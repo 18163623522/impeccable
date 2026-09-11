@@ -61,7 +61,11 @@ pub fn capture_snapshot(page: &mut Page<'_>) -> CdpResult<SnapshotDom> {
 /// [`capture_snapshot`] without the parse: the capture's JSON exactly as the
 /// page produced it, which is what a replay loads.
 pub fn capture_snapshot_json(page: &mut Page<'_>) -> CdpResult<String> {
-    let expr = "(function(){ const s = window.__impeccableSnapshot; const c = s.capture(); if (c.error) return { error: c.error }; window.__impCap = c; window.__impIO = s.visualIO(c); return { json: c.json }; })()";
+    // The page-side default cap (48 MiB) exists for the extension's message
+    // channel. Over CDP the websocket accepts 256 MiB (`cdp.rs`), so a URL scan
+    // allows a capture up to 200 MiB: large commerce pages serialize to 70+ MiB
+    // (cvs.com, 2026-09) and used to fail the scan outright.
+    let expr = "(function(){ const s = window.__impeccableSnapshot; const c = s.capture({ maxBytes: 200 * 1024 * 1024 }); if (c.error) return { error: c.error }; window.__impCap = c; window.__impIO = s.visualIO(c); return { json: c.json }; })()";
     let out = page.evaluate_value(expr)?;
     if let Some(err) = out.get("error").and_then(Value::as_str) {
         return Err(CdpError::new(format!("snapshot capture failed: {err}")));

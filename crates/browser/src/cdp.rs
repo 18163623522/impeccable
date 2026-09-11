@@ -131,10 +131,16 @@ impl Browser {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        // A per-process sequence number keeps two browsers launched in the
+        // same instant (library callers running workers in threads) from
+        // sharing a profile, which Chrome refuses with a SingletonLock error.
+        static LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let user_data_dir = std::env::temp_dir().join(format!(
-            "impeccable_dev_chrome_profile-{}-{}",
+            "impeccable_dev_chrome_profile-{}-{}-{}",
             std::process::id(),
-            stamp
+            stamp,
+            seq
         ));
         std::fs::create_dir_all(&user_data_dir).map_err(|e| {
             CdpError::new(format!("Failed to create a temporary browser profile: {e}"))

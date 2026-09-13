@@ -365,32 +365,6 @@ re!(
     THEATER_RE,
     format!(r"{B}({W}+){WS}+{theater}{B}", theater = ci("theater"))
 );
-re!(
-    IMG_HOVER_CSS_RE,
-    format!(
-        r"{B}{img}{B}[^,{{}}]*:{hover}{B}[^{{}}]*\{{[^}}]*{B}{transform}{WS}*:{WS}*(?:{scale}|{rotate}|{translate}|{matrix}|{skew})",
-        img = ci("img"),
-        hover = ci("hover"),
-        transform = ci("transform"),
-        scale = ci("scale"),
-        rotate = ci("rotate"),
-        translate = ci("translate"),
-        matrix = ci("matrix"),
-        skew = ci("skew")
-    )
-);
-re!(
-    IMG_TAG_CLASS_RE,
-    format!(
-        r#"<{img}{B}[^>]*{B}{cls}{WS}*={WS}*"([^"]*)""#,
-        img = ci("img"),
-        cls = ci("class")
-    )
-);
-re!(
-    TW_HOVER_TRANSFORM_RE,
-    format!(r"{B}hover:(?:scale|rotate|translate|skew)-")
-);
 
 fn pf(id: &str, snippet: String, selector: Option<String>) -> PatternFinding {
     PatternFinding {
@@ -635,25 +609,6 @@ pub fn check_html_patterns(
         }
     }
 
-    // --- Generated-UI tells: image hover transform ---
-    if let Some(im) = IMG_HOVER_CSS_RE.find(style_text) {
-        let brace = im.as_str().find('{').unwrap_or(0);
-        findings.push(pf(
-            "image-hover-transform",
-            "img:hover { transform } rule".to_string(),
-            enclosing_css_selector(style_text, im.start() + brace + 1),
-        ));
-    }
-    for im in IMG_TAG_CLASS_RE.captures_iter(html) {
-        if TW_HOVER_TRANSFORM_RE.is_match(&im[1]) {
-            findings.push(pf(
-                "image-hover-transform",
-                "Tailwind hover transform on <img>".to_string(),
-                None,
-            ));
-        }
-    }
-
     findings
 }
 
@@ -720,5 +675,21 @@ mod tests {
             None,
         );
         assert_eq!(out[0].snippet, "~8px used 11/11 times (100%)");
+    }
+
+    /// Hover zoom on card imagery is a long-standing convention, so none of
+    /// the shapes the retired `image-hover-transform` rule used to match are
+    /// reported any more: the CSS rule on the image's own hover, the parent
+    /// card's hover, and the utility-class forms (including the
+    /// `group-hover:` prefix, which fires from the card rather than the
+    /// image).
+    #[test]
+    fn image_hover_zoom_is_silent() {
+        let out = check_html_patterns(
+            "<style>.card img{transition:transform .3s}.card img:hover{transform:scale(1.05)}.card:hover img{transform:scale(1.04)}</style>\
+             <a class=\"card group\"><img class=\"transition-transform group-hover:scale-[1.04] hover:scale-105\" src=\"a.png\" width=\"240\" height=\"160\" alt=\"Card thumbnail\" /></a>",
+            None,
+        );
+        assert!(out.is_empty(), "unexpected findings: {out:?}");
     }
 }

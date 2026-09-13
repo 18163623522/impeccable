@@ -88,6 +88,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "clip-path",
     "clipPath",
     "color",
+    "colorScheme",
     "content",
     "contentVisibility",
     "cssFloat",

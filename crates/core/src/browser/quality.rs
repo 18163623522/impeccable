@@ -69,15 +69,24 @@ fn matches_or_closest(dom: &dyn Dom, el: ElId, sel: &str) -> bool {
     matches_or_false(dom, el, sel) || closest_or_none(dom, el, sel).is_some()
 }
 
-/// The colour a page paints when nothing in the ancestor chain sets a
-/// background: a white box on an unpainted page draws no edge.
+/// The colour a browser paints behind a page that sets no background of its
+/// own, under the light colour scheme: a white box on an unpainted light page
+/// draws no edge.
 pub const CANVAS_BACKGROUND: &str = "rgb(255, 255, 255)";
+
+/// Whether the canvas under an unpainted chain is the light one
+/// [`CANVAS_BACKGROUND`] names. A page that asks for a dark scheme gets a dark
+/// canvas from the browser, and any value that mentions `dark` may resolve
+/// that way, so only a plainly light scheme lets the comparison run.
+pub fn canvas_is_light(scheme: &str) -> bool {
+    !js::to_lower_case(scheme).contains("dark")
+}
 
 /// JS: checks.mjs#hasVisibleBackgroundBoundary(style, el, win) — browser:
 /// `style` is `el`'s own computed style, `win` the live window. The JS
 /// answered `true` when no ancestor painted; the canvas under an unpainted
-/// chain is white, so a white box there is compared against it like any other
-/// ground.
+/// light chain is white, so a white box there is compared against it like any
+/// other ground.
 pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
     let bg = dom.style(el, "backgroundColor");
     if css_color_is_transparent(Some(&bg)) {
@@ -91,7 +100,31 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
         }
         parent = dom.parent(p);
     }
+    // `colorScheme` is inherited, so the element's own computed value is the
+    // page's.
+    if !canvas_is_light(&dom.style(el, "colorScheme")) {
+        return true;
+    }
     !colors_nearly_match(Some(&bg), Some(CANVAS_BACKGROUND))
+}
+
+/// The part of `inner` that falls inside `outer`, or `None` when the two miss
+/// each other.
+///
+/// `direct_text_rect` is a font-metric box, not an ink box. A line box tighter
+/// than the font's ascent and descent pushes it out of the element's own
+/// border box, and so do the tall marks of Devanagari and Thai; no glyph lands
+/// out there. Only the part inside that box is what a reader gets, so every
+/// edge measurement clamps first.
+fn clamp_to(inner: &Rect, outer: &Rect) -> Option<Rect> {
+    let left = js::math_max(inner.left, outer.left);
+    let top = js::math_max(inner.top, outer.top);
+    let w = js::math_min(inner.right, outer.right) - left;
+    let h = js::math_min(inner.bottom, outer.bottom) - top;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some(Rect::from_xywh(left, top, w, h))
 }
 
 /// The space the element's own glyphs keep from each inner edge of its box
@@ -106,6 +139,9 @@ fn direct_text_insets(dom: &dyn Dom, el: ElId, rect: &Rect, border: &[f64; 4]) -
     if t.width <= 0.0 || t.height <= 0.0 {
         return None;
     }
+    // Text that overruns its own box still reads as cramped: the clamped rect
+    // lands on the border, an inset of zero.
+    let t = clamp_to(&t, rect)?;
     Some([
         t.top - (rect.top + border[0]),
         (rect.right - border[1]) - t.right,
@@ -161,22 +197,42 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         if !TEXT_EDGE_TAGS.contains(&tag_name.as_str()) || !has_meaningful_direct_text(dom, node) {
             continue;
         }
-        let Some(nr) = dom.direct_text_rect(node) else {
+        let br = dom.rect(node);
+        if br.width <= 0.0 || br.height <= 0.0 {
             continue;
+        }
+        if br.bottom < rect.top || br.top > rect.bottom || br.right < rect.left || br.left > rect.right {
+            continue;
+        }
+        // Glyphs a reader sees are inside the node's own box, so a box that
+        // reaches no edge of `el` has no text that reaches one. Rejecting on
+        // the box first keeps the text measurement, a range walk in the page,
+        // off the many candidates that sit well inside.
+        let box_sides = [
+            br.top - rect.top <= TEXT_EDGE_THRESHOLD,
+            rect.right - br.right <= TEXT_EDGE_THRESHOLD,
+            rect.bottom - br.bottom <= TEXT_EDGE_THRESHOLD,
+            br.left - rect.left <= TEXT_EDGE_THRESHOLD,
+        ];
+        if !box_sides.iter().any(|s| *s) {
+            continue;
+        }
+        // A Dom that cannot measure text falls back to the box, the behaviour
+        // this rule had before, rather than going silent.
+        let nr = match dom.direct_text_rect(node) {
+            Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(&t, &br) {
+                Some(c) => c,
+                None => continue,
+            },
+            _ => br,
         };
-        if nr.width <= 0.0 || nr.height <= 0.0 {
-            continue;
-        }
-        if nr.bottom < rect.top || nr.top > rect.bottom || nr.right < rect.left || nr.left > rect.right {
-            continue;
-        }
         let sides = [
             nr.top - rect.top <= TEXT_EDGE_THRESHOLD,
             rect.right - nr.right <= TEXT_EDGE_THRESHOLD,
             rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD,
             nr.left - rect.left <= TEXT_EDGE_THRESHOLD,
         ];
-        // The two costly tests run only for text that reached an edge.
+        // The two remaining tests run only for text that reached an edge.
         if !sides.iter().any(|s| *s) {
             continue;
         }
@@ -995,9 +1051,10 @@ mod tests {
                 ("fontSize", "16px"),
             ],
         );
+        // No text rect: a Dom that cannot measure glyphs keeps the boxes this
+        // rule read before.
         let p = text_el(&mut d, card, "p", "Hello there friend", "16px");
         d.set_rect(p, 0.0, 28.0, 400.0, 20.0);
-        d.set_text_rect(p, 0.0, 30.0, 400.0, 16.0);
         d.set_styles(p, &[("paddingTop", "0px"), ("paddingRight", "0px"), ("paddingBottom", "0px"), ("paddingLeft", "0px"), ("marginTop", "0px"), ("marginRight", "0px"), ("marginBottom", "0px"), ("marginLeft", "0px")]);
         let hits = check_element_quality_dom(&d, card, &BrowserConfig::default());
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -1143,6 +1200,82 @@ mod tests {
         assert_eq!(
             hits[0].snippet,
             "<div> \"wrapper\": children flush against bg on top/left (no inset)"
+        );
+
+        // The same white shell on a page that asks for a dark scheme sits on
+        // the browser's dark canvas, where it is a strong edge.
+        d.set_style(shell, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(shell, "colorScheme", "dark");
+        assert!(has_visible_background_boundary(&d, shell));
+        assert_eq!(
+            check_element_quality_dom(&d, shell, &BrowserConfig::default()).len(),
+            1
+        );
+    }
+
+    /// `direct_text_rect` is a font-metric box, not an ink box: half-leading
+    /// and scripts with tall marks push it out of the box that paints the
+    /// text, where no glyph can land. Measure the part inside that box.
+    #[test]
+    fn flush_clamps_text_to_the_box_that_paints_it() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let panel = d.add(Some(body), "div");
+        d.set_attr(panel, "class", "story-body");
+        d.set_rect(panel, 0.0, 0.0, 360.0, 120.0);
+        d.set_styles(
+            panel,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "0px"),
+                ("borderBottomColor", "rgb(200, 200, 200)"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        // A plain wrapper, so the paragraph below is not a direct child and
+        // the child-box insulation says nothing about it.
+        let inner = d.add(Some(panel), "div");
+        d.set_rect(inner, 0.0, 0.0, 360.0, 120.0);
+        let p = text_el(&mut d, inner, "p", "एक पूरी कहानी यहाँ पढ़ें", "16px");
+        d.set_styles(
+            p,
+            &[
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("marginTop", "0px"),
+                ("marginRight", "0px"),
+                ("marginBottom", "0px"),
+                ("marginLeft", "0px"),
+            ],
+        );
+        // The paragraph ends 10px above the rule; its metric box runs 15px
+        // past its own box and so past the rule.
+        d.set_rect(p, 0.0, 10.0, 360.0, 100.0);
+        d.set_text_rect(p, 0.0, 6.0, 340.0, 119.0);
+        assert!(check_element_quality_dom(&d, panel, &BrowserConfig::default()).is_empty());
+
+        // The shape the corpus confirms harmful: the label's own box overruns
+        // the panel and its glyphs come with it.
+        d.set_rect(p, 0.0, 10.0, 360.0, 115.0);
+        d.set_text_rect(p, 0.0, 12.0, 340.0, 108.0);
+        let hits = check_element_quality_dom(&d, panel, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"story-body\": children flush against border-bottom on bottom (no inset)"
         );
     }
 

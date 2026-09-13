@@ -19,9 +19,13 @@
        cramped-padding gives it a pass.
 
        Several pass cases below are cleared by measuring where the glyphs
-       actually land, which takes layout. A static file scan has none, so
-       `impeccable detect` on this file still reports a few of them; a URL
-       scan, where the rule does its real work, does not. */
+       actually land, which takes layout. A URL scan, where the rule does its
+       real work, reports the flag column and nothing else. A file scan has no
+       layout and still reports five of the pass cases: pass-table-wrap,
+       pass-tall-script, pass-segmented, pass-tooltip-underline and
+       pass-marquee-shell. That list is pinned by name in
+       crates/html/tests/static_flush.rs, so it can shrink but not grow
+       unnoticed. */
 
     body { font-family: system-ui, sans-serif; background: #fafafa; padding: 24px; margin: 0; color: #0f172a; line-height: 1.5; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; max-width: 1400px; margin: 0 auto; }
@@ -193,6 +197,23 @@
     .pass-collapsed-row h4 { margin: 0 0 18px; font-size: 15px; }
     .pass-collapsed-row .answer { max-height: 0; overflow: hidden; }
     .pass-collapsed-row .answer p { margin: 0; font-size: 13px; line-height: 20px; }
+
+    /* ── PASS: a text rect that runs past the box painting it ──
+       The measured text rect is a font-metric box, so a line box tighter
+       than the font's ascent and descent pushes it outside the paragraph's
+       own 12px border box; Devanagari and Thai marks do the same to an
+       ordinary paragraph. The 6px spacer below keeps the glyphs clear of the
+       rule the panel draws. */
+    .pass-tall-script {
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-bottom: 1px solid #cbd5e1;
+      width: 360px;
+    }
+    .pass-tall-script .body { padding: 0; margin: 0; }
+    .pass-tall-script .body p { margin: 0; font-size: 17px; line-height: 12px; }
+    .pass-tall-script .body .spacer { height: 6px; }
 
     /* ── PASS: a dashed border-bottom on an inline span is an underline ── */
     .pass-tooltip-underline { border-bottom: 1px dashed rgba(0, 0, 0, 0.25); padding: 0; cursor: help; }
@@ -518,6 +539,17 @@
         <div class="pass-collapsed-row">
           <h4>Which games does it work with?</h4>
           <div class="answer"><p>Any game with a public leaderboard.</p></div>
+        </div>
+      </div>
+
+      <h3>Tall script, metric box past its own border box</h3>
+      <div class="case">
+        <span class="case-label">360px panel with a bottom rule, 17px Devanagari on a 12px line box: the measured text rect runs past the paragraph's own box, while the glyphs stay 7px above the rule.</span>
+        <div class="pass-tall-script">
+          <div class="body">
+            <p>एक पूरी कहानी यहाँ पढ़ें और आज की सुर्खियाँ देखें</p>
+            <div class="spacer"></div>
+          </div>
         </div>
       </div>
 

@@ -173,17 +173,32 @@ the `padding` property and the child's border box rather than the text. A
 40px flex row centres a 14px label on zero padding; an accordion row's inset
 lives on a button two levels down; a collapsed panel and a screen-reader
 heading paint nothing at all. The rule now decides on `getDirectTextRect`, the
-union of an element's own text-node rects, and ignores a transparent border
-and a white box on an unpainted canvas. The two fixtures grew the reduced
-cases (real false positives in the pass column, the overrun field that both
-judges called harmful in the flag column), which is what moves these goldens:
-the static file scan has no layout, so it still reports some of the new pass
-cases, and the fixture header says so.
+union of an element's own text-node rects clamped to the box that paints them,
+and ignores a transparent border and a white box on an unpainted light canvas.
+The file scan has no layout to measure, so it follows the padding down instead:
+an element holding one element and no text of its own hands the question to
+what it wraps, which is how `wrapper > h3 > button` and `panel > div > p` now
+read.
 
-- `detect-fixture-json-flush-against-border-html`,
-  `detect-fixture-text-flush-against-border-html`: the new cases, plus
-  `flag-overrun-field`.
-- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
-  `detect-dir-quiet-all-fixtures`, `detect-scope-type`,
-  `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`,
-  `detect-no-advisory-text`: the directory sweeps pick the same cases up.
+Every golden below was re-recorded from the binary and reviewed by hand; none
+is exempted from comparison, so the oracle still pins each one.
+
+Goldens that moved, and why:
+
+* `detect-fixture-json-flush-against-border-html` and
+  `detect-fixture-text-flush-against-border-html`: 6 findings to 11. The
+  fixture grew five reduced cases from the corpus false positives plus
+  `flag-overrun-field`, the shape both judges called harmful. A URL scan of
+  the fixture reports the six `flag-` cases and nothing else; the file scan
+  adds the five pass cases it has no layout to clear, listed by name in the
+  fixture header and pinned in `crates/html/tests/static_flush.rs`.
+* `detect-fixture-json-edge-flush-cards-html` and
+  `detect-fixture-text-edge-flush-cards-html`: 3 findings to 0. Each was a
+  `.scroller` whose cards carry 12px of padding one level below its own
+  child, so the text was never near the edge. A URL scan of that fixture
+  reports no cramped-padding finding either, before or after this change.
+* `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-scope-layout-text`,
+  `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`:
+  the sweeps carry the same two files, 419 findings to 421. No other rule's
+  output moves.

@@ -303,51 +303,210 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
     findings
 }
 
+/// `heading-rhythm`: an element that takes part in normal flow and paints a
+/// box of its own.
+fn rhythm_visible_flow(dom: &dyn Dom, el: ElId) -> bool {
+    let display = dom.style(el, "display");
+    let visibility = dom.style(el, "visibility");
+    if display == "none" || visibility == "hidden" {
+        return false;
+    }
+    let op = dom.style(el, "opacity");
+    let op = if op.is_empty() { "1".to_string() } else { op };
+    if parse_float(&op) <= 0.05 {
+        return false;
+    }
+    let pos = dom.style(el, "position");
+    if pos == "absolute" || pos == "fixed" || pos == "sticky" {
+        return false;
+    }
+    let r = dom.rect(el);
+    r.width >= 1.0 && r.height >= 1.0
+}
+
+/// `display: contents` generates no box: its children lay out as children
+/// of its parent, so the walks look through it.
+fn rhythm_is_contents(dom: &dyn Dom, el: ElId) -> bool {
+    dom.style(el, "display") == "contents"
+}
+
+fn rhythm_overlaps_x(sr: &Rect, rect: &Rect) -> bool {
+    math_min(sr.right, rect.right) - math_max(sr.left, rect.left) >= 8.0
+}
+
+/// A box that paints an edge on `side` ("Top" or "Bottom"): a background,
+/// a border on that side, or a shadow.
+fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
+    if rhythm_is_contents(dom, el) {
+        return false;
+    }
+    if let Some(bg) = parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+        if bg.alpha_or_one() > 0.05 {
+            return true;
+        }
+    }
+    if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
+        return true;
+    }
+    let bs = dom.style(el, "boxShadow");
+    !bs.is_empty() && bs != "none"
+}
+
+/// The flow box `s` presents to a walk: `s` itself, or for a
+/// `display: contents` element the nearest of its children. `pick` tests a
+/// candidate's rect; `from_end` walks the children last-first.
+fn rhythm_flow_box(
+    dom: &dyn Dom,
+    s: ElId,
+    rect: &Rect,
+    from_end: bool,
+    pick: &dyn Fn(&Rect) -> bool,
+) -> Option<ElId> {
+    if rhythm_is_contents(dom, s) {
+        let mut kids = dom.children(s);
+        if from_end {
+            kids.reverse();
+        }
+        return kids
+            .into_iter()
+            .find_map(|k| rhythm_flow_box(dom, k, rect, from_end, pick));
+    }
+    if !rhythm_visible_flow(dom, s) {
+        return None;
+    }
+    let sr = dom.rect(s);
+    (pick(&sr) && rhythm_overlaps_x(&sr, rect)).then_some(s)
+}
+
+const RHYTHM_MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas", "svg", "iframe"];
+
+/// The block measured above a heading already separates it from the heading:
+/// a rule (an `hr` or a line a few pixels tall), a painted bottom border on
+/// the block or on the descendants that form its bottom edge, or a picture
+/// that forms that edge. A heading tight under a photo is that photo's
+/// caption, and a heading tight under a rule starts the section the rule
+/// opens; neither reads as a caption for the content above.
+fn rhythm_block_separates(dom: &dyn Dom, el: ElId) -> bool {
+    let er = dom.rect(el);
+    if tag_lower(dom, el) == "hr" || er.height <= 4.0 {
+        return true;
+    }
+    // A block with no words that holds a picture is a picture: a photo frame,
+    // an icon badge.
+    if js::trim(&dom.text_content(el)).is_empty()
+        && !dom
+            .query_all(Some(el), "img, picture, video, canvas, svg, iframe")
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return true;
+    }
+    let mut cur = Some(el);
+    for _ in 0..8 {
+        let Some(c) = cur else { break };
+        let cr = dom.rect(c);
+        // A rule runs across the block; a bordered button or chip inside it
+        // does not.
+        if style_px(dom, c, "borderBottomWidth") > 0.0 && cr.width >= er.width * 0.9 {
+            return true;
+        }
+        let tag = tag_lower(dom, c);
+        if RHYTHM_MEDIA_TAGS.contains(&tag.as_str()) && cr.width >= er.width * 0.5 {
+            return true;
+        }
+        // A heading stacked under another heading (a name over a title, a
+        // title over a subtitle) is one titling group, not a caption for
+        // content above.
+        if matches!(tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+            return true;
+        }
+        cur = dom.children(c).into_iter().rev().find(|&k| {
+            if dom.style(k, "display") == "none" {
+                return false;
+            }
+            let kr = dom.rect(k);
+            kr.width >= 1.0 && kr.height >= 1.0 && kr.bottom >= er.bottom - 2.0
+        });
+    }
+    false
+}
+
+fn rhythm_rendered_children(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
+    dom.children(el)
+        .into_iter()
+        .filter(|&k| {
+            if dom.style(k, "display") == "none" {
+                return false;
+            }
+            let pos = dom.style(k, "position");
+            if pos == "absolute" || pos == "fixed" {
+                return false;
+            }
+            let r = dom.rect(k);
+            r.width >= 1.0 && r.height >= 1.0
+        })
+        .collect()
+}
+
+/// An empty box that only holds space open: no text, no picture, nothing
+/// laid out inside it, nothing painted. It is part of the gap, not a block.
+fn rhythm_is_spacer(dom: &dyn Dom, el: ElId) -> bool {
+    !rhythm_paints_edge(dom, el, "Bottom")
+        && !RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, el).as_str())
+        && rhythm_rendered_children(dom, el).is_empty()
+        && js::trim(&dom.text_content(el)).is_empty()
+}
+
+/// Where a block's content ends, as a reader sees it: a box that paints its
+/// bottom edge ends at that edge; otherwise its bottom padding is space, and
+/// so is whatever runs past the lowest child it lays out.
+fn rhythm_content_bottom(dom: &dyn Dom, el: ElId) -> f64 {
+    // An inline run can draw its line box past the block that holds it; the
+    // block's own bottom is as far as its content reaches.
+    math_min(rhythm_lowest_content(dom, el), dom.rect(el).bottom)
+}
+
+fn rhythm_lowest_content(dom: &dyn Dom, el: ElId) -> f64 {
+    let mut cur = el;
+    for _ in 0..8 {
+        let r = dom.rect(cur);
+        if rhythm_paints_edge(dom, cur, "Bottom")
+            || RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, cur).as_str())
+        {
+            return r.bottom;
+        }
+        let lowest = rhythm_rendered_children(dom, cur)
+            .into_iter()
+            .filter(|&k| !rhythm_is_spacer(dom, k))
+            .max_by(|&a, &b| {
+                dom.rect(a)
+                    .bottom
+                    .partial_cmp(&dom.rect(b).bottom)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        match lowest {
+            Some(k) => cur = k,
+            None => return r.bottom - math_max(0.0, style_px(dom, cur, "paddingBottom")),
+        }
+    }
+    dom.rect(cur).bottom
+}
+
 /// JS: checks.mjs#checkHeadingRhythmDOM()
 pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     const MIN_VIOLATIONS: usize = 2;
     const CARD_EXEMPT_HEIGHT: f64 = 200.0;
     const MAX_BELOW_PX: f64 = 160.0;
     const MIN_DEFICIT_PX: f64 = 12.0;
+    /// How far a box may run past the heading's bottom (beyond the margins
+    /// the walk has climbed through) before the heading counts as the last
+    /// thing in that box.
+    const TRAILING_SLACK_PX: f64 = 2.0;
     let body = dom.body();
 
-    let is_visible_flow = |el: ElId| -> bool {
-        let display = dom.style(el, "display");
-        let visibility = dom.style(el, "visibility");
-        if display == "none" || visibility == "hidden" {
-            return false;
-        }
-        let op = dom.style(el, "opacity");
-        let op = if op.is_empty() { "1".to_string() } else { op };
-        if parse_float(&op) <= 0.05 {
-            return false;
-        }
-        let pos = dom.style(el, "position");
-        if pos == "absolute" || pos == "fixed" || pos == "sticky" {
-            return false;
-        }
-        let r = dom.rect(el);
-        r.width >= 1.0 && r.height >= 1.0
-    };
-    let overlaps_x = |sr: &Rect, rect: &Rect| -> bool {
-        math_min(sr.right, rect.right) - math_max(sr.left, rect.left) >= 8.0
-    };
-    let has_own_top_boundary = |el: ElId| -> bool {
-        let bg = parse_any_color(Some(&dom.style(el, "backgroundColor")));
-        if let Some(bg) = bg {
-            if bg.alpha_or_one() > 0.05 {
-                return true;
-            }
-        }
-        if style_px(dom, el, "borderTopWidth") > 0.0 {
-            return true;
-        }
-        let bs = dom.style(el, "boxShadow");
-        if !bs.is_empty() && bs != "none" {
-            return true;
-        }
-        false
-    };
+    let is_visible_flow = |el: ElId| rhythm_visible_flow(dom, el);
+    let overlaps_x = rhythm_overlaps_x;
+    let has_own_top_boundary = |el: ElId| rhythm_paints_edge(dom, el, "Top");
     let font_size_or_16 = |el: ElId| -> f64 {
         let n = parse_float(&dom.style(el, "fontSize"));
         if num_truthy(n) {
@@ -356,12 +515,54 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             16.0
         }
     };
+    // The nearest previous sibling that lays out a box, looking through
+    // `display: contents` and past elements that render nothing.
+    let previous_box = |n: ElId| -> Option<ElId> {
+        let mut sib = dom.previous_element_sibling(n);
+        while let Some(s) = sib {
+            if rhythm_is_contents(dom, s) {
+                if let Some(inner) = dom.children(s).into_iter().rev().find(|&k| {
+                    let r = dom.rect(k);
+                    r.width >= 1.0 && r.height >= 1.0
+                }) {
+                    return Some(inner);
+                }
+            } else {
+                let r = dom.rect(s);
+                if dom.style(s, "display") != "none" && r.width >= 1.0 && r.height >= 1.0 {
+                    return Some(s);
+                }
+            }
+            sib = dom.previous_element_sibling(s);
+        }
+        None
+    };
+    // The eyebrow fold. A label above the heading is part of the heading's
+    // cluster whether it is the heading's own sibling or a sibling of a
+    // wrapper that starts where the cluster starts: per-text wrappers
+    // (`<div><p>Label</p></div><div><h2>…</h2></div>`) are how site builders
+    // emit an eyebrow, and missing them measured the gap to the heading's
+    // own label.
     let cluster_top = |h: ElId, rect: &Rect| -> (ElId, f64) {
         let heading_font_size = font_size_or_16(h);
         let mut top_el = h;
         let mut top = rect.top;
-        for _ in 0..3 {
-            let Some(sib) = dom.previous_element_sibling(top_el) else { break };
+        let mut cursor = h;
+        let mut folded = 0;
+        while folded < 3 {
+            let Some(sib) = previous_box(cursor) else {
+                let Some(p) = dom.parent(cursor) else { break };
+                if Some(p) == body {
+                    break;
+                }
+                let starts_with_cluster = rhythm_is_contents(dom, p)
+                    || ((dom.rect(p).top - top).abs() <= 1.0 && !has_own_top_boundary(p));
+                if !starts_with_cluster {
+                    break;
+                }
+                cursor = p;
+                continue;
+            };
             if !is_visible_flow(sib) {
                 break;
             }
@@ -375,6 +576,15 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             }
             let text = js::trim(&dom.text_content(sib)).to_string();
             let text_len = utf16_len(&text);
+            // A label has words. A rule, a spacer or an icon above the heading
+            // is a block of its own, and the walk above judges it as one.
+            if text_len == 0 {
+                break;
+            }
+            // A heading above is a title of its own, never this heading's label.
+            if matches!(tag_lower(dom, sib).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+                break;
+            }
             let sib_font_size = font_size_or_16(sib);
             let label_like = sib_font_size < heading_font_size * 0.75 || text_len <= 40;
             if !label_like || text_len > 80 {
@@ -382,24 +592,76 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             }
             top_el = sib;
             top = sr.top;
+            cursor = sib;
+            folded += 1;
         }
         (top_el, top)
     };
-    let edge_above = |start_el: ElId, top: f64, rect: &Rect| -> Option<f64> {
+    // A box that sits beside a sibling holding text is one column of a row:
+    // a grid card, a sidebar, a header row. Once the walk below has left a
+    // column, what it finds sits under the whole row and belongs to none of
+    // the columns in particular.
+    let is_column = |n: ElId| -> bool {
+        let nr = dom.rect(n);
+        let beside = |s: ElId| -> bool {
+            if !is_visible_flow(s) {
+                return false;
+            }
+            let sr = dom.rect(s);
+            let shared_height = math_min(sr.bottom, nr.bottom) - math_max(sr.top, nr.top);
+            shared_height >= math_min(sr.height, nr.height) * 0.5
+                && !overlaps_x(&sr, &nr)
+                && !js::trim(&dom.text_content(s)).is_empty()
+        };
+        let mut sib = dom.previous_element_sibling(n);
+        while let Some(s) = sib {
+            if beside(s) {
+                return true;
+            }
+            sib = dom.previous_element_sibling(s);
+        }
+        let mut sib = dom.next_element_sibling(n);
+        while let Some(s) = sib {
+            if beside(s) {
+                return true;
+            }
+            sib = dom.next_element_sibling(s);
+        }
+        false
+    };
+    // The block above, and where its content ends. The gap a reader sees
+    // runs from that content to the cluster's own first line: empty spacer
+    // boxes are part of the gap, so is the bottom padding of a block that
+    // paints no edge, and so is top padding on the cluster's first box.
+    let edge_above = |start_el: ElId, top: f64, rect: &Rect| -> Option<(f64, ElId)> {
+        let pick = |sr: &Rect| sr.bottom <= top + 2.0;
+        let inset = if rhythm_paints_edge(dom, start_el, "Top") {
+            0.0
+        } else {
+            math_max(0.0, style_px(dom, start_el, "paddingTop"))
+        };
         let mut node = Some(start_el);
         while let Some(n) = node {
             if Some(n) == body {
                 break;
             }
+            // The nearest block above, not the first in source order: flex and
+            // grid `order` can lay siblings out in another sequence.
+            let mut nearest: Option<(f64, ElId)> = None;
             let mut sib = dom.previous_element_sibling(n);
             while let Some(s) = sib {
-                if is_visible_flow(s) {
-                    let sr = dom.rect(s);
-                    if sr.bottom <= top + 2.0 && overlaps_x(&sr, rect) {
-                        return Some(sr.bottom);
+                if let Some(b) = rhythm_flow_box(dom, s, rect, true, &pick) {
+                    if !rhythm_is_spacer(dom, b) {
+                        let bottom = rhythm_content_bottom(dom, b);
+                        if nearest.map_or(true, |(nb, _)| bottom > nb) {
+                            nearest = Some((bottom, b));
+                        }
                     }
                 }
                 sib = dom.previous_element_sibling(s);
+            }
+            if let Some((bottom, b)) = nearest {
+                return Some((bottom - inset, b));
             }
             let parent = dom.parent(n);
             let Some(p) = parent else { return None };
@@ -413,23 +675,45 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         None
     };
+    // The content the heading introduces. When the walk has to leave a box
+    // to find it, and that box runs past the heading (its own padding, a
+    // stretched row, a card) or paints a bottom edge, the heading is the last
+    // thing in its box: an accordion trigger, a list-row headline, a card
+    // title. What follows belongs to the next box, so there is nothing below
+    // to measure.
     let edge_below = |h: ElId, rect: &Rect| -> Option<f64> {
+        let pick = |sr: &Rect| sr.top >= rect.bottom - 2.0;
+        let mut slack = math_max(0.0, style_px(dom, h, "marginBottom")) + TRAILING_SLACK_PX;
         let mut node = Some(h);
         while let Some(n) = node {
             if Some(n) == body {
                 break;
             }
+            let mut nearest: Option<f64> = None;
             let mut sib = dom.next_element_sibling(n);
             while let Some(s) = sib {
-                if is_visible_flow(s) {
-                    let sr = dom.rect(s);
-                    if sr.top >= rect.bottom - 2.0 && overlaps_x(&sr, rect) {
-                        return Some(sr.top);
+                if let Some(b) = rhythm_flow_box(dom, s, rect, false, &pick) {
+                    let t = dom.rect(b).top;
+                    if nearest.map_or(true, |nt| t < nt) {
+                        nearest = Some(t);
                     }
                 }
                 sib = dom.next_element_sibling(s);
             }
-            node = dom.parent(n);
+            if nearest.is_some() {
+                return nearest;
+            }
+            let p = dom.parent(n)?;
+            if n != h && is_column(n) {
+                return None;
+            }
+            if Some(p) != body && !rhythm_is_contents(dom, p) {
+                if rhythm_paints_edge(dom, p, "Bottom") || dom.rect(p).bottom - rect.bottom > slack {
+                    return None;
+                }
+                slack += math_max(0.0, style_px(dom, p, "marginBottom"));
+            }
+            node = Some(p);
         }
         None
     };
@@ -467,9 +751,14 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
         let rect = dom.rect(h);
+        // A heading that draws its own top rule or band is separated from
+        // whatever sits above it by that edge.
+        if has_own_top_boundary(h) {
+            continue;
+        }
         let Some(below_top) = edge_below(h, &rect) else { continue };
         let (top_el, top) = cluster_top(h, &rect);
-        let Some(above_bottom) = edge_above(top_el, top, &rect) else { continue };
+        let Some((above_bottom, above_el)) = edge_above(top_el, top, &rect) else { continue };
         if inside_small_card(h) {
             continue;
         }
@@ -478,7 +767,10 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if below < 6.0 || below > MAX_BELOW_PX {
             continue;
         }
-        if above < below * 0.75 && below - above >= MIN_DEFICIT_PX {
+        if above < below * 0.75
+            && below - above >= MIN_DEFICIT_PX
+            && !rhythm_block_separates(dom, above_el)
+        {
             candidates.push(Cand {
                 el: h,
                 tag: tag_lower(dom, h),

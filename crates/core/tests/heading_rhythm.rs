@@ -1,0 +1,316 @@
+//! `heading-rhythm` over hand-built page geometry.
+//!
+//! Every page carries two plainly crowded headings, so the rule's two-heading
+//! minimum is met and a shape that should pass shows up as a third finding if
+//! it misfires. The shapes come from a live recapture of real sites, judged
+//! once the rule pass ran after the reveal sweep and the check started seeing
+//! sections that used to sit at opacity 0.
+
+use impeccable_core::browser::fake_dom::FakeDom;
+use impeccable_core::browser::page_checks::check_heading_rhythm_dom;
+use impeccable_core::browser::ElId;
+
+const W: f64 = 800.0;
+const LONG: &str = "A closing paragraph of the previous block of content that runs well past eighty characters.";
+
+struct Page {
+    d: FakeDom,
+    body: ElId,
+    y: f64,
+}
+
+impl Page {
+    fn new() -> Page {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        Page { d, body, y: 0.0 }
+    }
+
+    /// An element in normal flow with neutral styles, then `styles` on top.
+    fn el(&mut self, parent: ElId, tag: &str, rect: (f64, f64, f64, f64), styles: &[(&str, &str)], text: &str) -> ElId {
+        let el = self.d.add(Some(parent), tag);
+        self.d.set_styles(
+            el,
+            &[
+                ("display", "block"),
+                ("visibility", "visible"),
+                ("opacity", "1"),
+                ("position", "static"),
+                ("fontSize", "16px"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("borderTopWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("boxShadow", "none"),
+                ("marginBottom", "0px"),
+            ],
+        );
+        self.d.set_styles(el, styles);
+        self.d.set_rect(el, rect.0, rect.1, rect.2, rect.3);
+        if !text.is_empty() {
+            self.d.add_text(el, text);
+        }
+        el
+    }
+
+    /// A case wrapper whose top rule keeps walks from crossing into the case
+    /// before it. Returns the section and the y its content starts at.
+    fn case(&mut self, height: f64) -> (ElId, f64) {
+        let y = self.y;
+        let body = self.body;
+        let sec = self.el(body, "section", (0.0, y, W, height), &[("borderTopWidth", "1px")], "");
+        self.y += height + 48.0;
+        (sec, y + 24.0)
+    }
+
+    /// Paragraph flush above an h2, content forty pixels below.
+    fn crowded(&mut self, title: &str) {
+        let (sec, y) = self.case(196.0);
+        self.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+        self.el(sec, "h2", (0.0, y + 48.0, W, 36.0), &[("fontSize", "28px")], title);
+        self.el(sec, "p", (0.0, y + 124.0, W, 48.0), &[], LONG);
+    }
+
+    fn flagged(&self) -> Vec<String> {
+        check_heading_rhythm_dom(&self.d)
+            .into_iter()
+            .map(|f| f.finding.detail)
+            .collect()
+    }
+}
+
+fn assert_only_crowded(p: &Page) {
+    let flagged = p.flagged();
+    assert_eq!(flagged.len(), 2, "{flagged:#?}");
+    assert!(flagged.iter().all(|s| s.contains("Crowded")), "{flagged:#?}");
+}
+
+fn crowded_pair() -> Page {
+    let mut p = Page::new();
+    p.crowded("Crowded One");
+    p.crowded("Crowded Two");
+    p
+}
+
+#[test]
+fn a_crowded_title_in_flush_wrappers_still_flags() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(420.0);
+    // A carousel ends with its controls, one of them a bordered button that
+    // does not span the block, ten pixels above the title.
+    let carousel = p.el(sec, "div", (0.0, y, W, 200.0), &[], "");
+    p.el(carousel, "div", (0.0, y, W, 176.0), &[], "");
+    p.el(carousel, "a", (340.0, y + 176.0, 120.0, 24.0), &[("borderBottomWidth", "1px")], "More");
+    let outer = p.el(sec, "div", (0.0, y + 210.0, W, 36.0), &[], "");
+    let inner = p.el(outer, "div", (0.0, y + 210.0, W, 36.0), &[], "");
+    p.el(inner, "h2", (0.0, y + 210.0, W, 36.0), &[("fontSize", "28px")], "Wrapped Section Title");
+    p.el(sec, "div", (0.0, y + 286.0, W, 120.0), &[], "Tiles the title introduces");
+    let flagged = p.flagged();
+    assert_eq!(flagged.len(), 3, "{flagged:#?}");
+    assert!(
+        flagged.iter().any(|s| s.contains("\"Wrapped Section Title\" has 10px above vs 40px below")),
+        "{flagged:#?}"
+    );
+}
+
+#[test]
+fn an_eyebrow_in_a_wrapper_of_its_own_folds_into_the_heading() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let eyebrow_wrap = p.el(sec, "div", (0.0, y + 120.0, W, 16.0), &[], "");
+    p.el(eyebrow_wrap, "p", (0.0, y + 120.0, W, 16.0), &[("fontSize", "12px")], "Introducing");
+    let title_wrap = p.el(sec, "div", (0.0, y + 160.0, W, 36.0), &[], "");
+    p.el(title_wrap, "h2", (0.0, y + 160.0, W, 36.0), &[("fontSize", "28px")], "Eyebrow In Wrapper");
+    p.el(sec, "p", (0.0, y + 244.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // The same pair behind display: contents wrappers, as some builders emit.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let eyebrow_wrap = p.el(sec, "div", (0.0, y + 120.0, W, 16.0), &[], "");
+    p.el(eyebrow_wrap, "p", (0.0, y + 120.0, W, 16.0), &[("fontSize", "12px")], "Introducing");
+    let contents = p.el(sec, "div", (0.0, 0.0, 0.0, 0.0), &[("display", "contents")], "");
+    let title_wrap = p.el(contents, "div", (0.0, y + 160.0, W, 36.0), &[], "");
+    p.el(title_wrap, "h2", (0.0, y + 160.0, W, 36.0), &[("fontSize", "28px")], "Eyebrow Behind Contents");
+    p.el(sec, "p", (0.0, y + 244.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_heading_that_ends_its_row_has_nothing_below_to_introduce() {
+    // Accordion triggers: each h4 is the last thing in a row padded below it.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    for (i, title) in [
+        "Accordion Question That Opens The List Of Rows",
+        "Accordion Question In The Middle Of The List",
+        "Accordion Question On The Last Row Of The List",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let top = y + i as f64 * 72.0;
+        let row = p.el(sec, "div", (0.0, top, W, 48.0), &[("paddingBottom", "24px")], "");
+        p.el(row, "h4", (0.0, top, W, 24.0), &[("fontSize", "18px")], title);
+    }
+    assert_only_crowded(&p);
+
+    // Card headlines, one per column of a row, each the last thing in its
+    // column; the spacer under the row is not what they introduce.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(320.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let row = p.el(sec, "div", (0.0, y + 48.0, W, 156.0), &[], "");
+    for (i, title) in ["Card Headline On The Right", "Card Headline On The Left"].iter().enumerate() {
+        let x = i as f64 * 420.0;
+        let col = p.el(row, "div", (x, y + 48.0, 380.0, 156.0), &[], "");
+        p.el(col, "div", (x, y + 48.0, 380.0, 20.0), &[("fontSize", "12px")], "Culture");
+        p.el(col, "h4", (x, y + 80.0, 380.0, 100.0), &[("fontSize", "18px"), ("marginBottom", "24px")], title);
+    }
+    p.el(sec, "div", (0.0, y + 228.0, W, 60.0), &[], "Next section");
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_rule_a_photo_or_a_heading_above_is_not_content_the_heading_captions() {
+    // The block above ends in a rule across its width.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    p.el(sec, "div", (0.0, y, W, 49.0), &[("borderBottomWidth", "1px")], LONG);
+    p.el(sec, "h3", (0.0, y + 73.0, W, 28.0), &[("fontSize", "20px")], "Divider Above");
+    p.el(sec, "p", (0.0, y + 149.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // An hr twelve pixels above.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "hr", (0.0, y + 72.0, W, 1.0), &[], "");
+    p.el(sec, "h3", (0.0, y + 85.0, W, 28.0), &[("fontSize", "20px")], "Rule Above");
+    p.el(sec, "p", (0.0, y + 153.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // A caption four pixels under its photo.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(220.0);
+    let card = p.el(sec, "div", (0.0, y, 240.0, 204.0), &[], "");
+    p.el(card, "img", (0.0, y, 240.0, 120.0), &[], "");
+    p.el(card, "h3", (0.0, y + 124.0, 240.0, 28.0), &[("fontSize", "20px")], "Caption Under Photo");
+    p.el(card, "p", (0.0, y + 176.0, 240.0, 28.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // An author name heading stacked over the title heading.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "h3", (0.0, y + 72.0, W, 30.0), &[("fontSize", "26px")], "A Columnist With A Long Byline Name");
+    p.el(sec, "h3", (0.0, y + 102.0, W, 30.0), &[("fontSize", "26px")], "Stacked Title");
+    p.el(sec, "p", (0.0, y + 172.0, W, 24.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_heading_that_draws_its_own_rule_is_separated_by_it() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(
+        sec,
+        "h2",
+        (0.0, y + 48.0, W, 53.0),
+        &[("fontSize", "25px"), ("borderTopWidth", "1px"), ("borderBottomWidth", "1px")],
+        "Banded Title",
+    );
+    p.el(sec, "p", (0.0, y + 122.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn space_held_open_by_padding_or_a_spacer_counts_as_space_above() {
+    // An empty spacer box between the previous block and the heading.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "div", (0.0, y + 48.0, W, 80.0), &[], "");
+    p.el(sec, "h2", (0.0, y + 128.0, W, 36.0), &[("fontSize", "28px")], "Heading After A Spacer");
+    p.el(sec, "p", (0.0, y + 188.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // The previous panel's bottom padding: its framed screenshot ends fifty
+    // pixels before the panel's box does.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(420.0);
+    let panel = p.el(sec, "div", (0.0, y, W, 266.0), &[("paddingBottom", "50px")], "");
+    p.el(panel, "div", (22.0, y, 345.0, 216.0), &[("backgroundColor", "rgb(19, 23, 27)"), ("borderBottomWidth", "1px")], "");
+    p.el(sec, "h3", (0.0, y + 266.0, W, 28.0), &[("fontSize", "24px")], "Heading Under A Padded Panel");
+    p.el(sec, "p", (0.0, y + 306.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // The heading's own top padding sets its first line well below its box.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "h2", (0.0, y + 48.0, W, 56.0), &[("fontSize", "15px"), ("paddingTop", "36px")], "Footer Group Heading");
+    p.el(sec, "ul", (0.0, y + 116.0, W, 48.0), &[], "Links under the footer heading");
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn short_spacers_are_never_folded_in_as_an_eyebrow() {
+    // Two 48px spacer boxes between the previous block and the heading: short
+    // enough for the eyebrow fold's size test, but a label has words.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "div", (0.0, y + 48.0, W, 48.0), &[], "");
+    p.el(sec, "div", (0.0, y + 96.0, W, 48.0), &[], "");
+    p.el(sec, "h2", (0.0, y + 144.0, W, 36.0), &[("fontSize", "28px")], "Heading After Short Spacers");
+    p.el(sec, "p", (0.0, y + 204.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn an_icon_badge_above_is_a_picture_the_heading_captions() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(200.0);
+    let badge = p.el(sec, "div", (368.0, y, 64.0, 64.0), &[("backgroundColor", "rgba(20, 160, 90, 0.1)")], "");
+    p.el(badge, "svg", (384.0, y + 16.0, 32.0, 32.0), &[], "");
+    p.el(sec, "h3", (0.0, y + 80.0, W, 28.0), &[("fontSize", "18px")], "Feature Under Its Icon");
+    p.el(sec, "p", (0.0, y + 148.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn the_nearest_blocks_are_measured_whatever_the_source_order() {
+    // A flex column orders the button last on screen but first in source.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(300.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "h2", (0.0, y + 68.0, W, 36.0), &[("fontSize", "28px")], "Heading In A Flex Column");
+    p.el(sec, "div", (300.0, y + 254.0, 200.0, 44.0), &[], "Read more");
+    p.el(sec, "div", (0.0, y + 128.0, W, 108.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // A stat figure's inline run draws past its paragraph's box; the gap is
+    // measured from the paragraph, where the run's block ends.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    let stat = p.el(sec, "p", (0.0, y + 18.0, W, 82.0), &[("fontSize", "90px")], "");
+    p.el(stat, "span", (50.0, y, 80.0, 117.0), &[("display", "inline")], "60% reduction");
+    p.el(sec, "h3", (0.0, y + 119.0, W, 40.0), &[("fontSize", "38px")], "Heading Under A Stat");
+    p.el(sec, "p", (0.0, y + 175.0, W, 74.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_standfirst_behind_display_contents_is_what_sits_below() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "h2", (0.0, y + 58.0, W, 36.0), &[("fontSize", "28px")], "Standfirst Behind Contents");
+    let contents = p.el(sec, "div", (0.0, 0.0, 0.0, 0.0), &[("display", "contents")], "");
+    p.el(contents, "p", (0.0, y + 106.0, W, 24.0), &[], "A short standfirst under the heading.");
+    p.el(sec, "div", (0.0, y + 178.0, W, 60.0), &[], "Plans");
+    assert_only_crowded(&p);
+}

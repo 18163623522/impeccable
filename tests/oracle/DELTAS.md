@@ -457,3 +457,20 @@ narrow-column description.
 - `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: both the all-caps-body and justified-text descriptions.
 - `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html`: the all-caps-body description.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the union of every sweep delta above.
+
+## Recorded 2026-09-13: heading-rhythm reads the layouts the reveal sweep exposed
+
+Once URL scans measured the page after the reveal sweep, headings that sat at
+opacity 0 in the old first capture were measured for the first time, and the
+check misread their layouts: eyebrows wrapped in their own boxes, accordion
+triggers and card headlines that end their box, rules, photos, icon badges and
+stacked headings above, title bands that draw their own rule, standfirsts behind
+`display: contents`, empty spacers and padding held open above. heading-rhythm
+is browser-only, so no static golden moves. `heading-rhythm.html` was rewritten
+into two columns (should flag, should pass) with a case per misread shape; the
+static engine's one finding on it, cramped-padding on `.pass-band`, is kept
+byte for byte, so the fixture and directory goldens are unchanged. The browser
+behavior is pinned by `crates/browser/tests/heading_rhythm.rs` and
+`crates/core/tests/heading_rhythm.rs`.
+
+- No golden re-recorded.

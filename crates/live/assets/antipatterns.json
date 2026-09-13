@@ -358,11 +358,5 @@
     "name": "Theater framing copy",
     "category": "slop",
     "description": "Dismissing something as \"theater\" is a recurring generated-copy tic. Say plainly what the thing does or does not do."
-  },
-  {
-    "id": "image-hover-transform",
-    "name": "Image hover transform",
-    "category": "slop",
-    "description": "Scaling or rotating an image on hover is a recurring generated-UI signature. Let imagery sit still, or use a subtler, purposeful interaction."
   }
 ]

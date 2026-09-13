@@ -124,7 +124,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         id: "bounce-easing",
         category: "slop",
         scopes: None,
-        severity: None,
+        severity: Some("advisory"),
         name: "Bounce or elastic easing",
         description: "Bounce and elastic easing feel dated and tacky. Real objects decelerate smoothly — use exponential easing (ease-out-quart/quint/expo) instead.",
         skill_section: Some("Motion"),
@@ -404,7 +404,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         id: "layout-transition",
         category: "quality",
         scopes: None,
-        severity: None,
+        severity: Some("advisory"),
         name: "Layout property animation",
         description: "Animating width, height, padding, or margin causes layout thrash and janky performance. Use transform and opacity instead, or grid-template-rows for height animations.",
         skill_section: Some("Motion"),
@@ -630,16 +630,6 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         skill_section: Some("Copy"),
         skill_guideline: Some("theater framing copy"),
     },
-    Antipattern {
-        id: "image-hover-transform",
-        category: "slop",
-        scopes: None,
-        severity: Some("advisory"),
-        name: "Image hover transform",
-        description: "Scaling or rotating an image on hover is a recurring generated-UI signature. Let imagery sit still, or use a subtler, purposeful interaction.",
-        skill_section: Some("Motion"),
-        skill_guideline: Some("image scale or rotate on hover"),
-    },
 ];
 
 /// The rules the design hook fixes at edit time rather than deferring to a
@@ -840,7 +830,7 @@ mod tests {
 
     #[test]
     fn registry_shape() {
-        assert_eq!(ANTIPATTERNS.len(), 61);
+        assert_eq!(ANTIPATTERNS.len(), 60);
         assert_eq!(ANTIPATTERNS[0].id, "side-tab");
         assert_eq!(rule_scopes(), vec!["type", "layout"]);
         assert!(is_advisory_rule("em-dash-overuse"));
@@ -851,6 +841,14 @@ mod tests {
             get_antipattern("blinking-cursor").unwrap().severity,
             Some("advisory")
         );
+        // The corpus review moved these two out of the failure count: the
+        // measurement is right, the finding is almost never harmful.
+        assert!(is_advisory_rule("layout-transition"));
+        assert!(is_advisory_rule("bounce-easing"));
+        // Retired by the same review. An id the registry does not carry
+        // resolves to `None` rather than panicking, so a config or an inline
+        // ignore naming it still parses.
+        assert!(get_antipattern("image-hover-transform").is_none());
         assert_eq!(
             get_rule_engine_support("browser"),
             &["element", "page", "layout"]

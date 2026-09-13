@@ -164,3 +164,28 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: layout-transition and bounce-easing go advisory, image-hover-transform retires
+
+A corpus review of 50 real sites judged all three rules on their findings. Two
+measure exactly what they claim and are almost never harmful where they fire
+(`layout-transition` 1,435 findings on 37 sites, harmful in 9% of the judged
+representatives; `bounce-easing` 160 findings on 13 sites, harmful in none), so
+their registry severity is now `advisory`: still detected and listed, never
+counted, never in the exit code. `image-hover-transform` is retired outright:
+hover zoom on a card image is a long-standing convention rather than a
+generated-UI tell, and it fired on mobile captures where hover cannot happen.
+Its fixture (`tests/fixtures/antipatterns/gemini-tells.html`) and the two cases
+generated from it are gone; the real-world hover-zoom constructions moved into
+`motion.html`'s should-pass column, where they now produce nothing.
+
+- `detect-fixture-json-motion-html`, `detect-fixture-text-motion-html`, `detect-fixture-json-multifile`, `detect-fixture-text-multifile`, `detect-multifile-json`, `detect-multifile-text`, `detect-fixture-json-linked-url-patterns-css`, `detect-fixture-text-linked-url-patterns-css`, `detect-fixture-json-jsx-should-flag-jsx`, `detect-fixture-text-jsx-should-flag-jsx`, `detect-fixture-json-vue-should-flag-vue`, `detect-fixture-text-vue-should-flag-vue`, `detect-fixture-json-svelte-should-flag-svelte`, `detect-fixture-text-svelte-should-flag-svelte`, `detect-fixture-json-cssinjs-should-flag-tsx`, `detect-fixture-text-cssinjs-should-flag-tsx`, `detect-fixture-json-framework-next-modules`, `detect-fixture-text-framework-next-modules`, `detect-fixture-json-framework-next-tailwind`, `detect-fixture-text-framework-next-tailwind`, `detect-fixture-json-framework-next-cssinjs`, `detect-fixture-text-framework-next-cssinjs`, `detect-framework-next-modules-text`, `detect-framework-next-tailwind-json`, `detect-framework-next-cssinjs-json`: the same findings, now carrying `severity: "advisory"` / `advisory: true` and printed under the advisory heading instead of the counted list.
+- `detect-config-css-json`, `detect-config-css-text`: the workspace's only counted finding was a bounce-easing hit, so the scan reports `0 anti-patterns found.` and exits 0 instead of 2. The finding itself is still printed, as an advisory note.
+- `detect-config-dir-json`, `detect-config-dir-text`, `detect-config-dir-dot`: same reclassification inside a dir scan.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the fixture sweep loses the two `image-hover-transform` findings with the fixture (436 → 434 findings) and moves 28 (15 layout-transition, 13 bounce-easing) out of the failure count (419 → 391). `--no-advisory` drops all 43 advisory findings, as it always has.
+- `hook-config-per-edit-all`: the design hook defaults to `advisoryRules: "exclude"`, so the edited `Card.tsx`, whose only finding was bounce-easing, is now reported clean and the hook's message covers one file instead of two. Setting `advisoryRules: "include"` restores the old report.
+
+The frozen call vectors keep the retired rule's recorded hits, since
+`tests/oracle/vectors/calls/` can never be re-recorded. `crates/core/tests/vectors.rs`
+drops findings carrying a retired id from both sides of the comparison
+instead; every other hit on those lines still has to match.

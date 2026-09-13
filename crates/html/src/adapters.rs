@@ -795,10 +795,25 @@ pub fn check_element_glow(
     if box_shadow.is_empty() && text_shadow.is_empty() {
         return Vec::new();
     }
+    // Static HTML has no layout, so the element's size stays unknown and the
+    // perceptibility floor runs on the declaration and the opacity alone.
+    let opacity = match sv_opt(style, "opacity") {
+        Some(v) => {
+            let n = js::parse_float(v);
+            if n.is_nan() {
+                None
+            } else {
+                Some(n.clamp(0.0, 1.0))
+            }
+        }
+        None => None,
+    };
     check_glow(&GlowOpts {
         box_shadow: Some(box_shadow.to_string()),
         text_shadow: Some(text_shadow.to_string()),
         effective_bg,
+        element_opacity: opacity,
+        element_size: None,
     })
 }
 

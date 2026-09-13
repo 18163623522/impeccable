@@ -301,10 +301,17 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
             hits_to_js(&rules::check_motion(&opts))
         }
         "checkGlow" => {
+            // The recorded JS vectors predate the perceptibility floor and
+            // carry no geometry, so these read as "unknown" there.
+            let width = to_number(f(0, "elementWidth"));
+            let height = to_number(f(0, "elementHeight"));
+            let opacity = to_number(f(0, "elementOpacity"));
             let opts = rules::GlowOpts {
                 box_shadow: opt_str(f(0, "boxShadow")),
                 text_shadow: opt_str(f(0, "textShadow")),
                 effective_bg: rgba(f(0, "effectiveBg")),
+                element_opacity: (!opacity.is_nan()).then_some(opacity),
+                element_size: (!width.is_nan() && !height.is_nan()).then_some((width, height)),
             };
             hits_to_js(&rules::check_glow(&opts))
         }

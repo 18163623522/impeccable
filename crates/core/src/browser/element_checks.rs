@@ -708,10 +708,13 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     if parent_bg.is_none() && !parent_bg_info.unresolved {
         parent_bg = gradient_ancestor_average(dom, parent);
     }
+    let rect = dom.rect(el);
     check_glow(&GlowOpts {
         box_shadow: Some(box_shadow),
         text_shadow: Some(text_shadow),
         effective_bg: parent_bg,
+        element_opacity: Some(element_opacity(dom, el)),
+        element_size: Some((rect.width, rect.height)),
     })
 }
 
@@ -1009,6 +1012,18 @@ fn ai_palette_text_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
         "ai-color-palette",
         format!("{label} neon text on dark background"),
     ))
+}
+
+/// The element's own computed `opacity`, `1` when it does not resolve to a
+/// number. Ancestor opacity is left out: one style read keeps the glow check
+/// at constant cost per element.
+fn element_opacity(dom: &dyn Dom, el: ElId) -> f64 {
+    let value = js::parse_float(&dom.style(el, "opacity"));
+    if value.is_nan() {
+        1.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
 }
 
 /// JS: checks.mjs#checkElementAIPaletteDOM(el)
@@ -1984,6 +1999,7 @@ mod tests {
         d.set_style(body, "backgroundColor", "rgb(0, 0, 0)");
         let card = d.add(Some(body), "div");
         visible(&mut d, card);
+        d.set_rect(card, 0.0, 0.0, 320.0, 200.0);
         d.set_style(card, "boxShadow", "rgb(59, 130, 246) 0px 4px 20px 0px");
         d.set_style(card, "textShadow", "none");
         d.set_style(card, "backgroundColor", "rgba(0, 0, 0, 0)");
@@ -2312,6 +2328,31 @@ mod tests {
         let hits = check_element_ai_palette_dom(&d, typed);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Cyan neon text on dark background");
+    }
+
+    #[test]
+    fn glow_reads_element_opacity_and_size() {
+        let (mut d, body) = page();
+        d.set_style(body, "backgroundColor", "rgb(10, 10, 14)");
+
+        // A blinking caret: 3x23px, half faded, with a halo bigger than it is.
+        let caret = d.add(Some(body), "span");
+        visible(&mut d, caret);
+        d.set_style(caret, "opacity", "0.56");
+        d.set_rect(caret, 120.0, 40.0, 3.0, 23.0);
+        d.set_style(caret, "boxShadow", "rgba(155, 123, 232, 0.38) 0px 0px 9.9px 1.5px");
+        d.set_style(caret, "textShadow", "none");
+        assert!(check_element_glow_dom(&d, caret).is_empty());
+
+        // The same halo on a button is the treatment the rule is for.
+        let button = d.add(Some(body), "button");
+        visible(&mut d, button);
+        d.set_rect(button, 120.0, 80.0, 197.0, 40.0);
+        d.set_style(button, "boxShadow", "rgba(0, 169, 255, 0.6) 0px 0px 24px 0px");
+        d.set_style(button, "textShadow", "none");
+        let hits = check_element_glow_dom(&d, button);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "Zero-offset box-shadow glow (#00a9ff)");
     }
 
     #[test]

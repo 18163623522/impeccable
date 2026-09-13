@@ -38,6 +38,8 @@
       width: 120px;
       white-space: nowrap;
     }
+    .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   </style>
 </head>
 <body>
@@ -49,6 +51,8 @@
       <!-- Inline owner: the span has no client geometry, so only the rect-vs-container
            path can catch it. The parent box has no direct text and must not flag. -->
       <div class="box"><span class="flag-inline-spill" style="white-space: nowrap">IOC-QARTOD-ARGO-PROFILES-SPILLING-WELL-PAST-THE-CELL</span></div>
+      <!-- Clipped with no marker: the line is cut off mid-word, a real spill. -->
+      <div class="box flag-hidden-no-marker" style="overflow: hidden; white-space: nowrap; text-overflow: clip">A clipped line with no ellipsis that simply cuts the words off at the edge.</div>
     </section>
 
     <!-- PASS column: real scroll regions, preformatted code, wrapping text, scroll ancestors -->
@@ -66,6 +70,11 @@
       </div>
       <div class="box"><span class="pass-inline-fits" style="white-space: nowrap">Fits fine</span></div>
       <div class="box"><span class="pass-inline-wraps">An ordinary inline span with wrapping text that stays inside its container across several lines.</span></div>
+      <!-- Truncation the author asked for: an ellipsis, a line clamp, and an
+           inline run inside an ellipsizing row all end at their marker. -->
+      <div class="box pass-ellipsis ellipsis">A byline long enough to end in an ellipsis inside its narrow box.</div>
+      <div class="box pass-clamp clamp">Supercalifragilisticexpialidocioussupercalifragilisticexpialidocious in a two line clamp.</div>
+      <div class="box ellipsis"><span class="pass-inline-in-ellipsis">An inline headline run that the ellipsizing row around it truncates.</span></div>
     </section>
   </div>
 </body>

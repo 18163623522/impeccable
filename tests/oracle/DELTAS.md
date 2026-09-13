@@ -1552,3 +1552,17 @@ retired square flag case, the reworded `6px` snippets, and findings that moved
 down by inserted fixture lines), nothing extra and nothing missing. The only
 text lines that differ from the branch are the summary counts, 453 to 500 here
 against 419 to 466 there (523 to 570 with advisories).
+
+## Recorded 2026-09-13: evidence fixes move no golden
+
+`corpus/fix-evidence-bugs` fixes three findings whose evidence a corpus judge
+could not trust, all in the URL engine: the pixel contrast pass printed a
+verdict above its median (`pixel contrast 3.5:1 median 1.7:1`), script errors
+named no script (`Uncaught [object Object]`), and `text-overflow` reported
+ellipsized boxes as spills. The oracle records file scans only, so the replay
+passes against the branch binary with nothing re-recorded. The three fixtures
+the branch extends (`visual-contrast.html`, `script-error.html`,
+`text-overflow.html`) gained only browser-only cases, and their static and
+sweep goldens replay byte for byte. The browser behavior is pinned by
+`crates/browser/tests/evidence_findings.rs` and specified in `CLI-CONTRACT.md`
+(the script-error source suffix, the glyph-core verdict).

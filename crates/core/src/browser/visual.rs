@@ -1775,10 +1775,18 @@ pub enum PixelContrastOutcome {
 
 /// Below this many pixels the diff is noise, not a glyph.
 pub const GLYPH_MIN_PIXELS: usize = 8;
-/// A pixel counts as fully painted at this share of the strongest change in
-/// the box. Anything below it is an antialiased edge: mostly background, so
-/// its ratio tends to 1:1 no matter how legible the text is.
-const GLYPH_CORE_COVERAGE: f64 = 0.75;
+/// A pixel is a glyph core at this share of the strongest change in the box:
+/// the glyph covers nearly all of it, so what it painted is the text's own
+/// color. Anything below it is partly background. An antialiased edge tends
+/// to 1:1 no matter how legible the text is, and even a pixel three quarters
+/// covered reads well under the color the visitor sees on a dark ground:
+/// landio.framer.website's dates measured 3.5:1 over the pixels from 75% up,
+/// where the crops read about 4.5:1.
+const GLYPH_CORE_COVERAGE: f64 = 0.9;
+/// Small or thin text can leave fewer than [`GLYPH_MIN_PIXELS`] cores; the
+/// pass then reads the well covered pixels from this share up, as it did
+/// before it sampled cores, rather than reporting nothing.
+const GLYPH_BODY_COVERAGE: f64 = 0.75;
 /// Text covers a fraction of its own box. When most of the clip changed, the
 /// page repainted between the two screenshots (a video, a carousel, a reveal
 /// animation) and no pixel pair is a glyph over its background.
@@ -1849,8 +1857,14 @@ pub fn pixel_contrast_verdict(
         return PixelContrastOutcome::Unresolved("text moved between captures");
     }
     let strongest = pixels.iter().fold(0.0f64, |m, p| math_max(m, p.delta));
-    let core_floor = strongest * GLYPH_CORE_COVERAGE;
-    let core_pixels: Vec<&GlyphPixel> = pixels.iter().filter(|p| p.delta >= core_floor).collect();
+    let covered = |share: f64| -> Vec<&GlyphPixel> {
+        let floor = strongest * share;
+        pixels.iter().filter(|p| p.delta >= floor).collect()
+    };
+    let mut core_pixels = covered(GLYPH_CORE_COVERAGE);
+    if core_pixels.len() < GLYPH_MIN_PIXELS {
+        core_pixels = covered(GLYPH_BODY_COVERAGE);
+    }
     if core_pixels.len() < GLYPH_MIN_PIXELS {
         return PixelContrastOutcome::Unresolved("too few fully painted glyph pixels");
     }
@@ -1868,17 +1882,22 @@ pub fn pixel_contrast_verdict(
     let mut all: Vec<f64> = pixels.iter().map(|p| p.ratio).collect();
     core.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // The verdict is the median of the glyph cores, so the median the snippet
+    // prints is that same number over that same set. It used to be the median
+    // over every changed pixel, edges included, which printed a verdict above
+    // its own median (`pixel contrast 3.5:1 median 1.7:1`).
     let measured = percentile(&core, 50.0);
-    let median = percentile(&all, 50.0);
     if !measured.is_finite() || measured <= 0.0 {
         return PixelContrastOutcome::Unresolved("no readable glyph pixels");
     }
-    if median > measured * VERDICT_MEDIAN_DIVERGENCE {
+    // Every changed pixel still answers one question: whether the cores are a
+    // reading of one surface or a second population (a repaint, a video band).
+    if percentile(&all, 50.0) > measured * VERDICT_MEDIAN_DIVERGENCE {
         return PixelContrastOutcome::Unresolved("verdict disagrees with its own median");
     }
     PixelContrastOutcome::Verdict {
         measured,
-        median,
+        median: measured,
         core_pixels: core.len(),
     }
 }
@@ -1998,7 +2017,9 @@ mod tests {
             PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
                 assert_eq!(core_pixels, 40);
                 assert!((measured - 18.4).abs() < 1e-9);
-                assert!((median - 1.1).abs() < 1e-9);
+                // The printed median reads the same painted pixels, not the
+                // edges the verdict set aside.
+                assert!((median - 18.4).abs() < 1e-9);
             }
             other => panic!("{other:?}"),
         }
@@ -2008,6 +2029,45 @@ mod tests {
         faint.extend(px(90, 60.0, 1.3));
         match pixel_contrast_verdict(&faint, 4000, None) {
             PixelContrastOutcome::Verdict { measured, .. } => assert!((measured - 2.2).abs() < 1e-9),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixel_verdict_reads_glyph_cores_and_never_prints_a_verdict_above_its_median() {
+        // landio.framer.website "Access accurate, real-time data": light text
+        // through an opacity stack on a near-black card, measured live. The
+        // pixels from 90% of the strongest change up read 5.4:1, the band
+        // under them 4.2:1 and 3.6:1, and the edges fall toward 1:1. Over the
+        // pixels from 75% up the verdict was 4.2:1 (a failure) and the snippet
+        // printed a median of 2.3:1 from every changed pixel.
+        let mut pixels = px(322, 370.0, 5.4);
+        pixels.extend(px(333, 320.0, 4.2));
+        pixels.extend(px(220, 290.0, 3.6));
+        pixels.extend(px(198, 250.0, 2.8));
+        pixels.extend(px(253, 210.0, 2.3));
+        pixels.extend(px(186, 160.0, 2.0));
+        pixels.extend(px(900, 60.0, 1.3));
+        match pixel_contrast_verdict(&pixels, 40000, None) {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 322);
+                assert!((measured - 5.4).abs() < 1e-9, "{measured}");
+                assert!(measured <= median);
+                assert!((median - 5.4).abs() < 1e-9, "{median}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A thin label with only a handful of cores keeps the verdict it had
+        // over the well covered pixels instead of going silent.
+        let mut thin = px(5, 400.0, 2.4);
+        thin.extend(px(30, 320.0, 2.1));
+        thin.extend(px(60, 100.0, 1.2));
+        match pixel_contrast_verdict(&thin, 4000, None) {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 35);
+                assert!((measured - 2.1).abs() < 1e-9, "{measured}");
+                assert!(measured <= median);
+            }
             other => panic!("{other:?}"),
         }
     }

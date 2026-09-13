@@ -144,6 +144,60 @@ pub const POSITIONED_CHILD_INTERACTIVE_SELECTOR: &str = "a[href],button,input,se
 pub const POPOVER_LAYER_SELECTOR: &str =
     "[popover],[role=\"dialog\"],[role=\"listbox\"],[role=\"menu\"],[role=\"menubar\"],[role=\"tooltip\"]";
 
+// ─── Justified text ─────────────────────────────────────────────────────────
+
+/// Longest measure at which justifying without hyphenation still opens
+/// visible rivers. Wider columns have enough words per line to absorb the
+/// stretch, which is why print justifies comfortably at a long measure. Read
+/// in characters per line, the estimate `line-length` uses.
+pub const JUSTIFY_NARROW_CHARS_PER_LINE: f64 = 45.0;
+
+/// How much of an element's own text the script test reads. Long enough to
+/// classify a paragraph, short enough that the cost does not grow with the
+/// length of the page's longest block.
+const JUSTIFY_SCRIPT_SAMPLE_CHARS: usize = 400;
+
+/// Scripts that do not justify by stretching word spaces: CJK and Thai set on
+/// a grid of uniform characters with no inter-word gaps to open, and Arabic
+/// script justifies by elongating glyphs along the baseline. Rivers of white
+/// are a word-space artifact, so they cannot form here.
+fn justifies_without_word_spaces(c: char) -> bool {
+    matches!(c as u32,
+        0x0600..=0x06FF     // Arabic
+        | 0x0750..=0x077F   // Arabic Supplement
+        | 0x08A0..=0x08FF   // Arabic Extended-A
+        | 0x0E00..=0x0E7F   // Thai
+        | 0x1100..=0x11FF   // Hangul Jamo
+        | 0x2E80..=0x9FFF   // CJK radicals through the main ideographs, kana, Hangul compat jamo
+        | 0xA960..=0xA97F   // Hangul Jamo Extended-A
+        | 0xAC00..=0xD7FF   // Hangul syllables and Jamo Extended-B
+        | 0xF900..=0xFAFF   // CJK compatibility ideographs
+        | 0xFB50..=0xFDFF   // Arabic Presentation Forms-A
+        | 0xFE70..=0xFEFF   // Arabic Presentation Forms-B
+        | 0xFF66..=0xFF9F   // Halfwidth katakana
+        | 0x20000..=0x3134F // CJK ideograph extensions B and later
+    )
+}
+
+/// True when most of the letters in `text` belong to one of those scripts, so
+/// the justified-text premise does not reach it. Digits, punctuation and
+/// spacing are not letters and do not count either way.
+pub fn justifies_without_word_spaces_text(text: &str) -> bool {
+    let mut exempt = 0usize;
+    let mut other = 0usize;
+    for c in text.chars().take(JUSTIFY_SCRIPT_SAMPLE_CHARS) {
+        if !c.is_alphabetic() {
+            continue;
+        }
+        if justifies_without_word_spaces(c) {
+            exempt += 1;
+        } else {
+            other += 1;
+        }
+    }
+    exempt > other
+}
+
 // ─── Kicker above heading ───────────────────────────────────────────────────
 
 /// Input of `isKickerCandidate`. Numbers are JS numbers: pass NaN where the

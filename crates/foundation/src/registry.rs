@@ -596,9 +596,9 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         scopes: None,
         severity: Some("advisory"),
         name: "Hairline border with wide shadow",
-        description: "A hairline border paired with a wide, diffuse shadow is a recurring generated-UI signature. Commit to one — a defined edge or a soft elevation — rather than both at once.",
+        description: "Every card of this row wears a hairline border paired with a wide, diffuse shadow, which is a recurring generated-UI signature. One floating panel earns both; a whole row wearing them reads as a default nobody chose. Across the row, commit to one: a defined edge or a soft elevation.",
         skill_section: Some("Visual Details"),
-        skill_guideline: Some("hairline border plus wide diffuse shadow"),
+        skill_guideline: Some("a row of cards each wearing a hairline border plus a wide diffuse shadow"),
     },
     Antipattern {
         id: "repeating-stripes-gradient",

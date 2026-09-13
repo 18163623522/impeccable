@@ -212,6 +212,17 @@ impl Dom for JsDom {
     fn next_element_sibling(&self, el: ElId) -> Option<ElId> {
         opt(next_element_sibling(el))
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        // One bridge call per element per scan, then read from the cache
+        // without cloning the list.
+        CHILDREN_CACHE.with(|c| {
+            c.borrow_mut()
+                .entry(el)
+                .or_insert_with(|| children(el))
+                .first()
+                .copied()
+        })
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         contains(a, b)
     }

@@ -14,9 +14,11 @@ use crate::cascade::StyleValues;
 use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, positioned_style_implies_escape_axis, resolve_length_px,
-    GptBorderShadowInput, OversizedH1Input, StyleMap,
+    self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
+    gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close, gpt_border_shadow_row_finding,
+    gpt_border_shadow_row_size, gpt_thin_border_wide_shadow_pair,
+    positioned_style_implies_escape_axis, resolve_length_px, GptBorderShadowInput,
+    GptBorderShadowRowTree, OversizedH1Input, StyleMap,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -955,19 +957,136 @@ pub fn check_element_oversized_h1(el: &StaticElement<'_>, tag: &str) -> Vec<Rule
     }))
 }
 
-/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
-pub fn check_element_gpt_border_shadow(style: &StyleValues) -> Vec<RuleHit> {
+/// The hairline-and-halo pair of one element, read off its resolved style.
+/// The halo is measured first: it is one string parse, where the hairlines
+/// cost four style reads and two allocations, and a sibling row walk asks
+/// this of every box it passes.
+fn gpt_border_shadow_pair(style: &StyleValues) -> Option<(f64, f64)> {
+    let box_shadow = sv(style, "boxShadow");
+    gpt_border_shadow_halo_blur_px(Some(box_shadow))?;
     let s = StyleRef(style);
     let widths = border_widths_from_style(&s);
     let colors: Vec<Option<String>> = border_colors_from_style(&s)
         .into_iter()
         .map(|c| if c.is_empty() { None } else { Some(c) })
         .collect();
-    hits(check_gpt_thin_border_wide_shadow(&GptBorderShadowInput {
+    gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
-        box_shadow: Some(sv(style, "boxShadow")),
-    }))
+        box_shadow: Some(box_shadow),
+    })
+}
+
+/// A declared pixel length (`width: 180px`), or `None` for anything a file
+/// scan cannot size without layout (`auto`, percentages, keywords).
+fn gpt_border_shadow_declared_px(style: &StyleValues, prop: &str) -> Option<f64> {
+    let value = sv(style, prop).trim();
+    if !value.ends_with("px") {
+        return None;
+    }
+    let px = parse_float(value);
+    (!px.is_nan()).then_some(px)
+}
+
+/// Whether a box shows at rest, as far as a file scan can tell without
+/// layout. It does not when it or an ancestor is closed (the `hidden`
+/// attribute or `display: none`), or when it is lifted out of the flow
+/// (absolute or fixed, itself or up to
+/// [`measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] wrappers up) and hidden
+/// by `visibility: hidden` or opacities that multiply down to nothing. An
+/// in-flow box hidden that way is content staged for a scroll reveal, which
+/// still shows. A transform that parks a box off the page needs layout to
+/// read, so a file scan does not.
+fn gpt_border_shadow_paints_at_rest(el: &StaticElement<'_>) -> bool {
+    let mut opacity = 1.0f64;
+    let mut hidden = false;
+    let mut out_of_flow = false;
+    let mut depth = 0usize;
+    let mut current = Some(el.clone());
+    while let Some(node) = current {
+        if node.get_attribute("hidden").is_some() {
+            return false;
+        }
+        let style = node.style();
+        if js::to_lower_case(sv(style, "display")) == "none" {
+            return false;
+        }
+        if depth <= measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
+            let position = js::to_lower_case(sv(style, "position"));
+            out_of_flow |= position == "absolute" || position == "fixed";
+        }
+        let visibility = js::to_lower_case(sv(style, "visibility"));
+        hidden |= visibility == "hidden" || visibility == "collapse";
+        let own = parse_float(sv(style, "opacity"));
+        if own.is_finite() {
+            opacity *= own;
+        }
+        current = node.parent_element();
+        depth += 1;
+    }
+    !(out_of_flow && (hidden || opacity <= 0.02))
+}
+
+/// The tree a row walk reads in a file scan, which has no layout: wrappers of
+/// one kind share a tag, and two boxes are the same card when they share a
+/// tag and every pixel length both of them declare is comparable. A length
+/// only one of them declares, or neither, compares as unknown rather than as
+/// a mismatch.
+struct StaticRowTree<'a>(std::marker::PhantomData<StaticElement<'a>>);
+
+impl<'a> GptBorderShadowRowTree for StaticRowTree<'a> {
+    type El = StaticElement<'a>;
+    fn parent(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.parent_element()
+    }
+    fn previous_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.previous_element_sibling()
+    }
+    fn next_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.next_element_sibling()
+    }
+    fn first_child(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.first_element_child()
+    }
+    fn same_cell(&self, cell: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        cell.tag_lower() == other.tag_lower()
+    }
+    fn same_card(&self, card: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        if card.tag_lower() != other.tag_lower() {
+            return false;
+        }
+        ["width", "height"].into_iter().all(|prop| {
+            match (
+                gpt_border_shadow_declared_px(card.style(), prop),
+                gpt_border_shadow_declared_px(other.style(), prop),
+            ) {
+                (Some(a), Some(b)) => gpt_border_shadow_lengths_close(a, b),
+                _ => true,
+            }
+        })
+    }
+    fn carries_pair(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_pair(el.style()).is_some()
+    }
+    fn paints_at_rest(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_paints_at_rest(el)
+    }
+}
+
+/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
+pub fn check_element_gpt_border_shadow(
+    el: &StaticElement<'_>,
+    style: &StyleValues,
+) -> Vec<RuleHit> {
+    // The row walk is worth paying for only once this element carries the
+    // pair itself.
+    let Some(pair) = gpt_border_shadow_pair(style) else {
+        return Vec::new();
+    };
+    hits(gpt_border_shadow_row_finding(
+        pair,
+        gpt_border_shadow_row_size(&StaticRowTree(std::marker::PhantomData), el),
+    ))
 }
 
 // ─── Clipped overflow container ─────────────────────────────────────────────

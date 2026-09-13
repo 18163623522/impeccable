@@ -527,8 +527,29 @@ fn split_shadow_layers(s: &str) -> Vec<&str> {
 /// JS: checks.mjs#shadowMaxBlurPx. Largest blur radius across the layers
 /// whose color alpha is at least `min_alpha` (JS default 0).
 pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    shadow_max_blur_px_among(box_shadow, min_alpha, false)
+}
+
+/// Largest blur radius across the layers drawn outside the box: not `inset`,
+/// with a color alpha of at least `min_alpha`. An inset layer is a well
+/// pressed into the surface rather than an elevation under it, so it is never
+/// the halo around a card. Offsets are read by nothing here: every step of
+/// every mainstream elevation scale casts a y-offset, so a shadow lit from
+/// above is the common case rather than the exception.
+pub fn shadow_max_outer_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    shadow_max_blur_px_among(box_shadow, min_alpha, true)
+}
+
+/// The one box-shadow parse behind [`shadow_max_blur_px`] and
+/// [`shadow_max_outer_blur_px`]; `outer_only` skips `inset` layers.
+fn shadow_max_blur_px_among(
+    box_shadow: Option<&str>,
+    min_alpha: Option<f64>,
+    outer_only: bool,
+) -> f64 {
     re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
     re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
     let min_alpha = min_alpha.unwrap_or(0.0);
     let Some(box_shadow) = box_shadow else {
         return 0.0;
@@ -542,6 +563,9 @@ pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f
             continue;
         }
         let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        if outer_only && INSET_RE.is_match(&cleaned) {
+            continue;
+        }
         let cleaned = WORD_RE.replace_all(&cleaned, " ");
         let nums: Vec<f64> = NUM_RE
             .find_iter(&cleaned)

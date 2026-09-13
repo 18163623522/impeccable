@@ -13,9 +13,11 @@ use super::dom::{
 };
 use super::BrowserFinding;
 use crate::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, is_screen_reader_only_text_style,
-    GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
+    self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
+    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_row_finding,
+    gpt_border_shadow_row_size, gpt_border_shadow_sizes_match, gpt_thin_border_wide_shadow_pair,
+    is_screen_reader_only_text_style, GptBorderShadowInput, GptBorderShadowRowTree,
+    OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
@@ -1244,20 +1246,124 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     }))
 }
 
-/// JS: checks.mjs#checkElementGptBorderShadowDOM(el)
-pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+/// The hairline-and-halo pair of one element, read off its computed style.
+/// The halo is measured first: it is one string parse, where the hairlines
+/// cost four style reads and two allocations, and a sibling row walk asks
+/// this of every box it passes.
+fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
+    let box_shadow = dom.style(el, "boxShadow");
+    gpt_border_shadow_halo_blur_px(Some(&box_shadow))?;
     let style = ElStyle { dom, el };
     let widths = border_widths_from_style(&style);
     let colors: Vec<Option<String>> = border_colors_from_style(&style)
         .into_iter()
         .map(Some)
         .collect();
-    let box_shadow = dom.style(el, "boxShadow");
-    finding_hits(check_gpt_thin_border_wide_shadow(&GptBorderShadowInput {
+    gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
         box_shadow: Some(&box_shadow),
-    }))
+    })
+}
+
+/// Whether `el`, or a wrapper at most
+/// [`measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] levels above it, is
+/// lifted out of the flow the way a popover is.
+fn gpt_border_shadow_out_of_flow_dom(dom: &dyn Dom, el: ElId) -> bool {
+    let mut current = Some(el);
+    for _ in 0..=measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
+        let Some(node) = current else {
+            break;
+        };
+        let position = js::to_lower_case(&dom.style(node, "position"));
+        if position == "absolute" || position == "fixed" {
+            return true;
+        }
+        current = dom.parent(node);
+    }
+    false
+}
+
+/// The laid-out tree a row walk reads in a browser scan: wrappers of one
+/// kind share a tag, and two boxes are the same card when their rects are
+/// comparable, which also keeps a box with no area, a closed one included,
+/// out of every row. A box with area shows at rest unless it is out of the
+/// flow and computed hidden, transparent along its ancestors, or parked past
+/// the page's left or top edge or the viewport's right edge.
+struct DomRowTree<'a> {
+    dom: &'a dyn Dom,
+}
+
+impl DomRowTree<'_> {
+    fn size(&self, el: ElId) -> measures::Rect {
+        let r = self.dom.rect(el);
+        measures::Rect {
+            width: r.width,
+            height: r.height,
+        }
+    }
+}
+
+impl GptBorderShadowRowTree for DomRowTree<'_> {
+    type El = ElId;
+    fn parent(&self, el: &ElId) -> Option<ElId> {
+        self.dom.parent(*el)
+    }
+    fn previous_sibling(&self, el: &ElId) -> Option<ElId> {
+        self.dom.previous_element_sibling(*el)
+    }
+    fn next_sibling(&self, el: &ElId) -> Option<ElId> {
+        self.dom.next_element_sibling(*el)
+    }
+    fn first_child(&self, el: &ElId) -> Option<ElId> {
+        self.dom.first_element_child(*el)
+    }
+    fn same_cell(&self, cell: &ElId, other: &ElId) -> bool {
+        self.dom.tag_name(*cell) == self.dom.tag_name(*other)
+    }
+    fn same_card(&self, card: &ElId, other: &ElId) -> bool {
+        gpt_border_shadow_sizes_match(&self.size(*card), &self.size(*other))
+    }
+    fn carries_pair(&self, el: &ElId) -> bool {
+        gpt_border_shadow_pair_dom(self.dom, *el).is_some()
+    }
+    fn paints_at_rest(&self, el: &ElId) -> bool {
+        // Only a box lifted out of the flow can be a popover waiting for its
+        // trigger. An in-flow card sitting transparent or offset at scan time
+        // is content staged for a scroll reveal, and a visitor sees it by
+        // scrolling.
+        if !gpt_border_shadow_out_of_flow_dom(self.dom, *el) {
+            return true;
+        }
+        // Computed visibility is inherited, so the element's own value covers
+        // a hidden ancestor.
+        let visibility = js::to_lower_case(&self.dom.style(*el, "visibility"));
+        if visibility == "hidden" || visibility == "collapse" {
+            return false;
+        }
+        if effective_opacity_dom(self.dom, *el) <= 0.02 {
+            return false;
+        }
+        let rect = self.dom.rect(*el);
+        let viewport_width = self.dom.inner_width();
+        let off_page = rect.right + self.dom.scroll_x() <= 0.0
+            || rect.bottom + self.dom.scroll_y() <= 0.0
+            || (viewport_width > 0.0 && rect.left >= viewport_width);
+        !off_page
+    }
+}
+
+/// JS: checks.mjs#checkElementGptBorderShadowDOM(el)
+pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+    // The row walk is worth paying for only once this element carries the
+    // pair itself.
+    let Some(pair) = gpt_border_shadow_pair_dom(dom, el) else {
+        return Vec::new();
+    };
+    finding_hits(gpt_border_shadow_row_finding(
+        pair,
+        gpt_border_shadow_row_size(&DomRowTree { dom }, &el),
+    ))
 }
 
 // ── clipped overflow container ────────────────────────────────────────────
@@ -3002,5 +3108,386 @@ mod tests {
             }],
         );
         assert_eq!(check_element_blinking_cursor_dom(&d, cur).len(), 1);
+    }
+
+    /// One card carrying a hairline on every side plus `shadow`, sized `w`x`h`.
+    fn hairline_card(d: &mut FakeDom, parent: ElId, w: f64, h: f64, shadow: &str) -> ElId {
+        let card = d.add(Some(parent), "div");
+        visible(d, card);
+        d.set_rect(card, 0.0, 0.0, w, h);
+        d.set_styles(
+            card,
+            &[
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(229, 231, 235)"),
+                ("borderRightColor", "rgb(229, 231, 235)"),
+                ("borderBottomColor", "rgb(229, 231, 235)"),
+                ("borderLeftColor", "rgb(229, 231, 235)"),
+                ("boxShadow", shadow),
+            ],
+        );
+        card
+    }
+
+    /// A row of `n` identical cards under one parent; returns the first.
+    fn hairline_row(d: &mut FakeDom, parent: ElId, n: usize, shadow: &str) -> ElId {
+        let mut first = None;
+        for _ in 0..n {
+            let card = hairline_card(d, parent, 180.0, 140.0, shadow);
+            first.get_or_insert(card);
+        }
+        first.expect("row")
+    }
+
+    #[test]
+    fn gpt_border_shadow_needs_a_row_of_three() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 2, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        hairline_card(&mut d, row, 180.0, 140.0, halo);
+        let hits = check_element_gpt_border_shadow_dom(&d, first);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "gpt-thin-border-wide-shadow");
+        assert_eq!(
+            hits[0].snippet,
+            "1px border + 40px shadow blur, repeated across the row"
+        );
+    }
+
+    #[test]
+    fn gpt_border_shadow_ignores_tight_and_inset_shadows() {
+        for shadow in [
+            // a wide shadow, but a tight one
+            "rgba(15, 23, 42, 0.18) 0px 0px 24px 0px",
+            "rgba(15, 23, 42, 0.22) 0px 8px 24px 0px",
+            // drawn inside the box
+            "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px inset",
+            "rgba(15, 23, 42, 0.18) 0px 8px 40px 0px inset",
+        ] {
+            let (mut d, body) = page();
+            let row = d.add(Some(body), "div");
+            let first = hairline_row(&mut d, row, 4, shadow);
+            assert!(
+                check_element_gpt_border_shadow_dom(&d, first).is_empty(),
+                "{shadow} should not read as the repeated signature"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_a_row_lit_from_above() {
+        // Every step of every mainstream elevation scale casts a y-offset, so
+        // a repeated drop shadow is the population the rule is named for.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_row(&mut d, row, 3, "rgba(15, 23, 42, 0.22) 0px 8px 40px 0px");
+        let hits = check_element_gpt_border_shadow_dom(&d, first);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].snippet,
+            "1px border + 40px shadow blur, repeated across the row"
+        );
+    }
+
+    #[test]
+    fn gpt_border_shadow_finds_row_mates_past_the_sibling_bound() {
+        // A card sitting deep inside a long list still sees the boxes beside
+        // it: the walk reads outward from the element, not the head of the
+        // list.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        for _ in 0..400 {
+            let filler = d.add(Some(row), "div");
+            visible(&mut d, filler);
+            d.set_rect(filler, 0.0, 0.0, 180.0, 140.0);
+        }
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 3, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
+    }
+
+    #[test]
+    fn gpt_border_shadow_row_needs_comparable_sizes() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        hairline_card(&mut d, row, 600.0, 90.0, halo);
+        hairline_card(&mut d, row, 64.0, 400.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // Within tolerance on both axes, the same three read as one row.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        hairline_card(&mut d, row, 168.0, 132.0, halo);
+        hairline_card(&mut d, row, 192.0, 148.0, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
+    }
+
+    #[test]
+    fn gpt_border_shadow_skips_a_row_that_paints_nothing() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 4, halo);
+        for card in d.children(row) {
+            d.set_rect(card, 0.0, 0.0, 0.0, 0.0);
+        }
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+    }
+
+    /// Wraps a new hairline card in the tags of `wrappers`, outermost first,
+    /// under `parent`; returns the card.
+    fn wrapped_card(
+        d: &mut FakeDom,
+        parent: ElId,
+        wrappers: &[&str],
+        w: f64,
+        h: f64,
+        shadow: &str,
+    ) -> ElId {
+        let mut at = parent;
+        for tag in wrappers {
+            at = d.add(Some(at), tag);
+            visible(d, at);
+        }
+        hairline_card(d, at, w, h, shadow)
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_cards_wrapped_in_grid_items() {
+        // The common generated grid wraps every card in its own link, so no
+        // two cards are DOM siblings; the page still shows one row of three.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo))
+            .collect();
+        for card in cards {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, card).len(), 1);
+        }
+
+        // Two wrappers down, as in a list item holding a link.
+        let (mut d, body) = page();
+        let list = d.add(Some(body), "ul");
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, list, &["li", "a"], 180.0, 140.0, halo))
+            .collect();
+        for card in cards {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, card).len(), 1);
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_panels_repeated_one_per_article() {
+        // Three articles down a page, each holding copy beside a panel, the
+        // middle one flipped so the panel comes first: the panels sit at the
+        // same depth but not at the same index, and they are one repetition.
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let halo = "rgba(255, 255, 255, 0.04) 0px 1px 0px 0px inset, rgba(8, 33, 25, 0.6) 0px 30px 60px -40px";
+        let mut panels = Vec::new();
+        for flipped in [false, true, false] {
+            let article = d.add(Some(stack), "article");
+            visible(&mut d, article);
+            if !flipped {
+                let copy = d.add(Some(article), "p");
+                visible(&mut d, copy);
+            }
+            let viz = d.add(Some(article), "div");
+            visible(&mut d, viz);
+            panels.push(hairline_card(&mut d, viz, 491.0, 265.0, halo));
+            if flipped {
+                let copy = d.add(Some(article), "p");
+                visible(&mut d, copy);
+            }
+        }
+        for panel in panels {
+            let hits = check_element_gpt_border_shadow_dom(&d, panel);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                hits[0].snippet,
+                "1px border + 60px shadow blur, repeated across the row"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_lone_panel_among_repeated_articles_stays_silent() {
+        // A repeated layout is not enough: the other cells have to hold the
+        // same card.
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let panel = wrapped_card(&mut d, stack, &["article", "div"], 491.0, 265.0, halo);
+        for _ in 0..3 {
+            let article = d.add(Some(stack), "article");
+            visible(&mut d, article);
+            let viz = d.add(Some(article), "div");
+            visible(&mut d, viz);
+            let plain = d.add(Some(viz), "div");
+            visible(&mut d, plain);
+            d.set_rect(plain, 0.0, 0.0, 491.0, 265.0);
+        }
+        assert!(check_element_gpt_border_shadow_dom(&d, panel).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_wrapped_row_needs_comparable_cards_and_cells() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+
+        // Same wrappers, cards of very different sizes.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let first = wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["a"], 600.0, 90.0, halo);
+        wrapped_card(&mut d, grid, &["a"], 64.0, 400.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // Comparable cards, but under wrappers of three different kinds.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let first = wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["section"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["aside"], 180.0, 140.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_climbs_at_most_two_wrappers() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, grid, &["li", "a", "span"], 180.0, 140.0, halo))
+            .collect();
+        assert!(check_element_gpt_border_shadow_dom(&d, cards[0]).is_empty());
+    }
+
+    /// A nav bar of `n` items, each holding a trigger link beside a flyout
+    /// sized like a card and wearing the pair; returns the flyouts.
+    fn nav_with_flyouts(d: &mut FakeDom, body: ElId, n: usize) -> Vec<ElId> {
+        let list = d.add(Some(body), "ul");
+        (0..n)
+            .map(|_| {
+                let item = d.add(Some(list), "li");
+                d.set_rect(item, 0.0, 0.0, 80.0, 20.0);
+                let trigger = d.add(Some(item), "a");
+                d.set_rect(trigger, 0.0, 0.0, 80.0, 20.0);
+                let flyout =
+                    hairline_card(d, item, 320.0, 200.0, "rgba(15, 23, 42, 0.18) 0px 20px 50px 0px");
+                d.set_style(flyout, "position", "absolute");
+                flyout
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gpt_border_shadow_hidden_flyouts_in_repeated_nav_items_stay_silent() {
+        // Shown at rest, the three flyouts read as one row through their
+        // wrappers, so the silence below comes from the visibility gate.
+        let (mut d, body) = page();
+        for flyout in nav_with_flyouts(&mut d, body, 3) {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, flyout).len(), 1);
+        }
+
+        // Laid out ahead of their hover, they are popovers waiting for a
+        // trigger, not a row of cards.
+        type Hide = fn(&mut FakeDom, ElId);
+        let hides: [(&str, Hide); 5] = [
+            ("transparent", |d, f| {
+                d.set_style(f, "opacity", "0");
+            }),
+            ("visibility hidden", |d, f| {
+                d.set_style(f, "visibility", "hidden");
+            }),
+            ("inside a transparent nav item", |d, f| {
+                let item = d.parent(f).expect("nav item");
+                d.set_style(item, "opacity", "0");
+            }),
+            ("translated past the left edge", |d, f| {
+                d.set_rect(f, -400.0, 40.0, 320.0, 200.0);
+            }),
+            ("parked past the viewport's right edge", |d, f| {
+                d.set_rect(f, 1400.0, 40.0, 320.0, 200.0);
+            }),
+        ];
+        for (name, hide) in hides {
+            let (mut d, body) = page();
+            let flyouts = nav_with_flyouts(&mut d, body, 3);
+            for &flyout in &flyouts {
+                hide(&mut d, flyout);
+            }
+            for &flyout in &flyouts {
+                assert!(
+                    check_element_gpt_border_shadow_dom(&d, flyout).is_empty(),
+                    "flyouts {name} should stay silent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_hidden_popover_is_not_a_row_mate() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_row(&mut d, row, 2, halo);
+        let popover = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        d.set_style(popover, "position", "absolute");
+        d.set_style(popover, "opacity", "0");
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // A third card that shows makes the row, and the popover still
+        // reports nothing.
+        hairline_card(&mut d, row, 180.0, 140.0, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
+        assert!(check_element_gpt_border_shadow_dom(&d, popover).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_a_row_staged_for_a_scroll_reveal() {
+        // Before a scroll reveal runs, each article sits transparent and
+        // offset in the flow. The panels inside are the row a visitor sees by
+        // scrolling, and nothing about them waits for a trigger.
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let panels: Vec<ElId> = (0..3)
+            .map(|i| {
+                let panel = wrapped_card(&mut d, stack, &["article", "div"], 491.0, 265.0, halo);
+                let article = d.parent(d.parent(panel).expect("viz")).expect("article");
+                d.set_style(article, "opacity", "0");
+                d.set_style(article, "transform", "matrix(1, 0, 0, 1, 0, 18)");
+                d.set_rect(panel, 656.0, 1149.0 + 470.0 * i as f64, 491.0, 265.0);
+                panel
+            })
+            .collect();
+        for &panel in &panels {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, panel).len(), 1);
+        }
+
+        // Cards staged one by one, each transparent or hidden in the flow.
+        for (prop, value) in [("opacity", "0"), ("visibility", "hidden")] {
+            let (mut d, body) = page();
+            let row = d.add(Some(body), "div");
+            let first = hairline_row(&mut d, row, 3, halo);
+            for card in d.children(row) {
+                d.set_style(card, prop, value);
+            }
+            assert_eq!(
+                check_element_gpt_border_shadow_dom(&d, first).len(),
+                1,
+                "cards staged with {prop} {value}"
+            );
+        }
     }
 }

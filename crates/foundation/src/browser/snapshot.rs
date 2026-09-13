@@ -725,6 +725,9 @@ impl Dom for SnapshotDom {
     fn next_element_sibling(&self, el: ElId) -> Option<ElId> {
         self.snap.next_element_sibling(el)
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        self.snap.node(el).children.first().copied()
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         if !self.valid(a) || !self.valid(b) {
             return false;

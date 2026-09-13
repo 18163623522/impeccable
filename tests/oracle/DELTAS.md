@@ -558,3 +558,94 @@ section.
 - `detect-scope-layout-text`, `detect-scope-both`: the same thirteen findings inside the layout-scope sweeps (`detect-scope-both` 166 counted to 153, 170 findings unchanged).
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`: 458 findings unchanged, 415 counted to 402, advisory notes 43 to 56.
 - `detect-no-advisory-json`, `detect-no-advisory-text`: `--no-advisory` now drops the thirteen findings with the other advisories (415 to 402).
+
+## Recorded 2026-09-12: the hairline-and-halo pair has to repeat across a row
+
+Corpus judging put `gpt-thin-border-wide-shadow` at 0.70 pattern precision
+with no harm found on 19 representatives: a hairline border beside a soft
+shadow is the resting card and popover style of most mature design systems.
+The rule now reports it only where a row repeats it. Two gates on top of the
+pair, both measured on what the element already declares:
+
+- the widest shadow layer drawn outside the box reaches 32px of blur (was
+  16px, and an inset layer never counts, since a well pressed into a surface
+  is not an elevation under it). Offsets are read by nothing: every step of
+  every mainstream elevation scale casts a y-offset, so a shadow lit from
+  above is the common case rather than the exception.
+- at least three comparable boxes of one row carry the same pair. The row is
+  what the layout repeats, not only the element's DOM siblings: the walk
+  climbs at most two wrappers, and at each level reads the wrapper's siblings
+  of the same tag for a card at the element's own depth below them, so a grid
+  whose cells each wrap their card in a link, or a stack of articles each
+  holding one panel, is one row. It reads at most 24 siblings on each side per
+  level and 32 boxes inside each sibling cell, one child at a time. A browser
+  scan compares rects, which also silences an element that paints nothing,
+  such as a closed dropdown; a file scan has no layout and asks for the same
+  tag plus comparable pixel sizes wherever both boxes declare them.
+- every card of that row, the element included, shows at rest. The wrapper
+  climb would otherwise read a nav bar whose items each hold a flyout as a
+  row of cards, since flyouts laid out ahead of their hover have real sizes
+  and carry the pair. A popover waiting for its trigger is closed, or lifted
+  out of the flow (absolute or fixed, itself or up to two wrappers up) and
+  hidden. A browser scan reads a closed box as one with no area, and reads
+  an out-of-flow box as hidden when its computed visibility is hidden, its
+  opacity multiplies down to nothing along its ancestors, or its rect sits
+  past the page's left or top edge or the viewport's right edge. A file scan
+  reads the `hidden` attribute or `display: none` on the box or an ancestor
+  as closed, and `visibility: hidden` or a transparent opacity on an
+  out-of-flow box as hidden. A transform that parks a box off the page needs
+  layout, so only the browser scan reads it. Content staged in the flow for
+  a scroll reveal, transparent and offset until the reveal runs, still
+  counts: a visitor sees it by scrolling, and the corpus's one row, three
+  chart panels on evergrovelabs.com, sits at opacity 0 in the scan snapshot.
+
+The snippet now says which of the two the reader has to act on, so removing
+the shadow from the one named card does not read as the whole repair:
+`1px border + 40px shadow blur, repeated across the row`. The registry
+description names the row for the same reason.
+
+Every golden below was re-recorded from the binary and reviewed by hand, so
+none of them is an accepted delta. They are named in prose rather than in the
+bullet-then-case-id form this file's header describes, which run.mjs reads as
+a standing exception to a golden it would otherwise fail on.
+
+- Re-recorded on `gpt-tells.html`: `detect-fixture-json-gpt-tells-html` and
+  `detect-fixture-text-gpt-tells-html` go from 4 findings to 3. The fixture's
+  lone hairline card, a 24px halo on one box, now sits in the pass column; the
+  rule's own cases moved to the new `gpt-thin-border-wide-shadow.html`.
+- New cases for that fixture: `detect-fixture-json-gpt-thin-border-wide-shadow-html`
+  and `detect-fixture-text-gpt-thin-border-wide-shadow-html`. Fifteen findings,
+  one per card of its five flag rows (a 40px halo, a 48px halo across cards of
+  slightly different sizes, a row lit from above at 8px offset under a 40px
+  blur, grid cells that each wrap their card in a link, and one panel per
+  article two wrappers down with the middle article flipped); its ten pass
+  rows (a lone popover, a pair of cards, a tight shadow, a shadow drawn inside
+  the box, a border too faint to read, a heavy border, three boxes of one tag
+  sized nothing alike, one panel in a stack of articles that hold no panel, a
+  flyout per nav item hidden until hovered, a dropdown per nav item closed
+  with `display: none`) report nothing. A browser scan of the file, copied
+  outside the repo so the root DESIGN.md does not apply, reports the same
+  fifteen and nothing else.
+- Re-recorded sweeps: `detect-dir-json-all-fixtures`,
+  `detect-dir-text-all-fixtures` and `detect-dir-quiet-all-fixtures` carry both
+  files, 436 findings to 450 and 17 advisory notes to 31. The counted total
+  stays at 419; no other rule's output moves.
+- Known limits, merged as leftover noise the base also reports rather than
+  regressions: a closed native `<details>` dropdown, and a megamenu whose
+  hidden container sits several levels up, still count as a row; the file
+  scan still flags repeated closed `<dialog>` and `[popover]` elements; a
+  flyout closed by clipping still counts.
+
+## Recorded 2026-09-13: gpt-thin-border-wide-shadow joins the integration
+
+`corpus/integration` merges `corpus/premise-gpt-thin-border`. The branch's four
+fixture goldens replay as it recorded them. The three directory sweeps
+(`detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+`detect-dir-quiet-all-fixtures`) moved on both sides, so they were re-recorded
+from the integrated binary and checked against the entry above, finding for
+finding: the integration moved by exactly the branch's own delta, fifteen
+findings added from the new fixture and the one `gpt-tells.html` finding
+removed, with nothing extra and nothing missing. The sweep goes from 458
+findings to 472 and from 56 advisory notes to 70; the counted total stays at
+402. The `--no-advisory` and scope sweeps replay unchanged, since the rule's
+findings are advisory. Named in prose for the same reason as the entry above.

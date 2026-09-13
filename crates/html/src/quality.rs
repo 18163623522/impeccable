@@ -9,7 +9,8 @@ use crate::background::{sv, sv_opt};
 use crate::cascade::StyleValues;
 use crate::dom::{ChildNode, StaticElement};
 use impeccable_core::checks::measures::{
-    colors_nearly_match, css_color_is_transparent, resolve_length_px,
+    colors_nearly_match, css_color_is_transparent, is_capitalized_run, resolve_length_px,
+    TRACKED_LABEL_MAX_CHARS,
 };
 use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{NON_RENDERED_TAGS, SR_ONLY_SELECTOR};
@@ -473,18 +474,29 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- Wide letter spacing on body text ---
-    if q.has_direct_text && text_len > 20 && sv_opt(style, "textTransform") != Some("uppercase") {
+    if q.has_direct_text && text_len > 20 {
         if let Some(ls) = q.letter_spacing_px {
             if ls > 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_em > 0.05 {
-                    findings.push(RuleHit::new(
-                        "wide-tracking",
-                        format!(
-                            "letter-spacing: {}em on body text",
-                            to_fixed(tracking_em, 2)
-                        ),
-                    ));
+                    // Wide tracking is the standard treatment for an
+                    // uppercase eyebrow, label or button. `text-transform`
+                    // says so outright; capitals typed into the markup do
+                    // not, so that reading is held to label size. This
+                    // engine has no layout, so a run inside the label length
+                    // counts as one line.
+                    let caps_label = sv_opt(style, "textTransform") == Some("uppercase")
+                        || (text_len <= TRACKED_LABEL_MAX_CHARS
+                            && is_capitalized_run(js::trim(&el.text_content())));
+                    if !caps_label {
+                        findings.push(RuleHit::new(
+                            "wide-tracking",
+                            format!(
+                                "letter-spacing: {}em on body text",
+                                to_fixed(tracking_em, 2)
+                            ),
+                        ));
+                    }
                 }
             }
         }

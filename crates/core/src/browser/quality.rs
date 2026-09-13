@@ -11,7 +11,10 @@ use super::dom::{
     style_px, tag_lower, Dom, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
-use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
+use crate::checks::measures::{
+    colors_nearly_match, css_color_is_transparent, is_capitalized_run, resolve_length_px,
+    text_wraps_to_multiple_lines, TRACKED_LABEL_MAX_CHARS,
+};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
     NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
@@ -623,15 +626,29 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Wide letter spacing on body text ---
-    if has_direct_text && text_len > 20 && st("textTransform") != "uppercase" {
+    if has_direct_text && text_len > 20 {
         if let Some(ls) = q.letter_spacing_px {
             if ls > 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_em > 0.05 {
-                    findings.push(RuleHit::new(
-                        "wide-tracking",
-                        format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
-                    ));
+                    // Wide tracking is the standard treatment for an
+                    // uppercase eyebrow, label or button. `text-transform`
+                    // says so outright; capitals typed into the markup do
+                    // not, so that reading is held to label size on one
+                    // line and running text keeps the rule.
+                    let caps_label = st("textTransform") == "uppercase"
+                        || (text_len <= TRACKED_LABEL_MAX_CHARS
+                            && is_capitalized_run(js::trim(&dom.text_content(el)))
+                            && !text_wraps_to_multiple_lines(
+                                dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
+                                q.line_height_px,
+                            ));
+                    if !caps_label {
+                        findings.push(RuleHit::new(
+                            "wide-tracking",
+                            format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
+                        ));
+                    }
                 }
             }
         }
@@ -865,6 +882,61 @@ mod tests {
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
         assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
+    }
+
+    #[test]
+    fn wide_tracking_exempts_short_capital_labels() {
+        // A tracked label: one line, capitals, inside the label length.
+        let label_text = "LIMITED EDITION RELEASE 2026";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let s = text_el(&mut d, body, "span", label_text, "12px");
+        d.set_rect(s, 40.0, 100.0, 260.0, 18.0);
+        d.set_styles(s, &[("lineHeight", "18px"), ("letterSpacing", "2px")]);
+        d.els[s as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 260.0, 18.0));
+        assert!(check_element_quality_dom(&d, s, &BrowserConfig::default()).is_empty());
+
+        // The same label typed lowercase keeps the finding.
+        let mixed = text_el(&mut d, body, "span", "Fall 2026 technology preview", "12px");
+        d.set_rect(mixed, 40.0, 130.0, 260.0, 18.0);
+        d.set_styles(mixed, &[("lineHeight", "18px"), ("letterSpacing", "2px")]);
+        d.els[mixed as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 130.0, 260.0, 18.0));
+        let hits = check_element_quality_dom(&d, mixed, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+
+        // The same words declared uppercase were always exempt.
+        let up = text_el(&mut d, body, "span", "Fall 2026 technology preview", "12px");
+        d.set_rect(up, 40.0, 160.0, 260.0, 18.0);
+        d.set_styles(
+            up,
+            &[("lineHeight", "18px"), ("letterSpacing", "2px"), ("textTransform", "uppercase")],
+        );
+        d.els[up as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 160.0, 260.0, 18.0));
+        assert!(check_element_quality_dom(&d, up, &BrowserConfig::default()).is_empty());
+
+        // Typed capitals over two lines are no longer a label.
+        d.set_rect(s, 40.0, 100.0, 140.0, 36.0);
+        d.els[s as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 140.0, 36.0));
+        let hits = check_element_quality_dom(&d, s, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+
+        // Past the label length, one line or not, it is running text.
+        let long = text_el(
+            &mut d,
+            body,
+            "p",
+            "SUPPORT HOURS RUN MONDAY TO FRIDAY FROM NINE UNTIL SIX",
+            "16px",
+        );
+        d.set_rect(long, 40.0, 200.0, 600.0, 26.0);
+        d.set_styles(long, &[("lineHeight", "26px"), ("letterSpacing", "2px")]);
+        d.els[long as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 200.0, 600.0, 26.0));
+        let hits = check_element_quality_dom(&d, long, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+        assert_eq!(hits[0].snippet, "letter-spacing: 0.13em on body text");
     }
 
     #[test]

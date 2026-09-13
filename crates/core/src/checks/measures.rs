@@ -308,6 +308,39 @@ pub fn is_opaque_decorated_box(cs: Option<&dyn StyleMap>) -> bool {
     border_sides >= 2
 }
 
+// ─── Tracked-label helpers ──────────────────────────────────────────────────
+
+/// The longest run that still reads as a label rather than as running text.
+/// `wide-tracking` exempts an uppercase run at or under this length when it
+/// renders on one line.
+pub const TRACKED_LABEL_MAX_CHARS: usize = 40;
+
+/// True when `text` is set in capitals: at least one cased letter and no
+/// lowercase one. A label typed in caps in the markup carries no
+/// `text-transform`, so the computed style never reports it.
+pub fn is_capitalized_run(text: &str) -> bool {
+    let mut has_upper = false;
+    for ch in text.chars() {
+        if ch.is_lowercase() {
+            return false;
+        }
+        if ch.is_uppercase() {
+            has_upper = true;
+        }
+    }
+    has_upper
+}
+
+/// True when a text box taller than one-and-a-half line boxes proves the run
+/// wrapped. An unmeasured box (no line height, no rect, the static engine)
+/// counts as one line, so the exemption never turns on a guess.
+pub fn text_wraps_to_multiple_lines(text_height_px: f64, line_height_px: Option<f64>) -> bool {
+    match line_height_px {
+        Some(lh) if lh > 0.0 => text_height_px > lh * 1.5,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

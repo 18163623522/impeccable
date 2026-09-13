@@ -90,7 +90,16 @@ pub fn has_visible_background_boundary(style: &StyleValues, el: &StaticElement<'
         }
         parent = p.parent_element();
     }
-    true
+    // Nothing in the chain paints, so the ground is the canvas: a white box
+    // on an unpainted light page draws no edge. A page that asks for a dark
+    // scheme gets a dark canvas, and there a white box is an edge.
+    if !impeccable_core::browser::quality::canvas_is_light(sv(style, "colorScheme")) {
+        return true;
+    }
+    !colors_nearly_match(
+        Some(bg),
+        Some(impeccable_core::browser::quality::CANVAS_BACKGROUND),
+    )
 }
 
 /// JS: checks.mjs#isVisuallyHidden(el, style)
@@ -179,6 +188,41 @@ const SMALLPRINT: &str = "small, footer, [class*=\"legal\" i], [class*=\"copyrig
 
 fn side_len(style: &StyleValues, key: &str, font_size: f64) -> f64 {
     resolve_length_px(sv_opt(style, key), font_size).unwrap_or(0.0)
+}
+
+const PAD_KEYS: [&str; 4] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+const MARGIN_KEYS: [&str; 4] = ["marginTop", "marginRight", "marginBottom", "marginLeft"];
+/// How far below a container's own child the inset may sit and still count.
+/// A scroll wrapper around a table reaches its padded cells in four steps
+/// (`table` > `tbody` > `tr` > `td`).
+const MAX_INSULATE_DEPTH: usize = 4;
+
+/// Whether `el` keeps the container's text off side `s`.
+///
+/// An element that holds one element and no text of its own is a pass-through
+/// (`<h3>` around a padded `<button>`, `<a>` around a padded card), so the
+/// question goes to what it wraps: the padding that insets the text often sits
+/// a step or two below the container's own child. Where it holds several
+/// children the question stops, because any one of them can reach the edge on
+/// its own and the padding of another says nothing about it. The browser rule
+/// measures where the glyphs land and needs none of this; the static scan has
+/// no layout, so it reads the declarations that would move them.
+fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: f64, depth: usize) -> bool {
+    const CHILD_INSULATE_THRESHOLD: f64 = 4.0;
+    let style = el.style();
+    if side_len(style, PAD_KEYS[s], font_size) >= CHILD_INSULATE_THRESHOLD
+        || side_len(style, MARGIN_KEYS[s], font_size) >= CHILD_INSULATE_THRESHOLD
+    {
+        return true;
+    }
+    if depth == 0 || el.has_direct_text_longer_than(4) {
+        return false;
+    }
+    let children = el.children();
+    match children.as_slice() {
+        [only] => insulates_side(only, s, font_size, depth - 1),
+        _ => false,
+    }
 }
 
 /// JS: checks.mjs#checkQuality(opts), static (`rect: null`) branches.
@@ -272,29 +316,11 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     side_len(style, "paddingLeft", font_size),
                 ];
                 const PAD_THRESHOLD: f64 = 2.0;
-                const CHILD_INSULATE_THRESHOLD: f64 = 4.0;
                 let mut children_insulate = [false; 4];
-                for child in &children {
-                    let cs = child.style();
-                    let child_pad = [
-                        side_len(cs, "paddingTop", font_size),
-                        side_len(cs, "paddingRight", font_size),
-                        side_len(cs, "paddingBottom", font_size),
-                        side_len(cs, "paddingLeft", font_size),
-                    ];
-                    let child_margin = [
-                        side_len(cs, "marginTop", font_size),
-                        side_len(cs, "marginRight", font_size),
-                        side_len(cs, "marginBottom", font_size),
-                        side_len(cs, "marginLeft", font_size),
-                    ];
-                    for s in 0..4 {
-                        if child_pad[s] >= CHILD_INSULATE_THRESHOLD
-                            || child_margin[s] >= CHILD_INSULATE_THRESHOLD
-                        {
-                            children_insulate[s] = true;
-                        }
-                    }
+                for s in 0..4 {
+                    children_insulate[s] = children
+                        .iter()
+                        .any(|c| insulates_side(c, s, font_size, MAX_INSULATE_DEPTH));
                 }
                 let side_names = ["top", "right", "bottom", "left"];
                 let mut flush_sides: Vec<&str> = Vec::new();

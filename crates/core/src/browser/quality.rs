@@ -69,8 +69,24 @@ fn matches_or_closest(dom: &dyn Dom, el: ElId, sel: &str) -> bool {
     matches_or_false(dom, el, sel) || closest_or_none(dom, el, sel).is_some()
 }
 
+/// The colour a browser paints behind a page that sets no background of its
+/// own, under the light colour scheme: a white box on an unpainted light page
+/// draws no edge.
+pub const CANVAS_BACKGROUND: &str = "rgb(255, 255, 255)";
+
+/// Whether the canvas under an unpainted chain is the light one
+/// [`CANVAS_BACKGROUND`] names. A page that asks for a dark scheme gets a dark
+/// canvas from the browser, and any value that mentions `dark` may resolve
+/// that way, so only a plainly light scheme lets the comparison run.
+pub fn canvas_is_light(scheme: &str) -> bool {
+    !js::to_lower_case(scheme).contains("dark")
+}
+
 /// JS: checks.mjs#hasVisibleBackgroundBoundary(style, el, win) — browser:
-/// `style` is `el`'s own computed style, `win` the live window.
+/// `style` is `el`'s own computed style, `win` the live window. The JS
+/// answered `true` when no ancestor painted; the canvas under an unpainted
+/// light chain is white, so a white box there is compared against it like any
+/// other ground.
 pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
     let bg = dom.style(el, "backgroundColor");
     if css_color_is_transparent(Some(&bg)) {
@@ -84,6 +100,80 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
         }
         parent = dom.parent(p);
     }
+    // `colorScheme` is inherited, so the element's own computed value is the
+    // page's.
+    if !canvas_is_light(&dom.style(el, "colorScheme")) {
+        return true;
+    }
+    !colors_nearly_match(Some(&bg), Some(CANVAS_BACKGROUND))
+}
+
+/// The part of `inner` that falls inside `outer`, or `None` when the two miss
+/// each other.
+///
+/// `direct_text_rect` is a font-metric box, not an ink box. A line box tighter
+/// than the font's ascent and descent pushes it out of the element's own
+/// border box, and so do the tall marks of Devanagari and Thai; no glyph lands
+/// out there. Only the part inside that box is what a reader gets, so every
+/// edge measurement clamps first.
+fn clamp_to(inner: &Rect, outer: &Rect) -> Option<Rect> {
+    let left = js::math_max(inner.left, outer.left);
+    let top = js::math_max(inner.top, outer.top);
+    let w = js::math_min(inner.right, outer.right) - left;
+    let h = js::math_min(inner.bottom, outer.bottom) - top;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some(Rect::from_xywh(left, top, w, h))
+}
+
+/// The space the element's own glyphs keep from each inner edge of its box
+/// (`[top, right, bottom, left]`), or `None` when it paints no direct text.
+///
+/// `direct_text_rect` is the union of the client rects of the element's own
+/// text nodes, so this is the room a reader sees rather than the room the
+/// stylesheet declares: a fixed-height flex or grid box centres its label
+/// with no padding at all, and half-leading adds space of its own.
+fn direct_text_insets(dom: &dyn Dom, el: ElId, rect: &Rect, border: &[f64; 4]) -> Option<[f64; 4]> {
+    let t = dom.direct_text_rect(el)?;
+    if t.width <= 0.0 || t.height <= 0.0 {
+        return None;
+    }
+    // Text that overruns its own box still reads as cramped: the clamped rect
+    // lands on the border, an inset of zero.
+    let t = clamp_to(&t, rect)?;
+    Some([
+        t.top - (rect.top + border[0]),
+        (rect.right - border[1]) - t.right,
+        (rect.bottom - border[2]) - t.bottom,
+        t.left - (rect.left + border[3]),
+    ])
+}
+
+/// Whether text laid out at `tr` survives the clipping between `node` and
+/// `el`. A panel held at `max-height: 0` and a drawer collapsed to zero width
+/// still lay their text out; none of it reaches the screen, so it cannot be
+/// flush against anything.
+fn text_rect_survives_clipping(dom: &dyn Dom, el: ElId, node: ElId, tr: &Rect) -> bool {
+    let mut cur = dom.parent(node);
+    while let Some(p) = cur {
+        let clips = |k: &str| {
+            let v = dom.style(p, k);
+            v == "hidden" || v == "clip" || v == "scroll" || v == "auto"
+        };
+        if clips("overflow") || clips("overflowX") || clips("overflowY") {
+            let cr = dom.rect(p);
+            let w = js::math_min(tr.right, cr.right) - js::math_max(tr.left, cr.left);
+            let h = js::math_min(tr.bottom, cr.bottom) - js::math_max(tr.top, cr.top);
+            if w < 1.0 || h < 1.0 {
+                return false;
+            }
+        }
+        if p == el {
+            break;
+        }
+        cur = dom.parent(p);
+    }
     true
 }
 
@@ -93,6 +183,11 @@ pub fn has_meaningful_direct_text(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
+///
+/// Each candidate is measured by its own text rect, not by its border box: a
+/// padded button, a centred heading and a table cell all fill the box they sit
+/// in while their glyphs stay well inside it, and it is the glyphs a reader
+/// sees crowding the boundary.
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
     const TEXT_EDGE_THRESHOLD: f64 = 4.0;
@@ -102,24 +197,50 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         if !TEXT_EDGE_TAGS.contains(&tag_name.as_str()) || !has_meaningful_direct_text(dom, node) {
             continue;
         }
-        let nr = dom.rect(node);
-        if nr.width <= 0.0 || nr.height <= 0.0 {
+        let br = dom.rect(node);
+        if br.width <= 0.0 || br.height <= 0.0 {
             continue;
         }
-        if nr.bottom < rect.top || nr.top > rect.bottom || nr.right < rect.left || nr.left > rect.right {
+        if br.bottom < rect.top || br.top > rect.bottom || br.right < rect.left || br.left > rect.right {
             continue;
         }
-        if nr.top - rect.top <= TEXT_EDGE_THRESHOLD {
-            flush[0] = true;
+        // Glyphs a reader sees are inside the node's own box, so a box that
+        // reaches no edge of `el` has no text that reaches one. Rejecting on
+        // the box first keeps the text measurement, a range walk in the page,
+        // off the many candidates that sit well inside.
+        let box_sides = [
+            br.top - rect.top <= TEXT_EDGE_THRESHOLD,
+            rect.right - br.right <= TEXT_EDGE_THRESHOLD,
+            rect.bottom - br.bottom <= TEXT_EDGE_THRESHOLD,
+            br.left - rect.left <= TEXT_EDGE_THRESHOLD,
+        ];
+        if !box_sides.iter().any(|s| *s) {
+            continue;
         }
-        if rect.right - nr.right <= TEXT_EDGE_THRESHOLD {
-            flush[1] = true;
+        // A Dom that cannot measure text falls back to the box, the behaviour
+        // this rule had before, rather than going silent.
+        let nr = match dom.direct_text_rect(node) {
+            Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(&t, &br) {
+                Some(c) => c,
+                None => continue,
+            },
+            _ => br,
+        };
+        let sides = [
+            nr.top - rect.top <= TEXT_EDGE_THRESHOLD,
+            rect.right - nr.right <= TEXT_EDGE_THRESHOLD,
+            rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD,
+            nr.left - rect.left <= TEXT_EDGE_THRESHOLD,
+        ];
+        // The two remaining tests run only for text that reached an edge.
+        if !sides.iter().any(|s| *s) {
+            continue;
         }
-        if rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD {
-            flush[2] = true;
+        if is_visually_hidden(dom, node) || !text_rect_survives_clipping(dom, el, node, &nr) {
+            continue;
         }
-        if nr.left - rect.left <= TEXT_EDGE_THRESHOLD {
-            flush[3] = true;
+        for s in 0..4 {
+            flush[s] |= sides[s];
         }
     }
     flush
@@ -272,28 +393,50 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             spx("borderBottomWidth"),
             spx("borderLeftWidth"),
         ];
-        let border_count = borders.iter().filter(|w| **w > 0.0).count();
+        // A `border: 1px solid transparent` focus-ring placeholder draws no
+        // edge, so it bounds nothing.
+        let border_visible = [
+            borders[0] > 0.0 && !css_color_is_transparent(Some(&st("borderTopColor"))),
+            borders[1] > 0.0 && !css_color_is_transparent(Some(&st("borderRightColor"))),
+            borders[2] > 0.0 && !css_color_is_transparent(Some(&st("borderBottomColor"))),
+            borders[3] > 0.0 && !css_color_is_transparent(Some(&st("borderLeftColor"))),
+        ];
+        let border_count = border_visible.iter().filter(|v| **v).count();
         let has_bg = has_visible_background_boundary(dom, el);
         if border_count >= 2 || has_bg {
-            let mut v_pads: Vec<f64> = Vec::new();
-            let mut h_pads: Vec<f64> = Vec::new();
-            if has_bg || borders[0] > 0.0 {
-                v_pads.push(spx("paddingTop"));
+            let mut v_sides: Vec<usize> = Vec::new();
+            let mut h_sides: Vec<usize> = Vec::new();
+            if has_bg || border_visible[0] {
+                v_sides.push(0);
             }
-            if has_bg || borders[2] > 0.0 {
-                v_pads.push(spx("paddingBottom"));
+            if has_bg || border_visible[2] {
+                v_sides.push(2);
             }
-            if has_bg || borders[3] > 0.0 {
-                h_pads.push(spx("paddingLeft"));
+            if has_bg || border_visible[3] {
+                h_sides.push(3);
             }
-            if has_bg || borders[1] > 0.0 {
-                h_pads.push(spx("paddingRight"));
+            if has_bg || border_visible[1] {
+                h_sides.push(1);
             }
-            let v_min = v_pads.iter().copied().fold(f64::INFINITY, js::math_min);
-            let h_min = h_pads.iter().copied().fold(f64::INFINITY, js::math_min);
+            let pad_names = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+            let min_over = |sides: &[usize], f: &dyn Fn(usize) -> f64| {
+                sides.iter().map(|&s| f(s)).fold(f64::INFINITY, js::math_min)
+            };
+            let pad_of = |s: usize| spx(pad_names[s]);
+            let v_min = min_over(&v_sides, &pad_of);
+            let h_min = min_over(&h_sides, &pad_of);
             let v_thresh = js::math_max(4.0, font_size * 0.3);
             let h_thresh = js::math_max(8.0, font_size * 0.5);
-            if v_min < v_thresh {
+            // Declared padding is what a fix edits, but it is not what the
+            // reader sees. Where the element's own text is measurable, the
+            // gap its glyphs keep from the bounded edges decides: a 40px
+            // flex row centres a 14px label on zero padding, and that label
+            // has 12px of air on both sides.
+            let insets = direct_text_insets(dom, el, rect, &borders);
+            let inset_of = |s: usize| insets.map_or(f64::NEG_INFINITY, |i| i[s]);
+            let v_cramped = v_min < v_thresh && min_over(&v_sides, &inset_of) < v_thresh;
+            let h_cramped = h_min < h_thresh && min_over(&h_sides, &inset_of) < h_thresh;
+            if v_cramped {
                 findings.push(RuleHit::new(
                     "cramped-padding",
                     format!(
@@ -303,7 +446,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                         number_to_string(font_size)
                     ),
                 ));
-            } else if h_min < h_thresh {
+            } else if h_cramped {
                 findings.push(RuleHit::new(
                     "cramped-padding",
                     format!(
@@ -322,10 +465,15 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let upper_tag = js::to_upper_case(tag);
         let el_position = st("position");
         let children = dom.children(el);
+        // A box with no area paints no boundary (a drawer collapsed to zero
+        // width), and an inline box's border-bottom is an underline: text
+        // sitting on it is the point of it, and padding would not move it.
+        let el_is_box = rect.width > 0.0 && rect.height > 0.0 && st("display") != "inline";
         if !FLUSH_SKIP_TAGS.contains(&upper_tag.as_str())
             && !has_direct_text
             && el_position != "fixed"
             && el_position != "absolute"
+            && el_is_box
             && !children.is_empty()
         {
             let border_w = [
@@ -803,9 +951,76 @@ mod tests {
                 ("paddingRight", "12px"),
             ],
         );
+        // The glyphs sit 2px under the top edge, as the padding says.
+        d.set_text_rect(p, 52.0, 102.0, 200.0, 40.0);
         let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "2px vertical padding (need ≥4.8px for 16px text)");
+    }
+
+    /// A fixed-height flex row centres its label on zero padding: the padding
+    /// property says 0, the reader sees 12px. Only a box where the glyphs
+    /// really do crowd the edge is cramped.
+    #[test]
+    fn cramped_padding_reads_the_text_box_not_the_padding() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let btn = text_el(&mut d, body, "div", "Book a free consultation", "14px");
+        d.set_rect(btn, 0.0, 0.0, 240.0, 40.0);
+        d.set_styles(
+            btn,
+            &[
+                ("display", "flex"),
+                ("backgroundColor", "rgb(37, 99, 235)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "32px"),
+                ("paddingRight", "32px"),
+            ],
+        );
+        // 14px label centred in the 40px box: 12px of air above and below.
+        d.set_text_rect(btn, 32.0, 12.0, 160.0, 16.0);
+        assert!(check_element_quality_dom(&d, btn, &BrowserConfig::default()).is_empty());
+
+        // Same declared padding, but the label fills the box.
+        d.set_text_rect(btn, 32.0, 1.0, 160.0, 38.0);
+        let hits = check_element_quality_dom(&d, btn, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "0px vertical padding (need ≥4.2px for 14px text)");
+    }
+
+    /// `border: 1px solid transparent` (a focus-ring placeholder) draws no
+    /// edge, so a full-width row with no side padding crowds nothing.
+    #[test]
+    fn cramped_padding_ignores_a_transparent_border() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let row = text_el(&mut d, body, "div", "What does the free plan include?", "18px");
+        d.set_rect(row, 0.0, 0.0, 640.0, 60.0);
+        d.set_styles(
+            row,
+            &[
+                ("paddingTop", "20px"),
+                ("paddingBottom", "20px"),
+                ("paddingLeft", "0px"),
+                ("paddingRight", "0px"),
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgba(0, 0, 0, 0)"),
+                ("borderRightColor", "rgba(0, 0, 0, 0)"),
+                ("borderBottomColor", "rgba(0, 0, 0, 0)"),
+                ("borderLeftColor", "rgba(0, 0, 0, 0)"),
+            ],
+        );
+        d.set_text_rect(row, 0.0, 21.0, 400.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
     }
 
     #[test]
@@ -836,6 +1051,8 @@ mod tests {
                 ("fontSize", "16px"),
             ],
         );
+        // No text rect: a Dom that cannot measure glyphs keeps the boxes this
+        // rule read before.
         let p = text_el(&mut d, card, "p", "Hello there friend", "16px");
         d.set_rect(p, 0.0, 28.0, 400.0, 20.0);
         d.set_styles(p, &[("paddingTop", "0px"), ("paddingRight", "0px"), ("paddingBottom", "0px"), ("paddingLeft", "0px"), ("marginTop", "0px"), ("marginRight", "0px"), ("marginBottom", "0px"), ("marginLeft", "0px")]);
@@ -844,6 +1061,221 @@ mod tests {
         assert_eq!(
             hits[0].snippet,
             "<section> \"card-frame\": children flush against border on right/left (no inset)"
+        );
+    }
+
+    /// The accordion row every component library emits: `div.border` >
+    /// `h3` > `button.py-4`. The direct child carries no padding, so the
+    /// insulation test sees nothing; the button's box fills the row; only
+    /// its text rect shows the 16px the reader gets.
+    fn accordion_row(d: &mut FakeDom) -> (ElId, ElId) {
+        let (_h, body) = d.with_page();
+        let row = d.add(Some(body), "div");
+        d.set_attr(row, "class", "border");
+        d.set_rect(row, 0.0, 0.0, 600.0, 58.0);
+        d.set_styles(
+            row,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(200, 200, 200)"),
+                ("borderRightColor", "rgb(200, 200, 200)"),
+                ("borderBottomColor", "rgb(200, 200, 200)"),
+                ("borderLeftColor", "rgb(200, 200, 200)"),
+                ("outlineWidth", "0px"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "24px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "24px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        let h3 = d.add(Some(row), "h3");
+        d.set_rect(h3, 24.0, 0.0, 552.0, 58.0);
+        let zero = [
+            ("paddingTop", "0px"),
+            ("paddingRight", "0px"),
+            ("paddingBottom", "0px"),
+            ("paddingLeft", "0px"),
+            ("marginTop", "0px"),
+            ("marginRight", "0px"),
+            ("marginBottom", "0px"),
+            ("marginLeft", "0px"),
+        ];
+        d.set_styles(h3, &zero);
+        let button = d.add(Some(h3), "button");
+        d.add_text(button, "Which games does it work with?");
+        d.set_rect(button, 24.0, 0.0, 552.0, 58.0);
+        d.set_styles(button, &zero);
+        (row, button)
+    }
+
+    #[test]
+    fn flush_children_measure_text_not_boxes() {
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        // The button's own padding puts its label 20px off both rules.
+        d.set_text_rect(button, 24.0, 20.0, 300.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+
+        // A row whose two-line label really does run into the rules.
+        d.set_text_rect(button, 24.0, 1.0, 300.0, 56.0);
+        let hits = check_element_quality_dom(&d, row, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"border\": children flush against border on top/bottom (no inset)"
+        );
+    }
+
+    #[test]
+    fn flush_ignores_hidden_and_clipped_text() {
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        d.set_text_rect(button, 24.0, 20.0, 300.0, 18.0);
+
+        // A screen-reader-only heading at the box origin paints nothing.
+        let sr = d.add(Some(row), "h2");
+        d.add_text(sr, "Frequently asked questions");
+        d.set_rect(sr, 24.0, 0.0, 1.0, 1.0);
+        d.set_text_rect(sr, 24.0, 0.0, 200.0, 16.0);
+        d.add_selector(sr, SR_ONLY_SELECTOR);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+
+        // The collapsed answer panel lays its text out below the row and
+        // clips every pixel of it away.
+        let panel = d.add(Some(row), "div");
+        d.set_rect(panel, 24.0, 58.0, 552.0, 0.0);
+        d.set_styles(panel, &[("overflow", "hidden")]);
+        let answer = d.add(Some(panel), "p");
+        d.add_text(answer, "Any game with a public leaderboard.");
+        d.set_rect(answer, 24.0, 58.0, 552.0, 20.0);
+        d.set_text_rect(answer, 24.0, 59.0, 400.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+    }
+
+    /// White on an unpainted page draws no edge, so the page shell is not a
+    /// card whose text is flush against anything.
+    #[test]
+    fn white_on_the_canvas_is_not_a_boundary() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgba(0, 0, 0, 0)");
+        let shell = d.add(Some(body), "div");
+        d.set_attr(shell, "class", "wrapper");
+        d.set_rect(shell, 0.0, 0.0, 990.0, 400.0);
+        d.set_styles(
+            shell,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        assert!(!has_visible_background_boundary(&d, shell));
+        let p = text_el(&mut d, shell, "p", "Today's headlines, in full", "16px");
+        d.set_rect(p, 0.0, 0.0, 990.0, 20.0);
+        d.set_text_rect(p, 0.0, 2.0, 400.0, 16.0);
+        assert!(check_element_quality_dom(&d, shell, &BrowserConfig::default()).is_empty());
+
+        // A tinted card on the same page still bounds its text.
+        d.set_style(shell, "backgroundColor", "rgb(15, 23, 42)");
+        let hits = check_element_quality_dom(&d, shell, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"wrapper\": children flush against bg on top/left (no inset)"
+        );
+
+        // The same white shell on a page that asks for a dark scheme sits on
+        // the browser's dark canvas, where it is a strong edge.
+        d.set_style(shell, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(shell, "colorScheme", "dark");
+        assert!(has_visible_background_boundary(&d, shell));
+        assert_eq!(
+            check_element_quality_dom(&d, shell, &BrowserConfig::default()).len(),
+            1
+        );
+    }
+
+    /// `direct_text_rect` is a font-metric box, not an ink box: half-leading
+    /// and scripts with tall marks push it out of the box that paints the
+    /// text, where no glyph can land. Measure the part inside that box.
+    #[test]
+    fn flush_clamps_text_to_the_box_that_paints_it() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let panel = d.add(Some(body), "div");
+        d.set_attr(panel, "class", "story-body");
+        d.set_rect(panel, 0.0, 0.0, 360.0, 120.0);
+        d.set_styles(
+            panel,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "0px"),
+                ("borderBottomColor", "rgb(200, 200, 200)"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        // A plain wrapper, so the paragraph below is not a direct child and
+        // the child-box insulation says nothing about it.
+        let inner = d.add(Some(panel), "div");
+        d.set_rect(inner, 0.0, 0.0, 360.0, 120.0);
+        let p = text_el(&mut d, inner, "p", "एक पूरी कहानी यहाँ पढ़ें", "16px");
+        d.set_styles(
+            p,
+            &[
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("marginTop", "0px"),
+                ("marginRight", "0px"),
+                ("marginBottom", "0px"),
+                ("marginLeft", "0px"),
+            ],
+        );
+        // The paragraph ends 10px above the rule; its metric box runs 15px
+        // past its own box and so past the rule.
+        d.set_rect(p, 0.0, 10.0, 360.0, 100.0);
+        d.set_text_rect(p, 0.0, 6.0, 340.0, 119.0);
+        assert!(check_element_quality_dom(&d, panel, &BrowserConfig::default()).is_empty());
+
+        // The shape the corpus confirms harmful: the label's own box overruns
+        // the panel and its glyphs come with it.
+        d.set_rect(p, 0.0, 10.0, 360.0, 115.0);
+        d.set_text_rect(p, 0.0, 12.0, 340.0, 108.0);
+        let hits = check_element_quality_dom(&d, panel, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"story-body\": children flush against border-bottom on bottom (no inset)"
         );
     }
 

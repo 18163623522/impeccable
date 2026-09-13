@@ -158,6 +158,12 @@ impl FakeDom {
         self.el_mut(id).rect = Rect::from_xywh(x, y, w, h);
         self
     }
+    /// The union of the client rects of `id`'s own text nodes, as
+    /// `getDirectTextRect` reports it: the glyph box, not the line box.
+    pub fn set_text_rect(&mut self, id: ElId, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+        self.el_mut(id).direct_text_rect = Some(Rect::from_xywh(x, y, w, h));
+        self
+    }
     pub fn add_text(&mut self, id: ElId, text: &str) -> &mut Self {
         self.el_mut(id)
             .child_nodes

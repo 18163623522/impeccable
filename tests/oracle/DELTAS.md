@@ -170,32 +170,54 @@ CLI 4.0.0 release; it is what the binary prints when run directly.
 The corpus judging pass found `side-tab` firing on square boxes with a colored
 left rule: a themed notification banner, a bespoke timeline entry, a table-row
 marker. The maintainer's call on those crops is that the square version is an
-older convention and the rounded card is the tell. `check_borders` now reads
-the element's four corner radii and reports a left or right accent only when
-the two corners away from the stripe are at least 4px, so a box rounded only
-along the stripe still reads as square. The browser pseudo-element stripe path
-applies the same gate to a left or right stripe. Top and bottom accents are
-unchanged: `border-accent-on-rounded` already owns the rounded half of that
-scope.
+older convention and the rounded card is the tell. A left or right accent now
+reports only when the two corners away from the stripe are at least 4px, so a
+box rounded only along the stripe still reads as square. Top and bottom bands
+are unchanged in every producer: `border-accent-on-rounded` owns the rounded
+half of that scope, and the square band was not what the corpus judged.
+
+The gate holds in every producer of the rule, so one visual answers the same
+way however it is authored:
+
+- the border check (`check_borders`), in the browser and static engines;
+- the browser pseudo-element stripe check;
+- the two style-text scans every HTML engine runs over `<style>` and linked
+  stylesheets, the absolute `::before` / `::after` bar and the inset
+  box-shadow stripe. The scan functions stay as recorded; the static engine
+  gates what they return on the cascade of the elements the rule paints, the
+  browser on the live elements, and a rule no element on the page matches on
+  its host rule's own declarations;
+- the text engine: the same two scans over `.css` files, style blocks and
+  CSS-in-JS, reading the host rule's declarations, and the six line matchers.
+  A utility class reads the `rounded-*` classes in its markup tag; a CSS
+  declaration or style-object property reads the radius declarations in its
+  own block, template literal, `style=""` value, or (in `.sass`) indentation
+  block.
 
 Corners are read from every declaration that names one. The static cascade
-now collects the four `border-<corner>-radius` longhands, which is how a
-utility framework writes `rounded-r-lg`; without them a card rounded only by
-longhands read as square and its stripe went silent. A radius the parser
-cannot resolve (a `calc()`, an unresolved `var()`, a unit that needs context
-the engine does not have, a snapshot missing the column) is unknown rather
-than zero, and an unknown card keeps its finding.
+expands `border-radius` into the corner longhands with the shorthand's own
+cascade order, so `border-radius: 12px; border-top-right-radius: 0` (what
+`rounded-lg rounded-r-none` compiles to) is square at that corner, and a later
+shorthand resets an earlier longhand. The text readers apply declarations in
+source order, and utility classes in the order the framework emits them. `em`
+reads against the element's font size. A radius the reader cannot resolve (a
+`calc()`, an unresolved `var()`, `$radius`, a theme key) is unknown rather than
+zero, and an unknown card keeps its finding. What text cannot see stays out of
+reach: a radius declared on a different selector than the stripe rule, or on
+another line of a multi-line class list, reads as square in the text engine.
+The static and browser engines read the cascade and see it.
 
-Two halves of the scope are deliberately left alone, and both are visible to
-users. A square card with `border-top: 4px solid teal` still reports
-`side-tab` while the same card with `border-left` does not: the corpus judged
-the side accent, not the horizontal band, and silencing the band would drop
-findings on no evidence. The text and regex engines (`impeccable detect` on
-`.css` / `.jsx` / `.tsx`) also still report a square side accent, because
-their line-at-a-time heuristic cannot see a radius declared on another line.
+The static border snippet now prints the radius in px, the way the browser's
+computed style does: `border-radius: 0.375rem` reports `6px` where it used to
+print the unconverted `0.375px`.
 
-The fixtures moved with the rule, so the goldens below carry fixture edits,
-not lost findings.
+The fixtures moved with the rule, so the goldens below carry fixture edits and
+the two intended output changes, not lost findings.
 
-- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: `border-baseline.html` retired its square `border-left: 4px` flag case (it now sits in the should-pass column as a square callout), added `border-left: 6px` on a card rounded away from the stripe, and added two flag cases the corner read has to keep catching: a card rounded by `border-top-right-radius` / `border-bottom-right-radius`, and one whose radius is a `calc()`. Net for the whole-directory cases: two more findings, 419 to 421.
+- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`: `border-baseline.html` retired its square `border-left: 4px` flag case (it now sits in the should-pass column as a square callout), added `border-left: 6px` on a card rounded away from the stripe, a card rounded by `border-top-right-radius` / `border-bottom-right-radius` (`border-left: 4px`), and one whose radius is a `calc()` (`border-left: 9px`, a width of its own so the two snippets attribute).
+- `detect-fixture-json-pseudo-stripe-css`, `detect-fixture-text-pseudo-stripe-css`, `detect-fixture-json-pseudo-stripe-vue`, `detect-fixture-text-pseudo-stripe-vue`: the left and right flag cases gained host rules with a radius and each file gained square-host pass cases; the findings are the same and move down by the inserted lines. `pseudo-stripe.html` rounds `.row-stripe` and adds a square host and a rounded-under-the-stripe host as pass cases, so its goldens do not move. `astro-inset-shadow-stripe.astro` rounds its left and right flag cases and adds a square pass rule after the others, so its goldens do not move either.
+- `detect-fixture-json-should-flag-html`, `detect-fixture-text-should-flag-html`: the four side accents on the `0.375rem` card print `border-radius: 6px`.
+- `detect-fixture-json-framework-next-modules`, `detect-fixture-text-framework-next-modules`, `detect-framework-next-modules-text`: `Sidebar.module.css` is a square sidebar with `border-right: 3px solid #4f46e5` and no radius, the convention the premise retired; its finding is gone (6 to 5 findings).
+- `detect-fixture-json-side-accent-producers-html`, `detect-fixture-text-side-accent-producers-html`, `detect-fixture-json-side-accent-producers-css`, `detect-fixture-text-side-accent-producers-css`, `detect-fixture-json-side-accent-producers-jsx`, `detect-fixture-text-side-accent-producers-jsx`: new fixtures that draw the same accent through every producer, square and rounded. Each reports only its flag column: five findings for the HTML page, five for the stylesheet, three for the components.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 421 to 433 findings.
 - `detect-unreadable-file-in-dir`: the case's readable `a.html` carries `border-radius: 10px`, so it still produces the finding the case exists to show next to the unreadable file's error; the snippet gains `+ border-radius: 10px`.

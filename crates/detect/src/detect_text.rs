@@ -4,7 +4,8 @@
 //! line matchers, page analyzers, dedupe, and inline ignores.
 
 use impeccable_core::checks::css_scan::{
-    scan_css_text_for_grid_background, scan_css_text_for_pseudo_stripe,
+    css_text_host_corners, css_text_side_stripe_on_rounded_host, scan_css_text_for_grid_background,
+    scan_css_text_for_pseudo_stripe,
 };
 use impeccable_core::findings::{finding, Finding};
 use impeccable_core::inline_ignores::apply_inline_ignores;
@@ -15,8 +16,8 @@ use impeccable_core::rule_pack::RulePack;
 use crate::design_system::{check_source_design_system, DesignSystem};
 use crate::profiler::{profile_findings, profile_step, DetectorProfile, ProfileMeta};
 use crate::regex_matchers::{
-    analyzer_rule_id, is_neutral_authored_color, MatchCtx, REGEX_ANALYZERS, REGEX_MATCHERS,
-    TEXT_CONTENT_ANALYZER_IDS,
+    analyzer_rule_id, is_neutral_authored_color, side_tab_rounded_in_scope, MatchCtx,
+    REGEX_ANALYZERS, REGEX_MATCHERS, TEXT_CONTENT_ANALYZER_IDS,
 };
 use crate::util::{line_of_offset, re, ANY, B, D, W, WS, WS_CHARS};
 
@@ -989,6 +990,17 @@ pub fn scan_inset_stripe_css(
             } else {
                 "bottom"
             };
+            // A left or right stripe reports only on a box rounded away from it.
+            let side = match edge {
+                "left" => Some(3),
+                "right" => Some(1),
+                _ => None,
+            };
+            if let Some(side) = side {
+                if !css_text_host_corners(&content, &selector).is_rounded_away_from_side(side) {
+                    continue;
+                }
+            }
             let line = line_offset + line_of_offset(&content, selector_start);
             let thickness = if ay == 0.0 { ax } else { ay };
             findings.push(finding(
@@ -1313,6 +1325,7 @@ pub fn run_regex_matchers(
     phase: &str,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
+    let sass = file_path.to_ascii_lowercase().ends_with(".sass");
     for matcher in REGEX_MATCHERS.iter() {
         let run = || {
             let mut matches = Vec::new();
@@ -1329,7 +1342,12 @@ pub fn run_regex_matchers(
                     line.to_string()
                 };
                 for m in ctxs {
-                    if (matcher.test)(&m, &context) {
+                    // A side accent reports only on a card rounded away from
+                    // the stripe, read from the declarations around the match.
+                    if (matcher.test)(&m, &context)
+                        && (matcher.id != "side-tab"
+                            || side_tab_rounded_in_scope(&m, lines, i, sass))
+                    {
                         matches.push(finding(
                             matcher.id,
                             file_path,
@@ -1391,6 +1409,8 @@ pub fn run_text_content_analyzers(
 fn pseudo_stripe_findings(text: &str, file_path: &str, line_offset: usize) -> Vec<Finding> {
     scan_css_text_for_pseudo_stripe(text)
         .into_iter()
+        // A left or right stripe reports only on a host rounded away from it.
+        .filter(|hit| css_text_side_stripe_on_rounded_host(text, hit))
         .map(|hit| {
             let line = line_offset + line_of_offset(text, hit.index.unwrap_or(0));
             finding(&hit.id, file_path, &hit.snippet, line as f64)
@@ -1586,7 +1606,8 @@ mod tests {
 
     #[test]
     fn css_in_js() {
-        let src = "const A = styled.div`\n  border-left: 4px solid red;\n`;\n";
+        let src =
+            "const A = styled.div`\n  border-left: 4px solid red;\n  border-radius: 8px;\n`;\n";
         let blocks = extract_css_in_js(src, ".tsx");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].start_line, 1);
@@ -1604,10 +1625,66 @@ mod tests {
 
     #[test]
     fn inset_stripe() {
-        let css = ".card {\n  box-shadow: inset 4px 0 0 #6366f1;\n}\n";
+        let css = ".card {\n  box-shadow: inset 4px 0 0 #6366f1;\n  border-radius: 8px;\n}\n";
         let f = scan_inset_stripe_css(css, "a.css", 0);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].snippet, ".card — inset box-shadow 4px stripe (left)");
         assert_eq!(f[0].line, 1.0);
+        // The same stripe on a square box is the old convention: silent.
+        assert!(scan_inset_stripe_css(
+            ".q {\n  box-shadow: inset 4px 0 0 #6366f1;\n}\n",
+            "a.css",
+            0
+        )
+        .is_empty());
+        // A top band is not gated.
+        assert_eq!(
+            scan_inset_stripe_css(".t { box-shadow: inset 0 4px 0 #6366f1; }", "a.css", 0).len(),
+            1
+        );
+    }
+
+    /// Every text-engine producer of `side-tab` answers a square box and a
+    /// rounded card the same way the static and browser engines do.
+    #[test]
+    fn side_accent_needs_a_rounded_card_in_every_text_producer() {
+        let side_tabs = |src: &str, path: &str| -> Vec<String> {
+            detect_text(src, path, &TextOptions::default())
+                .into_iter()
+                .filter(|f| f.antipattern == "side-tab")
+                .map(|f| f.snippet)
+                .collect()
+        };
+        let square_css = ".a { border-left: 4px solid #6366f1; }\n\
+.b { border-left-width: 5px; border-left-color: #6366f1; }\n\
+.c { border-inline-start: 6px solid #6366f1; }\n\
+.d { position: relative; }\n.d::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 7px; background: #6366f1; }\n\
+.e { box-shadow: inset 8px 0 0 #6366f1; }\n";
+        assert_eq!(side_tabs(square_css, "/x/square.css"), Vec::<String>::new());
+        let rounded_css = square_css
+            .replace(".a { ", ".a { border-radius: 12px; ")
+            .replace(".b { ", ".b { border-radius: 12px; ")
+            .replace(".c { ", ".c { border-radius: 12px; ")
+            .replace(".d { ", ".d { border-radius: 12px; ")
+            .replace(".e { ", ".e { border-radius: 12px; ");
+        assert_eq!(
+            side_tabs(&rounded_css, "/x/rounded.css").len(),
+            5,
+            "{:?}",
+            side_tabs(&rounded_css, "/x/rounded.css")
+        );
+
+        let square_tsx = "export const A = () => <div className=\"border-l-4 border-indigo-500 bg-white p-4\" />;\n\
+export const B = () => <div style={{ borderLeft: '4px solid #6366f1', padding: 16 }} />;\n";
+        assert_eq!(side_tabs(square_tsx, "/x/square.tsx"), Vec::<String>::new());
+        let rounded_tsx = "export const A = () => <div className=\"border-l-4 border-indigo-500 rounded-r-lg bg-white p-4\" />;\n\
+export const B = () => <div style={{ borderLeft: '4px solid #6366f1', borderRadius: 12 }} />;\n";
+        assert_eq!(
+            side_tabs(rounded_tsx, "/x/rounded.tsx"),
+            vec![
+                "border-l-4".to_string(),
+                "borderLeft: '4px solid".to_string()
+            ]
+        );
     }
 }

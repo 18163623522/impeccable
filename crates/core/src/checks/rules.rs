@@ -52,6 +52,132 @@ pub fn is_rounded_away_from_side(corners: Option<&Corners>, i: usize) -> bool {
     a >= SIDE_ACCENT_MIN_RADIUS_PX && b >= SIDE_ACCENT_MIN_RADIUS_PX
 }
 
+/// The box a text-only reader assumes when a radius is a percentage: no
+/// element is in hand, and any percentage an author writes rounds a card
+/// visibly at card size.
+pub const NOMINAL_CARD_WIDTH_PX: f64 = 1000.0;
+
+/// Corner radii gathered from authored declarations, for the producers that
+/// read source text rather than a computed style: the CSS-text stripe scans
+/// and the regex engine's side accent matchers. Declarations apply in source
+/// order, so a later shorthand resets an earlier longhand and a later
+/// longhand overrides one corner of an earlier shorthand. A corner is `None`
+/// when a declaration that set it could not be resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeclaredCorners {
+    /// `[top-left, top-right, bottom-right, bottom-left]`.
+    corners: [Option<f64>; 4],
+    declared: bool,
+}
+
+/// No declaration yet: every corner at the cascade's `0`.
+impl Default for DeclaredCorners {
+    fn default() -> Self {
+        DeclaredCorners {
+            corners: [Some(0.0); 4],
+            declared: false,
+        }
+    }
+}
+
+impl DeclaredCorners {
+    /// Every corner at once, the way the `border-radius` shorthand sets them.
+    pub fn set_all(&mut self, corners: Option<Corners>) {
+        self.declared = true;
+        self.corners = match corners {
+            Some(c) => [
+                Some(c.top_left),
+                Some(c.top_right),
+                Some(c.bottom_right),
+                Some(c.bottom_left),
+            ],
+            None => [None; 4],
+        };
+    }
+
+    /// One corner, `[top-left, top-right, bottom-right, bottom-left][i]`.
+    pub fn set_corner(&mut self, i: usize, px: Option<f64>) {
+        self.declared = true;
+        self.corners[i] = px;
+    }
+
+    /// One corner raised to at least `px`: a conditional class (`md:rounded-lg`)
+    /// can round the card, so it never squares one off.
+    pub fn raise_corner(&mut self, i: usize, px: Option<f64>) {
+        self.declared = true;
+        self.corners[i] = match (self.corners[i], px) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+    }
+
+    /// Apply one declaration when it names a radius: the `border-radius`
+    /// shorthand, a physical or logical corner longhand, in CSS spelling or
+    /// the camelCase a style object uses. A bare number on a camelCase
+    /// property is px, the way a React style object reads it. Returns whether
+    /// the property was a radius.
+    pub fn apply(&mut self, prop: &str, value: &str, width_px: f64) -> bool {
+        let camel = !prop.contains('-') && prop.chars().any(|c| c.is_ascii_uppercase());
+        let key: String = prop
+            .chars()
+            .filter(|c| *c != '-')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let corner = match key.as_str() {
+            "borderradius" => None,
+            "bordertopleftradius" | "borderstartstartradius" => Some(0),
+            "bordertoprightradius" | "borderstartendradius" => Some(1),
+            "borderbottomrightradius" | "borderendendradius" => Some(2),
+            "borderbottomleftradius" | "borderendstartradius" => Some(3),
+            _ => return false,
+        };
+        re!(IMPORTANT_TAIL, format!(r"(?i){WS}*!{WS}*important{WS}*$"));
+        re!(BARE_NUMBER, r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$".to_string());
+        let unquoted = js::trim(value).trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        let cleaned = IMPORTANT_TAIL.replace(js::trim(unquoted), "");
+        let mut v = js::trim(&cleaned).to_string();
+        if camel && BARE_NUMBER.is_match(&v) {
+            v.push_str("px");
+        }
+        match corner {
+            None => self.set_all(crate::checks::measures::parse_radius_corners(
+                Some(&v),
+                width_px,
+            )),
+            Some(i) => self.set_corner(
+                i,
+                crate::checks::measures::parse_radius_corner_px(Some(&v), width_px),
+            ),
+        }
+        true
+    }
+
+    /// Whether any radius declaration was seen at all.
+    pub fn declared(&self) -> bool {
+        self.declared
+    }
+
+    /// The source-text reading of [`is_rounded_away_from_side`]. A box with
+    /// no radius declaration is square, the way the cascade defaults it. A
+    /// corner some declaration set to a value the reader could not resolve
+    /// is unknown, and an unknown corner keeps the finding.
+    pub fn is_rounded_away_from_side(&self, i: usize) -> bool {
+        if !self.declared {
+            return false;
+        }
+        let (a, b) = match i {
+            0 => (self.corners[3], self.corners[2]),
+            1 => (self.corners[0], self.corners[3]),
+            2 => (self.corners[0], self.corners[1]),
+            _ => (self.corners[1], self.corners[2]),
+        };
+        match (a, b) {
+            (Some(a), Some(b)) => a >= SIDE_ACCENT_MIN_RADIUS_PX && b >= SIDE_ACCENT_MIN_RADIUS_PX,
+            _ => true,
+        }
+    }
+}
+
 /// JS: checks.mjs#checkBorders
 pub fn check_borders(
     tag: &str,
@@ -996,6 +1122,47 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_corners_apply_in_order() {
+        let mut c = DeclaredCorners::default();
+        assert!(!c.declared());
+        assert!(!c.is_rounded_away_from_side(3));
+        assert!(!c.apply("padding", "12px", NOMINAL_CARD_WIDTH_PX));
+        assert!(c.apply("border-radius", "12px", NOMINAL_CARD_WIDTH_PX));
+        assert!(c.is_rounded_away_from_side(3));
+        assert!(c.apply("border-top-right-radius", "0", NOMINAL_CARD_WIDTH_PX));
+        assert!(!c.is_rounded_away_from_side(3));
+        // The far corners of a right stripe are still round.
+        assert!(c.is_rounded_away_from_side(1));
+        // camelCase with a bare number is px; quotes and !important strip.
+        let mut js = DeclaredCorners::default();
+        js.apply("borderRadius", "12", NOMINAL_CARD_WIDTH_PX);
+        assert!(js.is_rounded_away_from_side(3));
+        let mut quoted = DeclaredCorners::default();
+        quoted.apply("borderRadius", "'2px'", NOMINAL_CARD_WIDTH_PX);
+        assert!(!quoted.is_rounded_away_from_side(3));
+        let mut important = DeclaredCorners::default();
+        important.apply("border-radius", "8px !important", NOMINAL_CARD_WIDTH_PX);
+        assert!(important.is_rounded_away_from_side(3));
+        // Logical longhands map onto the physical corners (LTR).
+        let mut logical = DeclaredCorners::default();
+        logical.apply("border-start-end-radius", "8px", NOMINAL_CARD_WIDTH_PX);
+        logical.apply("border-end-end-radius", "8px", NOMINAL_CARD_WIDTH_PX);
+        assert!(logical.is_rounded_away_from_side(3));
+        // Unresolvable is unknown, and unknown keeps the finding.
+        let mut unknown = DeclaredCorners::default();
+        unknown.apply("border-radius", "$radius", NOMINAL_CARD_WIDTH_PX);
+        assert!(unknown.is_rounded_away_from_side(3));
+        // A conditional class only ever rounds.
+        let mut raised = DeclaredCorners::default();
+        raised.set_all(Some(Corners::default()));
+        raised.raise_corner(1, Some(8.0));
+        raised.raise_corner(2, Some(8.0));
+        raised.raise_corner(0, Some(0.0));
+        assert!(raised.is_rounded_away_from_side(3));
+        assert!(!raised.is_rounded_away_from_side(1));
+    }
 
     // Expected values below were produced by running the JS functions in
     // Node against the same inputs.

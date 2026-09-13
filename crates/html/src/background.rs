@@ -7,8 +7,8 @@
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
 use impeccable_core::checks::measures::{
-    parse_color_resolved, parse_radius_corner_px, parse_radius_corners, parse_radius_to_px,
-    CustomProps,
+    parse_color_resolved, parse_radius_corner_px_em, parse_radius_to_px, parse_radius_token_px,
+    CustomProps, ROOT_FONT_SIZE_PX,
 };
 use impeccable_core::checks::rules::Corners;
 use impeccable_core::color::{
@@ -336,28 +336,43 @@ pub fn resolve_border_radius_px(style: &StyleValues, width_px: f64) -> f64 {
     parse_radius_to_px(sv_opt(style, "borderRadius"), width_px).unwrap_or(0.0)
 }
 
-/// The four corner radii in px: the shorthand `resolve_border_radius_px`
-/// reads, with each `border-<corner>-radius` longhand folded over it.
-/// `None` when a declaration in play is one the parser cannot resolve, so the
-/// caller keeps reporting instead of reading the box as square.
-///
-/// The cascade stores every declaration under its own key, so a longhand and
-/// the shorthand cannot be ordered against each other here. A corner takes
-/// the larger of the two, the answer that keeps a finding rather than
-/// silencing one: a rounded card squared off at a single corner still
-/// reports.
-pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Option<Corners> {
-    let mut corners = parse_radius_corners(sv_opt(style, "borderRadius"), width_px)?;
-    for (prop, corner) in [
-        ("borderTopLeftRadius", &mut corners.top_left),
-        ("borderTopRightRadius", &mut corners.top_right),
-        ("borderBottomRightRadius", &mut corners.bottom_right),
-        ("borderBottomLeftRadius", &mut corners.bottom_left),
-    ] {
-        let Some(raw) = sv_opt(style, prop) else {
-            continue;
-        };
-        *corner = corner.max(parse_radius_corner_px(Some(raw), width_px)?);
+/// The element's font size in px, what an `em` radius resolves against.
+fn em_px(style: &StyleValues) -> f64 {
+    let size = impeccable_core::js::parse_float(sv(style, "fontSize"));
+    if size.is_finite() && size > 0.0 {
+        size
+    } else {
+        ROOT_FONT_SIZE_PX
     }
-    Some(corners)
+}
+
+/// The radius the border snippet reports, in px: the first horizontal radius
+/// of the shorthand with `em` / `rem` converted, which is what the browser's
+/// computed style prints. A token that does not convert (a `calc()`) keeps
+/// [`resolve_border_radius_px`]'s unitless reading.
+pub fn resolve_border_radius_scalar_px(style: &StyleValues, width_px: f64) -> f64 {
+    let first = sv_opt(style, "borderRadius")
+        .and_then(|v| v.split('/').next())
+        .and_then(|h| h.split_whitespace().next());
+    first
+        .and_then(|token| parse_radius_token_px(token, width_px, em_px(style)))
+        .unwrap_or_else(|| resolve_border_radius_px(style, width_px))
+}
+
+/// The four corner radii in px, read from the `border-<corner>-radius`
+/// longhands. The cascade expands every `border-radius` shorthand into those
+/// longhands with the shorthand's own cascade order, so a longhand declared
+/// after the shorthand wins its corner and a shorthand declared after a
+/// longhand resets it, the way the browser resolves them. `None` when a
+/// corner carries a value the parser cannot resolve, so the caller keeps
+/// reporting instead of reading the box as square.
+pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Option<Corners> {
+    let em = em_px(style);
+    let corner = |prop: &str| parse_radius_corner_px_em(sv_opt(style, prop), width_px, em);
+    Some(Corners {
+        top_left: corner("borderTopLeftRadius")?,
+        top_right: corner("borderTopRightRadius")?,
+        bottom_right: corner("borderBottomRightRadius")?,
+        bottom_left: corner("borderBottomLeftRadius")?,
+    })
 }

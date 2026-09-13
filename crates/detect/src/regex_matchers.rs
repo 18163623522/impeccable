@@ -4,14 +4,15 @@
 use impeccable_core::checks::css_scan::{
     scan_css_text_for_glow, scan_css_text_for_marquee, scan_css_text_for_radial_halo,
 };
+use impeccable_core::checks::measures::parse_radius_corner_px;
+use impeccable_core::checks::rules::{
+    find_solid_chromatic_bg, DeclaredCorners, NOMINAL_CARD_WIDTH_PX,
+};
 use impeccable_core::color::is_neutral_color;
 use impeccable_core::constants::{EM_DASH_CHARS_PER_DASH, EM_DASH_FLOOR, OVERUSED_FONTS};
-use impeccable_core::checks::rules::find_solid_chromatic_bg;
 use impeccable_core::findings::{finding, Finding};
 use impeccable_core::fonts::extract_google_font_families;
-use impeccable_core::js::{
-    self, ci, math_round, number_to_string, parse_float, string_to_number,
-};
+use impeccable_core::js::{self, ci, math_round, number_to_string, parse_float, string_to_number};
 use impeccable_core::js_ext_a::{advance_utf16, slice_utf16_start, utf16_index, utf16_length};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -272,6 +273,220 @@ fn gray_on_color_pairs(line: &str, gray_class: &str, index: usize) -> Vec<String
         .into_iter()
         .filter(|scope| scope.contains(gray_class))
         .collect()
+}
+
+// ─── side accent scope ──────────────────────────────────────────────────────
+// `side-tab` reports a left or right accent only on a card rounded away from
+// the stripe. A matcher sees one line; the corners live in the declarations
+// around it, so the driver hands every side-tab match to
+// [`side_tab_rounded_in_scope`] with the whole block in hand.
+
+re!(TW_SIDE_TAB_WHOLE_RE, format!("^border-([lrse])-{D}+$"));
+re!(
+    TW_ROUNDED_CLASS_RE,
+    r"^rounded(?:-(tl|tr|br|bl|ss|se|ee|es|t|r|b|l|s|e))?(?:-([a-z0-9-]+|\[[^\]]*\]|\([^)]*\)))?$"
+        .to_string()
+);
+re!(TW_CLASS_SPLIT_RE, r#"[\s"'`{}]+"#.to_string());
+re!(
+    STYLE_ATTR_VALUE_RE,
+    r#"(?i)\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')"#.to_string()
+);
+re!(
+    SCOPE_RADIUS_DECL_RE,
+    r"(?i)(?:^|[^a-z0-9_-])(border(?:-?(?:top|bottom|start|end)-?(?:left|right|start|end))?-?radius)\s*:\s*([^;,}\n]+)"
+        .to_string()
+);
+
+/// The corners a run of utility classes gives a box. `rounded-*` classes set
+/// every corner, then the side classes (`rounded-r-lg`), then the corner
+/// classes (`rounded-tr-lg`), the order the framework emits them in, so
+/// `rounded-lg rounded-r-none` squares the right corners off. A class behind
+/// a variant (`md:rounded-xl`) can only round a corner. A size the scale
+/// does not name (a theme key, a `(--var)`) is unknown.
+pub fn tailwind_declared_corners(scope: &str) -> DeclaredCorners {
+    let mut base: Vec<(u8, &'static [usize], Option<f64>)> = Vec::new();
+    let mut variants: Vec<(&'static [usize], Option<f64>)> = Vec::new();
+    for raw in TW_CLASS_SPLIT_RE.split(scope) {
+        let token = raw.trim_matches('!');
+        let bracket = token.find('[').unwrap_or(token.len());
+        let (variant, class) = match token[..bracket].rfind(':') {
+            Some(i) => (true, token[i + 1..].trim_start_matches('!')),
+            None => (false, token),
+        };
+        let Some(c) = TW_ROUNDED_CLASS_RE.captures(class) else {
+            continue;
+        };
+        let (group, corners): (u8, &'static [usize]) = match c.get(1).map(|m| m.as_str()) {
+            None => (0, &[0, 1, 2, 3]),
+            Some("t") => (1, &[0, 1]),
+            Some("r") | Some("e") => (1, &[1, 2]),
+            Some("b") => (1, &[2, 3]),
+            Some("l") | Some("s") => (1, &[0, 3]),
+            Some("tl") | Some("ss") => (2, &[0]),
+            Some("tr") | Some("se") => (2, &[1]),
+            Some("br") | Some("ee") => (2, &[2]),
+            _ => (2, &[3]),
+        };
+        let px = match c.get(2).map(|m| m.as_str()) {
+            // `rounded` is 4px; `rounded-sm` is 2px in v3 and 4px in v4, and
+            // the larger reading keeps the finding.
+            None | Some("sm") => Some(4.0),
+            Some("none") => Some(0.0),
+            Some("xs") => Some(2.0),
+            Some("md") => Some(6.0),
+            Some("lg") => Some(8.0),
+            Some("xl") => Some(12.0),
+            Some("2xl") => Some(16.0),
+            Some("3xl") => Some(24.0),
+            Some("4xl") => Some(32.0),
+            Some("full") => Some(9999.0),
+            Some(arbitrary) if arbitrary.starts_with('[') => parse_radius_corner_px(
+                Some(&arbitrary[1..arbitrary.len() - 1].replace('_', " ")),
+                NOMINAL_CARD_WIDTH_PX,
+            ),
+            Some(_) => None,
+        };
+        if variant {
+            variants.push((corners, px));
+        } else {
+            base.push((group, corners, px));
+        }
+    }
+    base.sort_by_key(|entry| entry.0);
+    let mut declared = DeclaredCorners::default();
+    for (_, corners, px) in base {
+        for &i in corners {
+            declared.set_corner(i, px);
+        }
+    }
+    for (corners, px) in variants {
+        for &i in corners {
+            declared.raise_corner(i, px);
+        }
+    }
+    declared
+}
+
+/// The declarations that style the element a CSS or style-object match sits
+/// in: the enclosing `style="..."` value, else the innermost `{ ... }` block
+/// or template literal around the match with nested blocks dropped, else (in
+/// indentation-syntax Sass) the lines at the match's own indentation.
+fn declaration_scope(lines: &[&str], i: usize, index: usize, sass: bool) -> String {
+    let line = lines[i];
+    for c in STYLE_ATTR_VALUE_RE.captures_iter(line) {
+        if let Some(value) = c.get(1).or_else(|| c.get(2)) {
+            if value.start() <= index && index <= value.end() {
+                return value.as_str().to_string();
+            }
+        }
+    }
+    if sass {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let base = indent(line);
+        let mut out = vec![line];
+        for l in lines[..i].iter().rev() {
+            if l.trim().is_empty() {
+                continue;
+            }
+            match indent(l) {
+                d if d < base => break,
+                d if d == base => out.push(l),
+                _ => {}
+            }
+        }
+        for l in &lines[i + 1..] {
+            if l.trim().is_empty() {
+                continue;
+            }
+            match indent(l) {
+                d if d < base => break,
+                d if d == base => out.push(l),
+                _ => {}
+            }
+        }
+        return out.join("\n");
+    }
+    let text = lines.join("\n");
+    let offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum::<usize>() + index;
+    let b = text.as_bytes();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut p = offset.min(b.len());
+    while p > 0 {
+        p -= 1;
+        match b[p] {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => {
+                start = p + 1;
+                break;
+            }
+            b'{' => depth -= 1,
+            b'`' if depth == 0 => {
+                start = p + 1;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut end = b.len();
+    depth = 0;
+    let mut p = offset.min(b.len());
+    while p < b.len() {
+        match b[p] {
+            b'{' => depth += 1,
+            b'}' if depth == 0 => {
+                end = p;
+                break;
+            }
+            b'}' => depth -= 1,
+            b'`' if depth == 0 => {
+                end = p;
+                break;
+            }
+            _ => {}
+        }
+        p += 1;
+    }
+    let mut out = String::with_capacity(end.saturating_sub(start));
+    let mut nested = 0usize;
+    for ch in text[start..end].chars() {
+        match ch {
+            '{' => nested += 1,
+            '}' => nested = nested.saturating_sub(1),
+            _ if nested == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether a `side-tab` match sits on a card rounded away from its stripe.
+/// A utility class reads the `rounded-*` classes in the same markup tag; a
+/// CSS declaration or style-object property reads the radius declarations in
+/// its own block. No radius in scope is a square box, which stays silent; a
+/// radius this cannot resolve (`$radius`, `var()`, `theme.radius`) keeps the
+/// finding. A radius declared somewhere else entirely (another class, another
+/// line of a multi-line `cn()` call) is out of reach, and the box reads square.
+pub fn side_tab_rounded_in_scope(m: &MatchCtx, lines: &[&str], i: usize, sass: bool) -> bool {
+    let whole = m.whole();
+    if let Some(c) = TW_SIDE_TAB_WHOLE_RE.captures(whole) {
+        let side = if matches!(&c[1], "l" | "s") { 3 } else { 1 };
+        let scope = containing_markup_tag(lines[i])(m.index);
+        return tailwind_declared_corners(&scope).is_rounded_away_from_side(side);
+    }
+    let lower = js::to_lower_case(whole);
+    let side = if lower.contains("left") || lower.contains("start") {
+        3
+    } else {
+        1
+    };
+    let scope = declaration_scope(lines, i, m.index, sass);
+    let mut corners = DeclaredCorners::default();
+    for c in SCOPE_RADIUS_DECL_RE.captures_iter(&scope) {
+        corners.apply(&c[1], &c[2], NOMINAL_CARD_WIDTH_PX);
+    }
+    corners.is_rounded_away_from_side(side)
 }
 
 pub struct Matcher {
@@ -1431,6 +1646,105 @@ mod tests {
             g(r#"<div className={cn(a ? "bg-red-500" : "bg-blue-600", "text-slate-400")} />"#),
             vec!["text-slate-400 on bg-red-500"]
         );
+    }
+
+    #[test]
+    fn tailwind_corners_follow_the_class_order_the_framework_emits() {
+        let left = |classes: &str| tailwind_declared_corners(classes).is_rounded_away_from_side(3);
+        let right = |classes: &str| tailwind_declared_corners(classes).is_rounded_away_from_side(1);
+        assert!(!left("border-l-4 border-indigo-500 bg-white p-4"));
+        assert!(!left("border-l-4 rounded-none"));
+        assert!(!left("border-l-4 rounded-xs"));
+        assert!(left("border-l-4 rounded-lg"));
+        assert!(left("border-l-4 rounded"));
+        assert!(left("border-l-4 rounded-r-lg"));
+        assert!(!right("border-r-4 rounded-r-lg"));
+        assert!(!left("border-l-4 rounded-l-lg"));
+        // Class order in the attribute does not matter, the emit order does.
+        assert!(!left("rounded-r-none border-l-4 rounded-lg"));
+        assert!(left("border-l-4 rounded-tr-xl rounded-br-xl"));
+        assert!(left("border-l-4 rounded-[12px]"));
+        assert!(!left("border-l-4 rounded-[2px]"));
+        // A variant can round the card; it never squares it.
+        assert!(left("border-l-4 md:rounded-xl"));
+        assert!(left("border-l-4 rounded-xl md:rounded-none"));
+        // Unknown sizes keep the finding.
+        assert!(left("border-l-4 rounded-card"));
+        assert!(left("border-l-4 rounded-(--radius)"));
+        assert!(left("border-l-4 !rounded-lg"));
+    }
+
+    #[test]
+    fn side_tab_scope_reads_the_enclosing_declarations() {
+        let rounded = |text: &str, needle: &str, sass: bool| {
+            let lines: Vec<&str> = text.split('\n').collect();
+            let i = lines.iter().position(|l| l.contains(needle)).unwrap();
+            let index = lines[i].find(needle).unwrap();
+            let m = MatchCtx {
+                groups: vec![Some(needle.to_string())],
+                index,
+            };
+            side_tab_rounded_in_scope(&m, &lines, i, sass)
+        };
+        let accent = "border-left: 4px solid #6366f1";
+        assert!(!rounded(
+            ".c {\n  border-left: 4px solid #6366f1;\n}",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  border-left: 4px solid #6366f1;\n}",
+            accent,
+            false
+        ));
+        // A radius in a sibling or nested rule is not this box's.
+        assert!(!rounded(".a { border-radius: 12px }\n.c {\n  border-left: 4px solid #6366f1;\n  &:hover { border-radius: 12px; }\n}", accent, false));
+        // Longhands after the shorthand square the far corners off.
+        assert!(!rounded(".c { border-left: 4px solid #6366f1; border-radius: 12px; border-top-right-radius: 0; border-bottom-right-radius: 0 }", accent, false));
+        // A template literal is a scope of its own.
+        assert!(rounded(
+            "const A = styled.div`\n  border-left: 4px solid #6366f1;\n  border-radius: 8px;\n`;",
+            accent,
+            false
+        ));
+        // Inline style attributes and style objects.
+        assert!(!rounded(
+            "<div style=\"border-left: 4px solid #6366f1; padding: 8px\">x</div>",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            "<div style=\"border-left: 4px solid #6366f1; border-radius: 8px\">x</div>",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            "<div style={{ borderLeft: '4px solid #6366f1', borderRadius: 12 }} />",
+            "borderLeft: '4px solid",
+            false
+        ));
+        assert!(!rounded(
+            "<div style={{ borderLeft: '4px solid #6366f1', padding: 12 }} />",
+            "borderLeft: '4px solid",
+            false
+        ));
+        // An unresolvable radius keeps the finding.
+        assert!(rounded(
+            ".c { border-left: 4px solid #6366f1; border-radius: $radius; }",
+            accent,
+            false
+        ));
+        // Indentation-syntax Sass.
+        assert!(rounded(
+            ".card\n  border-left: 4px solid #6366f1\n  border-radius: 12px",
+            accent,
+            true
+        ));
+        assert!(!rounded(
+            ".card\n  border-left: 4px solid #6366f1\n  .inner\n    border-radius: 12px",
+            accent,
+            true
+        ));
     }
 
     #[test]

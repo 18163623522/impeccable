@@ -426,17 +426,18 @@ fn compute_styles(
             }
         }
 
+        // Every property starts at its default; only an inherited property
+        // the parent carries is overwritten here.
         let mut values: StyleValues = make_default_style();
-        for (prop, default) in STATIC_DEFAULT_STYLE {
-            let inherited = if is_static_inherited_prop(prop) {
-                parent_style.as_ref().and_then(|ps| ps.get(*prop)).cloned()
-            } else {
-                None
-            };
-            values.insert(
-                prop.to_string(),
-                inherited.unwrap_or_else(|| default.to_string()),
-            );
+        if let Some(ps) = parent_style.as_ref() {
+            for (prop, _) in STATIC_DEFAULT_STYLE {
+                if !is_static_inherited_prop(prop) {
+                    continue;
+                }
+                if let Some(inherited) = ps.get(*prop) {
+                    values.insert(prop.to_string(), inherited.clone());
+                }
+            }
         }
         for (prop, decl) in specified_map {
             if prop.starts_with("--") {

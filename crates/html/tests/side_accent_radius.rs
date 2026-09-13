@@ -88,3 +88,125 @@ fn a_rounded_card_with_a_side_accent_still_reports() {
         vec!["border-left: 4px".to_string()]
     );
 }
+
+fn side_tab_page(css: &str, body: &str) -> Vec<String> {
+    let html = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>t</title>\
+<style>.c{{width:400px;height:120px;padding:16px;background:#fdfdfd}}{css}</style></head><body>{body}</body></html>"
+    );
+    let findings = detect_html_source(
+        &html,
+        Path::new("/nonexistent/dir/page.html"),
+        &DetectHtmlOptions::default(),
+    );
+    let value = serde_json::to_value(&findings).unwrap();
+    let mut out: Vec<String> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["antipattern"] == "side-tab")
+        .map(|f| f["snippet"].as_str().unwrap_or("").to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+const PRODUCER_BODY: &str =
+    "<div class=\"c bd\">b</div><div class=\"c sq\">p</div><div class=\"c sh\">s</div>";
+
+/// One visual, three authorings: a border, an absolute ::before bar, an inset
+/// box-shadow. The static engine answers all three the same way.
+#[test]
+fn every_static_producer_answers_the_same_visual_the_same_way() {
+    let stripes = ".bd{border-left:4px solid #6366f1}\
+.sq{position:relative}.sq::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:5px;background:#6366f1}\
+.sh{box-shadow:inset 6px 0 0 0 #6366f1}";
+    assert_eq!(side_tab_page(stripes, PRODUCER_BODY), Vec::<String>::new());
+
+    let rounded = format!("{stripes}.bd,.sq,.sh{{border-radius:12px}}");
+    assert_eq!(
+        side_tab_page(&rounded, PRODUCER_BODY),
+        vec![
+            ".sh — inset box-shadow 6px stripe (left)".to_string(),
+            ".sq::before — absolute 5px pseudo-element stripe (left: 0)".to_string(),
+            "border-left: 4px + border-radius: 12px".to_string(),
+        ]
+    );
+}
+
+/// A top band is outside the gate in every producer.
+#[test]
+fn a_square_top_band_still_reports_in_every_producer() {
+    let css = ".bd{border-top:4px solid #6366f1}\
+.sq{position:relative}.sq::after{content:\"\";position:absolute;left:0;right:0;top:0;height:5px;background:#6366f1}\
+.sh{box-shadow:inset 0 6px 0 0 #6366f1}";
+    assert_eq!(side_tab_page(css, PRODUCER_BODY).len(), 3);
+}
+
+/// The radius can come from any rule that matches the element: the cascade
+/// sees a second class the stripe rule never names.
+#[test]
+fn a_stripe_reads_the_cascade_of_the_element_it_paints() {
+    let css = ".shell{border-radius:12px}\
+.sq::before{content:\"\";position:absolute;right:0;top:0;bottom:0;width:5px;background:#6366f1}";
+    assert_eq!(
+        side_tab_page(css, "<div class=\"c shell sq\">p</div>"),
+        vec![".sq::before — absolute 5px pseudo-element stripe (right: 0)".to_string()]
+    );
+    assert!(side_tab_page(css, "<div class=\"c sq\">p</div>").is_empty());
+}
+
+/// A stripe rule no element on the page matches reads its host rule's own
+/// declarations, the way the text engine reads a stylesheet.
+#[test]
+fn a_stripe_with_no_matching_element_reads_the_host_rule() {
+    let css = ".ghost{border-radius:12px}\
+.ghost::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:5px;background:#6366f1}\
+.plain::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:6px;background:#6366f1}";
+    assert_eq!(
+        side_tab_page(css, "<div class=\"c\">x</div>"),
+        vec![".ghost::before — absolute 5px pseudo-element stripe (left: 0)".to_string()]
+    );
+}
+
+/// Shorthand and longhands resolve in cascade order, the way the browser
+/// resolves them: `rounded-lg rounded-r-none` is square away from a left
+/// stripe, and a later shorthand resets an earlier longhand.
+#[test]
+fn radius_longhands_and_shorthand_resolve_in_cascade_order() {
+    assert!(side_tab_snippets(
+        "border-left:4px solid #6366f1;border-radius:12px;border-top-right-radius:0;border-bottom-right-radius:0;"
+    )
+    .is_empty());
+    assert_eq!(
+        side_tab_page(
+            ".c.a{border-left:4px solid #6366f1;border-top-right-radius:0;border-bottom-right-radius:0}.c.a{border-radius:12px}",
+            "<div class=\"c a\">x</div>"
+        ),
+        vec!["border-left: 4px + border-radius: 12px".to_string()]
+    );
+    // A more specific longhand beats a later, less specific shorthand.
+    assert!(side_tab_page(
+        ".c.a{border-left:4px solid #6366f1;border-top-right-radius:0;border-bottom-right-radius:0}.c{border-radius:12px}",
+        "<div class=\"c a\">x</div>"
+    )
+    .is_empty());
+}
+
+/// `em` resolves against the element's own font size, and the snippet prints
+/// the radius in px, the way the browser's computed style does.
+#[test]
+fn em_and_rem_radii_resolve_to_px() {
+    assert!(
+        side_tab_snippets("font-size:12px;border-left:4px solid #6366f1;border-radius:0.3em;")
+            .is_empty()
+    );
+    assert_eq!(
+        side_tab_snippets("font-size:20px;border-left:4px solid #6366f1;border-radius:0.3em;"),
+        vec!["border-left: 4px + border-radius: 6px".to_string()]
+    );
+    assert_eq!(
+        side_tab_snippets("border-left:4px solid #6366f1;border-radius:0.5rem;"),
+        vec!["border-left: 4px + border-radius: 8px".to_string()]
+    );
+}

@@ -102,22 +102,32 @@ pub fn parse_radius_to_px(value: Option<&str>, width_px: f64) -> Option<f64> {
 /// One `border-radius` token in px, or `None` when it is not a length this
 /// can resolve: a `calc()`, an unresolved `var()`, a keyword, a unit whose
 /// px value depends on something not in hand. Percentages resolve against
-/// `width_px` the way [`parse_radius_to_px`] resolves them; `em` and `rem`
-/// resolve against the 16px root default, which is close enough to tell a
-/// square corner from a rounded one without walking the font-size chain.
-/// Unit matching is case-insensitive: CSS units are, and a stylesheet
-/// carrying `0.5REM` still describes a rounded corner.
-fn radius_token_px(token: &str, width_px: f64) -> Option<f64> {
+/// `width_px` the way [`parse_radius_to_px`] resolves them; `em` resolves
+/// against `em_px`, the element's font size, and `rem` against the 16px root
+/// default. Unit matching is case-insensitive: CSS units are, and a
+/// stylesheet carrying `0.5REM` still describes a rounded corner.
+fn radius_token_px(token: &str, width_px: f64, em_px: f64) -> Option<f64> {
     let token = js::trim(token);
     let num = parse_radius_to_px(Some(token), width_px)?;
     let unit = token.trim_start_matches(|c: char| !c.is_ascii_alphabetic() && c != '%');
     match js::to_lower_case(unit).as_str() {
         "px" | "%" => Some(num),
-        "em" | "rem" => Some(num * 16.0),
+        "em" => Some(num * em_px),
+        "rem" => Some(num * ROOT_FONT_SIZE_PX),
         // A bare `0` is the one unitless radius CSS allows.
         "" if num == 0.0 => Some(0.0),
         _ => None,
     }
+}
+
+/// The root font size `rem` resolves against, and the `em` default for a
+/// caller that has no font size in hand.
+pub const ROOT_FONT_SIZE_PX: f64 = 16.0;
+
+/// One `border-radius` token in px, `em` read against the element's font
+/// size. `None` on the terms [`parse_radius_corners`] documents.
+pub fn parse_radius_token_px(token: &str, width_px: f64, em_px: f64) -> Option<f64> {
+    radius_token_px(token, width_px, em_px)
 }
 
 /// The corners of a `border-radius` shorthand, in px. Reads the horizontal
@@ -126,6 +136,12 @@ fn radius_token_px(token: &str, width_px: f64) -> Option<f64> {
 /// or carries a token this cannot resolve: a caller that cannot see the
 /// corners should keep reporting rather than read the box as square.
 pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corners> {
+    parse_radius_corners_em(value, width_px, ROOT_FONT_SIZE_PX)
+}
+
+/// [`parse_radius_corners`] with `em` read against `em_px`, the element's
+/// font size.
+pub fn parse_radius_corners_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<Corners> {
     re!(WS_SPLIT, format!("{}+", WS));
     let horizontal = value?.split('/').next().unwrap_or("");
     let trimmed = js::trim(horizontal);
@@ -135,7 +151,7 @@ pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corner
     let parts: Vec<f64> = WS_SPLIT
         .split(trimmed)
         .filter(|t| !t.is_empty())
-        .map(|t| radius_token_px(t, width_px))
+        .map(|t| radius_token_px(t, width_px, em_px))
         .collect::<Option<Vec<f64>>>()?;
     let at = |i: usize| parts.get(i).copied().unwrap_or(0.0);
     Some(match parts.len() {
@@ -171,10 +187,15 @@ pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corner
 /// half a stripe runs along. `None` on the same terms as
 /// [`parse_radius_corners`].
 pub fn parse_radius_corner_px(value: Option<&str>, width_px: f64) -> Option<f64> {
+    parse_radius_corner_px_em(value, width_px, ROOT_FONT_SIZE_PX)
+}
+
+/// [`parse_radius_corner_px`] with `em` read against `em_px`.
+pub fn parse_radius_corner_px_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<f64> {
     re!(WS_SPLIT_ONE, format!("{}+", WS));
     let trimmed = js::trim(value?);
     let first = WS_SPLIT_ONE.split(trimmed).find(|t| !t.is_empty())?;
-    radius_token_px(first, width_px)
+    radius_token_px(first, width_px, em_px)
 }
 
 /// The custom-property lookup `resolveVarRefs` reads (`customPropMap.get`).
@@ -895,6 +916,14 @@ mod tests {
         assert_eq!(c("50%").top_right, 100.0);
         assert_eq!(c("0").top_left, 0.0);
         assert_eq!(c("0 10px 10px 0").bottom_left, 0.0);
+        // `em` reads against the element's font size, `rem` against the root.
+        let em = |v: &str, font: f64| parse_radius_corners_em(Some(v), 200.0, font).expect(v);
+        assert!((em("0.3em", 12.0).top_left - 3.6).abs() < 1e-9);
+        assert_eq!(em("0.5rem", 12.0).top_left, 8.0);
+        assert_eq!(
+            parse_radius_corner_px_em(Some("0.5em"), 200.0, 24.0),
+            Some(12.0)
+        );
     }
 
     #[test]

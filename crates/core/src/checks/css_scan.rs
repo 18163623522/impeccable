@@ -3,7 +3,9 @@
 //! carry a source `index` (a byte offset here; JS reports UTF-16 units, see
 //! `crate::js_ext_a::utf16_index`) and/or a `selector`.
 
-use crate::checks::rules::{extract_shadow_lengths, find_shadow_color, ANY, B, D};
+use crate::checks::rules::{
+    extract_shadow_lengths, find_shadow_color, DeclaredCorners, ANY, B, D, NOMINAL_CARD_WIDTH_PX,
+};
 use crate::color::{
     color_to_hex, has_chroma, parse_any_color, relative_luminance, split_top_level_commas, Rgba,
 };
@@ -908,6 +910,97 @@ pub fn scan_css_text_for_inset_stripe(content: &str) -> Vec<PatternFinding> {
     findings
 }
 
+// ─── side stripes on a rounded card ─────────────────────────────────────────
+// `side-tab` reports a left or right accent only on a card rounded away from
+// the stripe. The two CSS-text stripe scans above stay the recorded producers
+// (their call vectors pin them); every caller gates what they return, against
+// a computed style when it has elements in hand and against the host rule's
+// own declarations when it has only text.
+
+re!(STRIPE_EDGE_RE, r"\((left|right)(?:: 0)?\)$".to_string());
+
+/// The side a CSS-text `side-tab` stripe sits on, as a `[Top, Right, Bottom,
+/// Left]` index, read off the snippet both scans end with: `(left: 0)` /
+/// `(right: 0)` from the pseudo-element scan, `(left)` / `(right)` from the
+/// inset box-shadow scan. `None` for a top or bottom stripe and for anything
+/// that is not one of those findings.
+pub fn side_stripe_index(finding: &PatternFinding) -> Option<usize> {
+    if finding.id != "side-tab" {
+        return None;
+    }
+    let caps = STRIPE_EDGE_RE.captures(&finding.snippet)?;
+    Some(if &caps[1] == "left" { 3 } else { 1 })
+}
+
+re!(
+    PSEUDO_ELEMENT_STRIP_RE,
+    format!(
+        r"::?(?:{before}|{after}){B}",
+        before = ci("before"),
+        after = ci("after")
+    )
+);
+re!(SELECTOR_WS_RUN_RE, format!("{WS}+"));
+
+/// The host a `::before` / `::after` rule paints on: the selector with the
+/// pseudo-element removed. A selector without one is its own host.
+pub fn pseudo_host_selector(selector: &str) -> String {
+    js::trim(&PSEUDO_ELEMENT_STRIP_RE.replace_all(selector, "")).to_string()
+}
+
+fn normalize_selector(selector: &str) -> String {
+    SELECTOR_WS_RUN_RE
+        .replace_all(js::trim(selector), " ")
+        .into_owned()
+}
+
+/// The corner radii a stylesheet declares for `host_selector`: every rule
+/// whose selector list names one of the host's selectors, in source order,
+/// declarations in order within each rule. A radius declared on a different
+/// selector that happens to match the same element is out of reach of text;
+/// a caller holding elements reads their computed style instead.
+pub fn css_text_host_corners(css: &str, host_selector: &str) -> DeclaredCorners {
+    let content = blank_comments(css);
+    let custom_props = collect_css_custom_props(&content);
+    let hosts: Vec<String> = host_selector
+        .split(',')
+        .map(normalize_selector)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut corners = DeclaredCorners::default();
+    if hosts.is_empty() {
+        return corners;
+    }
+    for m in CSS_RULE_BLOCK_RE.captures_iter(&content) {
+        let names_host = m[1]
+            .split(',')
+            .map(normalize_selector)
+            .any(|s| hosts.contains(&s));
+        if !names_host {
+            continue;
+        }
+        for part in m[2].split(';') {
+            let Some(idx) = part.find(':').filter(|i| *i > 0) else {
+                continue;
+            };
+            let value = resolve_var_refs(&part[idx + 1..], &custom_props);
+            corners.apply(js::trim(&part[..idx]), &value, NOMINAL_CARD_WIDTH_PX);
+        }
+    }
+    corners
+}
+
+/// Whether a CSS-text finding survives the rounded-card gate when only the
+/// stylesheet text is in hand. Anything but a left or right `side-tab`
+/// stripe passes untouched.
+pub fn css_text_side_stripe_on_rounded_host(css: &str, finding: &PatternFinding) -> bool {
+    let Some(side) = side_stripe_index(finding) else {
+        return true;
+    };
+    let host = pseudo_host_selector(finding.selector.as_deref().unwrap_or(""));
+    css_text_host_corners(css, &host).is_rounded_away_from_side(side)
+}
+
 // ─── scanCssTextForOrganicClipPath ──────────────────────────────────────────
 // A `clip-path: polygon(...)` with many vertices, or `clip-path: path(...)`
 // with curves, is CSS approximating an organic contour: a torn edge, a blob,
@@ -1656,6 +1749,82 @@ mod tests {
         assert_eq!(resolve_var_refs("x var(--c) y", &cp), "x var(--c) y");
         assert_eq!(resolve_var_refs("plain", &cp), "plain");
         assert_eq!(resolve_var_refs("var(--zz, )", &cp), "");
+    }
+
+    #[test]
+    fn side_stripe_index_reads_both_scan_snippets() {
+        let pseudo = scan_css_text_for_pseudo_stripe(
+            ".a::before{position:absolute;width:4px;left:0;top:0;bottom:0;background:#3b82f6}\
+             .b::after{position:absolute;width:4px;right:0;top:0;bottom:0;background:#3b82f6}\
+             .c::after{position:absolute;height:4px;left:0;right:0;bottom:0;background:#3b82f6}",
+        );
+        let sides: Vec<Option<usize>> = pseudo.iter().map(side_stripe_index).collect();
+        assert_eq!(sides, vec![Some(3), Some(1), None]);
+        let inset = scan_css_text_for_inset_stripe(
+            ".a{box-shadow:inset 4px 0 0 #6366f1}.b{box-shadow:inset -4px 0 0 #6366f1}\
+             .c{box-shadow:inset 0 4px 0 #6366f1}",
+        );
+        let sides: Vec<Option<usize>> = inset.iter().map(side_stripe_index).collect();
+        assert_eq!(sides, vec![Some(3), Some(1), None]);
+    }
+
+    #[test]
+    fn css_text_host_corners_follow_source_order() {
+        let rounded = |css: &str, host: &str, side: usize| {
+            css_text_host_corners(css, host).is_rounded_away_from_side(side)
+        };
+        // No radius declared for the host: square.
+        assert!(!rounded(".card{position:relative}", ".card", 3));
+        assert!(!rounded(".other{border-radius:12px}", ".card", 3));
+        // The host names itself in a selector list, with whitespace moved.
+        assert!(rounded(
+            ".x, .card  .body{border-radius:12px}",
+            ".card .body",
+            3
+        ));
+        // Longhands after the shorthand square the far corners off.
+        assert!(!rounded(
+            ".card{border-radius:12px;border-top-right-radius:0;border-bottom-right-radius:0}",
+            ".card",
+            3
+        ));
+        // A later shorthand resets the earlier longhands.
+        assert!(rounded(
+            ".card{border-top-right-radius:0}.card{border-radius:12px}",
+            ".card",
+            3
+        ));
+        // Rounded only under the stripe: square where it counts.
+        assert!(!rounded(".card{border-radius:12px 0 0 12px}", ".card", 3));
+        assert!(rounded(".card{border-radius:12px 0 0 12px}", ".card", 1));
+        // var() resolves; an unresolvable value is unknown and keeps the find.
+        assert!(rounded(
+            ":root{--r:10px}.card{border-radius:var(--r)}",
+            ".card",
+            3
+        ));
+        assert!(rounded(".card{border-radius:var(--missing)}", ".card", 3));
+        assert!(rounded(".card{border-radius:calc(1rem)}", ".card", 3));
+        // Commented-out declarations are not live.
+        assert!(!rounded(
+            "/* .card{border-radius:12px} */.card{position:relative}",
+            ".card",
+            3
+        ));
+    }
+
+    #[test]
+    fn css_text_gate_uses_the_pseudo_host() {
+        let css = ".card{border-radius:12px}\
+                   .card::before{position:absolute;width:4px;left:0;top:0;bottom:0;background:#3b82f6}\
+                   .quote::before{position:absolute;width:4px;left:0;top:0;bottom:0;background:#3b82f6}";
+        let kept: Vec<String> = scan_css_text_for_pseudo_stripe(css)
+            .into_iter()
+            .filter(|f| css_text_side_stripe_on_rounded_host(css, f))
+            .map(|f| f.selector.unwrap())
+            .collect();
+        assert_eq!(kept, vec![".card::before".to_string()]);
+        assert_eq!(pseudo_host_selector(".a:hover::AFTER"), ".a:hover");
     }
 
     #[test]

@@ -152,13 +152,6 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     )
 }
 
-/// The element's four corner radii in px, read from the computed
-/// `border-radius` shorthand the snapshot carries. `None` when the snapshot
-/// has no readable radius for it.
-fn corner_radii(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<Corners> {
-    parse_radius_corners(Some(&dom.style(el, "borderRadius")), rect.width)
-}
-
 // ── shared helpers ────────────────────────────────────────────────────────
 
 re!(WS_RUN, format!("{}+", WS));
@@ -370,7 +363,8 @@ pub fn check_element_pseudo_stripe_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             _ => None,
         };
         if let Some(i) = side_index {
-            if !is_rounded_away_from_side(corner_radii(dom, el, &rect).as_ref(), i) {
+            let corners = parse_radius_corners(Some(&dom.style(el, "borderRadius")), rect.width);
+            if !is_rounded_away_from_side(corners.as_ref(), i) {
                 continue;
             }
         }

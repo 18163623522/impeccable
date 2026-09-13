@@ -399,9 +399,11 @@ fn clip_outcome(dom: &dyn Dom, p: ElId, band: &Rect, viewport_w: f64, viewport_h
     // fixed layer that hides overflow is how a smooth-scroll library does; the
     // content below their fold is reached by the ordinary scroll.
     let hides_y = matches!(oy.as_str(), "hidden" | "clip");
+    let script_frame = hides_y && is_script_scroll_frame(dom, p, &cr, viewport_h);
     if hides_y
         && !is_viewport_layer(dom, p, &cr, viewport_w, viewport_h)
         && misses_axis(band.top, band.bottom, band.height, cr.top, cr.bottom)
+        && !(script_frame && band.bottom > cr.bottom)
     {
         return Err(Unpainted::ClippedOut);
     }
@@ -411,11 +413,32 @@ fn clip_outcome(dom: &dyn Dom, p: ElId, band: &Rect, viewport_w: f64, viewport_h
         left = cr.left;
         width = cr.width;
     }
-    if scrolls(&oy) && has_overflow(dom.scroll_height(p), dom.client_height(p)) {
+    if script_frame || (scrolls(&oy) && has_overflow(dom.scroll_height(p), dom.client_height(p))) {
         top = cr.top;
         height = cr.height;
     }
     Ok(Rect::from_xywh(left, top, width, height))
+}
+
+/// Whether a box that hides its vertical overflow may be scrolled by script:
+/// it is at least as tall as the fold (the viewport, or the root's layout
+/// height when that is shorter) and its content runs past its bottom (or the
+/// capture did not record whether it does). smooth-scrollbar and Locomotive
+/// Scroll wrap the page in such a box, not always a fixed one, and move the
+/// content with transforms; a capture cannot tell that from content held
+/// clipped, so what lies below the box's bottom edge is kept. Smaller clips
+/// (carousels, accordions, collapsed menus) and the x axis are not affected.
+fn is_script_scroll_frame(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) -> bool {
+    let root_h = dom
+        .document_element()
+        .map(|root| dom.client_height(root))
+        .filter(|h| h.is_finite() && *h > 0.0);
+    let fold = match root_h {
+        Some(h) if viewport_h > 0.0 => js::math_min(h, viewport_h),
+        Some(h) => h,
+        None => viewport_h,
+    };
+    fold > 0.0 && cr.height >= fold - 1.0 && has_overflow(dom.scroll_height(p), dom.client_height(p))
 }
 
 fn is_viewport_layer(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_w: f64, viewport_h: f64) -> bool {
@@ -470,15 +493,22 @@ fn outside_document(dom: &dyn Dom, rect: &Rect, viewport_w: f64) -> Option<Unpai
 /// its parent, or a crossfade stack (a video around it, or a sibling video or
 /// raster layer over most of its box).
 ///
+/// Even then the transition counts only while the raster is at rest at 0 (an
+/// effective opacity at or below the transparent floor). A fade in or a
+/// crossfade starts from 0; an image held buried sits at a faint value other
+/// than 0, and Next.js images are lazy by default while Tailwind's transition
+/// utilities are everywhere, so the markers alone would silence it.
+///
 /// A transition in progress leaves no trace in a capture, so a crossfade
 /// driven by script over layers that are not siblings, or a lazy fade marked
 /// only in script state, is still reported; an image genuinely held buried
-/// that also carries `loading="lazy"` or sits over a sibling image is skipped.
+/// at 0 that also carries `loading="lazy"` or sits over a sibling image is
+/// skipped.
 fn is_state_layer(dom: &dyn Dom, el: ElId) -> bool {
     if declares_opacity_animation(dom, el) {
         return true;
     }
-    if !declares_opacity_transition(dom, el) {
+    if !declares_opacity_transition(dom, el) || effective_opacity_dom(dom, el) > TRANSPARENT_FLOOR {
         return false;
     }
     declares_animation(dom, el) || marks_lazy_loading(dom, el) || in_crossfade_stack(dom, el)
@@ -786,11 +816,76 @@ mod tests {
         assert_eq!(why(&d, below), None);
 
         // When main has nothing to scroll (its height chain is broken, so it
-        // is as tall as its content), the wrapper hides what lies below it.
+        // is as tall as its content), a wrapper shorter than the viewport
+        // hides what lies below it.
         d.set_rect(main, 240.0, 0.0, 1040.0, 3200.0);
         d.el_mut(main).client_height = 3200.0;
         d.el_mut(main).scroll_height = Some(3200.0);
+        d.set_rect(shell, 0.0, 0.0, 1280.0, 600.0);
+        d.el_mut(shell).client_height = 600.0;
+        d.el_mut(shell).scroll_height = Some(3200.0);
         assert_eq!(why(&d, below), Some(Unpainted::ClippedOut));
+
+        // A wrapper as tall as the viewport whose content runs past it is
+        // the shape a smooth-scroll library scrolls by script, so the same
+        // content is kept.
+        d.set_rect(shell, 0.0, 0.0, 1280.0, 800.0);
+        d.el_mut(shell).client_height = 800.0;
+        assert_eq!(why(&d, below), None);
+    }
+
+    /// smooth-scrollbar and Locomotive Scroll: a viewport-tall wrapper that
+    /// hides overflow, not fixed, around content moved by transforms.
+    #[test]
+    fn a_viewport_tall_frame_keeps_content_below_its_fold() {
+        let (mut d, body) = page();
+        let frame = d.add(Some(body), "div");
+        d.set_styles(frame, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(frame, 0.0, 0.0, 1280.0, 800.0);
+        d.el_mut(frame).client_height = 800.0;
+        d.el_mut(frame).scroll_height = Some(2000.0);
+        let content = d.add(Some(frame), "div");
+        d.set_style(content, "transform", "matrix(1, 0, 0, 1, 0, 0)");
+        d.set_rect(content, 0.0, 0.0, 1280.0, 2000.0);
+        let below = d.add(Some(content), "p");
+        d.set_rect(below, 40.0, 1800.0, 600.0, 40.0);
+        assert_eq!(why(&d, below), None);
+
+        // An unrecorded scrollHeight keeps it too.
+        d.el_mut(frame).scroll_height = None;
+        assert_eq!(why(&d, below), None);
+
+        // The root's layout height is the fold when it is shorter than the
+        // window (a horizontal scrollbar takes the rest).
+        let root = d.document_element.unwrap();
+        d.el_mut(root).client_height = 785.0;
+        d.set_rect(frame, 0.0, 0.0, 1280.0, 785.0);
+        assert_eq!(why(&d, below), None);
+
+        // Content above the frame's top edge is not what scrolling reaches.
+        let above = d.add(Some(content), "p");
+        d.set_rect(above, 40.0, -400.0, 600.0, 40.0);
+        assert_eq!(why(&d, above), Some(Unpainted::ClippedOut));
+
+        // A frame whose content does not run past it holds nothing below it.
+        d.el_mut(frame).scroll_height = Some(785.0);
+        d.el_mut(frame).client_height = 785.0;
+        assert_eq!(why(&d, below), Some(Unpainted::ClippedOut));
+
+        // Nor does a frame shorter than the fold: an accordion panel or a
+        // collapsed menu at a fixed height.
+        d.el_mut(frame).scroll_height = Some(2000.0);
+        d.set_rect(frame, 0.0, 0.0, 1280.0, 400.0);
+        d.el_mut(frame).client_height = 400.0;
+        assert_eq!(why(&d, below), Some(Unpainted::ClippedOut));
+
+        // The x axis still clips past a viewport-tall frame's edge.
+        d.set_rect(frame, 0.0, 0.0, 1280.0, 800.0);
+        d.el_mut(frame).client_height = 800.0;
+        d.el_mut(root).client_height = 0.0;
+        let right = d.add(Some(content), "p");
+        d.set_rect(right, 1400.0, 200.0, 300.0, 40.0);
+        assert_eq!(why(&d, right), Some(Unpainted::ClippedOut));
     }
 
     #[test]
@@ -1061,7 +1156,9 @@ mod tests {
         d.set_rect(heading, 40.0, 200.0, 600.0, 60.0);
         assert_eq!(raster(&d, photo), None);
 
-        // With a second marker, the transition is a load or crossfade state.
+        // With a second marker, a transition at rest at 0 is a load or
+        // crossfade state.
+        d.set_style(photo, "opacity", "0");
         d.el_mut(photo).attrs.push(("loading".to_string(), "lazy".to_string()));
         assert_eq!(raster(&d, photo), Some(Unpainted::StateLayer));
         d.el_mut(photo).attrs.clear();
@@ -1079,12 +1176,59 @@ mod tests {
         assert_eq!(raster(&d, photo), Some(Unpainted::StateLayer));
         d.set_style(photo, "animationName", "none");
         assert_eq!(raster(&d, photo), None);
+        d.set_style(photo, "opacity", "0.08");
 
         // A small sibling raster (a logo over the hero) is not a crossfade
         // layer.
         let logo = d.add(Some(hero), "img");
         d.set_rect(logo, 40.0, 40.0, 120.0, 40.0);
         assert_eq!(raster(&d, photo), None);
+    }
+
+    /// The Next.js Image shape: lazy by default, often with Tailwind's
+    /// `transition-opacity`, held at a faint value under a dark overlay. A
+    /// fade starts from 0, so the markers do not make it a state layer.
+    #[test]
+    fn a_lazy_image_held_at_a_faint_value_is_not_a_state_layer() {
+        let (mut d, body) = page();
+        let hero = d.add(Some(body), "section");
+        d.set_styles(hero, &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 520.0);
+        let photo = d.add(Some(hero), "img");
+        d.set_styles(photo, &[("position", "absolute"), ("opacity", "0.1"), ("transitionProperty", "opacity"), ("transitionDuration", "0.15s")]);
+        d.el_mut(photo).attrs.push(("loading".to_string(), "lazy".to_string()));
+        d.el_mut(photo).attrs.push(("data-nimg".to_string(), "fill".to_string()));
+        d.set_rect(photo, 0.0, 0.0, 1280.0, 520.0);
+        let overlay = d.add(Some(hero), "div");
+        d.set_styles(overlay, &[("position", "absolute"), ("backgroundImage", "linear-gradient(rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0.9))")]);
+        d.set_rect(overlay, 0.0, 0.0, 1280.0, 520.0);
+        assert_eq!(raster(&d, photo), None);
+
+        // Tailwind's `transition` list, the same.
+        d.set_styles(photo, TAILWIND_TRANSITION);
+        assert_eq!(raster(&d, photo), None);
+
+        // A crossfade sibling over the same box does not change that.
+        let next = d.add(Some(hero), "img");
+        d.set_rect(next, 0.0, 0.0, 1280.0, 520.0);
+        assert_eq!(raster(&d, photo), None);
+
+        // At 0, or an effective 0 through a faint parent, it is a fade.
+        d.set_style(photo, "opacity", "0.02");
+        assert_eq!(raster(&d, photo), Some(Unpainted::StateLayer));
+        d.set_style(photo, "opacity", "0.1");
+        d.set_style(hero, "opacity", "0.15");
+        assert_eq!(raster(&d, photo), Some(Unpainted::StateLayer));
+
+        // A keyframe animation that moves opacity can be caught mid-flight,
+        // so it still marks a state at a faint value.
+        d.set_style(hero, "opacity", "1");
+        d.set_style(photo, "animationName", "pulse");
+        d.keyframes.insert(
+            "pulse".to_string(),
+            vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0.5".to_string())] }],
+        );
+        assert_eq!(raster(&d, photo), Some(Unpainted::StateLayer));
     }
 
     /// The adant.app shape: an image poster at opacity 0 beside a wrapper that

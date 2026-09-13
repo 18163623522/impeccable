@@ -475,7 +475,15 @@ rest. An element is not painted at capture when:
   containing block and up for an absolute box, a containing ancestor and up
   for a fixed box. `html` and `body` never count as clips, and neither does a
   vertical scroll container or a full-viewport fixed layer on the y axis, so an
-  app shell or a smooth-scroll viewport keeps the content below its fold.
+  app shell or a smooth-scroll viewport keeps the content below its fold. Nor,
+  for what lies below its bottom edge, does a box that hides overflow, is at
+  least as tall as the fold (the viewport, or the root's layout height when
+  that is shorter), and whose content runs past it (or whose `scrollHeight`
+  was not recorded): smooth-scrollbar and Locomotive Scroll wrap the page in
+  such a box without fixing it and move the content by script, which a capture
+  cannot tell from content held clipped. Content above its top edge, the x
+  axis, and clips shorter than the fold (carousels, accordions, collapsed
+  menus) are tested as before.
   Once the walk passes a scroll container that has content to scroll to
   (`scrollWidth` or `scrollHeight` past the client size, or not recorded), the
   ancestors above it are tested against the scroller's box on that axis, not
@@ -507,17 +515,21 @@ Covered: `all-caps-body`, `body-text-viewport-edge`, `cramped-padding`,
 own opacity, so for it only ancestors count toward transparency, and a raster
 under 0.15 opacity is a state layer and skipped when an animation moves its
 opacity (or its keyframes cannot be read), or when it declares an opacity
-transition (`opacity` or `all` with a non-zero duration) and carries a second
-marker: any animation, `loading="lazy"` or a lazy-loading library's attribute
+transition (`opacity` or `all` with a non-zero duration), rests at 0 (an
+effective opacity at or below 0.02), and carries a second marker: any
+animation, `loading="lazy"` or a lazy-loading library's attribute
 (`data-src`, `data-srcset`, `data-lazy*`, `data-original`, `data-bg`,
 `data-loaded`, `data-ll-status`), a class on it or its parent naming `lazy`,
 `loading` or `preload`, a `<video>` parent, or a sibling that is or holds a
 video or a raster over at least half of its box (a crossfade stack, a poster
 over a video). A declared transition alone is not enough, because Tailwind's
-`transition` utility lists `opacity` on everything it animates. A capture
-records no transition in progress, so a script-driven crossfade over layers
-that are not siblings is still reported, and an image genuinely held buried
-that also carries `loading="lazy"` or sits over a sibling image is skipped.
+`transition` utility lists `opacity` on everything it animates, and neither are
+the markers at a faint value other than 0: a fade starts from 0, while a buried
+image sits at 0.1 under an overlay, and Next.js images are lazy by default. A
+capture records no transition in progress, so a script-driven crossfade over
+layers that are not siblings is still reported, and an image genuinely held
+buried at 0 that also carries `loading="lazy"` or sits over a sibling image is
+skipped.
 
 Not covered: the visual-contrast pixel pass, the page passes (`heading-rhythm`,
 `text-occlusion`, `first-viewport-column-overflow`, `kicker-above-heading`,
@@ -535,26 +547,36 @@ faded crossfade layer, an off-canvas panel, a column below a frame with
 nothing to scroll, a lazy image fading in, a poster over a video, a fixed
 drawer past the viewport) with a visible twin carrying the same measurement,
 plus a popover that escapes a clip below its containing block, text below an
-inner scroller's fold, a buried image with Tailwind's transition list, and a
+inner scroller's fold, a buried image with Tailwind's transition list, two
+buried lazy images at 0.08 with a transition (Tailwind's list and
+`transition-opacity`), text below the fold of a viewport-tall frame that hides
+overflow around transformed content, and a
 fixed badge inside each containing-block trigger (`will-change`, `contain`,
 `translate`, `scale`, `rotate`, `perspective`, `backdrop-filter`). The file
-scan has no boxes and reports all twenty-eight; the
+scan has no boxes and reports all thirty-one; the
 browser test `the_rule_pass_skips_what_is_not_painted`
 (crates/browser/tests/evidence.rs) pins that the URL engine reports only the
 twins, and fails with the gate off.
 
-On the run 9 recordings the gate removes 3,789 of 15,609 findings and adds
-none: `body-text-viewport-edge` 139, `buried-raster` 1,217, `cramped-padding`
+On the run 9 recordings the gate removes 3,589 of 15,609 findings and adds
+none: `body-text-viewport-edge` 139, `buried-raster` 1,043, `cramped-padding`
 8, `extreme-negative-tracking` 12, `justified-text` 55, `line-length` 49,
-`low-contrast` 1,041, `text-overflow` 13, `tight-leading` 102, `tiny-text` 135,
-`undersized-ui-text` 986, `wide-tracking` 32. Every harmful cluster it touches
-(470 confirmed-harmful removals, as before) keeps a painted finding in the
-same capture except the yna.co.kr
-weather carousel, whose green and orange status words are only off-screen
-slides at capture. The recordings predate the new containing-block properties,
-so the 23 fixed-layer removals of the first cut (a parked mobile menu, a side
-nav, a newsflash popup) are kept as undecided, and 4 swiper arrow buttons at
-opacity 0 with only a declared transition are reported again.
+`low-contrast` 1,017, `text-overflow` 13, `tight-leading` 102, `tiny-text` 135,
+`undersized-ui-text` 986, `wide-tracking` 32. Of the 446 confirmed-harmful
+removals, 418 keep a painted finding of the same cluster in the same capture;
+the other 28 are the yna.co.kr weather carousel, whose green and orange status
+words are only off-screen slides at capture. The recordings predate the new
+containing-block properties and `scrollHeight`, so the 23 fixed-layer removals
+of the first cut (a parked mobile menu, a side nav, a newsflash popup) are kept
+as undecided, 4 swiper arrow buttons at opacity 0 with only a declared
+transition are reported again, and every frame as tall as the fold reads as
+overflowing: that keeps 174 opacity-0 lazy images on four zigzag.kr product
+captures and 24 low-contrast headings on framai.framer.website, which clipping
+removed before. The zigzag.kr images sit below a collapsed product-details
+panel 1,600px tall that hides overflow until a "more" button opens it, so
+those are kept wrongly: a collapsed panel as tall as the fold has the same
+shape as a smooth-scroll frame. The faint-value rule keeps nothing more on run 9: every
+`buried-raster` finding above opacity 0 there was already kept.
 
-- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: new cases, the static engine's twenty-eight findings.
-- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` (409 to 437), `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same twenty-eight findings in the sweeps; every changed line adds a finding on the new fixture or moves the count.
+- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: new cases, the static engine's thirty-one findings.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` (409 to 440), `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same thirty-one findings in the sweeps; every changed line adds a finding on the new fixture or moves the count.

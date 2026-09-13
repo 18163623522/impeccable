@@ -227,6 +227,13 @@ fn the_rule_pass_skips_what_is_not_painted() {
         ("low-contrast", "#flag-shell-below-fold"),
         // A transition utility alone does not make a buried image a state.
         ("buried-raster", "#flag-tw-buried-photo"),
+        // Nor does a lazy-load marker on an image held at a faint value
+        // other than 0: a fade starts from 0.
+        ("buried-raster", "#flag-lazy-tw-buried-photo"),
+        ("buried-raster", "#flag-lazy-fade-buried-photo"),
+        // A viewport-tall frame that hides overflow is how a smooth-scroll
+        // library scrolls the page, so the content below its fold is kept.
+        ("low-contrast", "#flag-smooth-below-fold"),
         // A fixed badge inside a containing block sits against it, not
         // against the viewport.
         ("undersized-ui-text", "#flag-cb-will-link"),

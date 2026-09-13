@@ -86,6 +86,14 @@
     .tw-transition { transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter; transition-duration: 150ms; }
     .buried { display: block; width: 320px; height: 120px; opacity: 0.08; }
     .lazy-fade { display: block; width: 320px; height: 120px; opacity: 0; transition: opacity 0.4s; }
+    .tw-transition-opacity { transition-property: opacity; transition-duration: 150ms; }
+
+    /* A smooth-scroll frame (smooth-scrollbar, Locomotive Scroll): a wrapper
+       as tall as the viewport that hides overflow, around content a script
+       moves with transforms. */
+    .smooth-frame { height: 100vh; overflow: hidden; }
+    .smooth-content { transform: translate3d(0, 0, 0); }
+    .smooth-filler { height: 110vh; margin: 0; }
   </style>
 </head>
 <body>
@@ -144,6 +152,14 @@
       <img class="buried tw-transition" id="flag-tw-buried-photo" alt="Buried team photo" width="320" height="120"
         src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==">
 
+      <h3>Buried lazy photo with a transition utility</h3>
+      <img class="buried tw-transition" id="flag-lazy-tw-buried-photo" alt="Buried studio photo" width="320" height="120" loading="lazy"
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==">
+
+      <h3>Buried lazy photo with an opacity transition</h3>
+      <img class="buried tw-transition-opacity" id="flag-lazy-fade-buried-photo" alt="Buried product render" width="320" height="120" loading="lazy" decoding="async"
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==">
+
       <h3>Fixed badges inside a containing block</h3>
       <div class="cb cb-will"><a class="micro badge" id="flag-cb-will-link" href="#will">Offer ends 12:00</a></div>
       <div class="cb cb-contain"><a class="micro badge" id="flag-cb-contain-link" href="#contain">Offer ends 13:00</a></div>
@@ -152,6 +168,14 @@
       <div class="cb cb-rotate"><a class="micro badge" id="flag-cb-rotate-link" href="#rotate">Offer ends 16:00</a></div>
       <div class="cb cb-perspective"><a class="micro badge" id="flag-cb-perspective-link" href="#perspective">Offer ends 17:00</a></div>
       <div class="cb cb-backdrop"><a class="micro badge" id="flag-cb-backdrop-link" href="#backdrop">Offer ends 18:00</a></div>
+
+      <h3>Below a smooth-scroll frame's fold</h3>
+      <div class="smooth-frame">
+        <div class="smooth-content">
+          <p class="smooth-filler">Selected work</p>
+          <p class="faint" id="flag-smooth-below-fold">Case studies</p>
+        </div>
+      </div>
     </section>
 
     <section class="col" data-col="pass">

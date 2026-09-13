@@ -14,7 +14,8 @@ use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
-    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
+    LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT, LEADING_HEADING_TEXT_TAGS,
+    LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
 use crate::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -278,6 +279,18 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
         }
     }
     false
+}
+
+/// Whether this element carries heading text, for the tight-leading floor:
+/// the element is a heading (or takes the ARIA role), or it is one of the
+/// inline tags a heading's text sits in. A block of body copy nested inside a
+/// heading is not heading text and keeps the floor.
+pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+    if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
+        return true;
+    }
+    LEADING_HEADING_TEXT_TAGS.contains(&tag)
+        && closest_or_none(dom, el, LEADING_HEADING_CONTEXT).is_some()
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -680,11 +693,36 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     let is_heading = matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
 
     // --- Tight line height ---
-    if has_direct_text && text_len > 50 && !is_heading {
+    // The 1.3 floor is a reading-comfort floor for body copy: text a visitor
+    // reads at body scale, over more than one line. Several things are not
+    // that.
+    // Display type sets its own leading, and 1.2 at 32px is craft, not
+    // crowding; headings routinely put their text in a child <a> or <span>,
+    // so the exemption reads the nearest heading ancestor rather than the
+    // element's own tag. Text that renders as a single line box has no gap
+    // between lines to crowd. And source text that is never typeset (script,
+    // style, noscript, head content, display:none, the sr-only clip patterns,
+    // an element with no box at all) has no leading to measure.
+    if has_direct_text
+        && text_len > 50
+        && !is_heading
+        && font_size > 0.0
+        && font_size < LEADING_DISPLAY_TYPE_PX
+    {
         if let Some(lh) = q.line_height_px {
-            if font_size > 0.0 {
-                let ratio = lh / font_size;
-                if ratio > 0.0 && ratio < 1.3 {
+            let ratio = lh / font_size;
+            // Compare on the ratio the snippet prints, so a page that sets
+            // line-height: 1.3 exactly is never flagged for hitting the floor
+            // (46.8 / 36 is 1.2999999999999998 in binary floats).
+            let shown = js::math_round(ratio * 100.0) / 100.0;
+            if ratio > 0.0 && shown < 1.3 {
+                let text_rect = dom.direct_text_rect(el).unwrap_or(*rect);
+                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES;
+                if wraps
+                    && !is_non_rendered_text(dom, el, tag)
+                    && !is_visually_hidden(dom, el)
+                    && !is_heading_text(dom, el, tag)
+                {
                     findings.push(RuleHit::new(
                         "tight-leading",
                         format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
@@ -1297,6 +1335,88 @@ mod tests {
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
         assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
+    }
+
+    /// The tight-leading floor is a body-copy floor. Reviewing the rule's
+    /// output on real pages found it applied to display type, to heading text
+    /// that sits in a child anchor or span, to text that renders one line, to
+    /// source text nothing typesets, and to pages that set the floor exactly.
+    #[test]
+    fn tight_leading_carve_outs() {
+        const COPY: &str = "This card description is comfortably longer than the fifty characters the leading check asks for.";
+
+        fn leading(d: &FakeDom, el: ElId) -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "tight-leading")
+                .map(|h| h.snippet)
+                .collect()
+        }
+        // Two wrapped lines of 16px copy on a 20px line box.
+        fn wrapped(d: &mut FakeDom, parent: ElId, tag: &str, font: &str, lh: f64) -> ElId {
+            let el = text_el(d, parent, tag, COPY, font);
+            d.set_style(el, "lineHeight", &format!("{lh}px"));
+            d.set_rect(el, 40.0, 100.0, 240.0, lh * 2.0);
+            d.el_mut(el).direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 240.0, lh * 2.0));
+            el
+        }
+
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+
+        // Body copy under the floor: the case the rule is for.
+        let copy = wrapped(&mut d, body, "p", "16px", 20.0);
+        assert_eq!(leading(&d, copy), vec!["line-height 1.25x (need >=1.3)"]);
+
+        // Display type carries its own leading.
+        let display = wrapped(&mut d, body, "p", "32px", 38.4);
+        assert!(leading(&d, display).is_empty(), "32px display type");
+        let boundary = wrapped(&mut d, body, "p", "22px", 26.0);
+        assert_eq!(
+            leading(&d, boundary),
+            vec!["line-height 1.18x (need >=1.3)"],
+            "22px is still reading copy"
+        );
+
+        // One line box: there is no gap between lines to crowd.
+        let one_line = wrapped(&mut d, body, "p", "16px", 20.0);
+        d.set_rect(one_line, 40.0, 100.0, 900.0, 20.0);
+        d.el_mut(one_line).direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 900.0, 20.0));
+        assert!(leading(&d, one_line).is_empty(), "single line box");
+
+        // Heading text in a child anchor, and a card title on the ARIA role.
+        let h3 = d.add(Some(body), "h3");
+        let link = wrapped(&mut d, h3, "a", "18px", 21.6);
+        assert!(leading(&d, link).is_empty(), "anchor inside a heading");
+        let titled = wrapped(&mut d, body, "span", "18px", 21.6);
+        d.add_selector(titled, "[role=\"heading\"]");
+        assert!(leading(&d, titled).is_empty(), "role=heading card title");
+        // A block of reading copy nested inside a heading is still body copy.
+        let nested = wrapped(&mut d, h3, "p", "16px", 17.6);
+        assert_eq!(
+            leading(&d, nested),
+            vec!["line-height 1.10x (need >=1.3)"],
+            "paragraph nested in a heading"
+        );
+
+        // line-height: 1.3 on 18px computes to 23.4px, and 23.4 / 18 lands
+        // just under 1.3 in binary floats.
+        let at_floor = wrapped(&mut d, body, "p", "18px", 23.4);
+        assert!(leading(&d, at_floor).is_empty(), "exactly at the floor");
+
+        // Source text nothing typesets, and text with no box at all.
+        let script = wrapped(&mut d, body, "script", "16px", 16.0);
+        assert!(leading(&d, script).is_empty(), "script source");
+        let hidden = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.set_style(hidden, "display", "none");
+        assert!(leading(&d, hidden).is_empty(), "display:none");
+        let sr = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.add_selector(sr, SR_ONLY_SELECTOR);
+        assert!(leading(&d, sr).is_empty(), "screen-reader-only copy");
+        let boxless = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.set_rect(boxless, 0.0, 0.0, 0.0, 0.0);
+        d.el_mut(boxless).direct_text_rect = None;
+        assert!(leading(&d, boxless).is_empty(), "zero-area box");
     }
 
     #[test]

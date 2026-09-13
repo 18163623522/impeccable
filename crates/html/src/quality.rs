@@ -12,7 +12,10 @@ use impeccable_core::checks::measures::{
     colors_nearly_match, css_color_is_transparent, resolve_length_px,
 };
 use impeccable_core::checks::rules::RuleHit;
-use impeccable_core::checks::text_rules::{NON_RENDERED_TAGS, SR_ONLY_SELECTOR};
+use impeccable_core::checks::text_rules::{
+    LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT, LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS,
+    SR_ONLY_SELECTOR,
+};
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -135,6 +138,17 @@ pub fn is_visually_hidden(el: &StaticElement<'_>, style: &StyleValues) -> bool {
         }
     }
     false
+}
+
+/// Whether this element carries heading text, for the tight-leading floor:
+/// the element is a heading (or takes the ARIA role), or it is one of the
+/// inline tags a heading's text sits in. A block of body copy nested inside a
+/// heading is not heading text and keeps the floor.
+pub fn is_heading_text(el: &StaticElement<'_>, tag: &str) -> bool {
+    match el.closest(LEADING_HEADING_CONTEXT) {
+        None => false,
+        Some(found) => found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag),
+    }
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -388,16 +402,36 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     let is_heading = matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
 
     // --- Tight line height ---
-    if q.has_direct_text && text_len > 50 && !is_heading {
+    // The 1.3 floor is a reading-comfort floor for body copy. Display type
+    // sets its own leading, and a heading's text sits in a child <a> or
+    // <span> as often as in the heading element, so the exemption follows the
+    // nearest heading ancestor rather than the element's own tag. Source text
+    // that is never typeset (script, style, noscript, head content,
+    // display:none, the sr-only patterns) has no leading to measure. The
+    // wrap test the browser engine applies needs layout, so it has no static
+    // twin here.
+    if q.has_direct_text
+        && text_len > 50
+        && !is_heading
+        && font_size > 0.0
+        && font_size < LEADING_DISPLAY_TYPE_PX
+    {
         if let Some(lh) = q.line_height_px {
-            if font_size > 0.0 {
-                let ratio = lh / font_size;
-                if ratio > 0.0 && ratio < 1.3 {
-                    findings.push(RuleHit::new(
-                        "tight-leading",
-                        format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
-                    ));
-                }
+            let ratio = lh / font_size;
+            // Compare on the ratio the snippet prints, so a page that sets
+            // line-height: 1.3 exactly is never flagged for hitting the floor
+            // (46.8 / 36 is 1.2999999999999998 in binary floats).
+            let shown = js::math_round(ratio * 100.0) / 100.0;
+            if ratio > 0.0
+                && shown < 1.3
+                && !is_non_rendered_text(el, tag, Some(style))
+                && !is_visually_hidden(el, style)
+                && !is_heading_text(el, tag)
+            {
+                findings.push(RuleHit::new(
+                    "tight-leading",
+                    format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                ));
             }
         }
     }

@@ -284,3 +284,17 @@ never scanned either.
 - `detect-scope-both`: same, over both scopes.
 - `detect-no-advisory-json`: same, with advisories off.
 - `detect-no-advisory-text`: same, in the text renderer.
+## Recorded 2026-09-12: the tight-leading floor only measures body copy
+
+Reviewing the rule's findings on real pages showed the 1.3 leading floor being
+applied to type it was never written for: display sizes and heading text set on
+`p` / `div` / `span` (the heading exemption was a tag test, so it missed the
+heading text that sits in a child `<a>` or `<span>`), text that renders a
+single line, source text nothing typesets (`<script>`, `<style>`, `<noscript>`,
+head content, `display:none`, the screen-reader clip patterns), and pages that
+set `line-height: 1.3` exactly, where the float division lands just under the
+floor. The check now carries those carve-outs in both engines; the wrap test
+needs layout, so it is browser-only.
+
+- `detect-fixture-json-tight-leading-html`, `detect-fixture-text-tight-leading-html`: new fixture, two columns of real cases reduced from the reviewed pages.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the directory sweep picks up the new fixture. The additions are its six findings and the total moves from 419 to 425; no existing fixture's findings changed.

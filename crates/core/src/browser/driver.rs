@@ -1422,6 +1422,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     // handle 0 the same way they collapse under null.
     let body_key = body.unwrap_or(0);
 
+    let glow_text = ec::GlowTextRects::default();
     for el in dom.query_all(None, "*").unwrap_or_default() {
         if !element_is_scanned(dom, el) {
             continue;
@@ -1434,7 +1435,11 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         findings.extend(hits(ec::check_element_motion_dom(dom, el)));
         findings.extend(hits(ec::check_element_glow_dom(dom, el)));
         findings.extend(hits(ec::check_element_ai_palette_dom(dom, el)));
-        findings.extend(hits(ec::check_element_radial_spotlight_dom(dom, el)));
+        findings.extend(hits(ec::check_element_radial_spotlight_dom_with(
+            dom,
+            el,
+            &glow_text,
+        )));
         findings.extend(hits(ec::check_element_icon_tile_dom(dom, el)));
         findings.extend(hits(ec::check_element_italic_serif_dom(dom, el)));
         findings.extend(hits(q::check_element_quality_dom(dom, el, config)));

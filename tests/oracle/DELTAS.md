@@ -457,3 +457,83 @@ narrow-column description.
 - `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: both the all-caps-body and justified-text descriptions.
 - `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html`: the all-caps-body description.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the union of every sweep delta above.
+
+## Recorded 2026-09-12: the radial-spotlight-glow fixture states its surfaces
+
+`radial-spotlight-glow` now asks how prominent a declared glow is: bright
+against the surface it paints on (a contrast of 1.30 between the glow's peak
+and that surface), not scaled away by the element's opacity (an effective
+alpha of 0.14), and behind copy. The fixture had to declare those things, so
+every case gained a ground color and a heading.
+
+Three changes show up in the goldens.
+
+The hex-alpha case moved from `#506fff3d` to `#506fff66`. It was testing
+8-digit hex parsing, and at alpha 0.24 that blue no longer clears the contrast
+line against the fixture's `#0b0d13` ground, so it would have been testing the
+threshold instead. Alpha 0.40 keeps it on the parser. The pair pins the rule's
+practical firing floor for a mid blue on a near-black ground between 0.24 and
+0.26, which is where `.flag-hero-blue` (alpha 0.26) sits.
+
+Three should-flag cases are new, one per gap the review found: a glow over a
+hero painted with a gradient, a glow over a hero painted with a photograph,
+and a two-stop glow with the bright stop declared second. Two should-pass
+cases are new for the same gates: a pale gradient hero that swallows its glow,
+and a wash over a photograph. That takes the fixture from 5 flag / 14 pass to
+8 flag / 16 pass, and `detect-dir-quiet-all-fixtures` from 419 findings to
+422.
+
+The registry description changed. It opened by calling the gradient soft and
+low-opacity, which describes what the old declaration test matched rather than
+what now fires, so it names the brightness instead.
+
+- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+
+## Recorded 2026-09-13: radial-spotlight-glow measures every stop and every layer
+
+Review of the prominence gate found two ways it went silent on glows it
+exists to catch.
+
+The gate measured one stop, the brightest by luminance, with its alpha
+ignored. A pale highlight core (`rgba(255,228,186,0.08)`) over a saturated
+ring (`rgba(255,90,0,0.40)`) measured the core, failed, and hid the ring. The
+same hue at two alphas flagged or not depending on which alpha was declared
+first. The adapters now test every chromatic stop, and the finding names the
+stop that passed with the most contrast. The pure `checkRadialSpotlight`
+snippet still names the first chromatic stop, so the frozen call vectors
+replay unchanged.
+
+A translucent gradient anywhere in the backdrop, including a faint fade to
+`transparent`, made the surface unreadable, which switched the contrast test
+off, so a pastel wash in a hero with a decorative fade flagged. Translucent
+gradient layers are now composited, as the alpha-weighted mean of their stops,
+over whatever resolves beneath them. Only an image that shows through still
+skips the test. The glow element's own layers beneath the glow count as the
+surface too.
+
+The fixture gains three should-flag cases (Saturated Ring Under Pale Core,
+Weak Stop Declared First, Glow Under A Dark Fade) and two should-pass cases
+(Pastel Under A Faint Layer, Pastel Over Its Own Pale Layer). That takes it
+from 8 flag / 16 pass to 11 flag / 18 pass. The two new pass cases would have
+flagged under the previous revision: the first because the fade made the
+surface unreadable, the second because the dark page was measured instead of
+the element's own pale lower layer. Every golden change is one of the three
+new findings: the fixture goes from 9 findings to 12, `detect-dir-json-all-fixtures`
+from 439 to 442, and `detect-dir-quiet-all-fixtures` and `detect-no-advisory-json`
+from 422 to 425.
+
+- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+
+## Recorded 2026-09-13: radial-spotlight-glow joins the integration
+
+`corpus/integration` merges `corpus/premise-radial-spotlight-glow`. Both fixture
+goldens replay as the branch recorded them. The five directory sweeps moved on
+both sides, so they were re-recorded from the integrated binary and checked
+against the two entries above, finding for finding: the integration moved by
+exactly the branch's own delta, with nothing extra and nothing missing. The
+five existing radial-spotlight-glow findings carry the new registry description
+(and the hex-alpha case its 0.40 alpha), and six findings are new: the three
+should-flag cases from each revision. The sweep goes from 452 findings to 458, and from 409 counted to 415
+with advisories off.
+
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the radial-spotlight-glow delta on top of the integration above.

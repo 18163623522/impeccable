@@ -6,7 +6,8 @@
 //! and the computed style and hands plain data over.
 
 use crate::background::{
-    a_ge, a_gt, read_own_background_color, resolve_background, resolve_background_info,
+    a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
+    resolve_background_info,
     resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
 };
 use crate::cascade::StyleValues;
@@ -14,8 +15,8 @@ use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape_axis,
-    resolve_length_px, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
+    check_oversized_h1, positioned_style_implies_escape_axis, resolve_length_px,
+    GptBorderShadowInput, OversizedH1Input, StyleMap,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -30,7 +31,9 @@ use impeccable_core::checks::text_rules::{
     NumberedLabelCandidateInput, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
     POPOVER_LAYER_SELECTOR, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
 };
-use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb};
+use impeccable_core::color::{
+    composite_color_over, is_no_paint_color_value, parse_any_color, parse_rgb, Rgba,
+};
 use impeccable_core::js::{self, parse_float, parse_int};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::slice_utf16_prefix;
@@ -410,19 +413,119 @@ fn spotlight_label(el: &StaticElement<'_>) -> String {
     el.tag_lower()
 }
 
-/// JS: checks.mjs#checkElementRadialSpotlight(el, style, tag, window)
+/// How far up the tree the copy a glow sits behind may live.
+const GLOW_ANCESTOR_DEPTH: usize = 8;
+
+/// The element's own opacity times its ancestors': what the glow's declared
+/// alpha is actually multiplied by. Mirrors `effectiveOpacityDOM`, the whole
+/// chain and the same floor, so both engines gate on the same number.
+fn static_effective_opacity(el: &StaticElement<'_>) -> f64 {
+    let mut acc = 1.0;
+    let mut current = Some(*el);
+    while let Some(cur) = current {
+        let v = parse_float(sv(cur.style(), "opacity"));
+        if v.is_finite() {
+            acc *= v.clamp(0.0, 1.0);
+        }
+        if acc <= 0.02 {
+            return 0.0;
+        }
+        current = cur.parent_element();
+    }
+    acc
+}
+
+fn has_text(el: &StaticElement<'_>) -> bool {
+    !collapse_ws(js::trim(&el.text_content())).is_empty()
+}
+
+/// A static page has no layout, so "the glow sits behind text" is read
+/// structurally: the glowing element carries copy itself, or it is an overlay
+/// layer inside a container that does. An in-flow element with no copy of its
+/// own takes its own band of the page and the copy around it sits above or
+/// below, which is why only an overlay may borrow an ancestor's text. The
+/// browser measures the rectangles instead and needs no such stand-in.
+fn static_glow_behind_text(el: &StaticElement<'_>, style: &StyleValues) -> bool {
+    if has_text(el) {
+        return true;
+    }
+    let position = sv(style, "position");
+    if position != "absolute" && position != "fixed" {
+        return false;
+    }
+    let mut current = el.parent_element();
+    let mut depth = 0;
+    while let Some(parent) = current {
+        if depth >= GLOW_ANCESTOR_DEPTH {
+            break;
+        }
+        if has_text(&parent) {
+            return true;
+        }
+        current = parent.parent_element();
+        depth += 1;
+    }
+    false
+}
+
+/// The surface a glow paints on. The glow element's own image layers beneath
+/// the glow and its background color come first, then each ancestor's images
+/// and color, translucent paint composited over the first opaque surface.
+/// `None` only when an image shows through or a color does not parse.
+fn static_glow_backdrop(el: &StaticElement<'_>, gradient_value: &str) -> Option<Rgba> {
+    let mut stack = measures::BackdropStack::default();
+    let mut image = Some(measures::radial_spotlight_layers_beneath(gradient_value));
+    let mut current = Some(*el);
+    while let Some(cur) = current {
+        let style = cur.style();
+        let background_image = image
+            .take()
+            .unwrap_or_else(|| sv(style, "backgroundImage").to_string());
+        let raw = sv(style, "backgroundColor");
+        let mut color = read_cascade_background_color(&cur, style, None);
+        if color.is_none() && js::trim(raw).eq_ignore_ascii_case("currentcolor") {
+            color = parse_any_color(sv_opt(style, "color"));
+        }
+        let declared = !is_no_paint_color_value(Some(raw));
+        match stack.paint_element(Some(&background_image), color, declared) {
+            measures::BackdropStep::Resolved(surface) => return Some(surface),
+            measures::BackdropStep::Unreadable => return None,
+            measures::BackdropStep::Continue => {}
+        }
+        current = cur.parent_element();
+    }
+    Some(stack.finish())
+}
+
+/// JS: checks.mjs#checkElementRadialSpotlight(el, style, tag, window): the
+/// declaration test, then the prominence gate, reporting the stop that passed.
 pub fn check_element_radial_spotlight(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
     let gradient_value = element_gradient_value(style, el);
     if gradient_value.is_empty() {
         return Vec::new();
     }
+    let stops = measures::radial_spotlight_stops(Some(&gradient_value));
+    let width = pf0(sv(style, "width"));
+    let height = pf0(sv(style, "height"));
+    if stops.is_empty() || !measures::radial_spotlight_fits(width, height) {
+        return Vec::new();
+    }
+    let prominence = measures::RadialGlowProminence {
+        opacity: static_effective_opacity(el),
+        backdrop: static_glow_backdrop(el, &gradient_value),
+    };
+    let Some(stop) = measures::radial_glow_prominent_stop(&stops, &prominence, || {
+        static_glow_behind_text(el, style)
+    }) else {
+        return Vec::new();
+    };
     let label = spotlight_label(el);
-    hits(check_radial_spotlight(&RadialSpotlightInput {
-        gradient_value: Some(&gradient_value),
-        width: pf0(sv(style, "width")),
-        height: pf0(sv(style, "height")),
-        label: Some(&label),
-    }))
+    hits(vec![measures::radial_spotlight_finding(
+        &stop,
+        width,
+        height,
+        Some(&label),
+    )])
 }
 
 // ─── Element adapters ───────────────────────────────────────────────────────

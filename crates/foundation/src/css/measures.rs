@@ -269,6 +269,48 @@ pub struct GradientStop {
     pub transparent: bool,
 }
 
+/// The byte index of the `)` closing the `(` at `open`, or `None` when the
+/// value never closes it.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// One stop argument read the way `parseRadialGradientStops` reads it: the
+/// first color token, `transparent` or a near-zero alpha as a transparent
+/// stop, and an unparseable token as a stop with no color.
+fn spotlight_stop_from_arg(arg: &str) -> GradientStop {
+    re!(TRANSPARENT_ONLY, format!("^{}$", ci("transparent")));
+    let Some(tok) = SPOTLIGHT_COLOR_TOKEN_RE.find(arg) else {
+        return GradientStop {
+            color: None,
+            transparent: false,
+        };
+    };
+    if TRANSPARENT_ONLY.is_match(tok.as_str()) {
+        return GradientStop {
+            color: None,
+            transparent: true,
+        };
+    }
+    let c = color::parse_any_color(Some(tok.as_str()));
+    let transparent = matches!(c, Some(c) if c.alpha_or_one() <= 0.05);
+    GradientStop {
+        color: c,
+        transparent,
+    }
+}
+
 /// JS: checks.mjs#parseRadialGradientStops. The ordered stops of the FIRST
 /// non-repeating radial-gradient in a background value, or `None` when
 /// there is no plain radial-gradient to read.
@@ -278,7 +320,6 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
         GRAD_RE,
         format!(r"({}-)?{}\(", ci("repeating"), ci("radial-gradient"))
     );
-    re!(TRANSPARENT_ONLY, format!("^{}$", ci("transparent")));
     let value = value?;
     if value.is_empty() || !HAS_RADIAL.is_match(value) {
         return None;
@@ -293,20 +334,7 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
             Some(i) => start + i,
             None => return None,
         };
-        let mut depth = 0i32;
-        let mut end: Option<usize> = None;
-        for (i, &b) in bytes.iter().enumerate().skip(open) {
-            if b == b'(' {
-                depth += 1;
-            } else if b == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i);
-                    break;
-                }
-            }
-        }
-        let Some(end) = end else { return None };
+        let end = matching_paren(bytes, open)?;
         let args = color::split_top_level_commas(&value[open + 1..end]);
         let stop_args: Vec<&String> = args
             .iter()
@@ -318,30 +346,43 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
         return Some(
             stop_args
                 .iter()
-                .map(|a| {
-                    let Some(tok) = SPOTLIGHT_COLOR_TOKEN_RE.find(a) else {
-                        return GradientStop {
-                            color: None,
-                            transparent: false,
-                        };
-                    };
-                    if TRANSPARENT_ONLY.is_match(tok.as_str()) {
-                        return GradientStop {
-                            color: None,
-                            transparent: true,
-                        };
-                    }
-                    let c = color::parse_any_color(Some(tok.as_str()));
-                    let transparent = matches!(c, Some(c) if c.alpha_or_one() <= 0.05);
-                    GradientStop {
-                        color: c,
-                        transparent,
-                    }
-                })
+                .map(|a| spotlight_stop_from_arg(a))
                 .collect(),
         );
     }
     None
+}
+
+/// The color stops of one gradient image layer (`linear-gradient(...)`,
+/// `radial-gradient(...)`, `conic-gradient(...)` or a repeating form) in
+/// declaration order, `transparent` included. Unlike
+/// [`parse_radial_gradient_stops`] it takes any gradient function and a
+/// single stop, and reads a named color (`white`, `navy`) as a stop. `None`
+/// when the layer is not a gradient or no argument names a color.
+pub fn parse_gradient_layer_stops(layer: &str) -> Option<Vec<GradientStop>> {
+    re!(GRADIENT_FN, format!(r"{}\(", ci("gradient")));
+    let m = GRADIENT_FN.find(layer)?;
+    let open = m.end() - 1;
+    let end = matching_paren(layer.as_bytes(), open)?;
+    let mut stops = Vec::new();
+    for arg in color::split_top_level_commas(&layer[open + 1..end]) {
+        if SPOTLIGHT_COLOR_TOKEN_RE.is_match(&arg) {
+            stops.push(spotlight_stop_from_arg(&arg));
+            continue;
+        }
+        let first = arg.split_ascii_whitespace().next().unwrap_or("");
+        if let Some(c) = color::parse_any_color(Some(first)) {
+            stops.push(GradientStop {
+                color: Some(c),
+                transparent: c.alpha_or_one() <= 0.05,
+            });
+        }
+    }
+    if stops.is_empty() {
+        None
+    } else {
+        Some(stops)
+    }
 }
 
 /// A `{ id, snippet }` finding as the pure checks return them.
@@ -370,6 +411,20 @@ pub struct RadialSpotlightInput<'a> {
     pub height: f64,
     #[serde(borrow)]
     pub label: Option<&'a str>,
+}
+
+/// What `checkRadialSpotlight`'s declaration test cannot see: how much of the
+/// glow actually reaches the page. The adapters measure it per element.
+/// Whether the glow sits behind copy is the third measurement and the
+/// expensive one, so it travels to the gate as a closure rather than a field.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RadialGlowProminence {
+    /// The painting element's effective opacity: its own `opacity` times
+    /// every ancestor's.
+    pub opacity: f64,
+    /// The surface the glow paints over, `None` when the cascade cannot
+    /// resolve one (an image or an unreadable stack underneath).
+    pub backdrop: Option<Rgba>,
 }
 
 /// JS: checks.mjs#TAILWIND_BG_HEX (insertion order preserved).

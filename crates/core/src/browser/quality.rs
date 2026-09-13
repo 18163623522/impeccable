@@ -14,7 +14,8 @@ use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
-    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
+    is_cjk_text, tracking_is_crushed, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
+    TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
 use crate::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -642,15 +643,19 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         if let Some(ls) = q.letter_spacing_px {
             if ls < 0.0 {
                 let tracking_em = ls / font_size;
-                if tracking_em <= -0.05 {
-                    let excerpt = slice_utf16_prefix(
-                        &collapse_ws(js::trim(&dom.text_content(el))),
-                        40,
-                    );
-                    findings.push(RuleHit::new(
-                        "extreme-negative-tracking",
-                        format!("letter-spacing: {}em — \"{}\"", to_fixed(tracking_em, 2), excerpt),
-                    ));
+                if tracking_is_crushed(tracking_em, font_size) {
+                    let text = collapse_ws(js::trim(&dom.text_content(el)));
+                    if !is_cjk_text(&text) {
+                        findings.push(RuleHit::new(
+                            "extreme-negative-tracking",
+                            format!(
+                                "letter-spacing: {}em at {}px — \"{}\"",
+                                to_fixed(tracking_em, 2),
+                                number_to_string(font_size),
+                                slice_utf16_prefix(&text, 40)
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -860,11 +865,48 @@ mod tests {
         assert_eq!(ids, vec!["tight-leading", "justified-text", "wide-tracking"], "{hits:?}");
         assert_eq!(hits[0].snippet, "line-height 1.00x (need >=1.3)");
         assert_eq!(hits[2].snippet, "letter-spacing: 0.13em on body text");
-        d.set_styles(p, &[("lineHeight", "24px"), ("textAlign", "left"), ("letterSpacing", "-1px"), ("textTransform", "uppercase")]);
+        d.set_styles(p, &[("lineHeight", "24px"), ("textAlign", "left"), ("letterSpacing", "-1.6px"), ("textTransform", "uppercase")]);
         let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
-        assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
+        assert_eq!(hits[1].snippet, format!("letter-spacing: -0.10em at 16px — \"{}\"", "a".repeat(40)));
+    }
+
+    #[test]
+    fn crushed_tracking_is_size_scaled_and_latin_only() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let latin = "Tightened headline copy running past twenty characters";
+
+        let flags = |d: &FakeDom, el: ElId| {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .any(|h| h.id == "extreme-negative-tracking")
+        };
+
+        // Reading size: -0.05em (Tailwind's tracking-tighter) and -0.06em pass.
+        let p = text_el(&mut d, body, "p", latin, "16px");
+        d.set_rect(p, 40.0, 100.0, 300.0, 40.0);
+        for ls in ["-0.05em", "-0.06em"] {
+            d.set_styles(p, &[("letterSpacing", ls)]);
+            assert!(!flags(&d, p), "{ls} at 16px should pass");
+        }
+        d.set_styles(p, &[("letterSpacing", "-0.08em")]);
+        assert!(flags(&d, p), "-0.08em at 16px should flag");
+
+        // Display size: the same -0.08em is conventional optical tightening.
+        let h = text_el(&mut d, body, "h1", latin, "48px");
+        d.set_rect(h, 40.0, 200.0, 600.0, 60.0);
+        d.set_styles(h, &[("letterSpacing", "-0.08em")]);
+        assert!(!flags(&d, h), "-0.08em at 48px should pass");
+        d.set_styles(h, &[("letterSpacing", "-0.1em")]);
+        assert!(flags(&d, h), "-0.1em at 48px should flag");
+
+        // CJK glyphs are out of scope whatever the lang attribute says.
+        let cjk = text_el(&mut d, body, "p", "赓续长征精神奋进复兴征程福建守护红色家底新时代新征程", "18px");
+        d.set_rect(cjk, 40.0, 300.0, 300.0, 40.0);
+        d.set_styles(cjk, &[("letterSpacing", "-0.1em")]);
+        assert!(!flags(&d, cjk), "CJK text should pass");
     }
 
     #[test]

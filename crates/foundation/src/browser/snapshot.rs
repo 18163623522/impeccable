@@ -61,6 +61,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "animationIterationCount",
     "animationName",
     "animationTimingFunction",
+    "aspectRatio",
     "backdropFilter",
     "background",
     "backgroundClip",
@@ -91,6 +92,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "content",
     "contentVisibility",
     "cssFloat",
+    "direction",
     "display",
     "filter",
     "float",
@@ -152,6 +154,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "transitionDuration",
     "transitionProperty",
     "transitionTimingFunction",
+    "unicodeBidi",
     "verticalAlign",
     "visibility",
     "webkitBackgroundClip",
@@ -1028,6 +1031,63 @@ mod tests {
             Some("rgb(187, 187, 187)")
         );
         assert_eq!(d.pseudo_style(2, "::placeholder", "color"), None);
+    }
+
+    /// A capture that records the full current `STYLE_PROPS` answers
+    /// `direction`, `unicodeBidi` and `aspectRatio` through `Dom::style`.
+    #[test]
+    fn bidi_and_aspect_ratio_round_trip() {
+        let props: Vec<&str> = STYLE_PROPS.to_vec();
+        for want in ["direction", "unicodeBidi", "aspectRatio"] {
+            assert!(props.contains(&want), "{want} missing from STYLE_PROPS");
+        }
+        // One interned value per column, so each element's `s` row is the
+        // column order itself and a read must land on its own property name.
+        let strings: Vec<String> = props.iter().map(|p| format!("v:{p}")).collect();
+        let cols: Vec<usize> = (0..props.len()).collect();
+        let json = serde_json::json!({
+            "v": 1,
+            "hostname": "example.test",
+            "innerWidth": 1280,
+            "innerHeight": 800,
+            "styleProps": props,
+            "pseudoProps": ["content"],
+            "strings": strings,
+            "documentElement": 1,
+            "body": 2,
+            "els": [
+                {"t": "HTML", "c": [2], "s": cols},
+                {"t": "BODY", "p": 1, "c": [], "s": cols},
+            ],
+        })
+        .to_string();
+        let d = snap(&json);
+        assert_eq!(d.style(2, "direction"), "v:direction");
+        assert_eq!(d.style(2, "unicodeBidi"), "v:unicodeBidi");
+        assert_eq!(d.style(2, "aspectRatio"), "v:aspectRatio");
+        // Every other column still lands on its own name.
+        assert_eq!(d.style(2, "display"), "v:display");
+        assert_eq!(d.style(2, "zIndex"), "v:zIndex");
+        assert!(d.unknown_style_props().is_empty());
+    }
+
+    /// A capture recorded before the three properties were added still parses
+    /// and reads them as unknown rather than panicking or shifting columns.
+    #[test]
+    fn older_capture_without_the_new_props_still_loads() {
+        let d = snap(SMALL);
+        assert_eq!(d.style(5, "display"), "inline");
+        assert_eq!(d.style(5, "direction"), "");
+        assert_eq!(d.style(5, "unicodeBidi"), "");
+        assert_eq!(d.style(5, "aspectRatio"), "");
+        assert_eq!(
+            d.unknown_style_props(),
+            vec![
+                "direction".to_string(),
+                "unicodeBidi".to_string(),
+                "aspectRatio".to_string()
+            ]
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ use impeccable_core::checks::text_rules::{
     NumberedLabelCandidateInput, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
     POSITIONED_CHILD_INTERACTIVE_SELECTOR,
 };
-use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb};
+use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb, Rgba};
 use impeccable_core::js::{self, parse_float, parse_int};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::slice_utf16_prefix;
@@ -410,6 +410,73 @@ fn spotlight_label(el: &StaticElement<'_>) -> String {
     el.tag_lower()
 }
 
+/// How far up the tree the effective opacity of a glow is accumulated, and
+/// how far up the copy it sits behind may live.
+const GLOW_ANCESTOR_DEPTH: usize = 8;
+
+/// The element's own opacity times its ancestors': what the glow's declared
+/// alpha is actually multiplied by.
+fn static_effective_opacity(el: &StaticElement<'_>) -> f64 {
+    let mut acc = 1.0;
+    let mut current = Some(*el);
+    let mut depth = 0;
+    while let Some(cur) = current {
+        if depth >= GLOW_ANCESTOR_DEPTH {
+            break;
+        }
+        let v = parse_float(sv(cur.style(), "opacity"));
+        if v.is_finite() {
+            acc *= v.clamp(0.0, 1.0);
+        }
+        current = cur.parent_element();
+        depth += 1;
+    }
+    acc
+}
+
+fn has_text(el: &StaticElement<'_>) -> bool {
+    !collapse_ws(js::trim(&el.text_content())).is_empty()
+}
+
+/// A static page has no layout, so "the glow sits behind text" is read
+/// structurally: the glowing element carries copy itself, or it is an overlay
+/// layer inside a container that does.
+fn static_glow_behind_text(el: &StaticElement<'_>, style: &StyleValues) -> bool {
+    if has_text(el) {
+        return true;
+    }
+    let position = sv(style, "position");
+    if position != "absolute" && position != "fixed" {
+        return false;
+    }
+    let mut current = el.parent_element();
+    let mut depth = 0;
+    while let Some(parent) = current {
+        if depth >= GLOW_ANCESTOR_DEPTH {
+            break;
+        }
+        if has_text(&parent) {
+            return true;
+        }
+        current = parent.parent_element();
+        depth += 1;
+    }
+    false
+}
+
+/// The surface a glow paints on: the element's own background color where it
+/// has one (the gradient is painted over it), otherwise what shows through
+/// from underneath.
+fn static_glow_backdrop(el: &StaticElement<'_>, style: &StyleValues) -> Option<Rgba> {
+    let base = el.parent_element().unwrap_or(*el);
+    let own = read_own_background_color(el, style).filter(|c| c.alpha_or_one() > 0.01);
+    match own {
+        Some(c) if c.alpha_or_one() >= 0.99 => Some(c),
+        Some(c) => resolve_background(&base, None).map(|under| composite_color_over(&c, &under)),
+        None => resolve_background(&base, None),
+    }
+}
+
 /// JS: checks.mjs#checkElementRadialSpotlight(el, style, tag, window)
 pub fn check_element_radial_spotlight(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
     let gradient_value = element_gradient_value(style, el);
@@ -417,12 +484,27 @@ pub fn check_element_radial_spotlight(el: &StaticElement<'_>, style: &StyleValue
         return Vec::new();
     }
     let label = spotlight_label(el);
-    hits(check_radial_spotlight(&RadialSpotlightInput {
+    let hits = hits(check_radial_spotlight(&RadialSpotlightInput {
         gradient_value: Some(&gradient_value),
         width: pf0(sv(style, "width")),
         height: pf0(sv(style, "height")),
         label: Some(&label),
-    }))
+    }));
+    if hits.is_empty() {
+        return hits;
+    }
+    let Some(stop) = measures::radial_spotlight_stop(Some(&gradient_value)) else {
+        return Vec::new();
+    };
+    let prominence = measures::RadialGlowProminence {
+        opacity: static_effective_opacity(el),
+        backdrop: static_glow_backdrop(el, style),
+        behind_text: static_glow_behind_text(el, style),
+    };
+    if !measures::radial_glow_is_prominent(&stop, &prominence) {
+        return Vec::new();
+    }
+    hits
 }
 
 // ─── Element adapters ───────────────────────────────────────────────────────

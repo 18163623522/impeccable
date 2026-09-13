@@ -164,3 +164,16 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: the radial-spotlight-glow fixture states its surfaces
+
+`radial-spotlight-glow` now asks how prominent a declared glow is: bright
+against the surface it paints on, not scaled away by the element's opacity,
+and behind copy. The fixture had to declare those things, so every case gained
+a ground color and a heading, and the hex-alpha case moved from `#506fff3d`
+(alpha 0.24, a hair over the contrast line against the fixture's ground) to
+`#506fff66` (alpha 0.40), so the case keeps testing 8-digit hex parsing rather
+than the threshold. The same five cases flag and the same nine pass; the only
+byte that moves in each golden is that alpha.
+
+- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.

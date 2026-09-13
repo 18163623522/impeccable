@@ -847,6 +847,48 @@ pub fn spotlight_label(dom: &dyn Dom, el: ElId) -> String {
     }
 }
 
+/// How many elements one glow may measure for overlapping text. A page with
+/// more elements than this has answered the question long before the cap.
+const GLOW_TEXT_SCAN_LIMIT: usize = 5000;
+
+fn rects_overlap(a: &Rect, b: &Rect) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
+/// Whether any element's own text paints over the glowing box. Text is what
+/// makes a radial wash read as a spotlight; a glow with nothing over it is
+/// surface treatment.
+fn glow_behind_text(dom: &dyn Dom, rect: &Rect) -> bool {
+    if !rect.all_finite() || rect.width <= 0.0 || rect.height <= 0.0 {
+        return false;
+    }
+    let root = dom.body().or_else(|| dom.document_element());
+    dom.query_all(root, "*")
+        .unwrap_or_default()
+        .into_iter()
+        .take(GLOW_TEXT_SCAN_LIMIT)
+        .any(|other| match dom.direct_text_rect(other) {
+            Some(tr) => {
+                tr.all_finite() && tr.width > 0.0 && tr.height > 0.0 && rects_overlap(rect, &tr)
+            }
+            None => false,
+        })
+}
+
+/// The surface a glow paints on: the element's own background color where it
+/// has one (the gradient is painted over it), otherwise what shows through
+/// from underneath.
+fn glow_backdrop(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
+    let base = dom.parent(el).unwrap_or(el);
+    let own = read_own_background_color(dom, el).filter(|c| c.alpha_or_one() > 0.01);
+    match own {
+        Some(c) if c.alpha_or_one() >= 0.99 => Some(c),
+        Some(c) => super::background::resolve_background(dom, base)
+            .map(|under| crate::color::composite_color_over(&c, &under)),
+        None => super::background::resolve_background(dom, base),
+    }
+}
+
 /// JS: checks.mjs#checkElementRadialSpotlightDOM(el)
 pub fn check_element_radial_spotlight_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let gradient_value = element_gradient_value(dom, el);
@@ -855,12 +897,27 @@ pub fn check_element_radial_spotlight_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHi
     }
     let rect = dom.rect(el);
     let label = spotlight_label(dom, el);
-    finding_hits(check_radial_spotlight(&RadialSpotlightInput {
+    let hits = finding_hits(check_radial_spotlight(&RadialSpotlightInput {
         gradient_value: Some(&gradient_value),
         width: rect.width,
         height: rect.height,
         label: Some(&label),
-    }))
+    }));
+    if hits.is_empty() {
+        return hits;
+    }
+    let Some(stop) = measures::radial_spotlight_stop(Some(&gradient_value)) else {
+        return Vec::new();
+    };
+    let prominence = measures::RadialGlowProminence {
+        opacity: effective_opacity_dom(dom, el),
+        backdrop: glow_backdrop(dom, el),
+        behind_text: glow_behind_text(dom, &rect),
+    };
+    if !measures::radial_glow_is_prominent(&stop, &prominence) {
+        return Vec::new();
+    }
+    hits
 }
 
 // ── oversized h1 / gpt border shadow ──────────────────────────────────────
@@ -1539,6 +1596,16 @@ mod tests {
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
     }
 
+    /// A heading whose own text paints over `rect`, so a glow behind it has
+    /// something to be behind.
+    fn heading_over(d: &mut FakeDom, parent: ElId, x: f64, y: f64) -> ElId {
+        let h = d.add(Some(parent), "h2");
+        d.add_text(h, "Headline over the glow");
+        d.set_rect(h, x, y, 320.0, 48.0);
+        d.el_mut(h).direct_text_rect = Some(Rect::from_xywh(x, y, 320.0, 48.0));
+        h
+    }
+
     #[test]
     fn radial_spotlight_and_oversized_h1() {
         let (mut d, body) = page();
@@ -1550,6 +1617,7 @@ mod tests {
             "radial-gradient(circle at 52% 38%, rgba(80, 111, 255, 0.26), transparent 44%)",
         );
         d.set_rect(sec, 0.0, 0.0, 800.0, 400.0);
+        heading_over(&mut d, sec, 40.0, 120.0);
         let hits = check_element_radial_spotlight_dom(&d, sec);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "radial-spotlight-glow");
@@ -1563,6 +1631,86 @@ mod tests {
         let hits = check_element_oversized_h1_dom(&d, h1);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.starts_with("96px h1, 56 chars, 38vh"), "{}", hits[0].snippet);
+    }
+
+    /// A glow layer on a dark page, as the sites that carry them build it: an
+    /// absolutely positioned div with one chromatic stop fading out.
+    fn dark_page_with_glow(gradient: &str) -> (FakeDom, ElId, ElId) {
+        let (mut d, body) = page();
+        d.set_style(body, "backgroundColor", "rgb(4, 12, 19)");
+        let section = d.add(Some(body), "section");
+        d.set_style(section, "backgroundColor", "rgba(0, 0, 0, 0)");
+        d.set_rect(section, 0.0, 0.0, 1280.0, 800.0);
+        let glow = d.add(Some(section), "div");
+        d.set_attr(glow, "class", "glow");
+        d.set_styles(
+            glow,
+            &[
+                ("position", "absolute"),
+                ("opacity", "1"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", gradient),
+            ],
+        );
+        d.set_rect(glow, 0.0, 0.0, 803.0, 502.0);
+        heading_over(&mut d, section, 60.0, 200.0);
+        (d, section, glow)
+    }
+
+    #[test]
+    fn radial_spotlight_needs_a_prominent_glow() {
+        // Bright enough against the dark ground, and text sits on it.
+        let (d, _, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)",
+        );
+        let hits = check_element_radial_spotlight_dom(&d, glow);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].id, "radial-spotlight-glow");
+
+        // The same hue at 0.10: a tonal shift in the ground, not a spotlight.
+        let (d, _, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(26, 189, 226, 0.10) 0%, transparent 70%)",
+        );
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+
+        // Pastel mint on a white page: declared strong, barely visible.
+        let (mut d, body) = page();
+        let hero = d.add(Some(body), "section");
+        d.set_styles(
+            hero,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                (
+                    "backgroundImage",
+                    "radial-gradient(circle, rgba(63, 227, 223, 0.20) 0%, transparent 65%)",
+                ),
+                ("opacity", "1"),
+            ],
+        );
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 900.0);
+        heading_over(&mut d, hero, 60.0, 200.0);
+        assert!(check_element_radial_spotlight_dom(&d, hero).is_empty());
+
+        // A bright stop the element's own opacity scales back to a wash.
+        let (mut d, _, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.38) 0%, transparent 70%)",
+        );
+        d.set_style(glow, "opacity", "0.35");
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+
+        // Nothing painted at all.
+        let (mut d, _, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)",
+        );
+        d.set_style(glow, "opacity", "0");
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+
+        // A bright glow with no copy over it is surface treatment.
+        let (mut d, _, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)",
+        );
+        d.set_rect(glow, 0.0, 2000.0, 803.0, 502.0);
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
     }
 
     #[test]

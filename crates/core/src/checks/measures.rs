@@ -29,14 +29,13 @@ macro_rules! re {
     };
 }
 
-/// JS: checks.mjs#checkRadialSpotlight. Pure gate; `label` is a stable
-/// identifier the fixture test keys on.
-pub fn check_radial_spotlight(input: &RadialSpotlightInput) -> Vec<Finding> {
-    let Some(stops) = parse_radial_gradient_stops(input.gradient_value) else {
-        return vec![];
-    };
+/// The chromatic stop a spotlight-glow declaration glows with, or `None` when
+/// the value is not one of those declarations: opaque at its far end, too
+/// many colors, too solid a center, or grayscale.
+pub fn radial_spotlight_stop(gradient_value: Option<&str>) -> Option<Rgba> {
+    let stops = parse_radial_gradient_stops(gradient_value)?;
     if stops.len() < 2 {
-        return vec![];
+        return None;
     }
     let last = &stops[stops.len() - 1];
     let last_alpha = if last.transparent {
@@ -45,34 +44,80 @@ pub fn check_radial_spotlight(input: &RadialSpotlightInput) -> Vec<Finding> {
         last.color.map(|c| c.alpha_or_one()).unwrap_or(1.0)
     };
     if last_alpha > 0.05 {
-        return vec![];
+        return None;
     }
     let colored: Vec<&GradientStop> = stops
         .iter()
         .filter(|s| !s.transparent && matches!(s.color, Some(c) if c.alpha_or_one() > 0.05))
         .collect();
     if colored.is_empty() {
-        return vec![];
+        return None;
     }
     if colored.len() > 2 {
-        return vec![];
+        return None;
     }
     if colored
         .iter()
         .any(|s| s.color.map(|c| c.alpha_or_one()).unwrap_or(1.0) >= 0.45)
     {
-        return vec![];
+        return None;
     }
-    let Some(chromatic) = colored
+    let chromatic = colored
         .iter()
-        .find(|s| color::has_chroma(s.color.as_ref(), Some(24.0)))
-    else {
+        .find(|s| color::has_chroma(s.color.as_ref(), Some(24.0)))?;
+    Some(chromatic.color.expect("colored stop has a color"))
+}
+
+/// The least effective alpha (the declared stop alpha times the element's
+/// opacity) a glow can carry and still read as a glow rather than as a tint
+/// of the ground beneath it. On a scan corpus of live sites the layers two
+/// judges read as decorative ground carried 0.05 to 0.14; the one a reviewer
+/// called harmful carried 0.16.
+pub const RADIAL_GLOW_MIN_EFFECTIVE_ALPHA: f64 = 0.14;
+
+/// The least contrast a glow's brightest point can have against the surface
+/// it paints on before it stops reading as a cloud floating over that
+/// surface. Same corpus: every wash the judges waved through measured 1.23 or
+/// less, the harmful one measured 1.33.
+pub const RADIAL_GLOW_MIN_CONTRAST: f64 = 1.30;
+
+/// Whether a declared spotlight glow is prominent enough to read as one: it
+/// survives its element's opacity, it lifts the surface it paints on, and it
+/// sits behind text rather than off on its own. A faint wash is a tonal shift
+/// in the ground, not the hero spotlight this rule names.
+pub fn radial_glow_is_prominent(stop: &Rgba, p: &RadialGlowProminence) -> bool {
+    if !p.behind_text {
+        return false;
+    }
+    let opacity = if p.opacity.is_finite() {
+        p.opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let effective = stop.alpha_or_one() * opacity;
+    if effective < RADIAL_GLOW_MIN_EFFECTIVE_ALPHA {
+        return false;
+    }
+    // An unresolved backdrop (an image, a stack the cascade cannot read) is
+    // no evidence of a bright glow, so the rule stays silent on it.
+    let Some(backdrop) = p.backdrop else {
+        return false;
+    };
+    let peak = color::composite_color_over(&Rgba::new(stop.r, stop.g, stop.b, effective), &backdrop);
+    color::contrast_ratio(&peak, &backdrop) >= RADIAL_GLOW_MIN_CONTRAST
+}
+
+/// JS: checks.mjs#checkRadialSpotlight. Pure gate over the declaration; the
+/// element adapters gate its hit on [`radial_glow_is_prominent`], which needs
+/// measurements this signature does not carry. `label` is a stable identifier
+/// the fixture test keys on.
+pub fn check_radial_spotlight(input: &RadialSpotlightInput) -> Vec<Finding> {
+    let Some(cc) = radial_spotlight_stop(input.gradient_value) else {
         return vec![];
     };
     if !(input.width >= 240.0 && input.height >= 160.0) {
         return vec![];
     }
-    let cc = chromatic.color.expect("colored stop has a color");
     let alpha = to_fixed(cc.alpha_or_one(), 2);
     let name = match input.label {
         Some(l) if !l.is_empty() => l,

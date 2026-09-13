@@ -7,8 +7,8 @@
   /* jsdom / static-html engine does no layout: every case declares explicit
      pixel width + height so the size gate can read them. The rule also asks
      how prominent the glow is, so every case declares the surface under it
-     (the column background), its own opacity, and carries the copy it sits
-     behind. */
+     and its own opacity, and every glow meant to flag carries the copy it
+     sits behind. */
   body { margin: 0; background-color: #0b0d13; color: #e6e6e6; }
   .grid { display: flex; flex-wrap: wrap; gap: 24px; padding: 24px; }
   .col { width: 940px; }
@@ -75,6 +75,28 @@
   .flag-bright-second-stop {
     width: 640px; height: 400px;
     background-image: radial-gradient(circle, rgba(20,20,90,0.30) 0%, rgba(120,220,255,0.40) 45%, transparent 75%);
+  }
+  /* A pale highlight core over a saturated ring: the ring is the glow, and a
+     faint core declared first must not mask it. */
+  .flag-pale-core {
+    width: 900px; height: 600px;
+    background-image: radial-gradient(circle, rgba(255,228,186,0.08) 0%, rgba(255,90,0,0.40) 45%, transparent 75%);
+  }
+  /* .flag-two-stop-rose with its stops the other way round. */
+  .flag-weak-stop-first {
+    width: 640px; height: 400px;
+    background-image: radial-gradient(circle, rgba(255,90,120,0.12) 0%, rgba(255,90,120,0.28) 45%, transparent 75%);
+  }
+  /* A hero carrying a translucent fade of its own: the fade is composited
+     over the ground beneath it and the glow is measured against that. */
+  .flag-fade-host {
+    position: relative; width: 900px; height: 600px;
+    background-image: linear-gradient(180deg, rgba(20,26,43,0.6), transparent);
+  }
+  .flag-fade-glow {
+    position: absolute; top: 0; left: 0;
+    width: 900px; height: 600px;
+    background-image: radial-gradient(circle, rgba(139,92,246,0.42), transparent 70%);
   }
 
   /* ───────── SHOULD PASS: faint washes, scaled-down layers, bare surfaces,
@@ -174,7 +196,28 @@
     position: absolute; top: 0; left: 0;
     width: 860px; height: 560px;
     background-image: radial-gradient(circle, rgba(139,92,246,0.10), transparent 70%);
+  }  /* A white section whose hero carries a faint decorative fade: the fade
+     is measured, not read as a wall that switches the contrast test off, so
+     the pastel wash stays as silent as .pass-pastel-on-white. */
+  .pass-faint-layer-ground { background-color: #ffffff; color: #101010; padding: 24px; }
+  .pass-faint-layer-host {
+    position: relative; width: 860px; height: 560px;
+    background-image: radial-gradient(circle at 50% 0%, rgba(0,0,0,0.04), transparent 70%);
   }
+  .pass-faint-layer-glow {
+    position: absolute; top: 0; left: 0;
+    width: 860px; height: 560px;
+    background-image: radial-gradient(circle, rgba(63,227,223,0.20), transparent 65%);
+  }
+  /* A pastel glow stacked over its panel's own pale gradient: that gradient
+     is the surface, not the dark page beneath the panel. */
+  .pass-own-pale-layer {
+    width: 860px; height: 560px; color: #101010;
+    background-image: radial-gradient(circle, rgba(63,227,223,0.20), transparent 65%), linear-gradient(180deg, #ecf4f8, #ffffff);
+  }
+  /* The static engine's contrast read cannot see the pale layer, so the copy
+     sits on a white chip of its own. */
+  .pass-own-pale-layer h3 { background-color: #ffffff; }
 </style>
 </head>
 <body>
@@ -195,6 +238,11 @@
         <div class="flag-photo-glow" data-name="Glow Over Photo Hero"></div>
       </div>
       <div class="case flag-bright-second-stop" data-name="Bright Second Stop"><h3>Second stop headline</h3></div>
+      <div class="case flag-pale-core" data-name="Saturated Ring Under Pale Core"><h3>Pale core headline</h3></div>
+      <div class="case flag-weak-stop-first" data-name="Weak Stop Declared First"><h3>Weak stop first headline</h3></div>
+      <div class="flag-fade-host"><h3>Faded hero headline</h3>
+        <div class="flag-fade-glow" data-name="Glow Under A Dark Fade"></div>
+      </div>
     </div>
 
     <!-- should-pass column -->
@@ -219,6 +267,12 @@
       <div class="pass-photo-wash-host"><h3>Photo wash headline</h3>
         <div class="pass-photo-wash-glow" data-name="Wash Over Photo Hero"></div>
       </div>
+      <div class="pass-faint-layer-ground">
+        <div class="pass-faint-layer-host"><h3>Faint layer headline</h3>
+          <div class="pass-faint-layer-glow" data-name="Pastel Under A Faint Layer"></div>
+        </div>
+      </div>
+      <div class="pass-own-pale-layer" data-name="Pastel Over Its Own Pale Layer"><h3>Own pale layer headline</h3></div>
     </div>
   </main>
 </body>

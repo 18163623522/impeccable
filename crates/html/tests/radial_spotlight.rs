@@ -5,7 +5,7 @@
 use impeccable_html::{detect_html_source, DetectHtmlOptions};
 use std::path::Path;
 
-fn glow_hits(body_css: &str, body_html: &str) -> usize {
+fn glow_snippets(body_css: &str, body_html: &str) -> Vec<String> {
     let html = format!(
         "<!DOCTYPE html><html><head><style>{body_css}</style></head><body>{body_html}</body></html>"
     );
@@ -13,7 +13,12 @@ fn glow_hits(body_css: &str, body_html: &str) -> usize {
     detect_html_source(&html, Path::new("/nonexistent/dir/x.html"), &opts)
         .into_iter()
         .filter(|f| f.antipattern == "radial-spotlight-glow")
-        .count()
+        .map(|f| f.snippet)
+        .collect()
+}
+
+fn glow_hits(body_css: &str, body_html: &str) -> usize {
+    glow_snippets(body_css, body_html).len()
 }
 
 const DARK: &str = "body { background-color: #0b0d13; } \
@@ -160,4 +165,66 @@ fn the_brightest_stop_decides_whichever_way_round_it_is_declared() {
     let body = "<div class=\"glow\"><h2>Headline</h2></div>";
     assert_eq!(glow_hits(&bright_first, body), 1);
     assert_eq!(glow_hits(&bright_second, body), 1);
+}
+
+#[test]
+fn a_pale_core_does_not_mask_the_saturated_ring() {
+    let css = format!(
+        "{DARK} .glow {{ background-image: radial-gradient(circle, rgba(255,228,186,0.08) 0%, rgba(255,90,0,0.40) 45%, transparent 75%); }}"
+    );
+    let snippets = glow_snippets(&css, "<div class=\"glow\"><h2>Headline</h2></div>");
+    assert_eq!(snippets.len(), 1);
+    assert!(snippets[0].contains("#ff5a00 a0.40"), "{}", snippets[0]);
+}
+
+#[test]
+fn the_same_hue_flags_whichever_stop_is_declared_first() {
+    for stops in [
+        "rgba(255,90,120,0.28) 0%, rgba(255,90,120,0.12) 45%",
+        "rgba(255,90,120,0.12) 0%, rgba(255,90,120,0.28) 45%",
+    ] {
+        let css = format!(
+            "{DARK} .glow {{ background-image: radial-gradient(circle, {stops}, transparent 75%); }}"
+        );
+        let snippets = glow_snippets(&css, "<div class=\"glow\"><h2>Headline</h2></div>");
+        assert_eq!(snippets.len(), 1, "{stops}");
+        assert!(snippets[0].contains("#ff5a78 a0.28"), "{}", snippets[0]);
+    }
+}
+
+#[test]
+fn a_faint_decorative_layer_above_the_glow_is_measured_not_skipped() {
+    // The pastel-on-white wash stays silent with a faint fade in its hero, as
+    // it does without one.
+    let css = "body { background-color: #ffffff; } \
+        .host { position: relative; \
+        background-image: radial-gradient(circle at 50% 0%, rgba(0,0,0,0.04), transparent 70%); } \
+        .bare { position: relative; } \
+        .glow { position: absolute; width: 900px; height: 600px; \
+        background-image: radial-gradient(circle, rgba(63,227,223,0.20), transparent 65%); }";
+    let html = "<section class=\"host\"><h1>Headline</h1><div class=\"glow\"></div></section>\
+        <section class=\"bare\"><h1>Headline</h1><div class=\"glow\"></div></section>";
+    assert_eq!(glow_hits(css, html), 0);
+
+    // A dark translucent fade over a dark page keeps the ground dark, and a
+    // bright glow in it still flags.
+    let dark = "body { background-color: #0b0d13; } \
+        .host { position: relative; background-image: linear-gradient(180deg, rgba(20,26,43,0.6), transparent); } \
+        .glow { position: absolute; width: 900px; height: 600px; \
+        background-image: radial-gradient(circle, rgba(139,92,246,0.42), transparent 70%); }";
+    assert_eq!(
+        glow_hits(
+            dark,
+            "<section class=\"host\"><h1>Headline</h1><div class=\"glow\"></div></section>"
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_glow_reads_the_layers_beneath_it_in_its_own_value() {
+    let css = format!(
+        "{DARK} .glow {{ background-color: #0b0d13; background-image: radial-gradient(circle, rgba(63,227,223,0.20), transparent 65%), linear-gradient(180deg, #ecf4f8, #ffffff); }}"
+    );
+    assert_eq!(glow_hits(&css, "<div class=\"glow\"><h2>Headline</h2></div>"), 0);
 }

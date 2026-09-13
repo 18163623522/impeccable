@@ -195,3 +195,38 @@ low-opacity, which describes what the old declaration test matched rather than
 what now fires, so it names the brightness instead.
 
 - `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+
+## Recorded 2026-09-13: radial-spotlight-glow measures every stop and every layer
+
+Review of the prominence gate found two ways it went silent on glows it
+exists to catch.
+
+The gate measured one stop, the brightest by luminance, with its alpha
+ignored. A pale highlight core (`rgba(255,228,186,0.08)`) over a saturated
+ring (`rgba(255,90,0,0.40)`) measured the core, failed, and hid the ring. The
+same hue at two alphas flagged or not depending on which alpha was declared
+first. The adapters now test every chromatic stop, and the finding names the
+stop that passed with the most contrast. The pure `checkRadialSpotlight`
+snippet still names the first chromatic stop, so the frozen call vectors
+replay unchanged.
+
+A translucent gradient anywhere in the backdrop, including a faint fade to
+`transparent`, made the surface unreadable, which switched the contrast test
+off, so a pastel wash in a hero with a decorative fade flagged. Translucent
+gradient layers are now composited, as the alpha-weighted mean of their stops,
+over whatever resolves beneath them. Only an image that shows through still
+skips the test. The glow element's own layers beneath the glow count as the
+surface too.
+
+The fixture gains three should-flag cases (Saturated Ring Under Pale Core,
+Weak Stop Declared First, Glow Under A Dark Fade) and two should-pass cases
+(Pastel Under A Faint Layer, Pastel Over Its Own Pale Layer). That takes it
+from 8 flag / 16 pass to 11 flag / 18 pass. The two new pass cases would have
+flagged under the previous revision: the first because the fade made the
+surface unreadable, the second because the dark page was measured instead of
+the element's own pale lower layer. Every golden change is one of the three
+new findings: the fixture goes from 9 findings to 12, `detect-dir-json-all-fixtures`
+from 439 to 442, and `detect-dir-quiet-all-fixtures` and `detect-no-advisory-json`
+from 422 to 425.
+
+- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.

@@ -506,7 +506,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         scopes: Some(&["type"]),
         severity: None,
         name: "All-caps body text",
-        description: "Long passages in uppercase are hard to read. We recognize words by shape (ascenders and descenders), which all-caps removes. Reserve uppercase for short labels and headings.",
+        description: "Long passages in uppercase are hard to read. We recognize words by shape (ascenders and descenders), which all-caps removes. Reserve uppercase for short labels and headings. Only a run that reads as a sentence counts: it has to wrap to a second rendered line, or run past 80 characters. Single-line buttons, nav items, kickers and eyebrows set in caps are a convention and stay silent.",
         skill_section: Some("Typography"),
         skill_guideline: Some("long body passages in uppercase"),
     },

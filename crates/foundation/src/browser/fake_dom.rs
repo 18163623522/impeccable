@@ -158,6 +158,12 @@ impl FakeDom {
         self.el_mut(id).rect = Rect::from_xywh(x, y, w, h);
         self
     }
+    /// The rect of `id`'s own text nodes, as `Range.getBoundingClientRect`
+    /// reports it: unset by default, like an element with no direct text.
+    pub fn set_direct_text_rect(&mut self, id: ElId, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
+        self.el_mut(id).direct_text_rect = Some(Rect::from_xywh(x, y, w, h));
+        self
+    }
     pub fn add_text(&mut self, id: ElId, text: &str) -> &mut Self {
         self.el_mut(id)
             .child_nodes

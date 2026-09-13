@@ -164,3 +164,21 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: `all-caps-body` needs a wrapped or 80-character run
+
+Judged against real sites, every `all-caps-body` hit on the corpus was a short
+single-line label: a card CTA, a section kicker, an eyebrow, a diagram legend,
+a footer copyright line. Both judges called all 26 representatives harmless,
+and none of the 109 findings across 14 sites was a caps paragraph. Uppercase
+on a run the reader takes in as a shape costs nothing; the rule now fires only
+when the run reads as a sentence, meaning its own text wrapped to a second
+rendered line (direct text rect over line height) or it runs past 80
+characters. The static engine has no layout, so length is its whole test.
+
+- `detect-fixture-json-hero-eyebrow-chip-html`, `detect-fixture-text-hero-eyebrow-chip-html`: the 46-char uppercase table-of-contents label no longer flags. Its `hero-eyebrow-chip` finding is unchanged.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: sixteen overlay captions of 31-52 characters no longer flag.
+- `detect-fixture-json-text-occlusion-html`, `detect-fixture-text-text-occlusion-html`: the 32-char kicker no longer flags; `kicker-above-heading` still owns it.
+- `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: the 285-char and 159-char caps paragraphs still flag; only the rule description moved.
+- `detect-fixture-json-all-caps-body-html`, `detect-fixture-text-all-caps-body-html`: new fixture, three caps paragraphs flagged and five short caps labels silent.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep loses those eighteen findings and gains the new fixture's three (419 to 404).

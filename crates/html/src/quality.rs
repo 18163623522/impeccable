@@ -12,7 +12,9 @@ use impeccable_core::checks::measures::{
     colors_nearly_match, css_color_is_transparent, resolve_length_px,
 };
 use impeccable_core::checks::rules::RuleHit;
-use impeccable_core::checks::text_rules::{NON_RENDERED_TAGS, SR_ONLY_SELECTOR};
+use impeccable_core::checks::text_rules::{
+    ALL_CAPS_LONG_RUN, NON_RENDERED_TAGS, SR_ONLY_SELECTOR,
+};
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -458,8 +460,12 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- All-caps body text ---
+    // Uppercase on a short single-line run is a convention, not a defect: a
+    // button, a nav item, a kicker or an eyebrow is taken in as a shape. The
+    // browser adapter also flags a run that wrapped to a second line; with no
+    // layout here, length is the whole test.
     if q.has_direct_text
-        && text_len > 30
+        && text_len >= ALL_CAPS_LONG_RUN
         && sv_opt(style, "textTransform") == Some("uppercase")
         && !is_heading
     {

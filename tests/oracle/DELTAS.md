@@ -168,12 +168,30 @@ CLI 4.0.0 release; it is what the binary prints when run directly.
 ## Recorded 2026-09-12: the radial-spotlight-glow fixture states its surfaces
 
 `radial-spotlight-glow` now asks how prominent a declared glow is: bright
-against the surface it paints on, not scaled away by the element's opacity,
-and behind copy. The fixture had to declare those things, so every case gained
-a ground color and a heading, and the hex-alpha case moved from `#506fff3d`
-(alpha 0.24, a hair over the contrast line against the fixture's ground) to
-`#506fff66` (alpha 0.40), so the case keeps testing 8-digit hex parsing rather
-than the threshold. The same five cases flag and the same nine pass; the only
-byte that moves in each golden is that alpha.
+against the surface it paints on (a contrast of 1.30 between the glow's peak
+and that surface), not scaled away by the element's opacity (an effective
+alpha of 0.14), and behind copy. The fixture had to declare those things, so
+every case gained a ground color and a heading.
 
-- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+Three changes show up in the goldens.
+
+The hex-alpha case moved from `#506fff3d` to `#506fff66`. It was testing
+8-digit hex parsing, and at alpha 0.24 that blue no longer clears the contrast
+line against the fixture's `#0b0d13` ground, so it would have been testing the
+threshold instead. Alpha 0.40 keeps it on the parser. The pair pins the rule's
+practical firing floor for a mid blue on a near-black ground between 0.24 and
+0.26, which is where `.flag-hero-blue` (alpha 0.26) sits.
+
+Three should-flag cases are new, one per gap the review found: a glow over a
+hero painted with a gradient, a glow over a hero painted with a photograph,
+and a two-stop glow with the bright stop declared second. Two should-pass
+cases are new for the same gates: a pale gradient hero that swallows its glow,
+and a wash over a photograph. That takes the fixture from 5 flag / 14 pass to
+8 flag / 16 pass, and `detect-dir-quiet-all-fixtures` from 419 findings to
+422.
+
+The registry description changed. It opened by calling the gradient soft and
+low-opacity, which describes what the old declaration test matched rather than
+what now fires, so it names the brightness instead.
+
+- `detect-fixture-json-radial-spotlight-glow-html`, `detect-fixture-text-radial-spotlight-glow-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`.

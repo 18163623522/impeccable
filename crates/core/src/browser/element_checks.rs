@@ -875,17 +875,35 @@ fn glow_behind_text(dom: &dyn Dom, rect: &Rect) -> bool {
         })
 }
 
+/// The nearest ancestor surface painted by a gradient, read as the mean of
+/// its stops. `resolveBackground` answers a flat color and gives up at the
+/// first gradient, and a hero painted with a gradient is the commonest place
+/// to find a glow, so the walk continues here.
+fn gradient_backdrop(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        match measures::backdrop_layer(Some(&dom.style(c, "backgroundImage"))) {
+            measures::BackdropLayer::Color(color) => return Some(color),
+            measures::BackdropLayer::Unreadable => return None,
+            measures::BackdropLayer::Absent => {}
+        }
+        cur = dom.parent(c);
+    }
+    None
+}
+
 /// The surface a glow paints on: the element's own background color where it
 /// has one (the gradient is painted over it), otherwise what shows through
 /// from underneath.
 fn glow_backdrop(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
     let base = dom.parent(el).unwrap_or(el);
+    let under =
+        || super::background::resolve_background(dom, base).or_else(|| gradient_backdrop(dom, base));
     let own = read_own_background_color(dom, el).filter(|c| c.alpha_or_one() > 0.01);
     match own {
         Some(c) if c.alpha_or_one() >= 0.99 => Some(c),
-        Some(c) => super::background::resolve_background(dom, base)
-            .map(|under| crate::color::composite_color_over(&c, &under)),
-        None => super::background::resolve_background(dom, base),
+        Some(c) => under().map(|u| crate::color::composite_color_over(&c, &u)),
+        None => under(),
     }
 }
 
@@ -912,9 +930,8 @@ pub fn check_element_radial_spotlight_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHi
     let prominence = measures::RadialGlowProminence {
         opacity: effective_opacity_dom(dom, el),
         backdrop: glow_backdrop(dom, el),
-        behind_text: glow_behind_text(dom, &rect),
     };
-    if !measures::radial_glow_is_prominent(&stop, &prominence) {
+    if !measures::radial_glow_is_prominent(&stop, &prominence, || glow_behind_text(dom, &rect)) {
         return Vec::new();
     }
     hits
@@ -1711,6 +1728,80 @@ mod tests {
         );
         d.set_rect(glow, 0.0, 2000.0, 803.0, 502.0);
         assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+    }
+
+    #[test]
+    fn radial_spotlight_measures_a_hero_painted_with_a_gradient() {
+        // The commonest way to build this pattern: a glow layer over a hero
+        // whose own background is a gradient. The cascade cannot name one
+        // color for it, so the mean of the gradient's stops is the surface.
+        let bright = "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)";
+        let (mut d, section, glow) = dark_page_with_glow(bright);
+        d.set_style(
+            section,
+            "backgroundImage",
+            "linear-gradient(180deg, rgb(11, 13, 19), rgb(20, 26, 43))",
+        );
+        assert_eq!(check_element_radial_spotlight_dom(&d, glow).len(), 1);
+
+        // The same hero, the same glow at a wash's alpha: still silent.
+        let (mut d, section, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(26, 189, 226, 0.10) 0%, transparent 70%)",
+        );
+        d.set_style(
+            section,
+            "backgroundImage",
+            "linear-gradient(180deg, rgb(11, 13, 19), rgb(20, 26, 43))",
+        );
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+
+        // A gradient hero pale enough to swallow the glow.
+        let (mut d, section, glow) = dark_page_with_glow(bright);
+        d.set_style(
+            section,
+            "backgroundImage",
+            "linear-gradient(180deg, rgb(236, 244, 248), rgb(255, 255, 255))",
+        );
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+    }
+
+    #[test]
+    fn radial_spotlight_over_a_photograph_falls_back_to_alpha_and_copy() {
+        // No cascade can say what a photo looks like under the glow, so the
+        // contrast test drops out and the other two decide.
+        let (mut d, section, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)",
+        );
+        d.set_style(section, "backgroundImage", "url(\"/hero.jpg\")");
+        assert_eq!(check_element_radial_spotlight_dom(&d, glow).len(), 1);
+
+        // A wash over the same photo is still a wash.
+        let (mut d, section, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(26, 189, 226, 0.10) 0%, transparent 70%)",
+        );
+        d.set_style(section, "backgroundImage", "url(\"/hero.jpg\")");
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+
+        // And one with no copy over it is surface treatment, photo or not.
+        let (mut d, section, glow) = dark_page_with_glow(
+            "radial-gradient(circle, rgba(0, 209, 239, 0.16) 0%, transparent 70%)",
+        );
+        d.set_style(section, "backgroundImage", "url(\"/hero.jpg\")");
+        d.set_rect(glow, 0.0, 2000.0, 803.0, 502.0);
+        assert!(check_element_radial_spotlight_dom(&d, glow).is_empty());
+    }
+
+    #[test]
+    fn radial_spotlight_does_not_depend_on_stop_order() {
+        let bright_first = "radial-gradient(circle, rgba(120, 220, 255, 0.40) 0%, rgba(20, 20, 90, 0.30) 45%, transparent 75%)";
+        let bright_second = "radial-gradient(circle, rgba(20, 20, 90, 0.30) 0%, rgba(120, 220, 255, 0.40) 45%, transparent 75%)";
+        let (d, _, glow) = dark_page_with_glow(bright_first);
+        let first = check_element_radial_spotlight_dom(&d, glow);
+        let (d, _, glow) = dark_page_with_glow(bright_second);
+        let second = check_element_radial_spotlight_dom(&d, glow);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert_eq!(first[0].snippet, second[0].snippet);
+        assert!(first[0].snippet.contains("#78dcff"), "{}", first[0].snippet);
     }
 
     #[test]

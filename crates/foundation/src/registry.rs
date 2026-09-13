@@ -206,7 +206,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         scopes: None,
         severity: None,
         name: "Decorative radial spotlight glow",
-        description: "A soft, low-opacity accent-colored radial gradient fading to transparent, dropped behind a hero or section as a \"spotlight.\" It is a reflex AI decoration — the translucent cousin of the saturated radial halo. Let the surface stand on its own, or light the composition with a deliberate material accent rather than a floating colored haze.",
+        description: "An accent-colored radial gradient fading to transparent, dropped behind a hero or section as a \"spotlight\" and bright enough against that surface to read as a cloud floating over the copy. It is a reflex AI decoration — the translucent cousin of the saturated radial halo. Let the surface stand on its own, or light the composition with a deliberate material accent rather than a floating colored haze.",
         skill_section: Some("Color & Contrast"),
         skill_guideline: Some("dark mode with glowing accents"),
     },

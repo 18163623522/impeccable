@@ -62,10 +62,81 @@ pub fn radial_spotlight_stop(gradient_value: Option<&str>) -> Option<Rgba> {
     {
         return None;
     }
-    let chromatic = colored
+    // The stop the glow reads as is its brightest chromatic one, not the first
+    // one declared: two gradients that paint the same cloud may list their
+    // stops either way round. Ties keep declaration order.
+    let mut brightest: Option<Rgba> = None;
+    let mut brightest_luminance = f64::NEG_INFINITY;
+    for s in colored
         .iter()
-        .find(|s| color::has_chroma(s.color.as_ref(), Some(24.0)))?;
-    Some(chromatic.color.expect("colored stop has a color"))
+        .filter(|s| color::has_chroma(s.color.as_ref(), Some(24.0)))
+    {
+        let c = s.color.expect("colored stop has a color");
+        let l = color::relative_luminance(&c);
+        if l > brightest_luminance {
+            brightest_luminance = l;
+            brightest = Some(c);
+        }
+    }
+    brightest
+}
+
+/// What an element's `background-image` offers as a surface a glow could be
+/// measured against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BackdropLayer {
+    /// Nothing is painted here; the surface is further up the tree.
+    Absent,
+    /// Something is painted, but no one color names it: a photo, or a
+    /// gradient carrying a translucent or unreadable stop.
+    Unreadable,
+    /// The mean color of an opaque gradient.
+    Color(Rgba),
+}
+
+/// Read the top paint layer of a `background-image` value as the surface a
+/// glow over it sits on. A hero that paints itself with a flat color is what
+/// `resolveBackground` already answers; this is the other common case, a hero
+/// painted with a gradient, which names no single color until its stops are
+/// averaged.
+pub fn backdrop_layer(background_image: Option<&str>) -> BackdropLayer {
+    let Some(raw) = background_image else {
+        return BackdropLayer::Absent;
+    };
+    let value = js::trim(raw);
+    if value.is_empty() {
+        return BackdropLayer::Absent;
+    }
+    let mut top: Option<String> = None;
+    for layer in color::split_top_level_commas(value) {
+        let lower = js::to_lower_case(&layer);
+        if lower.contains("url(") || lower.contains("gradient(") {
+            top = Some(layer);
+            break;
+        }
+    }
+    let Some(layer) = top else {
+        return BackdropLayer::Absent;
+    };
+    let lower = js::to_lower_case(&layer);
+    if lower.contains("url(") {
+        return BackdropLayer::Unreadable;
+    }
+    // A `transparent` stop lets the surface under this one through, and
+    // `parseGradientColors` does not report it, so the layer is only opaque
+    // when no stop names it.
+    if lower.contains("transparent") {
+        return BackdropLayer::Unreadable;
+    }
+    let stops = color::parse_gradient_colors(Some(&layer));
+    if stops.is_empty() || stops.iter().any(|c| c.alpha_or_one() < 0.99) {
+        return BackdropLayer::Unreadable;
+    }
+    let n = stops.len() as f64;
+    let sum = stops.iter().fold((0.0, 0.0, 0.0), |acc, c| {
+        (acc.0 + c.r, acc.1 + c.g, acc.2 + c.b)
+    });
+    BackdropLayer::Color(Rgba::new(sum.0 / n, sum.1 / n, sum.2 / n, 1.0))
 }
 
 /// The least effective alpha (the declared stop alpha times the element's
@@ -85,10 +156,22 @@ pub const RADIAL_GLOW_MIN_CONTRAST: f64 = 1.30;
 /// survives its element's opacity, it lifts the surface it paints on, and it
 /// sits behind text rather than off on its own. A faint wash is a tonal shift
 /// in the ground, not the hero spotlight this rule names.
-pub fn radial_glow_is_prominent(stop: &Rgba, p: &RadialGlowProminence) -> bool {
-    if !p.behind_text {
-        return false;
-    }
+///
+/// `behind_text` is a closure because answering it costs a walk of the
+/// document's elements, and in the browser a forced layout per element; the
+/// two measurements the caller hands over are an ancestor walk each. The
+/// tests run in the order written, cheapest first, so a wash that fails on
+/// alpha never pays for the walk.
+///
+/// A backdrop of `None` is a surface no cascade can name (a photograph, an
+/// unreadable stack). The contrast test is skipped rather than failed: the
+/// glow still has to carry its alpha and sit behind copy, and silencing every
+/// glow over a photo would drop the pattern's own hero case.
+pub fn radial_glow_is_prominent(
+    stop: &Rgba,
+    p: &RadialGlowProminence,
+    behind_text: impl FnOnce() -> bool,
+) -> bool {
     let opacity = if p.opacity.is_finite() {
         p.opacity.clamp(0.0, 1.0)
     } else {
@@ -98,19 +181,22 @@ pub fn radial_glow_is_prominent(stop: &Rgba, p: &RadialGlowProminence) -> bool {
     if effective < RADIAL_GLOW_MIN_EFFECTIVE_ALPHA {
         return false;
     }
-    // An unresolved backdrop (an image, a stack the cascade cannot read) is
-    // no evidence of a bright glow, so the rule stays silent on it.
-    let Some(backdrop) = p.backdrop else {
-        return false;
-    };
-    let peak = color::composite_color_over(&Rgba::new(stop.r, stop.g, stop.b, effective), &backdrop);
-    color::contrast_ratio(&peak, &backdrop) >= RADIAL_GLOW_MIN_CONTRAST
+    if let Some(backdrop) = p.backdrop {
+        let peak =
+            color::composite_color_over(&Rgba::new(stop.r, stop.g, stop.b, effective), &backdrop);
+        if color::contrast_ratio(&peak, &backdrop) < RADIAL_GLOW_MIN_CONTRAST {
+            return false;
+        }
+    }
+    behind_text()
 }
 
 /// JS: checks.mjs#checkRadialSpotlight. Pure gate over the declaration; the
 /// element adapters gate its hit on [`radial_glow_is_prominent`], which needs
-/// measurements this signature does not carry. `label` is a stable identifier
-/// the fixture test keys on.
+/// measurements this signature does not carry. A caller reaching this through
+/// the pure wasm export therefore gets the declaration test alone and owes
+/// itself the prominence gate. `label` is a stable identifier the fixture test
+/// keys on.
 pub fn check_radial_spotlight(input: &RadialSpotlightInput) -> Vec<Finding> {
     let Some(cc) = radial_spotlight_stop(input.gradient_value) else {
         return vec![];
@@ -363,6 +449,110 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    fn stop_hex(gradient: &str) -> Option<String> {
+        radial_spotlight_stop(Some(gradient)).map(|c| color::color_to_hex(Some(&c)))
+    }
+
+    #[test]
+    fn radial_spotlight_stop_takes_the_brightest_chromatic_stop() {
+        // Two colored stops, either way round: the bright one names the glow.
+        let bright_first =
+            "radial-gradient(circle, rgba(120,220,255,0.40) 0%, rgba(20,20,90,0.30) 45%, transparent 75%)";
+        let bright_second =
+            "radial-gradient(circle, rgba(20,20,90,0.30) 0%, rgba(120,220,255,0.40) 45%, transparent 75%)";
+        assert_eq!(stop_hex(bright_first).as_deref(), Some("#78dcff"));
+        assert_eq!(stop_hex(bright_second).as_deref(), Some("#78dcff"));
+
+        // Equal luminance keeps declaration order, which is what the frozen
+        // vectors of the same hue at two alphas recorded.
+        let same_hue =
+            "radial-gradient(circle,rgba(255,90,120,0.28) 0%,rgba(255,90,120,0.12) 45%,transparent 75%)";
+        assert_eq!(stop_hex(same_hue).as_deref(), Some("#ff5a78"));
+
+        // Grayscale stops are not a glow at all.
+        assert_eq!(
+            stop_hex("radial-gradient(circle, rgba(200,200,200,0.30), transparent 70%)"),
+            None
+        );
+    }
+
+    #[test]
+    fn backdrop_layer_reads_an_opaque_gradient_as_its_mean() {
+        assert_eq!(backdrop_layer(None), BackdropLayer::Absent);
+        assert_eq!(backdrop_layer(Some("none")), BackdropLayer::Absent);
+        assert_eq!(
+            backdrop_layer(Some("linear-gradient(180deg, #000000, #202020)")),
+            BackdropLayer::Color(Rgba::new(16.0, 16.0, 16.0, 1.0))
+        );
+        // A photograph names no color, and neither does a gradient that lets
+        // the surface under it through.
+        assert_eq!(
+            backdrop_layer(Some("url(\"/hero.jpg\")")),
+            BackdropLayer::Unreadable
+        );
+        assert_eq!(
+            backdrop_layer(Some("linear-gradient(180deg, #000000, transparent)")),
+            BackdropLayer::Unreadable
+        );
+        assert_eq!(
+            backdrop_layer(Some(
+                "linear-gradient(180deg, rgba(0,0,0,0.4), rgba(32,32,32,0.4))"
+            )),
+            BackdropLayer::Unreadable
+        );
+        // The top paint layer decides; a gradient under a photo does not.
+        assert_eq!(
+            backdrop_layer(Some("url(/hero.jpg), linear-gradient(#000000, #202020)")),
+            BackdropLayer::Unreadable
+        );
+    }
+
+    #[test]
+    fn radial_glow_is_prominent_orders_its_tests() {
+        let stop = Rgba::new(0.0, 209.0, 239.0, 0.16);
+        let dark = Rgba::new(4.0, 12.0, 19.0, 1.0);
+        let lit = RadialGlowProminence {
+            opacity: 1.0,
+            backdrop: Some(dark),
+        };
+        assert!(radial_glow_is_prominent(&stop, &lit, || true));
+        assert!(!radial_glow_is_prominent(&stop, &lit, || false));
+
+        // A wash fails on alpha without ever asking about copy.
+        let wash = Rgba::new(26.0, 189.0, 226.0, 0.10);
+        assert!(!radial_glow_is_prominent(&wash, &lit, || {
+            panic!("alpha is cheaper than the text walk and is tested first")
+        }));
+
+        // So does a bright stop an ancestor's opacity scales away.
+        let scaled = RadialGlowProminence {
+            opacity: 0.35,
+            backdrop: Some(dark),
+        };
+        let bright = Rgba::new(0.0, 209.0, 239.0, 0.38);
+        assert!(!radial_glow_is_prominent(&bright, &scaled, || {
+            panic!("opacity is cheaper than the text walk and is tested first")
+        }));
+
+        // A surface no cascade can name skips the contrast test rather than
+        // failing it: the alpha and the copy still have to carry the glow.
+        let unnamed = RadialGlowProminence {
+            opacity: 1.0,
+            backdrop: None,
+        };
+        assert!(radial_glow_is_prominent(&stop, &unnamed, || true));
+        assert!(!radial_glow_is_prominent(&stop, &unnamed, || false));
+        assert!(!radial_glow_is_prominent(&wash, &unnamed, || true));
+
+        // A pastel on white is declared strong and reads as nothing.
+        let white = RadialGlowProminence {
+            opacity: 1.0,
+            backdrop: Some(Rgba::new(255.0, 255.0, 255.0, 1.0)),
+        };
+        let pastel = Rgba::new(63.0, 227.0, 223.0, 0.20);
+        assert!(!radial_glow_is_prominent(&pastel, &white, || true));
     }
 
     // Expected values below were produced by running the JS functions in Node.

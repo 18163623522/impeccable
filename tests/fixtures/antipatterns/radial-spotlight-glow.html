@@ -47,6 +47,35 @@
     width: 700px; height: 460px;
     background-image: radial-gradient(circle, #506fff66, transparent 50%);
   }
+  /* The commonest build of the pattern: a glow layer over a hero whose own
+     background is a gradient, so no one color names the surface until its
+     stops are averaged. */
+  .flag-gradient-host {
+    position: relative; width: 900px; height: 600px;
+    background-image: linear-gradient(180deg, #0b0d13, #141a2b);
+  }
+  .flag-gradient-glow {
+    position: absolute; top: 0; left: 0;
+    width: 900px; height: 600px;
+    background-image: radial-gradient(circle, rgba(139,92,246,0.42), transparent 70%);
+  }
+  /* The same layer over a photographic hero: nothing can say what the surface
+     under it looks like, so the alpha and the copy decide. */
+  .flag-photo-host {
+    position: relative; width: 900px; height: 600px;
+    background-image: url('hero-photo.jpg');
+  }
+  .flag-photo-glow {
+    position: absolute; top: 0; left: 0;
+    width: 900px; height: 600px;
+    background-image: radial-gradient(circle, rgba(139,92,246,0.42), transparent 70%);
+  }
+  /* Two colored stops with the bright one declared second: the same cloud as
+     .flag-two-stop-rose paints, written the other way round. */
+  .flag-bright-second-stop {
+    width: 640px; height: 400px;
+    background-image: radial-gradient(circle, rgba(20,20,90,0.30) 0%, rgba(120,220,255,0.40) 45%, transparent 75%);
+  }
 
   /* ───────── SHOULD PASS: faint washes, scaled-down layers, bare surfaces,
      real backgrounds, small elements, neutrals, rich art ───────── */
@@ -125,6 +154,27 @@
     width: 800px; height: 520px;
     background-image: linear-gradient(120deg, rgba(80,111,255,0.28), transparent 60%);
   }
+  /* A gradient hero pale enough to swallow the glow painted over it. */
+  .pass-pale-gradient-host {
+    position: relative; width: 860px; height: 560px; color: #101010;
+    background-image: linear-gradient(180deg, #ecf4f8, #ffffff);
+  }
+  .pass-pale-gradient-glow {
+    position: absolute; top: 0; left: 0;
+    width: 860px; height: 560px;
+    background-image: radial-gradient(circle, rgba(63,227,223,0.20), transparent 65%);
+  }
+  /* A wash over a photographic hero is still a wash: no contrast to read, but
+     nothing reaches the page either. */
+  .pass-photo-wash-host {
+    position: relative; width: 860px; height: 560px;
+    background-image: url('hero-photo.jpg');
+  }
+  .pass-photo-wash-glow {
+    position: absolute; top: 0; left: 0;
+    width: 860px; height: 560px;
+    background-image: radial-gradient(circle, rgba(139,92,246,0.10), transparent 70%);
+  }
 </style>
 </head>
 <body>
@@ -138,6 +188,13 @@
       </div>
       <div class="case flag-two-stop-rose" data-name="Two Stop Soft Glow"><h3>Rose two stop headline</h3></div>
       <div class="case flag-hex-alpha" data-name="Hex Alpha Glow"><h3>Hex alpha headline</h3></div>
+      <div class="flag-gradient-host"><h3>Gradient hero headline</h3>
+        <div class="flag-gradient-glow" data-name="Glow Over Gradient Hero"></div>
+      </div>
+      <div class="flag-photo-host"><h3>Photo hero headline</h3>
+        <div class="flag-photo-glow" data-name="Glow Over Photo Hero"></div>
+      </div>
+      <div class="case flag-bright-second-stop" data-name="Bright Second Stop"><h3>Second stop headline</h3></div>
     </div>
 
     <!-- should-pass column -->
@@ -156,6 +213,12 @@
       <div class="case pass-rich-transparent" data-name="Rich Transparent Composition"><h3>Rich transparent headline</h3></div>
       <div class="case pass-opaque-center" data-name="Opaque Center Glow"><h3>Opaque center headline</h3></div>
       <div class="case pass-linear-wash" data-name="Linear Gradient Wash"><h3>Linear wash headline</h3></div>
+      <div class="pass-pale-gradient-host"><h3>Pale gradient hero headline</h3>
+        <div class="pass-pale-gradient-glow" data-name="Glow Over Pale Gradient Hero"></div>
+      </div>
+      <div class="pass-photo-wash-host"><h3>Photo wash headline</h3>
+        <div class="pass-photo-wash-glow" data-name="Wash Over Photo Hero"></div>
+      </div>
     </div>
   </main>
 </body>

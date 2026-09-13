@@ -410,26 +410,24 @@ fn spotlight_label(el: &StaticElement<'_>) -> String {
     el.tag_lower()
 }
 
-/// How far up the tree the effective opacity of a glow is accumulated, and
-/// how far up the copy it sits behind may live.
+/// How far up the tree the copy a glow sits behind may live.
 const GLOW_ANCESTOR_DEPTH: usize = 8;
 
 /// The element's own opacity times its ancestors': what the glow's declared
-/// alpha is actually multiplied by.
+/// alpha is actually multiplied by. Mirrors `effectiveOpacityDOM`, the whole
+/// chain and the same floor, so both engines gate on the same number.
 fn static_effective_opacity(el: &StaticElement<'_>) -> f64 {
     let mut acc = 1.0;
     let mut current = Some(*el);
-    let mut depth = 0;
     while let Some(cur) = current {
-        if depth >= GLOW_ANCESTOR_DEPTH {
-            break;
-        }
         let v = parse_float(sv(cur.style(), "opacity"));
         if v.is_finite() {
             acc *= v.clamp(0.0, 1.0);
         }
+        if acc <= 0.02 {
+            return 0.0;
+        }
         current = cur.parent_element();
-        depth += 1;
     }
     acc
 }
@@ -440,7 +438,10 @@ fn has_text(el: &StaticElement<'_>) -> bool {
 
 /// A static page has no layout, so "the glow sits behind text" is read
 /// structurally: the glowing element carries copy itself, or it is an overlay
-/// layer inside a container that does.
+/// layer inside a container that does. An in-flow element with no copy of its
+/// own takes its own band of the page and the copy around it sits above or
+/// below, which is why only an overlay may borrow an ancestor's text. The
+/// browser measures the rectangles instead and needs no such stand-in.
 fn static_glow_behind_text(el: &StaticElement<'_>, style: &StyleValues) -> bool {
     if has_text(el) {
         return true;
@@ -464,16 +465,34 @@ fn static_glow_behind_text(el: &StaticElement<'_>, style: &StyleValues) -> bool 
     false
 }
 
+/// The nearest ancestor surface painted by a gradient, read as the mean of
+/// its stops. `resolveBackground` answers a flat color and gives up at the
+/// first gradient, and a hero painted with a gradient is the commonest place
+/// to find a glow, so the walk continues here.
+fn static_gradient_backdrop(el: &StaticElement<'_>) -> Option<Rgba> {
+    let mut current = Some(*el);
+    while let Some(cur) = current {
+        match measures::backdrop_layer(Some(sv(cur.style(), "backgroundImage"))) {
+            measures::BackdropLayer::Color(color) => return Some(color),
+            measures::BackdropLayer::Unreadable => return None,
+            measures::BackdropLayer::Absent => {}
+        }
+        current = cur.parent_element();
+    }
+    None
+}
+
 /// The surface a glow paints on: the element's own background color where it
 /// has one (the gradient is painted over it), otherwise what shows through
 /// from underneath.
 fn static_glow_backdrop(el: &StaticElement<'_>, style: &StyleValues) -> Option<Rgba> {
     let base = el.parent_element().unwrap_or(*el);
+    let under = || resolve_background(&base, None).or_else(|| static_gradient_backdrop(&base));
     let own = read_own_background_color(el, style).filter(|c| c.alpha_or_one() > 0.01);
     match own {
         Some(c) if c.alpha_or_one() >= 0.99 => Some(c),
-        Some(c) => resolve_background(&base, None).map(|under| composite_color_over(&c, &under)),
-        None => resolve_background(&base, None),
+        Some(c) => under().map(|u| composite_color_over(&c, &u)),
+        None => under(),
     }
 }
 
@@ -499,9 +518,10 @@ pub fn check_element_radial_spotlight(el: &StaticElement<'_>, style: &StyleValue
     let prominence = measures::RadialGlowProminence {
         opacity: static_effective_opacity(el),
         backdrop: static_glow_backdrop(el, style),
-        behind_text: static_glow_behind_text(el, style),
     };
-    if !measures::radial_glow_is_prominent(&stop, &prominence) {
+    if !measures::radial_glow_is_prominent(&stop, &prominence, || {
+        static_glow_behind_text(el, style)
+    }) {
         return Vec::new();
     }
     hits

@@ -367,6 +367,8 @@ pub struct RadialSpotlightInput<'a> {
 
 /// What `checkRadialSpotlight`'s declaration test cannot see: how much of the
 /// glow actually reaches the page. The adapters measure it per element.
+/// Whether the glow sits behind copy is the third measurement and the
+/// expensive one, so it travels to the gate as a closure rather than a field.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RadialGlowProminence {
     /// The painting element's effective opacity: its own `opacity` times
@@ -375,8 +377,6 @@ pub struct RadialGlowProminence {
     /// The surface the glow paints over, `None` when the cascade cannot
     /// resolve one (an image or an unreadable stack underneath).
     pub backdrop: Option<Rgba>,
-    /// A text-bearing element overlaps the glowing box.
-    pub behind_text: bool,
 }
 
 /// JS: checks.mjs#TAILWIND_BG_HEX (insertion order preserved).

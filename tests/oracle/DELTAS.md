@@ -164,3 +164,15 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: `ai-color-palette.html` joins the fixture directory
+
+`ai-color-palette` gained the evidence gates that separate a painted
+violet-to-cyan palette from a declared one (occluded placeholder gradients,
+tints, blurred washes, hairlines, flat repeats of one stop, and `color`
+inherited by elements that paint no glyphs). The gates live on the browser
+element path, which has no goldens, so the only oracle movement is the new
+two-column fixture that documents them.
+
+- `detect-fixture-json-ai-color-palette-html`, `detect-fixture-text-ai-color-palette-html`: new cases for the new fixture.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the directory sweeps pick up the same two findings from the new file (the static engine's own heading-color match, plus `radial-halo` on the violet glow blob), and the count moves 419 to 421. No other fixture's output changed.

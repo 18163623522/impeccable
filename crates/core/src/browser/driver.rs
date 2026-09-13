@@ -718,6 +718,59 @@ pub fn selector_nodes_for_live_dom(dom: &dyn Dom, selector: &str) -> Option<Vec<
     dom.query_all(None, &fallback).ok()
 }
 
+/// The page-level accent finding read off the stylesheet alone.
+const PURPLE_ACCENT_SNIPPET: &str = "Purple/violet accent colors detected";
+
+/// The stock violet hexes as sRGB, for the painted-color test below.
+static PURPLE_ACCENT_RGB: once_cell::sync::Lazy<Vec<crate::color::Rgba>> =
+    once_cell::sync::Lazy::new(|| {
+        crate::checks::html_patterns::PURPLE_ACCENT_HEXES
+            .iter()
+            .filter_map(|h| crate::color::parse_any_color(Some(&format!("#{h}"))))
+            .collect()
+    });
+
+/// Computed colors round-trip through the browser exactly for hex-declared
+/// values; the slack covers a token that reached the same color by another
+/// notation.
+fn is_stock_violet(c: &crate::color::Rgba) -> bool {
+    PURPLE_ACCENT_RGB.iter().any(|p| {
+        (p.r - c.r).abs() <= 8.0 && (p.g - c.g).abs() <= 8.0 && (p.b - c.b).abs() <= 8.0
+    })
+}
+
+/// Whether any element a visitor can see wears one of the stock violet
+/// hexes. A palette that only exists in a stylesheet is a dead token, not a
+/// design decision, so the page-level accent finding asks for paint first.
+fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
+    use super::element_checks::{element_rect, is_rendered_for_browser_rule};
+    for el in dom.query_all(None, "*").unwrap_or_default() {
+        if element_rect(dom, el).is_none() || !is_rendered_for_browser_rule(dom, el) {
+            continue;
+        }
+        if super::dom::has_direct_text_longer_than(dom, el, 0) {
+            if let Some(c) = crate::color::parse_any_color(Some(&dom.style(el, "color"))) {
+                if c.alpha_or_one() > 0.1 && is_stock_violet(&c) {
+                    return true;
+                }
+            }
+        }
+        if let Some(c) = crate::color::parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+            if c.alpha_or_one() > 0.1 && is_stock_violet(&c) {
+                return true;
+            }
+        }
+        let bg_image = dom.style(el, "backgroundImage");
+        if crate::color::parse_gradient_colors(Some(&bg_image))
+            .iter()
+            .any(|c| c.alpha_or_one() > 0.1 && is_stock_violet(c))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
 /// (a selector matching nothing drops the finding; a match under a
@@ -736,7 +789,23 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
     }
     let all = crate::checks::html_patterns::check_html_patterns(&html, Some(&corpora));
     let mut out = Vec::new();
+    // Computed lazily: the accent check below is the only caller and it is
+    // rare, so an unrelated page never pays for the sweep.
+    let mut paints_stock_violet: Option<bool> = None;
     for f in all {
+        if f.id == "ai-color-palette" && f.snippet == PURPLE_ACCENT_SNIPPET {
+            let painted = match paints_stock_violet {
+                Some(v) => v,
+                None => {
+                    let v = page_paints_stock_violet(dom);
+                    paints_stock_violet = Some(v);
+                    v
+                }
+            };
+            if !painted {
+                continue;
+            }
+        }
         if let Some(selector) = f.selector.as_deref().filter(|s| !s.is_empty()) {
             let Some(matches) = selector_nodes_for_live_dom(dom, selector) else {
                 continue;

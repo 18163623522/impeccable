@@ -90,7 +90,12 @@ pub fn has_visible_background_boundary(style: &StyleValues, el: &StaticElement<'
         }
         parent = p.parent_element();
     }
-    true
+    // Nothing in the chain paints, so the ground is the canvas: a white box
+    // on an unpainted page draws no edge.
+    !colors_nearly_match(
+        Some(bg),
+        Some(impeccable_core::browser::quality::CANVAS_BACKGROUND),
+    )
 }
 
 /// JS: checks.mjs#isVisuallyHidden(el, style)

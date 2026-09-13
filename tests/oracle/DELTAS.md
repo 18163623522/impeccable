@@ -164,3 +164,26 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+
+## Recorded 2026-09-12: cramped-padding measures where the glyphs land
+
+Corpus judging (both judges, 88 of 111 representatives) found the rule reading
+the `padding` property and the child's border box rather than the text. A
+40px flex row centres a 14px label on zero padding; an accordion row's inset
+lives on a button two levels down; a collapsed panel and a screen-reader
+heading paint nothing at all. The rule now decides on `getDirectTextRect`, the
+union of an element's own text-node rects, and ignores a transparent border
+and a white box on an unpainted canvas. The two fixtures grew the reduced
+cases (real false positives in the pass column, the overrun field that both
+judges called harmful in the flag column), which is what moves these goldens:
+the static file scan has no layout, so it still reports some of the new pass
+cases, and the fixture header says so.
+
+- `detect-fixture-json-flush-against-border-html`,
+  `detect-fixture-text-flush-against-border-html`: the new cases, plus
+  `flag-overrun-field`.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-scope-type`,
+  `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: the directory sweeps pick the same cases up.

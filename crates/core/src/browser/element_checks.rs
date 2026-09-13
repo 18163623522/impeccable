@@ -534,7 +534,7 @@ pub fn check_element_colors_dom(
         && !is_glyph_only_text(&direct)
         && !is_visually_hidden(dom, el)
         && overlaps_page_width(dom, &rect)
-        && !matches_or_false(dom, el, DISABLED_CONTROL_SELECTOR)
+        // `closest` starts at the element, so the control itself is covered.
         && closest_or_none(dom, el, DISABLED_CONTROL_SELECTOR).is_none()
         && !inherits_scored_text_color(dom, el, text_color);
     let color_opts = ColorOpts {

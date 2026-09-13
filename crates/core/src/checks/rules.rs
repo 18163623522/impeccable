@@ -311,6 +311,24 @@ fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
 /// reported as `1.0:1 — text #ffffff on #ffffff`. The walk's blind spots
 /// are their own problem; a report that is self-evidently wrong to anyone
 /// who opens the page is not worth printing while they are fixed.
+///
+/// What it hides, stated plainly: text that really is painted in its own
+/// background colour, which is invisible and a genuine 1:1 failure. That
+/// shape is rare, and when an author writes it deliberately it is usually
+/// `<p>` or `<div>` markup, which never reaches here: this guard covers
+/// only the SAFE_TAGS text path, and every other tag still reports the
+/// `1.0:1`. It is exact equality on the resolved hex, not a near-match, so
+/// a link one shade off its surface still reports.
+///
+/// Narrowing it means knowing whether the walk resolved a surface or gave
+/// up and fell through to the page fill, which the check cannot see from
+/// `ColorOpts` alone. The same blind spot also mislabels the background on
+/// findings whose verdict is right: an overlapping sibling image or an
+/// absolutely positioned panel is not an ancestor, so the walk reads past
+/// it and names the page's fill in the snippet. The verdict usually
+/// survives that (the text is low-contrast against either surface), the
+/// hex in the label does not always. Both want the same fix: a resolved
+/// background that carries where it came from.
 fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
     let text_hex = color_to_hex(Some(text_color));
     let same = |bg: &Rgba| color_to_hex(Some(bg)) == text_hex;

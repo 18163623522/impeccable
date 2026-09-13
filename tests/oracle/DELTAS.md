@@ -199,3 +199,50 @@ result. Its trial-banner link was `#d97706` on the banner's own `#fffbeb` at
 3.1:1, a real failure that the old gate hid; the link is darkened to `#92400e`
 (6.8:1) in the same commit so the fixture keeps being a clean baseline and its
 goldens do not move.
+
+### Revision: markup the browser never renders
+
+Widening the gate widened what the static engine can reach. The browser scan
+sees a layout tree, so a `<template>`'s content, a `display: none` subtree and
+a `[hidden]` panel are simply absent from it; the static tree carries all of
+them, html5ever hands template content back as ordinary descendants, and the
+static cascade has no UA stylesheet to turn `hidden` into `display: none`. The
+colour rule was therefore able to report a washed-out link in markup nothing
+paints, and only in this one engine.
+
+`check_element_colors` now returns early on `is_in_non_rendered_markup`, the
+ancestor-aware form of the `is_non_rendered_text` that `tiny-text` and
+`undersized-ui-text` already use, so there is one model of rendered rather
+than one per rule. It covers every tag the colour rule walks, not only the
+newly gated ones. `visibility` needs no walk: it inherits in the static
+cascade, so a descendant of a hidden container already computes hidden.
+`hidden="until-found"` is excluded, because a browser does render that content
+once find-in-page reveals it.
+
+**No golden moves.** No fixture had a colour finding inside non-rendered
+markup, and the three cases added to `link-text-contrast.html`'s should-pass
+column (a `<template>`, a `[hidden]` subtree, a `display: none` subtree, each
+holding a low-contrast link) are silent by construction, so the sweep total
+stays at 430. The cases are there to keep a future change from reopening this:
+`crates/html/tests/link_text_contrast.rs` pins them, and the fixture test
+already asserts that the should-pass column contributes no finding of any
+rule.
+
+### Risks carried, not fixed
+
+Two things about the background walk stay as they are, and both are written
+into `resolved_bg_matches_text`'s doc comment beside the code:
+
+- A background that resolves to the text colour itself is dropped, which also
+  drops text genuinely painted in its own background: invisible, and a real
+  1:1 failure. It is exact hex equality, so a link one shade off its surface
+  still reports, and the guard covers only the SAFE_TAGS text path, so `<p>`
+  and `<div>` still report the `1.0:1`.
+- The ratio label can name the wrong surface where the verdict is right. An
+  overlapping sibling image or an absolutely positioned panel is not an
+  ancestor, so the walk reads past it to the page's own fill. The text is
+  usually low-contrast against either surface, so the verdict survives; the
+  hex in the snippet does not always.
+
+Both want the same fix, which is a resolved background that carries where it
+came from, and neither is cheap from `ColorOpts` as it stands.

@@ -11,7 +11,9 @@ use crate::background::{
 };
 use crate::cascade::StyleValues;
 use crate::dom::{StaticDocument, StaticElement};
-use crate::quality::{collapse_ws, is_visually_hidden, pf0, resolve_font_size_px};
+use crate::quality::{
+    collapse_ws, is_in_non_rendered_markup, is_visually_hidden, pf0, resolve_font_size_px,
+};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
@@ -531,6 +533,13 @@ pub fn check_element_colors(
     seen: &mut SafeTagTextSeen,
 ) -> Vec<RuleHit> {
     if sv_opt(style, "visibility") == Some("hidden") {
+        return Vec::new();
+    }
+    // Markup the browser never lays out: a `<template>`'s content, a
+    // `display: none` or `[hidden]` subtree, anything under `<head>`. The
+    // static tree carries it and a browser scan cannot see it, so scoring it
+    // here is a false positive only this engine can produce.
+    if is_in_non_rendered_markup(el, tag, style) {
         return Vec::new();
     }
     let mut eff_opacity = 1.0f64;

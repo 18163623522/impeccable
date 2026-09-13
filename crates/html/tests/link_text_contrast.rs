@@ -61,6 +61,9 @@ fn fixture_passes_every_should_pass_case() {
         ("link with no text of its own", "#b3b3b3"),
         ("emoji-only span", "#b4b4b4"),
         ("disabled control", "#b6b6b6"),
+        ("link inside a <template>", "#b7b7b7"),
+        ("link inside a [hidden] subtree", "#b8b8b8"),
+        ("link inside a display:none subtree", "#b9b9b9"),
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(color)),
@@ -170,6 +173,86 @@ a.lang { color: #ffffff; font-size: 14px; }
 <body><div class="hero"><a class="lang" href="/en">English</a></div></body></html>
 "#;
     let snippets = low_contrast_snippets(html, Path::new("/tmp/hero.html"));
+    assert!(snippets.is_empty(), "{snippets:?}");
+}
+
+#[test]
+fn text_painted_in_its_own_background_is_the_cost_of_that_guard() {
+    // The documented cost of the guard above: a link genuinely set in its own
+    // surface colour is invisible, and this path stays quiet about it. Every
+    // other tag still reports it, which is why the guard is worth its cost.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+a.ghost { color: #ffffff; font-size: 14px; }
+p.ghost { color: #ffffff; font-size: 14px; }
+</style></head>
+<body><a class="ghost" href="/x">Invisible link</a><p class="ghost">Invisible paragraph</p></body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/ghost.html"));
+    assert_eq!(
+        snippets.len(),
+        1,
+        "the paragraph reports, the link does not: {snippets:?}"
+    );
+    assert!(snippets[0].contains("#ffffff on #ffffff"), "{snippets:?}");
+}
+
+#[test]
+fn markup_the_browser_never_renders_is_not_scored() {
+    // A browser lays out none of this, so a browser scan reports none of it.
+    // The static tree carries all of it: html5ever hands template content
+    // back as ordinary descendants, and the static cascade has no UA
+    // stylesheet to turn `hidden` into `display: none`.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+a.pale { color: #aaaaaa; font-size: 14px; }
+.gone { display: none; }
+</style></head>
+<body>
+  <template><div><a class="pale" href="/1">Unmounted card link</a></div></template>
+  <div hidden><a class="pale" href="/2">Closed panel link</a></div>
+  <div hidden="until-found"><a class="pale" href="/3">Findable panel link</a></div>
+  <div class="gone"><span><a class="pale" href="/4">Collapsed drawer link</a></span></div>
+  <noscript><a class="pale" href="/5">No-script fallback link</a></noscript>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/non-rendered.html"));
+    assert_eq!(
+        snippets.len(),
+        1,
+        "only `hidden=\"until-found\"` renders: {snippets:?}"
+    );
+
+    // The control: the same link outside all of it is still scored, so the
+    // skip is about the markup around the element and nothing else.
+    let rendered = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+a.pale { color: #aaaaaa; font-size: 14px; }
+</style></head>
+<body><div><a class="pale" href="/1">Unmounted card link</a></div></body></html>
+"#;
+    let snippets = low_contrast_snippets(rendered, Path::new("/tmp/rendered.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#aaaaaa")),
+        "{snippets:?}"
+    );
+}
+
+#[test]
+fn non_rendered_markup_is_skipped_for_every_tag_the_colour_rule_walks() {
+    // One model of rendered, not one per tag: the same skip covers the `<p>`
+    // and `<div>` the tag gate never applied to.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+p.pale { color: #aaaaaa; font-size: 14px; }
+</style></head>
+<body><template><p class="pale">Unmounted paragraph copy</p></template></body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/non-rendered-p.html"));
     assert!(snippets.is_empty(), "{snippets:?}");
 }
 

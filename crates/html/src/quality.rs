@@ -153,6 +153,46 @@ pub fn is_non_rendered_text(
     false
 }
 
+/// The `hidden` attribute, which the static cascade cannot turn into
+/// `display: none` on its own: it carries author CSS, not a UA stylesheet.
+/// `hidden="until-found"` is excluded, because a browser does render that
+/// content once find-in-page or a fragment link reveals it.
+fn has_hidden_attribute(el: &StaticElement<'_>) -> bool {
+    el.get_attribute("hidden")
+        .is_some_and(|v| !v.eq_ignore_ascii_case("until-found"))
+}
+
+/// `is_non_rendered_text` for the markup an element sits inside, not only
+/// for the element itself.
+///
+/// A browser paints nothing inside a `<template>`, nothing inside a
+/// `display: none` or `[hidden]` subtree, and nothing under `<head>`. The
+/// static tree carries all of it: html5ever hands template fragments back
+/// as ordinary descendants of the template element, so a `*` element rule
+/// walks the markup of every unmounted component on the page and scores it
+/// as though it were on screen. A browser scan cannot produce those
+/// findings, and a rule that judges what a reader reads should not either.
+///
+/// Only `display` and the tags need the walk. `visibility` inherits in the
+/// static cascade, so a descendant of a hidden container already computes
+/// hidden and `is_non_rendered_text` catches it on the element.
+pub fn is_in_non_rendered_markup(el: &StaticElement<'_>, tag: &str, style: &StyleValues) -> bool {
+    if is_non_rendered_text(el, tag, Some(style)) || has_hidden_attribute(el) {
+        return true;
+    }
+    let mut parent = el.parent_element();
+    while let Some(p) = parent {
+        if NON_RENDERED_TAGS.contains(&p.tag_lower().as_str())
+            || sv_opt(p.style(), "display") == Some("none")
+            || has_hidden_attribute(&p)
+        {
+            return true;
+        }
+        parent = p.parent_element();
+    }
+    false
+}
+
 /// Inputs of `checkQuality` as the static adapter builds them.
 pub struct QualityInput<'a, 'b> {
     pub el: &'b StaticElement<'a>,

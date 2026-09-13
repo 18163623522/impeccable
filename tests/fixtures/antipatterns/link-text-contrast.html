@@ -35,6 +35,13 @@
     .pass-empty-link { color: #b3b3b3; font-size: 14px; display: inline-block; width: 24px; height: 24px; }
     .pass-emoji { color: #b4b4b4; font-size: 14px; }
     .pass-disabled-button { background: transparent; border: 0; color: #b6b6b6; font-size: 14px; padding: 8px 0; }
+    /* Non-rendered markup. The static tree carries all of it and a browser
+       paints none of it, so a contrast verdict here is a false positive only
+       the static engine can produce. */
+    .pass-template-link { color: #b7b7b7; font-size: 14px; }
+    .pass-hidden-attr-link { color: #b8b8b8; font-size: 14px; }
+    .pass-display-none { display: none; }
+    .pass-display-none-link { color: #b9b9b9; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -109,6 +116,22 @@
 
       <h3>Disabled control</h3>
       <div class="row"><button class="pass-disabled-button" type="button" disabled>Generate the report</button></div>
+
+      <!-- The parser hands template content back as ordinary descendants of
+           the template element, so the element walk sees this link. A browser
+           never lays it out until something clones it. -->
+      <h3>Link inside a &lt;template&gt;</h3>
+      <template id="card-template">
+        <div class="row"><a class="pass-template-link" href="/unmounted">Read the unmounted card</a></div>
+      </template>
+
+      <!-- `hidden` is display:none in every browser's UA stylesheet, which
+           the static cascade does not carry, so the walk reads the attribute. -->
+      <h3>Link inside a [hidden] subtree</h3>
+      <div class="row" hidden><a class="pass-hidden-attr-link" href="/closed">Open the closed panel</a></div>
+
+      <h3>Link inside a display:none subtree</h3>
+      <div class="row pass-display-none"><a class="pass-display-none-link" href="/drawer">Open the collapsed drawer</a></div>
     </div>
 
   </div>

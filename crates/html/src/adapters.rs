@@ -524,6 +524,38 @@ fn inherits_scored_text_color(
 /// otherwise start reporting.
 const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
 
+/// Whether an ancestor clips its background to text, which makes this run's
+/// glyphs part of that ancestor's fill: `<p class="gradient"><span>Split</span>
+/// <span>word</span></p>`. What a reader sees there is the gradient, and the
+/// span's declared `color` is either painted over nothing (a transparent
+/// `-webkit-text-fill-color`, which the static cascade drops, so this engine
+/// cannot see it) or painted over the gradient's own glyph shapes. Either way
+/// the walk hands the check the gradient's stops as the surface, and the
+/// verdict is about a surface nobody reads the text against.
+///
+/// The static cascade does carry `background-clip`, so the ancestor is
+/// visible where the fill colour is not. The walk stops at an ancestor with
+/// an opaque background of its own, because a box painted normally inside
+/// the clipped one is a real surface again, and at a fixed depth.
+fn text_clipped_by_an_ancestor(el: &StaticElement<'_>) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        let style = c.style();
+        if js::trim(sv(style, "webkitBackgroundClip")) == "text"
+            || js::trim(sv(style, "backgroundClip")) == "text"
+        {
+            return true;
+        }
+        if read_own_background_color(&c, style).map_or(false, |b| b.alpha_or_one() >= 0.95) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
@@ -618,7 +650,9 @@ pub fn check_element_colors(
         // The browser path also stands down where `-webkit-text-fill-color`
         // paints the glyphs in nothing. This engine cannot: the static
         // cascade drops that property, and a recorded call vector pins it
-        // dropping it.
+        // dropping it. The clip that property travels with is carried, so
+        // a run inside a gradient-clipped parent is caught by the clip.
+        && !text_clipped_by_an_ancestor(el)
         && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
         && !inherits_scored_text_color(el, text_color, custom_props);
     let color_opts = ColorOpts {

@@ -203,42 +203,190 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
     reasons
 }
 
-/// The reasons that mean a picture, not a surface, is what the text is
-/// actually read against: a raster background on an ancestor, or a replaced
-/// media box painting under the text from outside its ancestor chain.
-///
-/// The other reasons are deliberately not here. A gradient ancestor is
-/// scored against its stops, and an opacity stack, a blend mode or a filter
-/// shifts a colour the walk did resolve rather than hiding a layer from it.
-const MEDIA_LAYER_REASONS: &[&str] = &[
-    "image background",
-    "img underlay",
-    "picture underlay",
-    "video underlay",
-    "canvas underlay",
-];
+/// Replaced boxes that paint a picture rather than a colour.
+const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
 
-/// Whether a media layer paints behind this element's text, which is to say
-/// whether the surface `resolve_background_info` returned is the one a
-/// reader sees.
+/// Bounds on [`media_layer_under_text`], each a count of DOM hops. The test
+/// runs only for an element the rule failed whose colour pair the page has
+/// not reported yet, and the sibling scan descends only into a box whose
+/// rect covers the text, so the bounds are rarely reached.
+const LAYER_MAX_LEVELS: usize = 32;
+const LAYER_MAX_SIBLINGS: usize = 32;
+const LAYER_MAX_DEPTH: usize = 3;
+const LAYER_MAX_CHILDREN: usize = 8;
+
+/// The largest tile, per axis, a raster background can be drawn at and still
+/// count as a texture over its element's own colour.
+const TEXTURE_MAX_TILE_PX: f64 = 256.0;
+
+/// A background colour nothing behind it shows through.
+fn paints_opaque_color(dom: &dyn Dom, node: ElId) -> bool {
+    parse_rgb_or_any(&dom.style(node, "backgroundColor"))
+        .map_or(false, |c| c.alpha_or_one() >= 0.95)
+}
+
+/// Whether an element's raster background is a small repeating tile: a
+/// noise, grain or dot texture laid over the element's own colour. The
+/// tile's pixels are not in the computed style, so "faint" cannot be
+/// measured; what can be measured is the shape a photograph is almost never
+/// drawn in. `no-repeat`, `cover`, `contain`, a percentage, or a tile larger
+/// than [`TEXTURE_MAX_TILE_PX`] is a picture. An unknown size is a picture
+/// too, so a capture that did not record the property keeps the quiet
+/// answer.
+fn raster_tiles_as_texture(dom: &dyn Dom, node: ElId) -> bool {
+    if js::to_lower_case(&dom.style(node, "background")).contains("no-repeat") {
+        return false;
+    }
+    let size = js::to_lower_case(&dom.style(node, "backgroundSize"));
+    let mut tokens = size
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .peekable();
+    tokens.peek().is_some()
+        && tokens.all(|t| {
+            t == "auto" || (t.ends_with("px") && parse_float(t) <= TEXTURE_MAX_TILE_PX)
+        })
+}
+
+/// What a box's own background says about the layer under the text:
+/// `Some(true)` for a picture, `Some(false)` for an opaque surface that
+/// covers everything painted before it, `None` for nothing that decides.
+/// A solid colour carrying a texture tile is a surface. `body` and `html`
+/// paint the document itself, and their images are not a layer over it.
+fn own_background_layer(dom: &dyn Dom, node: ElId, document_surface: bool) -> Option<bool> {
+    let opaque = paints_opaque_color(dom, node);
+    let raster = !document_surface && URL_RE.is_match(&dom.style(node, "backgroundImage"));
+    if raster && !(opaque && raster_tiles_as_texture(dom, node)) {
+        return Some(true);
+    }
+    if opaque {
+        return Some(false);
+    }
+    None
+}
+
+/// Whether `outer` covers `inner`, give or take a pixel of rounding.
+fn rect_covers(outer: &Rect, inner: &Rect) -> bool {
+    const SLACK: f64 = 1.0;
+    outer.width > 0.0
+        && outer.height > 0.0
+        && inner.width > 0.0
+        && inner.height > 0.0
+        && outer.left <= inner.left + SLACK
+        && outer.top <= inner.top + SLACK
+        && outer.left + outer.width >= inner.left + inner.width - SLACK
+        && outer.top + outer.height >= inner.top + inner.height - SLACK
+}
+
+/// The layer an earlier-painted box puts under the text, looked at the way
+/// a reader looks down through it: its children topmost first, then its own
+/// background. A box that does not cover the text paints nothing under it
+/// and decides nothing.
+fn layer_in_box(dom: &dyn Dom, node: ElId, text: &Rect, depth: usize) -> Option<bool> {
+    if !rect_covers(&dom.rect(node), text) {
+        return None;
+    }
+    if dom.style(node, "visibility") == "hidden" || parse_float(&dom.style(node, "opacity")) < 0.05
+    {
+        return None;
+    }
+    if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+        return Some(true);
+    }
+    if depth < LAYER_MAX_DEPTH {
+        for &child in dom.children(node).iter().rev().take(LAYER_MAX_CHILDREN) {
+            if let Some(layer) = layer_in_box(dom, child, text, depth + 1) {
+                return Some(layer);
+            }
+        }
+    }
+    own_background_layer(dom, node, false)
+}
+
+/// The hit-test answer, for a page the geometric walk could not decide: a
+/// transparent document, or a tree deeper than its bounds. Only points in
+/// the viewport can be asked, and the scan stops at the first opaque box
+/// under the text, because nothing below that box is seen.
+fn media_in_hit_test_stack(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
+    let vw = dom.inner_width();
+    let vh = dom.inner_height();
+    let y = text.top + text.height / 2.0;
+    let xs = [
+        text.left + text.width / 2.0,
+        text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.25)),
+        text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.75)),
+    ];
+    for x in xs {
+        if x < 0.0 || y < 0.0 || x > vw || y > vh {
+            continue;
+        }
+        let stack = dom.elements_from_point(x, y);
+        let Some(self_index) = stack
+            .iter()
+            .position(|&n| n == el || dom.contains(el, n) || dom.contains(n, el))
+        else {
+            continue;
+        };
+        for &node in &stack[self_index + 1..] {
+            if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+                return true;
+            }
+            if paints_opaque_color(dom, node) {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Whether a picture, rather than a surface, is what this element's text is
+/// read against, which is to say whether the surface
+/// `resolve_background_info` returned is one nobody sees.
 ///
 /// The background walk reads the ancestor chain, so it is blind in two
-/// directions: an ancestor that carries a raster image over its own
-/// background colour (the walk answers with the colour it can parse and
-/// never looks at the picture on top of it), and a positioned sibling —
-/// hero photo, video poster, canvas — that is nobody's ancestor and so is
-/// invisible to it either way. Both answer with the page's own fill, which
-/// is how white text over a photograph is reported as `1.0:1 on #ffffff`
-/// and orange over a photograph is reported against the section's grey.
+/// directions: an ancestor that paints a raster image over its own colour
+/// (the walk answers with the colour it can parse), and a positioned
+/// sibling (hero photo, video, canvas) that is nobody's ancestor. Both
+/// answer with a fill under the picture, which is how white text over a
+/// photograph is reported as `1.0:1 on #ffffff`.
 ///
-/// [`collect_visual_contrast_reasons`] already knows how to find both,
-/// because deciding them is exactly what the visual-contrast pass does
-/// before it reads pixels. This asks it the same question and keeps only
-/// the answers about a layer the walk cannot read.
+/// The test is geometric, so it works at any scroll position without a hit
+/// test. It climbs from the element and at each level asks two things in
+/// paint order, nearest first: the box's own background, then its earlier
+/// siblings, which paint beneath it. An earlier sibling, or a descendant of
+/// one a few levels down, that covers the text rect and is an `img`,
+/// `picture`, `video` or `canvas`, or carries a raster background, is a
+/// picture under the text. The first opaque surface met on the way, ancestor
+/// or covering sibling, ends the test with no picture: the card sitting on
+/// the hero photo is what the link on it is read against. A solid colour
+/// carrying a small tiled texture is such a surface
+/// ([`raster_tiles_as_texture`]). Only a page the climb cannot decide falls
+/// back to hit tests.
+///
+/// A gradient is not a picture. The walk scores it against its stops.
 pub fn media_layer_under_text(dom: &dyn Dom, el: ElId) -> bool {
-    collect_visual_contrast_reasons(dom, el)
-        .iter()
-        .any(|r| MEDIA_LAYER_REASONS.contains(&r.as_str()))
+    let text = dom.direct_text_rect(el).unwrap_or_else(|| dom.rect(el));
+    let mut node = el;
+    for _ in 0..LAYER_MAX_LEVELS {
+        let tag = tag_lower(dom, node);
+        let document_surface = tag == "body" || tag == "html";
+        if let Some(layer) = own_background_layer(dom, node, document_surface) {
+            return layer;
+        }
+        let mut sibling = dom.previous_element_sibling(node);
+        for _ in 0..LAYER_MAX_SIBLINGS {
+            let Some(s) = sibling else { break };
+            if let Some(layer) = layer_in_box(dom, s, &text, 0) {
+                return layer;
+            }
+            sibling = dom.previous_element_sibling(s);
+        }
+        match dom.parent(node) {
+            Some(p) => node = p,
+            None => break,
+        }
+    }
+    media_in_hit_test_stack(dom, el, &text)
 }
 
 /// JS: index.mjs#collectVisualContrastCandidates(options)

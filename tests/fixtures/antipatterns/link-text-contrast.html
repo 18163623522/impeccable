@@ -31,8 +31,22 @@
        here whatever the viewport. A reader on a desktop sees the link, and
        the contrast pass has to keep seeing it too. */
     @media (max-width: 900px) { .flag-desktop-only-row { display: none; } }
+    /* An opaque card on a hero photo is the surface its link is read on. */
+    .flag-hero { position: relative; width: 320px; height: 160px; }
+    .flag-hero-photo { position: absolute; left: 0; top: 0; width: 320px; height: 160px; display: block; }
+    .flag-hero-card { position: absolute; left: 24px; top: 32px; width: 240px; padding: 16px; background: #ffffff; }
+    .flag-card-link { color: #939393; font-size: 14px; }
+    /* A solid section with a small tiled texture is still a solid surface. */
+    .flag-textured { width: 288px; padding: 16px; background: #ffffff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='1' height='1' fill='%23f7f7f7'/%3E%3C/svg%3E"); }
+    .flag-textured-link { color: #969696; font-size: 14px; }
+    /* Any author `display` beats the UA's `[hidden] { display: none }`. */
+    .flag-revealed-panel { display: block; }
+    .flag-revealed-copy { color: #8c8c8c; font-size: 14px; }
+    .flag-map-link { color: #919191; font-size: 14px; }
 
-    /* Should pass: this column must stay finding-free. */
+    /* Should pass: this column carries no contrast finding. The two
+       gradient-clipped cases do report `gradient-text`, which is that rule's
+       verdict on them, and nothing else does. */
     .pass-strong-link { color: #0b4fbc; font-size: 14px; }
     .pass-large-link { color: #838383; font-size: 26px; text-decoration: none; }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); color: #b1b1b1; font-size: 14px; }
@@ -47,6 +61,13 @@
     .pass-hidden-attr-link { color: #b8b8b8; font-size: 14px; }
     .pass-until-found-link { color: #b9b9b9; font-size: 14px; }
     .pass-noscript-link { color: #bababa; font-size: 14px; }
+    .pass-details-link { color: #bbbbbb; font-size: 14px; }
+    .pass-deep-template-link { color: #bcbcbc; font-size: 14px; }
+    /* A parent clips a gradient to the text and fills the glyphs with
+       nothing, so what a reader sees is the gradient. The runs inside carry
+       a declared colour that is painted nowhere. */
+    .pass-wordsplit { background-image: linear-gradient(90deg, #fde68a, #fbcfe8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #fdfdfd; font-size: 18px; display: inline-block; }
+    .pass-gradlink { background-image: linear-gradient(90deg, #b45309, #be123c); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #d1d5db; font-size: 15px; display: inline-block; }
   </style>
 </head>
 <body>
@@ -101,6 +122,23 @@
            the link, and it is scored. -->
       <h3>Row a media query hides on narrow viewports</h3>
       <div class="row flag-desktop-only-row"><a class="flag-desktop-only" href="/desktop">Open the desktop dashboard</a></div>
+
+      <!-- The photo paints under the card, and the card under the link. The
+           card is the surface, so the link is scored on its white. -->
+      <h3>Link on a white card over a hero photo</h3>
+      <div class="flag-hero"><img class="flag-hero-photo" alt="" width="320" height="160" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23223344'/%3E%3C/svg%3E"><div class="flag-hero-card"><a class="flag-card-link" href="/story">Read the full story</a></div></div>
+
+      <h3>Link on a white section with a faint texture tile</h3>
+      <div class="flag-textured"><a class="flag-textured-link" href="/textured">Browse the collection</a></div>
+
+      <!-- `hidden`, but author CSS sets `display: block`, and the author rule
+           wins. A browser renders the paragraph. -->
+      <h3>Paragraph in a [hidden] panel author CSS reveals</h3>
+      <div class="row flag-revealed-panel" hidden><p class="flag-revealed-copy">Revealed panel copy in a muted grey</p></div>
+
+      <!-- A `<map>` is an inline box and its flow content renders. -->
+      <h3>Link inside a &lt;map&gt;</h3>
+      <div class="row"><map name="site-map"><a class="flag-map-link" href="/sitemap">Browse the site map</a></map></div>
     </div>
 
     <div class="col" data-col="pass">
@@ -150,6 +188,23 @@
 
       <h3>Link inside a &lt;noscript&gt;</h3>
       <noscript><div class="row"><a class="pass-noscript-link" href="/plain">Continue without scripting</a></div></noscript>
+
+      <!-- Closed, so everything but the summary is slotted out of sight. -->
+      <h3>Link inside a closed &lt;details&gt;</h3>
+      <div class="row"><details><summary>More options</summary><a class="pass-details-link" href="/options">Open the advanced options</a></details></div>
+
+      <!-- The template is fourteen levels above the link. A markup fact holds
+           however far up it is written. -->
+      <h3>Link deep inside a &lt;template&gt;</h3>
+      <template id="deep-template"><div><div><div><div><div><div><div><div><div><div><div><div><div><a class="pass-deep-template-link" href="/deep">Read the deeply nested card</a></div></div></div></div></div></div></div></div></div></div></div></div></div></template>
+
+      <!-- The parent clips the gradient to the words; each word is a span.
+           The spans' own colour is painted nowhere. -->
+      <h3>Gradient caption split into word spans</h3>
+      <p class="pass-wordsplit"><span>Split</span> <span>word</span> <span>gradient</span> <span>caption</span></p>
+
+      <h3>Gradient link whose words sit in a span</h3>
+      <p><a class="pass-gradlink" href="/learn"><span>Learn more about it</span></a></p>
     </div>
 
   </div>

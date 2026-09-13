@@ -43,6 +43,10 @@ fn fixture_flags_every_should_flag_case() {
         ("paragraph with an inherited run", "#999999"),
         ("repeated nav link", "#888888"),
         ("link in a row a media query hides on phones", "#8e8e8e"),
+        ("link on a white card over a hero photo", "#939393"),
+        ("link on a white section with a texture tile", "#969696"),
+        ("paragraph in a [hidden] panel author CSS reveals", "#8c8c8c"),
+        ("link inside a <map>", "#919191"),
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(color)),
@@ -66,6 +70,10 @@ fn fixture_passes_every_should_pass_case() {
         ("link inside a [hidden] subtree", "#b8b8b8"),
         ("link inside a [hidden=until-found] subtree", "#b9b9b9"),
         ("link inside a <noscript>", "#bababa"),
+        ("link inside a closed <details>", "#bbbbbb"),
+        ("link fourteen levels inside a <template>", "#bcbcbc"),
+        ("word spans of a gradient-clipped caption", "#fdfdfd"),
+        ("span inside a gradient-clipped link", "#d1d5db"),
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(color)),
@@ -84,12 +92,171 @@ fn fixture_passes_every_should_pass_case() {
         1,
         "a repeated link colour must be reported once, {snippets:?}"
     );
-    // The should-pass column contributes nothing at all, not just no
-    // contrast findings: the fixture is a clean negative control.
+    // Nothing but contrast findings, except the two gradient-clipped cases,
+    // which `gradient-text` reports as that rule always has. The fixture is
+    // otherwise a clean negative control for every other rule.
     let fixture = repo_root().join("tests/fixtures/antipatterns/link-text-contrast.html");
     let html = std::fs::read_to_string(&fixture).unwrap();
     let all = detect_html_source(&html, &fixture, &DetectHtmlOptions::default());
-    assert_eq!(all.len(), snippets.len(), "{all:?}");
+    let others: Vec<_> = all
+        .iter()
+        .filter(|f| f.antipattern != "low-contrast")
+        .collect();
+    assert_eq!(others.len(), 2, "{others:?}");
+    assert!(
+        others.iter().all(|f| f.antipattern == "gradient-text"),
+        "{others:?}"
+    );
+}
+
+#[test]
+fn a_run_inside_a_gradient_clipped_parent_is_not_scored() {
+    // The review's two repros. The clip sits on the parent, the words are in
+    // spans, and the static cascade drops `-webkit-text-fill-color`, so the
+    // span used to be scored on its declared colour against the stops:
+    // `1.2:1, text #ffffff on #fde68a` and `3.1:1, text #d1d5db on #db2777`.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #0b0b10; color: #f5f5f5; font-size: 16px; }
+.wordsplit { background-image: linear-gradient(90deg, #fde68a, #fbcfe8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #ffffff; font-size: 18px; display: inline-block; }
+.gradlink { background-image: linear-gradient(90deg, #7c3aed, #db2777); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #d1d5db; font-size: 15px; display: inline-block; }
+</style></head>
+<body>
+  <p class="wordsplit"><span>Split</span> <span>word</span> <span>gradient</span> <span>caption</span></p>
+  <p><a href="/x" class="gradlink"><span>Learn more about it</span></a></p>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/gradclip.html"));
+    assert!(snippets.is_empty(), "{snippets:?}");
+
+    // Control: the same spans with nothing clipped report against the stops,
+    // so the silence above is the clip and not the colours.
+    let unclipped = html
+        .replace("-webkit-background-clip: text; background-clip: text;", "")
+        .replace("-webkit-text-fill-color: transparent;", "");
+    let snippets = low_contrast_snippets(&unclipped, Path::new("/tmp/gradclip-control.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#ffffff on #fde68a")),
+        "{snippets:?}"
+    );
+
+    // A box painted normally inside the clipped one is a real surface again.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+.clipped { background-image: linear-gradient(90deg, #7c3aed, #db2777); -webkit-background-clip: text; background-clip: text; color: #1f2937; }
+.card { background: #ffffff; padding: 12px; }
+.pale { color: #aaaaaa; font-size: 14px; }
+</style></head>
+<body><div class="clipped"><div class="card"><span class="pale">Card copy</span></div></div></body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/gradclip-card.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#aaaaaa on #ffffff")),
+        "{snippets:?}"
+    );
+}
+
+#[test]
+fn a_hidden_element_an_author_display_reveals_is_scored() {
+    // The UA's `[hidden] { display: none }` is the weakest rule on the page.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+.reveal { display: block; }
+.m4 { color: #9a9a9a; font-size: 14px; }
+.m6 { color: #a1a1a1; font-size: 14px; }
+.m7 { color: #a2a2a2; font-size: 14px; }
+</style></head>
+<body>
+  <div hidden class="reveal"><p class="m4">Hidden attribute but author CSS shows this</p></div>
+  <div hidden><p class="m6">Hidden with no author display</p></div>
+  <div hidden="until-found" class="reveal"><p class="m7">Until found, which no display undoes</p></div>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/reveal.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#9a9a9a")),
+        "{snippets:?}"
+    );
+    assert!(
+        !snippets.iter().any(|s| s.contains("#a1a1a1") || s.contains("#a2a2a2")),
+        "{snippets:?}"
+    );
+}
+
+#[test]
+fn a_closed_details_hides_everything_but_its_summary() {
+    let page = |open: &str| {
+        format!(
+            r#"<!DOCTYPE html>
+<html><head><style>
+body {{ background: #ffffff; }}
+.s {{ color: #a3a3a3; font-size: 14px; }}
+.m5 {{ color: #9b9b9b; font-size: 14px; }}
+</style></head>
+<body><details{open}><summary><span class="s">More options</span></summary><div><a href="/x" class="m5">Link inside the details panel</a></div></details></body></html>
+"#
+        )
+    };
+    let closed = low_contrast_snippets(&page(""), Path::new("/tmp/details.html"));
+    assert!(
+        closed.iter().any(|s| s.contains("#a3a3a3")),
+        "the summary is on screen: {closed:?}"
+    );
+    assert!(
+        !closed.iter().any(|s| s.contains("#9b9b9b")),
+        "the panel is not: {closed:?}"
+    );
+    let open = low_contrast_snippets(&page(" open"), Path::new("/tmp/details-open.html"));
+    assert!(open.iter().any(|s| s.contains("#9b9b9b")), "{open:?}");
+}
+
+#[test]
+fn a_map_renders_its_flow_content() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+.maplink { color: #a4a4a4; font-size: 14px; }
+</style></head>
+<body><map name="nav"><a href="/a" class="maplink">Text link repeated from the image map</a></map></body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/map.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#a4a4a4")),
+        "{snippets:?}"
+    );
+}
+
+#[test]
+fn non_rendered_markup_hides_however_far_up_it_is_written() {
+    let wrap = |open: &str, close: &str| {
+        let depth = 20;
+        format!(
+            r#"<!DOCTYPE html>
+<html><head><style>
+body {{ background: #ffffff; }}
+.pale {{ color: #a5a5a5; font-size: 14px; }}
+</style></head>
+<body>{open}{}<a class="pale" href="/deep">Deeply nested link</a>{}{close}</body></html>
+"#,
+            "<div>".repeat(depth),
+            "</div>".repeat(depth)
+        )
+    };
+    for (open, close) in [
+        ("<template>", "</template>"),
+        ("<div hidden>", "</div>"),
+        ("<details><summary>More</summary>", "</details>"),
+    ] {
+        let snippets = low_contrast_snippets(&wrap(open, close), Path::new("/tmp/deep.html"));
+        assert!(snippets.is_empty(), "{open}: {snippets:?}");
+    }
+    let snippets = low_contrast_snippets(&wrap("", ""), Path::new("/tmp/deep-control.html"));
+    assert!(
+        snippets.iter().any(|s| s.contains("#a5a5a5")),
+        "{snippets:?}"
+    );
 }
 
 #[test]

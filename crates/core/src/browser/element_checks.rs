@@ -470,6 +470,32 @@ fn overlaps_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
 /// otherwise start reporting.
 const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
 
+/// Whether an ancestor clips its background to text, which makes this run's
+/// glyphs part of that ancestor's fill. With a transparent fill the run is
+/// already caught by `text_fill_is_transparent`, because the fill inherits;
+/// with an opaque one the glyphs cover the gradient, and the background
+/// walk still hands the check the gradient's stops as the surface. The
+/// static engine asks the same question, and the two answer alike. The walk
+/// stops at an ancestor painting an opaque background of its own, a real
+/// surface inside the clipped box, and at a fixed depth.
+fn text_clipped_by_an_ancestor(dom: &dyn Dom, el: ElId) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if js::trim(&dom.style(c, "webkitBackgroundClip")) == "text"
+            || js::trim(&dom.style(c, "backgroundClip")) == "text"
+        {
+            return true;
+        }
+        if read_own_background_color(dom, c).map_or(false, |b| b.alpha_or_one() >= 0.95) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
 /// Whether a hit from the SAFE_TAGS text path is one this page should
 /// print. Two things waive it, both of them the engine's knowledge rather
 /// than the rule's, and both asked here: late, only for an element the rule
@@ -562,6 +588,7 @@ pub fn check_element_colors_dom(
         && !is_glyph_only_text(&direct)
         && !is_visually_hidden(dom, el)
         && !text_fill_is_transparent(&dom.style(el, "webkitTextFillColor"))
+        && !text_clipped_by_an_ancestor(dom, el)
         && overlaps_page_width(dom, &rect)
         // `closest` starts at the element, so the control itself is covered.
         && closest_or_none(dom, el, DISABLED_CONTROL_SELECTOR).is_none()
@@ -1911,23 +1938,260 @@ mod tests {
         );
     }
 
+    /// An orange link standing in a positioned hero section at `top`, with an
+    /// optional photo painted by an earlier sibling across the whole section.
+    /// The page itself is white, so without the photo the link reports.
+    fn hero_link(top: f64, with_photo: bool) -> (FakeDom, ElId, Option<ElId>, ElId) {
+        let (mut d, body) = page();
+        let hero = d.add(Some(body), "section");
+        visible(&mut d, hero);
+        d.set_rect(hero, 0.0, top, 1280.0, 500.0);
+        d.set_styles(
+            hero,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let photo = with_photo.then(|| {
+            let img = d.add(Some(hero), "img");
+            visible(&mut d, img);
+            d.set_rect(img, 0.0, top, 1280.0, 500.0);
+            img
+        });
+        let a = d.add(Some(hero), "a");
+        visible(&mut d, a);
+        d.add_text(a, "Read more");
+        d.set_rect(a, 100.0, top + 200.0, 160.0, 20.0);
+        d.set_styles(
+            a,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(243, 123, 46)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        (d, hero, photo, a)
+    }
+
     #[test]
     fn text_over_a_media_layer_is_left_to_the_visual_pass() {
         // A hero photo painted by a positioned sibling is nobody's ancestor,
         // so the background walk reads past it to the page's own white and
         // scores the text against a surface no reader sees.
-        let (mut d, wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(243, 123, 46)");
+        let (d, _hero, _photo, a) = hero_link(0.0, false);
         assert!(
-            !colors(&d, a).is_empty(),
+            colors(&d, a)
+                .iter()
+                .any(|h| h.snippet.contains("#f37b2e on #ffffff")),
             "control: with nothing behind it, the link reports"
         );
-        let photo = d.add(Some(wrap), "img");
-        visible(&mut d, photo);
-        d.set_rect(photo, 0.0, 0.0, 300.0, 40.0);
-        d.set_point(60.0, 10.0, vec![a, photo, wrap]);
+        let (d, _hero, _photo, a) = hero_link(0.0, true);
         assert!(
             colors(&d, a).is_empty(),
             "the verdict against the page fill is a guess about a photograph"
+        );
+    }
+
+    #[test]
+    fn a_media_layer_below_the_fold_is_still_seen() {
+        // The viewport is 800px tall and this hero starts at 1400px. No hit
+        // test can be asked there, and none is needed: the photo's rect
+        // covers the link's, and it paints first.
+        let (d, _hero, _photo, a) = hero_link(1400.0, true);
+        assert!(d.inner_height < 1600.0);
+        assert!(colors(&d, a).is_empty(), "{:?}", colors(&d, a));
+        // A photo that does not reach the text paints nothing under it.
+        let (mut d, _hero, photo, a) = hero_link(1400.0, true);
+        d.set_rect(photo.unwrap(), 0.0, 1400.0, 80.0, 80.0);
+        assert!(
+            colors(&d, a)
+                .iter()
+                .any(|h| h.snippet.contains("#f37b2e on #ffffff")),
+            "{:?}",
+            colors(&d, a)
+        );
+    }
+
+    #[test]
+    fn an_opaque_card_between_the_photo_and_the_text_is_the_surface() {
+        // `#999` on a white card that sits on the hero photo. The card is
+        // what the link is read against, and it is scored there.
+        let (mut d, hero, _photo, a) = hero_link(0.0, true);
+        let card = d.add(Some(hero), "div");
+        visible(&mut d, card);
+        d.set_rect(card, 100.0, 100.0, 400.0, 200.0);
+        d.set_styles(
+            card,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let link = d.add(Some(card), "a");
+        visible(&mut d, link);
+        d.add_text(link, "Read the full story");
+        d.set_rect(link, 130.0, 150.0, 160.0, 20.0);
+        d.set_styles(
+            link,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(153, 153, 153)"),
+                ("fontSize", "15px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(
+            colors(&d, link)
+                .iter()
+                .any(|h| h.snippet.contains("#999999 on #ffffff")),
+            "{:?}",
+            colors(&d, link)
+        );
+        // The hero's own link, standing on the photo, stays quiet.
+        assert!(colors(&d, a).is_empty());
+    }
+
+    #[test]
+    fn a_solid_section_with_a_texture_tile_is_a_surface() {
+        let textured = |size: &str, shorthand: &str| {
+            let (mut d, wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(157, 157, 157)");
+            d.set_styles(
+                wrap,
+                &[
+                    ("backgroundColor", "rgb(255, 255, 255)"),
+                    ("backgroundImage", "url(\"data:image/svg+xml,tile\")"),
+                    ("backgroundSize", size),
+                    ("background", shorthand),
+                ],
+            );
+            colors(&d, a)
+        };
+        let tile = "rgb(255, 255, 255) url(\"data:image/svg+xml,tile\") repeat scroll 0% 0% / auto padding-box border-box";
+        let hits = textured("auto", tile);
+        assert!(
+            hits.iter().any(|h| h.snippet.contains("#9d9d9d on #ffffff")),
+            "{hits:?}"
+        );
+        let hits = textured("24px 24px", tile);
+        assert!(hits.iter().any(|h| h.id == "low-contrast"), "{hits:?}");
+        // The shapes a photograph is drawn in are still a picture.
+        assert!(textured("cover", tile).is_empty());
+        assert!(textured("100% auto", tile).is_empty());
+        assert!(textured("1920px 1080px", tile).is_empty());
+        assert!(textured(
+            "auto",
+            "rgb(255, 255, 255) url(\"hero.jpg\") no-repeat scroll 50% 50% / auto padding-box border-box"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn the_hit_test_fallback_stops_at_an_opaque_box() {
+        // A transparent document the climb cannot decide, with the layers
+        // under the text reachable only by hit tests.
+        let stacked = |under: &dyn Fn(ElId, ElId) -> Vec<ElId>| {
+            let mut d = FakeDom::new();
+            let (html, body) = d.with_page();
+            for e in [html, body] {
+                visible(&mut d, e);
+                d.set_style(e, "backgroundColor", "rgba(0, 0, 0, 0)");
+            }
+            let wrap = d.add(Some(body), "div");
+            visible(&mut d, wrap);
+            d.set_rect(wrap, 0.0, 0.0, 300.0, 40.0);
+            let a = d.add(Some(wrap), "a");
+            visible(&mut d, a);
+            d.add_text(a, "Read more");
+            d.set_rect(a, 0.0, 0.0, 120.0, 20.0);
+            let card = d.add(Some(body), "div");
+            visible(&mut d, card);
+            d.set_style(card, "backgroundColor", "rgb(255, 255, 255)");
+            d.set_rect(card, 0.0, 0.0, 300.0, 40.0);
+            let img = d.add(Some(body), "img");
+            visible(&mut d, img);
+            d.set_rect(img, 0.0, 0.0, 300.0, 40.0);
+            for x in [60.0, 30.0, 90.0] {
+                let mut stack = vec![a, wrap];
+                stack.extend(under(card, img));
+                d.set_point(x, 10.0, stack);
+            }
+            crate::browser::visual::media_layer_under_text(&d, a)
+        };
+        assert!(stacked(&|_card, img| vec![img]), "a photo under the text");
+        assert!(
+            !stacked(&|card, img| vec![card, img]),
+            "the white card covers the photo"
+        );
+    }
+
+    #[test]
+    fn a_run_inside_a_gradient_clipped_parent_is_not_scored() {
+        // `<a class="gradlink"><span>Learn more</span></a>`: the parent clips
+        // a gradient to the text, so the walk hands the span the gradient's
+        // stops as its surface, which nobody reads it against.
+        let (mut d, wrap, span) =
+            muted_text_in_wrapper("span", "Learn more about it", "rgb(209, 213, 219)");
+        d.set_styles(
+            wrap,
+            &[
+                ("color", "rgb(209, 213, 219)"),
+                (
+                    "backgroundImage",
+                    "linear-gradient(90deg, rgb(180, 83, 9), rgb(219, 39, 119))",
+                ),
+            ],
+        );
+        assert!(
+            !colors(&d, span).is_empty(),
+            "control: the gradient is scored while nothing clips it"
+        );
+        d.set_style(wrap, "webkitBackgroundClip", "text");
+        assert!(colors(&d, span).is_empty(), "{:?}", colors(&d, span));
+        // A painted box inside the clipped one is a real surface again.
+        let (mut d, body) = page();
+        let clipped = d.add(Some(body), "div");
+        visible(&mut d, clipped);
+        d.set_rect(clipped, 0.0, 0.0, 300.0, 40.0);
+        d.set_styles(
+            clipped,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundClip", "text"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let card = d.add(Some(clipped), "div");
+        visible(&mut d, card);
+        d.set_rect(card, 0.0, 0.0, 300.0, 40.0);
+        d.set_styles(
+            card,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let run = d.add(Some(card), "span");
+        visible(&mut d, run);
+        d.add_text(run, "Learn more about it");
+        d.set_rect(run, 0.0, 0.0, 120.0, 20.0);
+        d.set_styles(
+            run,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(160, 160, 160)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(
+            colors(&d, run).iter().any(|h| h.id == "low-contrast"),
+            "{:?}",
+            colors(&d, run)
         );
     }
 
@@ -1942,6 +2206,7 @@ mod tests {
             &[
                 ("backgroundColor", "rgb(246, 247, 248)"),
                 ("backgroundImage", "url(\"/hero.jpg\")"),
+                ("backgroundSize", "cover"),
             ],
         );
         assert!(colors(&d, a).is_empty(), "{:?}", colors(&d, a));
@@ -1956,21 +2221,49 @@ mod tests {
     fn a_link_over_a_photo_does_not_spend_the_pages_report() {
         // Same colour twice: once over a photo, once on the page's own fill.
         // The suppressed one must not register the pair.
-        let (mut d, nav, links) = nav_of_links(2);
-        let photo = d.add(Some(nav), "img");
-        visible(&mut d, photo);
-        d.set_rect(photo, 0.0, 0.0, 60.0, 20.0);
-        for x in [30.0, 15.0, 45.0] {
-            d.set_point(x, 10.0, vec![links[0], photo, nav]);
-        }
+        let (mut d, hero, _photo, over) = hero_link(0.0, true);
+        let body = d.parent(hero).unwrap();
+        let plain = d.add(Some(body), "a");
+        visible(&mut d, plain);
+        d.add_text(plain, "Read more");
+        d.set_rect(plain, 100.0, 700.0, 160.0, 20.0);
+        d.set_styles(
+            plain,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(243, 123, 46)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
         let mut seen = SafeTagTextSeen::default();
-        assert!(check_element_colors_dom(&d, links[0], &mut seen).is_empty());
+        assert!(check_element_colors_dom(&d, over, &mut seen).is_empty());
         assert!(
-            check_element_colors_dom(&d, links[1], &mut seen)
+            check_element_colors_dom(&d, plain, &mut seen)
                 .iter()
                 .any(|h| h.id == "low-contrast"),
             "the readable copy of the colour still reports"
         );
+    }
+
+    #[test]
+    fn a_duplicate_pair_costs_no_engine_work() {
+        // The engine's verdict can be a layer walk. A hit the dedupe drops
+        // anyway is not worth asking it about.
+        let mut seen = SafeTagTextSeen::default();
+        let mut calls = 0;
+        for _ in 0..3 {
+            let mut hits = vec![RuleHit::new(
+                "low-contrast",
+                "2.8:1 (need 4.5:1), text #999999 on #ffffff".to_string(),
+            )];
+            seen.keep_first(&mut hits, &mut |_h: &RuleHit| {
+                calls += 1;
+                true
+            });
+        }
+        assert_eq!(calls, 1);
     }
 
     #[test]

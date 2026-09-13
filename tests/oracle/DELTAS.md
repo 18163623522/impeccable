@@ -273,19 +273,79 @@ property, and a recorded call vector pins it dropping it.
 No golden moves for either: no fixture puts SAFE_TAGS text over an image or
 fills text with nothing.
 
-**Corpus, run 2, 346 captures.** Removed 0, added 434, violations 0 (455
-before this revision; 439 after the media gate, 434 after the text-fill
-guard). In the three clusters an independent review measured against capture
-pixels, aisupply.framer.website (3 wrong-layer findings) and
-landio.framer.website (4) now add nothing at all. donckelektro.nl's hero cases
-go quiet only when the hit tests are answered: `replay_url_scan` answers hit
-tests from the facts a capture recorded, run 2 recorded none for these points
-(`unanswered_hit_tests` is 18 on capture 115), and a live scan has
-`elementsFromPoint`. Answering them from the capture's own geometry drops ten
-of the site's sixteen adds and leaves six, which are three elements seen at
-both viewports, each read off the screenshot by hand and each real: two
-orange "read more" links on the white cards they sit on, and an orange filter
-pill whose own 10% tint composites to the grey the snippet names.
+The corpus numbers this revision first recorded (434 added) are superseded by
+the next revision, which replaced the hit-test gate with a geometric one; see
+there for what now holds.
+
+### Revision: picture, surface and markup, measured the way a reader meets them
+
+A review of the revision above found four more places the colour rule scored
+text a reader does not see, or dropped text a reader does.
+
+**Gradient-clipped runs, static engine.** Where a parent clips a gradient to
+its text and the words sit in `<span>`s, the span is not `background-clip:
+text` itself, and the static cascade drops `-webkit-text-fill-color`, so the
+span was scored on its declared colour against the stops:
+`<p class="wordsplit"><span>Split</span> <span>word</span></p>` reported
+`1.2:1, text #ffffff on #fde68a`. The SAFE_TAGS text path now stands down
+where an ancestor within twelve parents clips its background to text,
+stopping at an ancestor with an opaque background of its own, which is a
+real surface inside the clipped box. The cascade does carry the clip. The
+browser engine asks the same question, so the two engines agree where the
+fill is opaque, too.
+
+**The wrong-layer gate, at any scroll position.** The gate read the
+visual-contrast collector's hit tests, which skip every point below the
+viewport, so an orange link over a dark photo at y 1600 reported
+`2.7:1, text #f37b2e on #ffffff` while the same link above the fold did not.
+`media_layer_under_text` is now its own geometric test and no longer calls
+the collector. It climbs from the element, and at each level asks, in paint
+order, the box's own background and then its earlier siblings (and a few
+levels of their descendants) whose rect covers the text rect. An `img`,
+`picture`, `video` or `canvas` there, or a raster background, is a picture
+under the text. Bounds: 32 levels, 32 siblings per level, 3 levels and 8
+children into a covering sibling. Only a page the climb cannot decide (a
+transparent document, or a tree past those bounds) falls back to hit tests.
+
+**Opaque surfaces between the picture and the text.** The first opaque
+background met on the way, ancestor or covering sibling, ends the test with
+no picture: a `#999` link on a white card over a hero photo is scored on the
+card, as it should be. The hit-test fallback stops at an opaque box the same
+way. A solid colour carrying a raster texture is a surface where the image
+is a small repeating tile: not `no-repeat`, not `cover`, `contain` or a
+percentage, every size component `auto` or at most 256px. The tile's pixels
+are not in the computed style, so "faint" cannot be measured, and a
+photograph drawn in tile shape (an auto-sized, repeating hero with no
+`background-size`) is now scored against its section colour. An unknown
+size keeps the quiet answer.
+
+**The static non-rendered gate, reading markup.** An author `display` on a
+`hidden` element beats the UA's `[hidden] { display: none }`, so
+`<div hidden class="reveal">` with `.reveal { display: block }` renders and
+is scored again; `hidden="until-found"` stays hidden, because no `display`
+undoes it. The panel of a closed `<details>`, everything but its first
+`<summary>`, is not rendered. `map` leaves `NON_RENDERED_TAGS`: a `<map>` is
+an inline box and its flow content renders, only `<area>` paints nothing.
+That constant also serves `tiny-text` and `undersized-ui-text`, and no golden
+moves for them. The walk now goes to the root, because a `<template>` twenty
+levels up hides an element as surely as its parent does.
+
+The per-page dedupe also checks a hit against the pairs already reported
+before it asks the engine for its verdict, so a duplicate link the dedupe
+would drop anyway costs no layer walk.
+
+- `detect-fixture-json-link-text-contrast-html`, `detect-fixture-text-link-text-contrast-html`: 10 to 16. Four should-flag cases join: a link on a white card over a hero photo (`#939393`, 3.1:1), a link on a white section with a texture tile (`#969696`, 3.0:1), a paragraph in a `[hidden]` panel author CSS reveals (`#8c8c8c`, 3.4:1), and a link inside a `<map>` (`#919191`, 3.2:1). The should-pass column gains a link in a closed `<details>`, a link fourteen levels inside a `<template>`, and the review's two gradient-clipped runs, none of which reports a contrast finding. The two gradient-clipped parents report `gradient-text`, which is that rule's verdict and the only non-contrast finding in the fixture.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep total moves from 431 to 437, which is those six findings.
+
+**Corpus, run 2, 346 captures.** Removed 0, added 423, violations 0 (434
+before this revision). The geometric test reads the rects a capture already
+carries, so in replay it decides a page without the hit-test facts run 2 did
+not record; the per-site effect on the clusters above was not re-measured
+for this revision. The review's repro pages, scanned live from a local
+server: the orange links over a dark photo above and below the
+fold both report nothing, the `#999` link on the white card reports
+`2.8:1, text #999999 on #ffffff`, and the textured section's link reports
+`2.7:1, text #9d9d9d on #ffffff`.
 
 ### Risks carried, not fixed
 

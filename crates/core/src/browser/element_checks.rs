@@ -22,8 +22,9 @@ use crate::checks::measures::{
 use crate::checks::rules::{
     check_borders, check_colors, check_colors_deduped, check_glow, check_hero_eyebrow,
     check_icon_tile, check_italic_serif, check_motion, check_placeholder_colors,
-    is_emoji_only_text, is_glyph_only_text, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
-    IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit, SafeTagTextSeen, Sides, HEADING_TAGS,
+    is_emoji_only_text, is_glyph_only_text, text_fill_is_transparent, BorderOpts, ColorOpts,
+    GlowOpts, HeroEyebrowOpts, IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit, SafeTagTextSeen,
+    Sides, HEADING_TAGS,
 };
 use crate::checks::text_rules::{
     CURSOR_FIRST_VIEWPORT_PX, CURSOR_GLYPH_RE, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
@@ -469,6 +470,33 @@ fn overlaps_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
 /// otherwise start reporting.
 const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
 
+/// Whether a hit from the SAFE_TAGS text path is one this page should
+/// print. Two things waive it, both of them the engine's knowledge rather
+/// than the rule's, and both asked here: late, only for an element the rule
+/// actually failed, and before the colour pair is registered as this page's
+/// one report of itself.
+///
+/// The first is an author's inline `data-impeccable-ignore`.
+///
+/// The second is the wrong-layer problem. A link or a span reading over a
+/// hero photo, a video or a raster section background is scored against
+/// whatever fill the ancestor walk could parse, which is not the surface
+/// anyone reads it against: the orange that measures 2.5:1 on the section's
+/// grey measures 7.7:1 on the photograph actually behind it. Against a
+/// picture the verdict is a guess, and a wrong verdict on a real element
+/// costs more than a missed one, so this path stays quiet there.
+///
+/// Those elements are not handed to the visual-contrast pass as candidates
+/// either. Its collector takes the first twelve it finds in document order,
+/// and a page's links and spans outnumber its headings by an order of
+/// magnitude, so admitting them would spend a pixel-reading budget on the
+/// smallest text on the page. Widening that pass is its own change, with
+/// its own measurement.
+fn safe_tag_text_hit_stands(dom: &dyn Dom, el: ElId, hit: &RuleHit) -> bool {
+    !crate::browser::driver::scoped_ignore_active(dom, el, &hit.id)
+        && !crate::browser::visual::media_layer_under_text(dom, el)
+}
+
 /// JS: checks.mjs#checkElementColorsDOM(el)
 pub fn check_element_colors_dom(
     dom: &dyn Dom,
@@ -533,6 +561,7 @@ pub fn check_element_colors_dom(
         && !is_emoji_only_text(&direct)
         && !is_glyph_only_text(&direct)
         && !is_visually_hidden(dom, el)
+        && !text_fill_is_transparent(&dom.style(el, "webkitTextFillColor"))
         && overlaps_page_width(dom, &rect)
         // `closest` starts at the element, so the control itself is covered.
         && closest_or_none(dom, el, DISABLED_CONTROL_SELECTOR).is_none()
@@ -557,7 +586,9 @@ pub fn check_element_colors_dom(
         class_list: Some(class_attr(dom, el)),
         detector_is_browser: true,
     };
-    let mut findings = check_colors_deduped(&color_opts, seen);
+    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
+        safe_tag_text_hit_stands(dom, el, h)
+    });
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -1806,8 +1837,8 @@ mod tests {
         assert!(colors(&d, button).is_empty());
     }
 
-    #[test]
-    fn one_washed_out_colour_is_one_finding_per_page() {
+    /// A nav of `n` links, all in one washed-out colour on the page's white.
+    fn nav_of_links(n: usize) -> (FakeDom, ElId, Vec<ElId>) {
         let (mut d, body) = page();
         let nav = d.add(Some(body), "nav");
         visible(&mut d, nav);
@@ -1820,7 +1851,7 @@ mod tests {
             ],
         );
         let mut links = Vec::new();
-        for i in 0..8 {
+        for i in 0..n {
             let a = d.add(Some(nav), "a");
             visible(&mut d, a);
             d.add_text(a, &format!("Section {i}"));
@@ -1837,6 +1868,114 @@ mod tests {
             );
             links.push(a);
         }
+        (d, nav, links)
+    }
+
+    #[test]
+    fn a_colour_the_glyphs_are_not_painted_in_is_not_scored() {
+        // The gradient heading: a parent clips a gradient to the text and the
+        // run fills its own glyphs with nothing, so `color` is a value that
+        // renders nowhere and its ratio is a number about nothing.
+        let (mut d, _wrap, run) = muted_text_in_wrapper("span", "Ship faster", "rgb(228, 233, 242)");
+        assert!(
+            !colors(&d, run).is_empty(),
+            "control: the same colour scores while it is painted"
+        );
+        d.set_style(run, "webkitTextFillColor", "rgba(0, 0, 0, 0)");
+        assert!(colors(&d, run).is_empty());
+        // An opaque fill is the ordinary case and changes nothing.
+        d.set_style(run, "webkitTextFillColor", "rgb(228, 233, 242)");
+        assert!(!colors(&d, run).is_empty());
+    }
+
+    #[test]
+    fn an_inline_ignore_waives_its_own_link_and_not_the_page() {
+        // The waived link must not spend the page's one report of the pair:
+        // an author silencing one link silences one link.
+        let (mut d, _nav, links) = nav_of_links(3);
+        d.set_attr(links[0], "data-impeccable-ignore", "low-contrast");
+        let mut seen = SafeTagTextSeen::default();
+        assert!(
+            check_element_colors_dom(&d, links[0], &mut seen).is_empty(),
+            "the ignored link reports nothing"
+        );
+        let hits = check_element_colors_dom(&d, links[1], &mut seen);
+        assert!(
+            hits.iter()
+                .any(|h| h.id == "low-contrast" && h.snippet.contains("#888888 on #ffffff")),
+            "the next link still carries the page's report, {hits:?}"
+        );
+        assert!(
+            check_element_colors_dom(&d, links[2], &mut seen).is_empty(),
+            "and only that one"
+        );
+    }
+
+    #[test]
+    fn text_over_a_media_layer_is_left_to_the_visual_pass() {
+        // A hero photo painted by a positioned sibling is nobody's ancestor,
+        // so the background walk reads past it to the page's own white and
+        // scores the text against a surface no reader sees.
+        let (mut d, wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(243, 123, 46)");
+        assert!(
+            !colors(&d, a).is_empty(),
+            "control: with nothing behind it, the link reports"
+        );
+        let photo = d.add(Some(wrap), "img");
+        visible(&mut d, photo);
+        d.set_rect(photo, 0.0, 0.0, 300.0, 40.0);
+        d.set_point(60.0, 10.0, vec![a, photo, wrap]);
+        assert!(
+            colors(&d, a).is_empty(),
+            "the verdict against the page fill is a guess about a photograph"
+        );
+    }
+
+    #[test]
+    fn a_raster_section_background_is_not_the_surface_the_walk_parsed() {
+        // The walk answers with the first background colour it can parse. An
+        // ancestor that paints an image over its own fill hands it a surface
+        // that is covered up in the rendered page.
+        let (mut d, wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(243, 123, 46)");
+        d.set_styles(
+            wrap,
+            &[
+                ("backgroundColor", "rgb(246, 247, 248)"),
+                ("backgroundImage", "url(\"/hero.jpg\")"),
+            ],
+        );
+        assert!(colors(&d, a).is_empty(), "{:?}", colors(&d, a));
+        // Take the picture away and the same fill is a real surface again.
+        d.set_style(wrap, "backgroundImage", "none");
+        assert!(colors(&d, a)
+            .iter()
+            .any(|h| h.snippet.contains("#f37b2e on #f6f7f8")));
+    }
+
+    #[test]
+    fn a_link_over_a_photo_does_not_spend_the_pages_report() {
+        // Same colour twice: once over a photo, once on the page's own fill.
+        // The suppressed one must not register the pair.
+        let (mut d, nav, links) = nav_of_links(2);
+        let photo = d.add(Some(nav), "img");
+        visible(&mut d, photo);
+        d.set_rect(photo, 0.0, 0.0, 60.0, 20.0);
+        for x in [30.0, 15.0, 45.0] {
+            d.set_point(x, 10.0, vec![links[0], photo, nav]);
+        }
+        let mut seen = SafeTagTextSeen::default();
+        assert!(check_element_colors_dom(&d, links[0], &mut seen).is_empty());
+        assert!(
+            check_element_colors_dom(&d, links[1], &mut seen)
+                .iter()
+                .any(|h| h.id == "low-contrast"),
+            "the readable copy of the colour still reports"
+        );
+    }
+
+    #[test]
+    fn one_washed_out_colour_is_one_finding_per_page() {
+        let (mut d, _nav, links) = nav_of_links(8);
         let mut seen = SafeTagTextSeen::default();
         let total: usize = links
             .iter()

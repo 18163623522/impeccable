@@ -536,10 +536,11 @@ pub fn check_element_colors(
         return Vec::new();
     }
     // Markup the browser never lays out: a `<template>`'s content, a
-    // `display: none` or `[hidden]` subtree, anything under `<head>`. The
-    // static tree carries it and a browser scan cannot see it, so scoring it
-    // here is a false positive only this engine can produce.
-    if is_in_non_rendered_markup(el, tag, style) {
+    // `[hidden]` subtree, a `<noscript>`, anything under `<head>`. The static
+    // tree carries it and a browser scan cannot see it, so scoring it here is
+    // a false positive only this engine can produce. Nothing viewport-shaped
+    // belongs in that gate; see `is_in_non_rendered_markup`.
+    if is_in_non_rendered_markup(el, tag) {
         return Vec::new();
     }
     let mut eff_opacity = 1.0f64;
@@ -614,6 +615,10 @@ pub fn check_element_colors(
         && !is_emoji_only_text(&direct_text)
         && !is_glyph_only_text(&direct_text)
         && !is_visually_hidden(el, style)
+        // The browser path also stands down where `-webkit-text-fill-color`
+        // paints the glyphs in nothing. This engine cannot: the static
+        // cascade drops that property, and a recorded call vector pins it
+        // dropping it.
         && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
         && !inherits_scored_text_color(el, text_color, custom_props);
     let color_opts = ColorOpts {
@@ -636,7 +641,14 @@ pub fn check_element_colors(
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
     };
-    let mut findings = check_colors_deduped(&color_opts, seen);
+    // The page's one report of a colour pair goes to an element that will
+    // actually print it, so an inline ignore on the first of fifty links
+    // waives that link and not the other forty-nine. The static engine has
+    // no layout, so it cannot ask the browser path's second question, about
+    // a picture painting behind the text.
+    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
+        !scoped_ignore_active(el, &h.id)
+    });
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();
         if !placeholder.is_empty() {

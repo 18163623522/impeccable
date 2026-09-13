@@ -110,6 +110,20 @@ pub fn is_glyph_only_text(text: &str) -> bool {
     !trimmed.is_empty() && !trimmed.chars().any(char::is_alphanumeric)
 }
 
+/// Whether a computed `-webkit-text-fill-color` says the element's glyphs
+/// are not painted in its `color` at all. A gradient heading is written by
+/// clipping a background to the text and filling the text with nothing, so
+/// what a reader sees is the gradient and `color` is a value that renders
+/// nowhere. Scoring a colour nobody can see is how a legible heading gets
+/// reported at 1.1:1 against the gradient's own first stop.
+///
+/// An empty value is not an answer. The static cascade carries only the
+/// properties an author declared, so absence means unset, which is the
+/// initial `currentcolor` and not transparent.
+pub fn text_fill_is_transparent(value: &str) -> bool {
+    !js::trim(value).is_empty() && crate::css::measures::css_color_is_transparent(Some(value))
+}
+
 // ─── checkColors ────────────────────────────────────────────────────────────
 
 /// JS `checkColors` opts.

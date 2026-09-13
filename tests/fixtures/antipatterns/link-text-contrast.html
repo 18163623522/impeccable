@@ -26,6 +26,11 @@
     .flag-field-label { color: #949494; font-size: 14px; }
     .flag-muted-copy { color: #999999; font-size: 14px; }
     .flag-repeated-link { color: #888888; font-size: 14px; text-decoration: none; }
+    .flag-desktop-only { color: #8e8e8e; font-size: 14px; text-decoration: none; }
+    /* The static cascade descends every `@media` block, so this rule wins
+       here whatever the viewport. A reader on a desktop sees the link, and
+       the contrast pass has to keep seeing it too. */
+    @media (max-width: 900px) { .flag-desktop-only-row { display: none; } }
 
     /* Should pass: this column must stay finding-free. */
     .pass-strong-link { color: #0b4fbc; font-size: 14px; }
@@ -36,12 +41,12 @@
     .pass-emoji { color: #b4b4b4; font-size: 14px; }
     .pass-disabled-button { background: transparent; border: 0; color: #b6b6b6; font-size: 14px; padding: 8px 0; }
     /* Non-rendered markup. The static tree carries all of it and a browser
-       paints none of it, so a contrast verdict here is a false positive only
-       the static engine can produce. */
+       paints none of it, at any viewport, so a contrast verdict here is a
+       false positive only the static engine can produce. */
     .pass-template-link { color: #b7b7b7; font-size: 14px; }
     .pass-hidden-attr-link { color: #b8b8b8; font-size: 14px; }
-    .pass-display-none { display: none; }
-    .pass-display-none-link { color: #b9b9b9; font-size: 14px; }
+    .pass-until-found-link { color: #b9b9b9; font-size: 14px; }
+    .pass-noscript-link { color: #bababa; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -89,6 +94,13 @@
         <li><a class="flag-repeated-link" href="/g">Security</a></li>
         <li><a class="flag-repeated-link" href="/h">Contact</a></li>
       </ul>
+
+      <!-- A desktop-only row that a `max-width` query collapses on phones.
+           The static cascade has no viewport, so it reads the query's
+           `display: none` as the winning value; the reader on a desktop sees
+           the link, and it is scored. -->
+      <h3>Row a media query hides on narrow viewports</h3>
+      <div class="row flag-desktop-only-row"><a class="flag-desktop-only" href="/desktop">Open the desktop dashboard</a></div>
     </div>
 
     <div class="col" data-col="pass">
@@ -130,8 +142,14 @@
       <h3>Link inside a [hidden] subtree</h3>
       <div class="row" hidden><a class="pass-hidden-attr-link" href="/closed">Open the closed panel</a></div>
 
-      <h3>Link inside a display:none subtree</h3>
-      <div class="row pass-display-none"><a class="pass-display-none-link" href="/drawer">Open the collapsed drawer</a></div>
+      <!-- `until-found` is laid out with content-visibility: hidden until
+           find-in-page reveals it, so a browser measures a zero-size rect
+           here and reports nothing. -->
+      <h3>Link inside a [hidden=until-found] subtree</h3>
+      <div class="row" hidden="until-found"><a class="pass-until-found-link" href="/findable">Open the findable panel</a></div>
+
+      <h3>Link inside a &lt;noscript&gt;</h3>
+      <noscript><div class="row"><a class="pass-noscript-link" href="/plain">Continue without scripting</a></div></noscript>
     </div>
 
   </div>

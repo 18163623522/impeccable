@@ -167,9 +167,22 @@ pub struct SafeTagTextSeen {
 
 impl SafeTagTextSeen {
     /// Drops every hit whose rule and snippet this page has already
-    /// reported from this path.
-    pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>) {
+    /// reported from this path, and every hit `keep` rejects.
+    ///
+    /// A hit the caller rejects never claims the page's one report of its
+    /// colour pair. That ordering is the point of the callback: the engines
+    /// waive findings after the rule runs — an inline
+    /// `data-impeccable-ignore` on one link, a text layer the background
+    /// walk cannot read under another — and registering the pair before
+    /// those verdicts would let a single waived element silence every other
+    /// element on the page wearing the same colour. `keep` is called once
+    /// per surviving hit and no more, so an engine may put real work behind
+    /// it.
+    pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>, keep: &mut dyn FnMut(&RuleHit) -> bool) {
         hits.retain(|h| {
+            if !keep(h) {
+                return false;
+            }
             let key = (h.id.clone(), h.snippet.clone());
             if self.reported.contains(&key) {
                 return false;
@@ -257,10 +270,19 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
 /// Each document's element loop threads one `SafeTagTextSeen` through this
 /// so a colour the page repeats on every link is reported where it first
 /// appears and nowhere else.
-pub fn check_colors_deduped(opts: &ColorOpts, seen: &mut SafeTagTextSeen) -> Vec<RuleHit> {
+///
+/// `keep` is the engine's own verdict on a hit this path produced, asked
+/// before the pair is registered: the inline-ignore filter, and whatever
+/// else the engine knows that the rule does not. It is never called for the
+/// findings of the full `check_colors` pass, which the dedupe does not own.
+pub fn check_colors_deduped(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
     let mut hits = check_colors(opts);
     if scores_safe_tag_text(opts) {
-        seen.keep_first(&mut hits);
+        seen.keep_first(&mut hits, keep);
     }
     hits
 }
@@ -322,13 +344,12 @@ fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
 ///
 /// Narrowing it means knowing whether the walk resolved a surface or gave
 /// up and fell through to the page fill, which the check cannot see from
-/// `ColorOpts` alone. The same blind spot also mislabels the background on
-/// findings whose verdict is right: an overlapping sibling image or an
-/// absolutely positioned panel is not an ancestor, so the walk reads past
-/// it and names the page's fill in the snippet. The verdict usually
-/// survives that (the text is low-contrast against either surface), the
-/// hex in the label does not always. Both want the same fix: a resolved
-/// background that carries where it came from.
+/// `ColorOpts` alone. That is why this guard is written as a hex
+/// coincidence rather than as a verdict about the walk: the engine asks the
+/// real question one layer out, where it can hit-test, and drops a hit from
+/// this path whose text reads over a picture
+/// (`media_layer_under_text`). Here the coincidence is all there is to go
+/// on, and it covers the static engine, which has no layout to test.
 fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
     let text_hex = color_to_hex(Some(text_color));
     let same = |bg: &Rgba| color_to_hex(Some(bg)) == text_hex;

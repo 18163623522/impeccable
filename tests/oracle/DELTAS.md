@@ -203,46 +203,103 @@ goldens do not move.
 ### Revision: markup the browser never renders
 
 Widening the gate widened what the static engine can reach. The browser scan
-sees a layout tree, so a `<template>`'s content, a `display: none` subtree and
-a `[hidden]` panel are simply absent from it; the static tree carries all of
-them, html5ever hands template content back as ordinary descendants, and the
-static cascade has no UA stylesheet to turn `hidden` into `display: none`. The
-colour rule was therefore able to report a washed-out link in markup nothing
-paints, and only in this one engine.
+sees a layout tree, so a `<template>`'s content and a `[hidden]` panel are
+simply absent from it; the static tree carries both, html5ever hands template
+content back as ordinary descendants, and the static cascade has no UA
+stylesheet to turn `hidden` into `display: none`. The colour rule was
+therefore able to report a washed-out link in markup nothing paints, and only
+in this one engine.
 
-`check_element_colors` now returns early on `is_in_non_rendered_markup`, the
-ancestor-aware form of the `is_non_rendered_text` that `tiny-text` and
-`undersized-ui-text` already use, so there is one model of rendered rather
-than one per rule. It covers every tag the colour rule walks, not only the
-newly gated ones. `visibility` needs no walk: it inherits in the static
-cascade, so a descendant of a hidden container already computes hidden.
-`hidden="until-found"` is excluded, because a browser does render that content
-once find-in-page reveals it.
+`check_element_colors` now returns early on `is_in_non_rendered_markup`: a
+`<template>`, `<noscript>` or `<head>` ancestor, or the `hidden` attribute, on
+the element or within twelve parents of it. It covers every tag the colour
+rule walks, not only the newly gated ones. `tiny-text` and `undersized-ui-text`
+keep the element-local `is_non_rendered_text` they have always used; this is a
+second gate beside that one, not a replacement for it, and the two do not read
+the same facts.
 
-**No golden moves.** No fixture had a colour finding inside non-rendered
-markup, and the three cases added to `link-text-contrast.html`'s should-pass
-column (a `<template>`, a `[hidden]` subtree, a `display: none` subtree, each
-holding a low-contrast link) are silent by construction, so the sweep total
-stays at 430. The cases are there to keep a future change from reopening this:
-`crates/html/tests/link_text_contrast.rs` pins them, and the fixture test
-already asserts that the should-pass column contributes no finding of any
-rule.
+Every fact it reads is viewport-independent, which is the correction this
+revision makes to its first draft. That draft also stood an element down for a
+winning `display: none`, and the static cascade descends `@media` blocks
+unconditionally, so `@media (max-width: 900px) { .desktop-only { display:
+none } }` deleted the whole subtree from the colour rule at every width,
+coverage this engine had before the branch. `display` is out of the gate, and
+a should-flag case in the fixture (`.flag-desktop-only-row`, a link inside a
+row a `max-width` query collapses) plus
+`a_media_query_never_hides_anything_from_the_contrast_pass` keep it out.
+`hidden="until-found"` is now treated like plain `hidden`: that content is laid
+out with `content-visibility: hidden` until find-in-page reveals it, so a
+browser measures a zero-size rect and reports nothing there either.
+
+- `detect-fixture-json-link-text-contrast-html`, `detect-fixture-text-link-text-contrast-html`: +1, the desktop-only row's link, `#8e8e8e` on `#ffffff` at 3.3:1. The should-pass column gains a `[hidden=until-found]` subtree and a `<noscript>`, both silent, and loses the `display: none` case, which is now the should-flag one above.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep total moves from 430 to 431, which is that one finding.
+
+### Revision: one report of a colour pair goes to an element that prints it
+
+The per-page dedupe registered a colour pair when the hit was made, and both
+engines filter inline `data-impeccable-ignore` afterwards, so a single
+`data-impeccable-ignore="low-contrast"` on the first of fifty identical links
+waived the whole page's report of that colour. `check_colors_deduped` now takes
+the engine's own verdict on a hit and registers the pair only for hits that
+survive it. Both engines pass their inline-ignore filter; the browser engine
+adds the wrong-layer test below. No golden moves: no fixture waives a
+SAFE_TAGS contrast finding.
+
+### Revision: text over a picture is not scored against the fill behind it
+
+The background walk reads the ancestor chain, so it is blind to a positioned
+sibling (a hero photo, a video, a canvas), and it answers with the first
+background colour it can parse even when an ancestor paints a raster image
+over that colour. Both answers are a surface no reader sees, which is how
+white label text over a photograph was reported at 1.1:1 against the page fill
+and donckelektro.nl's accent orange was reported at 2.5:1 on a section grey it
+measures 7.7:1 against in the rendered page.
+
+A hit from the SAFE_TAGS text path is now dropped when
+`collect_visual_contrast_reasons`, the visual-contrast pass's own candidate
+helper and not a second walk, says a media layer paints behind the text: an
+ancestor's raster background, or an `img`, `picture`, `video` or `canvas` in
+the hit-test stack under it. A gradient ancestor is not in that set; it is
+scored against its stops as before. Those elements are not handed to the
+visual-contrast pass as candidates, because that pass takes the first twelve
+candidates in document order and a page's links outnumber its headings by an
+order of magnitude; widening it is its own change with its own measurement.
+
+The same path also stands down where a transparent `-webkit-text-fill-color`
+says the glyphs are not painted in `color` at all, which is how a gradient
+heading is written. That guard is browser-only: the static cascade drops the
+property, and a recorded call vector pins it dropping it.
+
+No golden moves for either: no fixture puts SAFE_TAGS text over an image or
+fills text with nothing.
+
+**Corpus, run 2, 346 captures.** Removed 0, added 434, violations 0 (455
+before this revision; 439 after the media gate, 434 after the text-fill
+guard). In the three clusters an independent review measured against capture
+pixels, aisupply.framer.website (3 wrong-layer findings) and
+landio.framer.website (4) now add nothing at all. donckelektro.nl's hero cases
+go quiet only when the hit tests are answered: `replay_url_scan` answers hit
+tests from the facts a capture recorded, run 2 recorded none for these points
+(`unanswered_hit_tests` is 18 on capture 115), and a live scan has
+`elementsFromPoint`. Answering them from the capture's own geometry drops ten
+of the site's sixteen adds and leaves six, which are three elements seen at
+both viewports, each read off the screenshot by hand and each real: two
+orange "read more" links on the white cards they sit on, and an orange filter
+pill whose own 10% tint composites to the grey the snippet names.
 
 ### Risks carried, not fixed
-
-Two things about the background walk stay as they are, and both are written
-into `resolved_bg_matches_text`'s doc comment beside the code:
 
 - A background that resolves to the text colour itself is dropped, which also
   drops text genuinely painted in its own background: invisible, and a real
   1:1 failure. It is exact hex equality, so a link one shade off its surface
   still reports, and the guard covers only the SAFE_TAGS text path, so `<p>`
-  and `<div>` still report the `1.0:1`.
-- The ratio label can name the wrong surface where the verdict is right. An
-  overlapping sibling image or an absolutely positioned panel is not an
-  ancestor, so the walk reads past it to the page's own fill. The text is
-  usually low-contrast against either surface, so the verdict survives; the
-  hex in the snippet does not always.
-
-Both want the same fix, which is a resolved background that carries where it
-came from, and neither is cheap from `ColorOpts` as it stands.
+  and `<div>` still report the `1.0:1`. Written into
+  `resolved_bg_matches_text`'s doc comment beside the code.
+- The wrong-layer test is the browser path's. The static engine has no layout
+  and no hit testing, so a link over a positioned photo is still scored
+  against whatever the ancestor walk resolved there.
+- The ratio label can still name the wrong surface where nothing media-shaped
+  is involved: an opaque sibling panel that is not an ancestor is not in the
+  set the test reads. The real fix for all of it is a resolved background that
+  carries where it came from, which is not cheap from `ColorOpts` as it
+  stands.

@@ -203,6 +203,44 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
     reasons
 }
 
+/// The reasons that mean a picture, not a surface, is what the text is
+/// actually read against: a raster background on an ancestor, or a replaced
+/// media box painting under the text from outside its ancestor chain.
+///
+/// The other reasons are deliberately not here. A gradient ancestor is
+/// scored against its stops, and an opacity stack, a blend mode or a filter
+/// shifts a colour the walk did resolve rather than hiding a layer from it.
+const MEDIA_LAYER_REASONS: &[&str] = &[
+    "image background",
+    "img underlay",
+    "picture underlay",
+    "video underlay",
+    "canvas underlay",
+];
+
+/// Whether a media layer paints behind this element's text, which is to say
+/// whether the surface `resolve_background_info` returned is the one a
+/// reader sees.
+///
+/// The background walk reads the ancestor chain, so it is blind in two
+/// directions: an ancestor that carries a raster image over its own
+/// background colour (the walk answers with the colour it can parse and
+/// never looks at the picture on top of it), and a positioned sibling —
+/// hero photo, video poster, canvas — that is nobody's ancestor and so is
+/// invisible to it either way. Both answer with the page's own fill, which
+/// is how white text over a photograph is reported as `1.0:1 on #ffffff`
+/// and orange over a photograph is reported against the section's grey.
+///
+/// [`collect_visual_contrast_reasons`] already knows how to find both,
+/// because deciding them is exactly what the visual-contrast pass does
+/// before it reads pixels. This asks it the same question and keeps only
+/// the answers about a layer the walk cannot read.
+pub fn media_layer_under_text(dom: &dyn Dom, el: ElId) -> bool {
+    collect_visual_contrast_reasons(dom, el)
+        .iter()
+        .any(|r| MEDIA_LAYER_REASONS.contains(&r.as_str()))
+}
+
 /// JS: index.mjs#collectVisualContrastCandidates(options)
 pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec<Value> {
     let max_candidates = match options.get("maxCandidates") {

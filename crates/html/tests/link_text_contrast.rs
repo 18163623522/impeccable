@@ -42,6 +42,7 @@ fn fixture_flags_every_should_flag_case() {
         ("form label", "#949494"),
         ("paragraph with an inherited run", "#999999"),
         ("repeated nav link", "#888888"),
+        ("link in a row a media query hides on phones", "#8e8e8e"),
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(color)),
@@ -63,7 +64,8 @@ fn fixture_passes_every_should_pass_case() {
         ("disabled control", "#b6b6b6"),
         ("link inside a <template>", "#b7b7b7"),
         ("link inside a [hidden] subtree", "#b8b8b8"),
-        ("link inside a display:none subtree", "#b9b9b9"),
+        ("link inside a [hidden=until-found] subtree", "#b9b9b9"),
+        ("link inside a <noscript>", "#bababa"),
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(color)),
@@ -200,30 +202,24 @@ p.ghost { color: #ffffff; font-size: 14px; }
 
 #[test]
 fn markup_the_browser_never_renders_is_not_scored() {
-    // A browser lays out none of this, so a browser scan reports none of it.
-    // The static tree carries all of it: html5ever hands template content
-    // back as ordinary descendants, and the static cascade has no UA
-    // stylesheet to turn `hidden` into `display: none`.
+    // A browser lays out none of this at any viewport, so a browser scan
+    // reports none of it. The static tree carries all of it: html5ever hands
+    // template content back as ordinary descendants, and the static cascade
+    // has no UA stylesheet to turn `hidden` into `display: none`.
     let html = r#"<!DOCTYPE html>
 <html><head><style>
 body { background: #ffffff; }
 a.pale { color: #aaaaaa; font-size: 14px; }
-.gone { display: none; }
 </style></head>
 <body>
   <template><div><a class="pale" href="/1">Unmounted card link</a></div></template>
   <div hidden><a class="pale" href="/2">Closed panel link</a></div>
   <div hidden="until-found"><a class="pale" href="/3">Findable panel link</a></div>
-  <div class="gone"><span><a class="pale" href="/4">Collapsed drawer link</a></span></div>
-  <noscript><a class="pale" href="/5">No-script fallback link</a></noscript>
+  <noscript><a class="pale" href="/4">No-script fallback link</a></noscript>
 </body></html>
 "#;
     let snippets = low_contrast_snippets(html, Path::new("/tmp/non-rendered.html"));
-    assert_eq!(
-        snippets.len(),
-        1,
-        "only `hidden=\"until-found\"` renders: {snippets:?}"
-    );
+    assert!(snippets.is_empty(), "{snippets:?}");
 
     // The control: the same link outside all of it is still scored, so the
     // skip is about the markup around the element and nothing else.
@@ -239,6 +235,67 @@ a.pale { color: #aaaaaa; font-size: 14px; }
         snippets.iter().any(|s| s.contains("#aaaaaa")),
         "{snippets:?}"
     );
+}
+
+#[test]
+fn a_media_query_never_hides_anything_from_the_contrast_pass() {
+    // The static cascade descends every `@media` block, so a `max-width`
+    // query's `display: none` is the winning value here whatever viewport a
+    // reader is on. Standing an element down for it deletes the coverage
+    // this engine has always had of desktop-only markup: both links below
+    // are read by somebody, and both are reported.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+a.pale { color: #aaaaaa; font-size: 14px; }
+a.paler { color: #bbbbbb; font-size: 14px; }
+@media (max-width: 900px) { .desktop-only { display: none; } }
+</style></head>
+<body>
+  <div class="desktop-only"><a class="pale" href="/1">Open the desktop dashboard</a></div>
+  <div><a class="paler" href="/2">Open the mobile dashboard</a></div>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/responsive.html"));
+    assert_eq!(snippets.len(), 2, "{snippets:?}");
+
+    // The same is true of an element that carries the declaration itself,
+    // and of the `<p>` and `<div>` the tag gate never applied to.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+p.pale { color: #aaaaaa; font-size: 14px; }
+@media (max-width: 900px) { p.pale { display: none; } }
+</style></head>
+<body><p class="pale">Muted desktop copy</p></body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/responsive-p.html"));
+    assert_eq!(snippets.len(), 1, "{snippets:?}");
+}
+
+#[test]
+fn an_inline_ignore_waives_its_own_link_and_not_the_page() {
+    // The dedupe hands a colour pair to the first element that reports it.
+    // A waived element reports nothing, so it cannot be that element: an
+    // author silencing one link must not silence the fifty beside it.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+a.pale { color: #aaaaaa; font-size: 14px; }
+</style></head>
+<body>
+  <a class="pale" href="/1" data-impeccable-ignore="low-contrast">Waived link</a>
+  <a class="pale" href="/2">Reported link</a>
+  <a class="pale" href="/3">Third link</a>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/ignore.html"));
+    assert_eq!(
+        snippets.len(),
+        1,
+        "one report for the pair, and not on the waived link: {snippets:?}"
+    );
+    assert!(snippets[0].contains("#aaaaaa on #ffffff"), "{snippets:?}");
 }
 
 #[test]

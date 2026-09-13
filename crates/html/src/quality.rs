@@ -155,37 +155,44 @@ pub fn is_non_rendered_text(
 
 /// The `hidden` attribute, which the static cascade cannot turn into
 /// `display: none` on its own: it carries author CSS, not a UA stylesheet.
-/// `hidden="until-found"` is excluded, because a browser does render that
-/// content once find-in-page or a fragment link reveals it.
+/// `hidden="until-found"` counts too. That content is laid out with
+/// `content-visibility: hidden` until find-in-page or a fragment link
+/// reveals it, so a browser measures a zero-size rect there and a browser
+/// scan reports nothing; pinning a finding only this engine can produce is
+/// the thing this gate exists to stop.
 fn has_hidden_attribute(el: &StaticElement<'_>) -> bool {
-    el.get_attribute("hidden")
-        .is_some_and(|v| !v.eq_ignore_ascii_case("until-found"))
+    el.get_attribute("hidden").is_some()
 }
 
-/// `is_non_rendered_text` for the markup an element sits inside, not only
-/// for the element itself.
+/// Markup a browser lays out nowhere, at any viewport: a `<template>`'s
+/// content, a `<noscript>` (inert whenever scripting is on, which is what a
+/// scanning browser does), anything under `<head>`, and any `[hidden]`
+/// subtree. The static tree carries all of it — html5ever hands template
+/// fragments back as ordinary descendants of the template element — so a
+/// `*` element rule walks the markup of every unmounted component on the
+/// page and scores it as though it were on screen. A browser scan cannot
+/// produce those findings, and a rule that judges what a reader reads
+/// should not either.
 ///
-/// A browser paints nothing inside a `<template>`, nothing inside a
-/// `display: none` or `[hidden]` subtree, and nothing under `<head>`. The
-/// static tree carries all of it: html5ever hands template fragments back
-/// as ordinary descendants of the template element, so a `*` element rule
-/// walks the markup of every unmounted component on the page and scores it
-/// as though it were on screen. A browser scan cannot produce those
-/// findings, and a rule that judges what a reader reads should not either.
-///
-/// Only `display` and the tags need the walk. `visibility` inherits in the
-/// static cascade, so a descendant of a hidden container already computes
-/// hidden and `is_non_rendered_text` catches it on the element.
-pub fn is_in_non_rendered_markup(el: &StaticElement<'_>, tag: &str, style: &StyleValues) -> bool {
-    if is_non_rendered_text(el, tag, Some(style)) || has_hidden_attribute(el) {
+/// Every fact read here is viewport-independent, and that is the design.
+/// The static cascade descends `@media` blocks unconditionally, so a
+/// winning `display: none` is some narrow viewport's answer and not the one
+/// a reader sees: gating on it would delete the coverage this engine has
+/// always had of the `.desktop-only` sections a `max-width` query collapses
+/// on phones. `display` therefore stays out of this, and so does
+/// `visibility`, which `check_element_colors` reads on the element itself
+/// the way it always has.
+pub fn is_in_non_rendered_markup(el: &StaticElement<'_>, tag: &str) -> bool {
+    // The bound `inherits_scored_text_color` walks with, for the same
+    // reason: a handful of parent hops per element, not the whole chain.
+    const MAX_ANCESTORS: usize = 12;
+    if NON_RENDERED_TAGS.contains(&js::to_lower_case(tag).as_str()) || has_hidden_attribute(el) {
         return true;
     }
     let mut parent = el.parent_element();
-    while let Some(p) = parent {
-        if NON_RENDERED_TAGS.contains(&p.tag_lower().as_str())
-            || sv_opt(p.style(), "display") == Some("none")
-            || has_hidden_attribute(&p)
-        {
+    for _ in 0..MAX_ANCESTORS {
+        let Some(p) = parent else { return false };
+        if NON_RENDERED_TAGS.contains(&p.tag_lower().as_str()) || has_hidden_attribute(&p) {
             return true;
         }
         parent = p.parent_element();

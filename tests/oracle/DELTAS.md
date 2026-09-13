@@ -164,3 +164,22 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+
+## Recorded 2026-09-12: `clipped-overflow-container` names the child and drops the clips that do their job
+
+Judging the rule over real sites put its precision at 0.36: most findings were
+`overflow: hidden` working as intended (masked reveals, marquee and rail
+tracks, image bleeds, ornament layers, boxless wrappers, page shells), and the
+snippet never said which child was cut, so a finding could not be checked
+without opening the page. The check now names the escaping child, skips
+containers that generate no box or that hold the whole page, reads the
+carousel and marquee words on the immediate scrolling child, treats a
+transform-parked copy that fits the box as a masked reveal, only counts an
+inset escape on an axis the container actually clips, and reports the
+outermost clipping container of a given child instead of every one in the
+chain. Menus, dialogs, tooltips and popovers keep their findings.
+
+- `detect-fixture-json-clipped-overflow-container-html`, `detect-fixture-text-clipped-overflow-container-html`: the six existing findings now name their child, and four cases added to the fixture flag column (a ribbon above a card, a tooltip in a rail, nested clips reported once on the outer container, a transform-parked menu) are reported; the pass column grew by the new exemptions and reports none of them.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: the one finding there now names its child (`div clips positioned div`).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the directory sweeps carry the same snippet change and the four new fixture findings (419 -> 423).

@@ -97,6 +97,12 @@ pub const OCCLUSION_TEXT_SKIP_TAGS: &[&str] = &["script", "style", "noscript", "
 /// JS: checks.mjs#POSITIONED_CHILD_INTERACTIVE_SELECTOR.
 pub const POSITIONED_CHILD_INTERACTIVE_SELECTOR: &str = "a[href],button,input,select,summary,textarea,[tabindex]:not([tabindex=\"-1\"]),[role=\"button\"],[role=\"dialog\"],[role=\"link\"],[role=\"listbox\"],[role=\"menu\"],[role=\"menuitem\"],[role=\"option\"],[role=\"tooltip\"]";
 
+/// Roles and attributes only a layer that has to escape its box carries.
+/// They override the mask and scroller exemptions of
+/// `clipped-overflow-container`: a menu parked by a transform is a menu.
+pub const POPOVER_LAYER_SELECTOR: &str =
+    "[popover],[role=\"dialog\"],[role=\"listbox\"],[role=\"menu\"],[role=\"menubar\"],[role=\"tooltip\"]";
+
 // ─── Kicker above heading ───────────────────────────────────────────────────
 
 /// Input of `isKickerCandidate`. Numbers are JS numbers: pass NaN where the

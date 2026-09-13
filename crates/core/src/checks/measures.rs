@@ -217,6 +217,18 @@ pub fn check_gpt_thin_border_wide_shadow(input: &GptBorderShadowInput) -> Vec<Fi
 /// declarations read as pushing it outside its clipping parent (negative
 /// offset or a full 100% offset).
 pub fn positioned_style_implies_escape(style: &dyn StyleMap) -> bool {
+    positioned_style_implies_escape_axis(style, true, true)
+}
+
+/// [`positioned_style_implies_escape`] restricted to the axes the container
+/// actually clips. A container that only clips horizontally cannot cut a
+/// layer pushed above or below it. The shorthands (`inset`, `insetBlock`,
+/// `insetInline`) can name either axis, so they count for both.
+pub fn positioned_style_implies_escape_axis(
+    style: &dyn StyleMap,
+    clip_x: bool,
+    clip_y: bool,
+) -> bool {
     re!(
         NEG_RE,
         format!(r"(?:^|[{ws}(])-+(?:{d}|\.)", ws = WS_CHARS, d = D)
@@ -225,20 +237,24 @@ pub fn positioned_style_implies_escape(style: &dyn StyleMap) -> bool {
         FULL_RE,
         format!(r"(?:^|[{ws}(])100(?:\.0+)?%", ws = WS_CHARS)
     );
-    const PROPS: [&str; 11] = [
-        "top",
-        "right",
-        "bottom",
-        "left",
-        "inset",
-        "insetBlock",
-        "insetInline",
-        "insetBlockStart",
-        "insetBlockEnd",
-        "insetInlineStart",
-        "insetInlineEnd",
+    /// Each inset property with the axes it can push along.
+    const PROPS: [(&str, bool, bool); 11] = [
+        ("top", false, true),
+        ("right", true, false),
+        ("bottom", false, true),
+        ("left", true, false),
+        ("inset", true, true),
+        ("insetBlock", true, true),
+        ("insetInline", true, true),
+        ("insetBlockStart", true, true),
+        ("insetBlockEnd", true, true),
+        ("insetInlineStart", true, true),
+        ("insetInlineEnd", true, true),
     ];
-    for prop in PROPS {
+    for (prop, on_x, on_y) in PROPS {
+        if !((on_x && clip_x) || (on_y && clip_y)) {
+            continue;
+        }
         let Some(v) = style.prop(prop) else { continue };
         if v.is_empty() {
             continue;

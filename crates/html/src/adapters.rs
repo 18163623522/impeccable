@@ -14,8 +14,8 @@ use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
-    GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
+    check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape_axis,
+    resolve_length_px, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -28,7 +28,7 @@ use impeccable_core::checks::text_rules::{
     check_numbered_section_labels, is_kicker_candidate, is_numbered_section_label_candidate,
     parse_numbered_label_text, KickerCandidateInput, NumberedLabelCandidate,
     NumberedLabelCandidateInput, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
-    POSITIONED_CHILD_INTERACTIVE_SELECTOR,
+    POPOVER_LAYER_SELECTOR, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
 };
 use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb};
 use impeccable_core::js::{self, parse_float, parse_int};
@@ -877,7 +877,7 @@ static DECORATIVE_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
 static VIEWPORT_ROLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?-u:\b)(carousel|slider)(?-u:\b)").expect("VIEWPORT_ROLE_RE"));
 static VIEWPORT_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|marquee|preview|scroller|slider|slideshow|split|viewport)(?-u:\b)")
+    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|flickity|marquee|owl|preview|scroller|slider|slideshow|splide|split|swiper|ticker|viewport)(?-u:\b)")
         .expect("VIEWPORT_IDENT_RE")
 });
 static VIEWPORT_DEMO_RE: Lazy<Regex> = Lazy::new(|| {
@@ -920,13 +920,33 @@ fn positioned_child_is_decorative(child: &StaticElement<'_>) -> bool {
     false
 }
 
-/// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
-fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
-    let role_description =
-        js::to_lower_case(el.get_attribute("aria-roledescription").unwrap_or(""));
-    if VIEWPORT_ROLE_RE.is_match(&role_description) {
+/// A layer the clip would really trap, whatever else it looks like.
+fn positioned_child_is_popover_layer(child: &StaticElement<'_>) -> bool {
+    child.query_selector(POPOVER_LAYER_SELECTOR).is_some()
+}
+
+/// A positioned child that only paints: nothing to read, nothing to click,
+/// and either no content of its own, only media, no pointer target, or
+/// nothing visible at rest.
+fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
+    if positioned_child_has_substantive_content(child) {
+        return false;
+    }
+    let style = child.style();
+    if sv(style, "pointerEvents") == "none" {
         return true;
     }
+    let opacity = sv(style, "opacity");
+    if !opacity.is_empty() && parse_float(opacity) <= 0.05 {
+        return true;
+    }
+    if child.children().is_empty() {
+        return true;
+    }
+    child.query_selector("img,picture,svg,video,canvas").is_some()
+}
+
+fn ident_names_viewport(el: &StaticElement<'_>) -> bool {
     let ident = js::to_lower_case(&format!(
         "{} {}",
         el.get_attribute("class").unwrap_or(""),
@@ -935,8 +955,25 @@ fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
     VIEWPORT_IDENT_RE.is_match(&ident) || VIEWPORT_DEMO_RE.is_match(&ident)
 }
 
-/// JS: checks.mjs#checkClippedOverflow(el, style, getStyle) / checkElementClippedOverflow
-pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
+/// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
+fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
+    let role_description =
+        js::to_lower_case(el.get_attribute("aria-roledescription").unwrap_or(""));
+    if VIEWPORT_ROLE_RE.is_match(&role_description) {
+        return true;
+    }
+    if ident_names_viewport(el) {
+        return true;
+    }
+    // A marquee or a rail names the track that moves, not the window that
+    // clips it, so the same words count on the immediate scrolling child.
+    el.children().iter().any(ident_names_viewport)
+}
+
+/// The clipped axes of `el`, or `None` when it is not a clipping container
+/// at all (it scrolls, its overflow is visible, or `display: contents`
+/// leaves it without a box to clip with).
+fn clipped_axes(style: &StyleValues) -> Option<(bool, bool)> {
     let clips = |v: &str| v == "hidden" || v == "clip";
     let scrolls = |v: &str| v == "auto" || v == "scroll";
     let ox = sv(style, "overflowX");
@@ -944,11 +981,38 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
     let ov = sv(style, "overflow");
     let clip_x = clips(ox) || clips(ov);
     let clip_y = clips(oy) || clips(ov);
-    let any_clip = clip_x || clip_y;
-    let any_scroll = scrolls(ox) || scrolls(oy) || scrolls(ov);
-    if !any_clip || any_scroll {
-        return Vec::new();
+    if (!clip_x && !clip_y) || scrolls(ox) || scrolls(oy) || scrolls(ov) {
+        return None;
     }
+    let display = sv(style, "display");
+    if display == "contents" || display == "none" {
+        return None;
+    }
+    Some((clip_x, clip_y))
+}
+
+/// Nested clips repeat one decision, so the outermost container the child
+/// escapes is the one that owns it.
+fn ancestor_clip_traps_child(el: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
+    let mut current = el.parent_element();
+    while let Some(ancestor) = current {
+        if let Some((clip_x, clip_y)) = clipped_axes(ancestor.style()) {
+            if !clipping_container_is_intentional_viewport(&ancestor)
+                && positioned_style_implies_escape_axis(&StyleRef(child.style()), clip_x, clip_y)
+            {
+                return true;
+            }
+        }
+        current = ancestor.parent_element();
+    }
+    false
+}
+
+/// JS: checks.mjs#checkClippedOverflow(el, style, getStyle) / checkElementClippedOverflow
+pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
+    let Some((clip_x, clip_y)) = clipped_axes(style) else {
+        return Vec::new();
+    };
     if clipping_container_is_intentional_viewport(el) {
         return Vec::new();
     }
@@ -956,16 +1020,27 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
         let child_style = child.style();
         let pos = sv(child_style, "position");
         if pos == "absolute" || pos == "fixed" {
-            if positioned_child_is_decorative(&child) {
+            if positioned_child_is_decorative(&child)
+                || (!positioned_child_is_popover_layer(&child)
+                    && positioned_child_is_ornament(&child))
+            {
                 continue;
             }
-            // No layout statically: `positionedChildEscapesClip` is null.
-            if !positioned_style_implies_escape(&StyleRef(child_style)) {
+            // No layout statically: `positionedChildEscapesClip` is null, and
+            // so is the transform offset of a masked reveal.
+            if !positioned_style_implies_escape_axis(&StyleRef(child_style), clip_x, clip_y) {
+                continue;
+            }
+            if ancestor_clip_traps_child(el, &child) {
                 continue;
             }
             return vec![RuleHit::new(
                 "clipped-overflow-container",
-                format!("{} clips a positioned child", class_selector(el)),
+                format!(
+                    "{} clips positioned {}",
+                    class_selector(el),
+                    class_selector(&child)
+                ),
             )];
         }
     }

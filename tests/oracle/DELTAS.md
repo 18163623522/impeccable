@@ -340,3 +340,19 @@ change in any case below.
 
 - `detect-fixture-json-extreme-negative-tracking-html`, `detect-fixture-text-extreme-negative-tracking-html`: the three flagged rows carry the new snippet form and the fixture's new values.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-both`: the same three lines inside the sweeps.
+## Recorded 2026-09-12: `wide-tracking` spares short labels typed in capitals
+
+Corpus run 2 judged 70 `wide-tracking` findings across nine sites; the hits
+both judges called harmless were eyebrows, badges and buttons, several of them
+typed in capitals in the markup. The rule exempted `text-transform: uppercase`
+only, so a label spelled `LIMITED EDITION RELEASE 2026` was measured against
+the body-text threshold. It now also exempts a run that is already all
+capitals when it is at most 40 characters and does not wrap; running text and
+mixed-case labels are unchanged.
+
+No existing fixture's output moved. The new
+`tests/fixtures/antipatterns/wide-tracking.html` adds four findings (three
+`wide-tracking` in the flag column, one `all-caps-body`), which is what these
+goldens re-record.
+
+- `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html` (new cases), `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`.

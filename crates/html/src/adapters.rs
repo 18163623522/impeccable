@@ -870,6 +870,45 @@ fn gpt_border_shadow_declared_px(style: &StyleValues, prop: &str) -> Option<f64>
     (!px.is_nan()).then_some(px)
 }
 
+/// Whether a box shows at rest, as far as a file scan can tell without
+/// layout. It does not when it or an ancestor is closed (the `hidden`
+/// attribute or `display: none`), or when it is lifted out of the flow
+/// (absolute or fixed, itself or up to
+/// [`measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] wrappers up) and hidden
+/// by `visibility: hidden` or opacities that multiply down to nothing. An
+/// in-flow box hidden that way is content staged for a scroll reveal, which
+/// still shows. A transform that parks a box off the page needs layout to
+/// read, so a file scan does not.
+fn gpt_border_shadow_paints_at_rest(el: &StaticElement<'_>) -> bool {
+    let mut opacity = 1.0f64;
+    let mut hidden = false;
+    let mut out_of_flow = false;
+    let mut depth = 0usize;
+    let mut current = Some(el.clone());
+    while let Some(node) = current {
+        if node.get_attribute("hidden").is_some() {
+            return false;
+        }
+        let style = node.style();
+        if js::to_lower_case(sv(style, "display")) == "none" {
+            return false;
+        }
+        if depth <= measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
+            let position = js::to_lower_case(sv(style, "position"));
+            out_of_flow |= position == "absolute" || position == "fixed";
+        }
+        let visibility = js::to_lower_case(sv(style, "visibility"));
+        hidden |= visibility == "hidden" || visibility == "collapse";
+        let own = parse_float(sv(style, "opacity"));
+        if own.is_finite() {
+            opacity *= own;
+        }
+        current = node.parent_element();
+        depth += 1;
+    }
+    !(out_of_flow && (hidden || opacity <= 0.02))
+}
+
 /// The tree a row walk reads in a file scan, which has no layout: wrappers of
 /// one kind share a tag, and two boxes are the same card when they share a
 /// tag and every pixel length both of them declare is comparable. A length
@@ -888,8 +927,8 @@ impl<'a> GptBorderShadowRowTree for StaticRowTree<'a> {
     fn next_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
         el.next_element_sibling()
     }
-    fn children(&self, el: &StaticElement<'a>) -> Vec<StaticElement<'a>> {
-        el.children()
+    fn first_child(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.first_element_child()
     }
     fn same_cell(&self, cell: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
         cell.tag_lower() == other.tag_lower()
@@ -910,6 +949,9 @@ impl<'a> GptBorderShadowRowTree for StaticRowTree<'a> {
     }
     fn carries_pair(&self, el: &StaticElement<'a>) -> bool {
         gpt_border_shadow_pair(el.style()).is_some()
+    }
+    fn paints_at_rest(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_paints_at_rest(el)
     }
 }
 

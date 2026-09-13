@@ -374,6 +374,15 @@ impl Dom for FakeDom {
         let i = sibs.iter().position(|&s| s == el)?;
         sibs.get(i + 1).copied()
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        self.els[el as usize]
+            .child_nodes
+            .iter()
+            .find_map(|n| match n {
+                FakeNode::El(id) => Some(*id),
+                _ => None,
+            })
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         let mut cur = Some(b);
         while let Some(c) = cur {

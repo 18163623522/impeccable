@@ -208,8 +208,10 @@ pub const GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH: usize = 2;
 /// read first.
 pub const GPT_BORDER_SHADOW_MAX_SIBLINGS_PER_SIDE: usize = 24;
 
-/// How many boxes a row walk collects inside one sibling cell while it looks
-/// for the card sitting at the element's depth.
+/// How many boxes a row walk reads inside one sibling cell while it looks
+/// for the card sitting at the element's depth. Children are read one at a
+/// time, first child then next sibling, so a cell holding thousands of
+/// children costs no more than one holding 32.
 pub const GPT_BORDER_SHADOW_MAX_CELL_NODES: usize = 32;
 
 /// Whether two lengths are close enough to be the same card's.
@@ -227,15 +229,16 @@ pub fn gpt_border_shadow_sizes_match(a: &Rect, b: &Rect) -> bool {
 }
 
 /// The tree a row walk reads, as one engine sees it. Navigation, plus the
-/// three answers only the engine can give: whether two wrappers are the same
-/// kind of cell, whether two boxes are the same card, and whether a box
-/// carries the hairline-and-halo pair.
+/// four answers only the engine can give: whether two wrappers are the same
+/// kind of cell, whether two boxes are the same card, whether a box carries
+/// the hairline-and-halo pair, and whether it shows at rest.
 pub trait GptBorderShadowRowTree {
     type El: Clone + PartialEq;
     fn parent(&self, el: &Self::El) -> Option<Self::El>;
     fn previous_sibling(&self, el: &Self::El) -> Option<Self::El>;
     fn next_sibling(&self, el: &Self::El) -> Option<Self::El>;
-    fn children(&self, el: &Self::El) -> Vec<Self::El>;
+    /// The first element child, read without collecting the rest.
+    fn first_child(&self, el: &Self::El) -> Option<Self::El>;
     /// Whether `other` is a cell of the same kind as `cell`, which holds the
     /// element somewhere below it.
     fn same_cell(&self, cell: &Self::El, other: &Self::El) -> bool;
@@ -243,17 +246,29 @@ pub trait GptBorderShadowRowTree {
     fn same_card(&self, card: &Self::El, other: &Self::El) -> bool;
     /// Whether `el` carries [`gpt_thin_border_wide_shadow_pair`].
     fn carries_pair(&self, el: &Self::El) -> bool;
+    /// Whether `el` shows on the page before anyone interacts with it. A
+    /// flyout laid out ahead of its hover is a popover waiting for its
+    /// trigger: closed, or lifted out of the flow and transparent, hidden or
+    /// parked off the page. A row of them under a nav bar is not a row of
+    /// cards. Content staged in the flow for a scroll reveal still shows,
+    /// since a visitor sees it by scrolling and a scan often reads the page
+    /// before the reveal runs.
+    fn paints_at_rest(&self, el: &Self::El) -> bool;
 }
 
-/// How many boxes of `el`'s row carry the same pair as a comparable card,
-/// `el` included. The row is what the layout repeats, not only the element's
-/// DOM siblings: the walk climbs up to [`GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`]
-/// wrappers, and at each level reads the wrapper's siblings of the same kind
-/// for a card at the element's own depth below them. So a grid whose items
-/// each wrap a card, or a stack of articles each holding one panel, is one
-/// row, the way it reads on the page. Levels are counted apart, since each
-/// is one repeated position, and the walk stops at the threshold.
+/// How many boxes of `el`'s row carry the same pair as a comparable card and
+/// show at rest, `el` included; 0 when `el` itself does not show. The row is
+/// what the layout repeats, not only the element's DOM siblings: the walk
+/// climbs up to [`GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] wrappers, and at each
+/// level reads the wrapper's siblings of the same kind for a card at the
+/// element's own depth below them. So a grid whose items each wrap a card, or
+/// a stack of articles each holding one panel, is one row, the way it reads
+/// on the page. Levels are counted apart, since each is one repeated
+/// position, and the walk stops at the threshold.
 pub fn gpt_border_shadow_row_size<T: GptBorderShadowRowTree>(tree: &T, el: &T::El) -> usize {
+    if !tree.paints_at_rest(el) {
+        return 0;
+    }
     let mut best = 1usize;
     let mut cell = el.clone();
     for depth in 0..=GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
@@ -305,9 +320,21 @@ fn gpt_border_shadow_row_at_depth<T: GptBorderShadowRowTree>(
     row
 }
 
+/// Whether `node` is another card of `el`'s row: comparable, carrying the
+/// pair, and showing at rest. The checks run cheapest first.
+fn gpt_border_shadow_is_row_mate<T: GptBorderShadowRowTree>(
+    tree: &T,
+    el: &T::El,
+    node: &T::El,
+) -> bool {
+    tree.same_card(el, node) && tree.carries_pair(node) && tree.paints_at_rest(node)
+}
+
 /// The cards inside `sibling`, a sibling of `cell`, that stand where `el`
-/// stands inside `cell`: `depth` levels down, comparable, carrying the pair.
-/// At depth 0 the sibling is the candidate card itself.
+/// stands inside `cell`: `depth` levels down, and row-mates of `el`. At depth
+/// 0 the sibling is the candidate card itself. Inside a cell the walk reads
+/// at most [`GPT_BORDER_SHADOW_MAX_CELL_NODES`] boxes across all its levels,
+/// one child at a time.
 fn gpt_border_shadow_cell_row_mates<T: GptBorderShadowRowTree>(
     tree: &T,
     el: &T::El,
@@ -316,7 +343,7 @@ fn gpt_border_shadow_cell_row_mates<T: GptBorderShadowRowTree>(
     depth: usize,
 ) -> usize {
     if depth == 0 {
-        return usize::from(tree.same_card(el, sibling) && tree.carries_pair(sibling));
+        return usize::from(gpt_border_shadow_is_row_mate(tree, el, sibling));
     }
     if !tree.same_cell(cell, sibling) {
         return 0;
@@ -326,12 +353,14 @@ fn gpt_border_shadow_cell_row_mates<T: GptBorderShadowRowTree>(
     for _ in 0..depth {
         let mut next = Vec::new();
         'collect: for node in &level {
-            for child in tree.children(node) {
+            let mut child = tree.first_child(node);
+            while let Some(current) = child {
                 if budget == 0 {
                     break 'collect;
                 }
                 budget -= 1;
-                next.push(child);
+                child = tree.next_sibling(&current);
+                next.push(current);
             }
         }
         if next.is_empty() {
@@ -344,11 +373,125 @@ fn gpt_border_shadow_cell_row_mates<T: GptBorderShadowRowTree>(
         if found + 1 >= GPT_BORDER_SHADOW_MIN_ROW {
             break;
         }
-        if tree.same_card(el, node) && tree.carries_pair(node) {
+        if gpt_border_shadow_is_row_mate(tree, el, node) {
             found += 1;
         }
     }
     found
+}
+
+#[cfg(test)]
+mod gpt_border_shadow_walk_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// A plain arena tree that counts every navigation read a row walk makes.
+    struct CountingTree {
+        parents: Vec<Option<usize>>,
+        children: Vec<Vec<usize>>,
+        pair: Vec<bool>,
+        reads: Cell<usize>,
+    }
+
+    impl CountingTree {
+        fn new() -> Self {
+            CountingTree {
+                parents: vec![None],
+                children: vec![Vec::new()],
+                pair: vec![false],
+                reads: Cell::new(0),
+            }
+        }
+        fn add(&mut self, parent: usize, pair: bool) -> usize {
+            let id = self.parents.len();
+            self.parents.push(Some(parent));
+            self.children.push(Vec::new());
+            self.pair.push(pair);
+            self.children[parent].push(id);
+            id
+        }
+        fn read(&self) {
+            self.reads.set(self.reads.get() + 1);
+        }
+        fn position(&self, el: usize) -> Option<(usize, usize)> {
+            let parent = self.parents[el]?;
+            let index = self.children[parent].iter().position(|&c| c == el)?;
+            Some((parent, index))
+        }
+    }
+
+    impl GptBorderShadowRowTree for CountingTree {
+        type El = usize;
+        fn parent(&self, el: &usize) -> Option<usize> {
+            self.read();
+            self.parents[*el]
+        }
+        fn previous_sibling(&self, el: &usize) -> Option<usize> {
+            self.read();
+            let (parent, index) = self.position(*el)?;
+            index.checked_sub(1).map(|i| self.children[parent][i])
+        }
+        fn next_sibling(&self, el: &usize) -> Option<usize> {
+            self.read();
+            let (parent, index) = self.position(*el)?;
+            self.children[parent].get(index + 1).copied()
+        }
+        fn first_child(&self, el: &usize) -> Option<usize> {
+            self.read();
+            self.children[*el].first().copied()
+        }
+        fn same_cell(&self, _: &usize, _: &usize) -> bool {
+            true
+        }
+        fn same_card(&self, _: &usize, _: &usize) -> bool {
+            true
+        }
+        fn carries_pair(&self, el: &usize) -> bool {
+            self.pair[*el]
+        }
+        fn paints_at_rest(&self, _: &usize) -> bool {
+            true
+        }
+    }
+
+    /// Three list items, each holding `width` plain boxes and then one card:
+    /// the row size the first item's card sees, and the navigation reads it
+    /// took.
+    fn walk_wide_cells(width: usize) -> (usize, usize) {
+        let mut tree = CountingTree::new();
+        let list = tree.add(0, false);
+        let mut cards = Vec::new();
+        for _ in 0..3 {
+            let item = tree.add(list, false);
+            for _ in 0..width {
+                tree.add(item, false);
+            }
+            cards.push(tree.add(item, true));
+        }
+        tree.reads.set(0);
+        let size = gpt_border_shadow_row_size(&tree, &cards[0]);
+        (size, tree.reads.get())
+    }
+
+    #[test]
+    fn the_cell_walk_reads_a_bounded_number_of_boxes() {
+        // Narrow cells: the cards in the other items sit inside the budget.
+        assert_eq!(walk_wide_cells(4).0, 3);
+
+        // Wide cells: the cards sit past the budget, and the walk reads the
+        // same number of boxes whether a cell holds 200 or 20,000.
+        let (narrow_size, narrow_reads) = walk_wide_cells(200);
+        let (wide_size, wide_reads) = walk_wide_cells(20_000);
+        assert_eq!((narrow_size, wide_size), (1, 1));
+        assert_eq!(narrow_reads, wide_reads);
+
+        // One parent read and two sibling runs per level, and inside each
+        // sibling cell a first-child read plus a next-sibling read per box.
+        let per_side = GPT_BORDER_SHADOW_MAX_SIBLINGS_PER_SIDE;
+        let per_cell = 2 * GPT_BORDER_SHADOW_MAX_CELL_NODES + 1;
+        let per_level = 1 + 2 * (per_side + 1) + 2 * per_side * per_cell;
+        assert!(wide_reads <= (GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH + 1) * per_level);
+    }
 }
 
 /// Every border side that reads as a hairline: at most 1.5px wide in a color

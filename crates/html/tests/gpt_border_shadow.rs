@@ -119,7 +119,10 @@ fn same_tag_boxes_of_very_different_sizes_are_not_a_row() {
 #[test]
 fn cards_wrapped_in_grid_items_are_a_row() {
     let card = format!("<div class=\"card\" style=\"{HAIRLINE_HALO}\">Card</div>");
-    for (open, close) in [("<a href=\"#\">", "</a>"), ("<li><a href=\"#\">", "</a></li>")] {
+    for (open, close) in [
+        ("<a href=\"#\">", "</a>"),
+        ("<li><a href=\"#\">", "</a></li>"),
+    ] {
         let cell = format!("{open}{card}{close}");
         let html = format!(
             "<!DOCTYPE html><html><body><ul class=\"grid\">{}</ul></body></html>",
@@ -161,12 +164,97 @@ fn a_lone_panel_among_repeated_articles_stays_silent() {
 
 #[test]
 fn the_row_walk_climbs_at_most_two_wrappers() {
-    let cell = format!("<li><a href=\"#\"><span><div style=\"{HAIRLINE_HALO}\">Card</div></span></a></li>");
+    let cell = format!(
+        "<li><a href=\"#\"><span><div style=\"{HAIRLINE_HALO}\">Card</div></span></a></li>"
+    );
     let html = format!(
         "<!DOCTYPE html><html><body><ul class=\"grid\">{}</ul></body></html>",
         cell.repeat(3)
     );
     assert!(snippets(&html).is_empty());
+}
+
+/// A nav bar of three items, each holding a trigger link and a flyout that
+/// wears the pair and opens on hover. `flyout_css` joins the flyout's rule
+/// and `flyout_attrs` goes on each flyout element.
+fn nav_flyouts(flyout_css: &str, flyout_attrs: &str) -> String {
+    let item = format!(
+        "<li class=\"item\"><a href=\"#\">Topic</a><div class=\"flyout\"{flyout_attrs}><a href=\"#\">Link</a></div></li>"
+    );
+    format!(
+        "<!DOCTYPE html><html><head><style>\
+.item{{position:relative}}\
+.flyout{{position:absolute;top:32px;left:0;width:320px;height:200px;background:#fff;border:1px solid #e5e7eb;box-shadow:0 20px 50px rgba(15,23,42,0.18);{flyout_css}}}\
+.item:hover .flyout{{opacity:1;visibility:visible;display:block}}\
+</style></head><body><nav><ul class=\"nav\">{}</ul></nav></body></html>",
+        item.repeat(3)
+    )
+}
+
+#[test]
+fn hidden_per_item_flyouts_stay_silent() {
+    // Shown at rest, the three flyouts read as one row through their
+    // wrappers, so the silence below comes from the visibility gate.
+    assert_eq!(snippets(&nav_flyouts("", "")).len(), 3);
+    for (css, attrs) in [
+        ("opacity:0;visibility:hidden;transform:translateY(8px)", ""),
+        ("opacity:0;pointer-events:none", ""),
+        ("visibility:hidden", ""),
+        ("display:none", ""),
+        ("", " style=\"display:none\""),
+        ("", " hidden"),
+    ] {
+        assert!(
+            snippets(&nav_flyouts(css, attrs)).is_empty(),
+            "flyouts closed with `{css}{attrs}` should stay silent"
+        );
+    }
+}
+
+#[test]
+fn a_hidden_popover_is_not_a_row_mate() {
+    let card = format!("<div class=\"card\" style=\"{HAIRLINE_HALO}\">Card</div>");
+    let popover = format!(
+        "<div class=\"card\" style=\"position:absolute;opacity:0;{HAIRLINE_HALO}\">Menu</div>"
+    );
+    let page = |cells: &str| {
+        format!("<!DOCTYPE html><html><body><div class=\"row\">{cells}</div></body></html>")
+    };
+    assert!(snippets(&page(&format!("{card}{card}{popover}"))).is_empty());
+    // A third card that shows makes the row; the popover reports nothing.
+    assert_eq!(
+        snippets(&page(&format!("{card}{card}{popover}{card}"))).len(),
+        3
+    );
+    // A whole row inside a closed container shows nothing at rest.
+    let closed = format!(
+        "<!DOCTYPE html><html><body><div hidden><div class=\"row\">{}</div></div></body></html>",
+        card.repeat(3)
+    );
+    assert!(snippets(&closed).is_empty());
+}
+
+#[test]
+fn a_row_staged_for_a_scroll_reveal_still_counts() {
+    // Before a scroll reveal runs, the content sits transparent or hidden in
+    // the flow. A visitor sees it by scrolling, so it is still a row.
+    let panel = format!("<figure style=\"{HAIRLINE_HALO}\"></figure>");
+    let articles =
+        format!("<article class=\"reveal\"><p>Copy</p><div class=\"viz\">{panel}</div></article>")
+            .repeat(3);
+    let html = format!(
+        "<!DOCTYPE html><html><head><style>.reveal{{opacity:0;transform:translateY(18px)}}</style></head>\
+<body><div class=\"stack\">{articles}</div></body></html>"
+    );
+    assert_eq!(snippets(&html).len(), 3);
+    for staging in ["opacity:0", "visibility:hidden"] {
+        let card = format!("<div class=\"card\" style=\"{staging};{HAIRLINE_HALO}\">Card</div>");
+        let html = format!(
+            "<!DOCTYPE html><html><body><div class=\"row\">{}</div></body></html>",
+            card.repeat(3)
+        );
+        assert_eq!(snippets(&html).len(), 3, "cards staged with {staging}");
+    }
 }
 
 #[test]

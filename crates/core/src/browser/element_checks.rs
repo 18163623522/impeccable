@@ -910,9 +910,30 @@ fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     })
 }
 
+/// Whether `el`, or a wrapper at most
+/// [`measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] levels above it, is
+/// lifted out of the flow the way a popover is.
+fn gpt_border_shadow_out_of_flow_dom(dom: &dyn Dom, el: ElId) -> bool {
+    let mut current = Some(el);
+    for _ in 0..=measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
+        let Some(node) = current else {
+            break;
+        };
+        let position = js::to_lower_case(&dom.style(node, "position"));
+        if position == "absolute" || position == "fixed" {
+            return true;
+        }
+        current = dom.parent(node);
+    }
+    false
+}
+
 /// The laid-out tree a row walk reads in a browser scan: wrappers of one
 /// kind share a tag, and two boxes are the same card when their rects are
-/// comparable, which also keeps a box that paints nothing out of every row.
+/// comparable, which also keeps a box with no area, a closed one included,
+/// out of every row. A box with area shows at rest unless it is out of the
+/// flow and computed hidden, transparent along its ancestors, or parked past
+/// the page's left or top edge or the viewport's right edge.
 struct DomRowTree<'a> {
     dom: &'a dyn Dom,
 }
@@ -938,8 +959,8 @@ impl GptBorderShadowRowTree for DomRowTree<'_> {
     fn next_sibling(&self, el: &ElId) -> Option<ElId> {
         self.dom.next_element_sibling(*el)
     }
-    fn children(&self, el: &ElId) -> Vec<ElId> {
-        self.dom.children(*el)
+    fn first_child(&self, el: &ElId) -> Option<ElId> {
+        self.dom.first_element_child(*el)
     }
     fn same_cell(&self, cell: &ElId, other: &ElId) -> bool {
         self.dom.tag_name(*cell) == self.dom.tag_name(*other)
@@ -949,6 +970,30 @@ impl GptBorderShadowRowTree for DomRowTree<'_> {
     }
     fn carries_pair(&self, el: &ElId) -> bool {
         gpt_border_shadow_pair_dom(self.dom, *el).is_some()
+    }
+    fn paints_at_rest(&self, el: &ElId) -> bool {
+        // Only a box lifted out of the flow can be a popover waiting for its
+        // trigger. An in-flow card sitting transparent or offset at scan time
+        // is content staged for a scroll reveal, and a visitor sees it by
+        // scrolling.
+        if !gpt_border_shadow_out_of_flow_dom(self.dom, *el) {
+            return true;
+        }
+        // Computed visibility is inherited, so the element's own value covers
+        // a hidden ancestor.
+        let visibility = js::to_lower_case(&self.dom.style(*el, "visibility"));
+        if visibility == "hidden" || visibility == "collapse" {
+            return false;
+        }
+        if effective_opacity_dom(self.dom, *el) <= 0.02 {
+            return false;
+        }
+        let rect = self.dom.rect(*el);
+        let viewport_width = self.dom.inner_width();
+        let off_page = rect.right + self.dom.scroll_x() <= 0.0
+            || rect.bottom + self.dom.scroll_y() <= 0.0
+            || (viewport_width > 0.0 && rect.left >= viewport_width);
+        !off_page
     }
 }
 
@@ -1954,5 +1999,124 @@ mod tests {
             .map(|_| wrapped_card(&mut d, grid, &["li", "a", "span"], 180.0, 140.0, halo))
             .collect();
         assert!(check_element_gpt_border_shadow_dom(&d, cards[0]).is_empty());
+    }
+
+    /// A nav bar of `n` items, each holding a trigger link beside a flyout
+    /// sized like a card and wearing the pair; returns the flyouts.
+    fn nav_with_flyouts(d: &mut FakeDom, body: ElId, n: usize) -> Vec<ElId> {
+        let list = d.add(Some(body), "ul");
+        (0..n)
+            .map(|_| {
+                let item = d.add(Some(list), "li");
+                d.set_rect(item, 0.0, 0.0, 80.0, 20.0);
+                let trigger = d.add(Some(item), "a");
+                d.set_rect(trigger, 0.0, 0.0, 80.0, 20.0);
+                let flyout =
+                    hairline_card(d, item, 320.0, 200.0, "rgba(15, 23, 42, 0.18) 0px 20px 50px 0px");
+                d.set_style(flyout, "position", "absolute");
+                flyout
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gpt_border_shadow_hidden_flyouts_in_repeated_nav_items_stay_silent() {
+        // Shown at rest, the three flyouts read as one row through their
+        // wrappers, so the silence below comes from the visibility gate.
+        let (mut d, body) = page();
+        for flyout in nav_with_flyouts(&mut d, body, 3) {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, flyout).len(), 1);
+        }
+
+        // Laid out ahead of their hover, they are popovers waiting for a
+        // trigger, not a row of cards.
+        type Hide = fn(&mut FakeDom, ElId);
+        let hides: [(&str, Hide); 5] = [
+            ("transparent", |d, f| {
+                d.set_style(f, "opacity", "0");
+            }),
+            ("visibility hidden", |d, f| {
+                d.set_style(f, "visibility", "hidden");
+            }),
+            ("inside a transparent nav item", |d, f| {
+                let item = d.parent(f).expect("nav item");
+                d.set_style(item, "opacity", "0");
+            }),
+            ("translated past the left edge", |d, f| {
+                d.set_rect(f, -400.0, 40.0, 320.0, 200.0);
+            }),
+            ("parked past the viewport's right edge", |d, f| {
+                d.set_rect(f, 1400.0, 40.0, 320.0, 200.0);
+            }),
+        ];
+        for (name, hide) in hides {
+            let (mut d, body) = page();
+            let flyouts = nav_with_flyouts(&mut d, body, 3);
+            for &flyout in &flyouts {
+                hide(&mut d, flyout);
+            }
+            for &flyout in &flyouts {
+                assert!(
+                    check_element_gpt_border_shadow_dom(&d, flyout).is_empty(),
+                    "flyouts {name} should stay silent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_hidden_popover_is_not_a_row_mate() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_row(&mut d, row, 2, halo);
+        let popover = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        d.set_style(popover, "position", "absolute");
+        d.set_style(popover, "opacity", "0");
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // A third card that shows makes the row, and the popover still
+        // reports nothing.
+        hairline_card(&mut d, row, 180.0, 140.0, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
+        assert!(check_element_gpt_border_shadow_dom(&d, popover).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_a_row_staged_for_a_scroll_reveal() {
+        // Before a scroll reveal runs, each article sits transparent and
+        // offset in the flow. The panels inside are the row a visitor sees by
+        // scrolling, and nothing about them waits for a trigger.
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let panels: Vec<ElId> = (0..3)
+            .map(|i| {
+                let panel = wrapped_card(&mut d, stack, &["article", "div"], 491.0, 265.0, halo);
+                let article = d.parent(d.parent(panel).expect("viz")).expect("article");
+                d.set_style(article, "opacity", "0");
+                d.set_style(article, "transform", "matrix(1, 0, 0, 1, 0, 18)");
+                d.set_rect(panel, 656.0, 1149.0 + 470.0 * i as f64, 491.0, 265.0);
+                panel
+            })
+            .collect();
+        for &panel in &panels {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, panel).len(), 1);
+        }
+
+        // Cards staged one by one, each transparent or hidden in the flow.
+        for (prop, value) in [("opacity", "0"), ("visibility", "hidden")] {
+            let (mut d, body) = page();
+            let row = d.add(Some(body), "div");
+            let first = hairline_row(&mut d, row, 3, halo);
+            for card in d.children(row) {
+                d.set_style(card, prop, value);
+            }
+            assert_eq!(
+                check_element_gpt_border_shadow_dom(&d, first).len(),
+                1,
+                "cards staged with {prop} {value}"
+            );
+        }
     }
 }

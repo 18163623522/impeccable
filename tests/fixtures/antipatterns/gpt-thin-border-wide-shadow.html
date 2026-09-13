@@ -10,7 +10,10 @@
     wrappers of one kind (a link per grid cell, an article per panel), up to
     two wrappers up. A lone popover, a pair of cards, a tight shadow, a shadow
     drawn inside the box and boxes of very different sizes are the resting
-    styles of most design systems and stay silent.
+    styles of most design systems and stay silent. So does a nav bar whose
+    items each hold a flyout: the cards of a row have to show at rest, and a
+    flyout laid out ahead of its hover (transparent, hidden, or closed) is a
+    popover waiting for its trigger.
 
     A file scan has no layout, so it reads a card of the row as a box with the
     same tag whose declared pixel sizes are comparable; a browser scan compares
@@ -31,6 +34,13 @@
     .outcome { display: flex; gap: 16px; align-items: center; }
     .copy { width: 160px; margin: 0; font-size: 13px; }
     .panel { margin: 0; }
+    .nav { display: flex; gap: 24px; min-height: 120px; margin: 0; padding: 0; list-style: none; }
+    .nav-item { position: relative; }
+    .nav-trigger { font-size: 13px; color: inherit; }
+    .flyout { position: absolute; top: 24px; left: 0; opacity: 0; visibility: hidden; transform: translateY(8px); }
+    .nav-item:hover .flyout { opacity: 1; visibility: visible; transform: none; }
+    .dropdown { position: absolute; top: 24px; left: 0; display: none; }
+    .nav-item:focus-within .dropdown { display: block; }
   </style>
 </head>
 <body>
@@ -174,6 +184,24 @@
             <div class="viz"><figure class="card panel pass-plain-panel-third"></figure></div>
           </article>
         </div>
+      </div>
+
+      <div class="case">
+        <h3>A flyout per nav item, laid out but hidden until hovered</h3>
+        <ul class="nav">
+          <li class="nav-item"><a class="nav-trigger" href="#products">Products</a><div class="card flyout pass-flyout-first" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Products menu.</div></li>
+          <li class="nav-item"><a class="nav-trigger" href="#solutions">Solutions</a><div class="card flyout pass-flyout-second" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Solutions menu.</div></li>
+          <li class="nav-item"><a class="nav-trigger" href="#resources">Resources</a><div class="card flyout pass-flyout-third" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Resources menu.</div></li>
+        </ul>
+      </div>
+
+      <div class="case">
+        <h3>A dropdown per nav item, closed with display: none</h3>
+        <ul class="nav">
+          <li class="nav-item"><a class="nav-trigger" href="#plans">Plans</a><div class="card dropdown pass-dropdown-first" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Plans menu.</div></li>
+          <li class="nav-item"><a class="nav-trigger" href="#teams">Teams</a><div class="card dropdown pass-dropdown-second" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Teams menu.</div></li>
+          <li class="nav-item"><a class="nav-trigger" href="#docs">Docs</a><div class="card dropdown pass-dropdown-third" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Docs menu.</div></li>
+        </ul>
       </div>
     </section>
   </div>

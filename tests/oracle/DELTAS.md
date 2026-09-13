@@ -185,10 +185,26 @@ pair, both measured on what the element already declares:
   of the same tag for a card at the element's own depth below them, so a grid
   whose cells each wrap their card in a link, or a stack of articles each
   holding one panel, is one row. It reads at most 24 siblings on each side per
-  level and 32 boxes inside each sibling cell. A browser scan compares rects,
-  which also silences an element that paints nothing, such as a closed
-  dropdown; a file scan has no layout and asks for the same tag plus
-  comparable pixel sizes wherever both boxes declare them.
+  level and 32 boxes inside each sibling cell, one child at a time. A browser
+  scan compares rects, which also silences an element that paints nothing,
+  such as a closed dropdown; a file scan has no layout and asks for the same
+  tag plus comparable pixel sizes wherever both boxes declare them.
+- every card of that row, the element included, shows at rest. The wrapper
+  climb would otherwise read a nav bar whose items each hold a flyout as a
+  row of cards, since flyouts laid out ahead of their hover have real sizes
+  and carry the pair. A popover waiting for its trigger is closed, or lifted
+  out of the flow (absolute or fixed, itself or up to two wrappers up) and
+  hidden. A browser scan reads a closed box as one with no area, and reads
+  an out-of-flow box as hidden when its computed visibility is hidden, its
+  opacity multiplies down to nothing along its ancestors, or its rect sits
+  past the page's left or top edge or the viewport's right edge. A file scan
+  reads the `hidden` attribute or `display: none` on the box or an ancestor
+  as closed, and `visibility: hidden` or a transparent opacity on an
+  out-of-flow box as hidden. A transform that parks a box off the page needs
+  layout, so only the browser scan reads it. Content staged in the flow for
+  a scroll reveal, transparent and offset until the reveal runs, still
+  counts: a visitor sees it by scrolling, and the corpus's one row, three
+  chart panels on evergrovelabs.com, sits at opacity 0 in the scan snapshot.
 
 The snippet now says which of the two the reader has to act on, so removing
 the shadow from the one named card does not read as the whole repair:
@@ -209,12 +225,14 @@ a standing exception to a golden it would otherwise fail on.
   one per card of its five flag rows (a 40px halo, a 48px halo across cards of
   slightly different sizes, a row lit from above at 8px offset under a 40px
   blur, grid cells that each wrap their card in a link, and one panel per
-  article two wrappers down with the middle article flipped); its eight pass
+  article two wrappers down with the middle article flipped); its ten pass
   rows (a lone popover, a pair of cards, a tight shadow, a shadow drawn inside
   the box, a border too faint to read, a heavy border, three boxes of one tag
-  sized nothing alike, one panel in a stack of articles that hold no panel)
-  report nothing. A browser scan of the file reports the same fifteen and
-  nothing else.
+  sized nothing alike, one panel in a stack of articles that hold no panel, a
+  flyout per nav item hidden until hovered, a dropdown per nav item closed
+  with `display: none`) report nothing. A browser scan of the file, copied
+  outside the repo so the root DESIGN.md does not apply, reports the same
+  fifteen and nothing else.
 - Re-recorded sweeps: `detect-dir-json-all-fixtures`,
   `detect-dir-text-all-fixtures` and `detect-dir-quiet-all-fixtures` carry both
   files, 436 findings to 450 and 17 advisory notes to 31. The counted total

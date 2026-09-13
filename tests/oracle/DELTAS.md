@@ -457,3 +457,61 @@ narrow-column description.
 - `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: both the all-caps-body and justified-text descriptions.
 - `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html`: the all-caps-body description.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the union of every sweep delta above.
+
+## Recorded 2026-09-13: text and raster rules score only what is painted at capture
+
+The URL engine's element pass now asks one predicate
+(`crates/core/src/browser/painted.rs`) before it reports a text or raster
+measurement, and drops the finding when a visitor cannot see the element at
+rest. An element is not painted at capture when:
+
+- `checkVisibility()` is false, its computed `visibility` is `hidden` or
+  `collapse`, or an ancestor has `display: none` or `content-visibility: hidden`;
+- its effective opacity (its own times its ancestors') is at or below 0.02;
+- an ancestor that clips it has no area on a clipped axis, or misses it on the
+  x axis (`hidden`, `clip`, `auto`, `scroll`: carousel tracks, scrolled table
+  columns) or on the y axis (`hidden` and `clip` only). Which ancestors clip
+  follows the containing block: every ancestor for an in-flow box, the
+  containing block and up for an absolute box, a transformed ancestor and up
+  for a fixed box. `html` and `body` never count as clips, and neither does a
+  vertical scroll container or a full-viewport fixed layer on the y axis, so an
+  app shell or a smooth-scroll viewport keeps the content below its fold;
+- its box lies wholly outside the scrollable document (before the start, or
+  past the root's scroll width, right to left aware), or it sits in a fixed
+  layer whose own box lies outside the viewport.
+
+Covered: `all-caps-body`, `body-text-viewport-edge`, `cramped-padding`,
+`extreme-negative-tracking`, `gray-on-color`, `justified-text`, `line-length`,
+`low-contrast` (the computed and placeholder forms of the element pass),
+`text-overflow`, `tight-leading`, `tiny-text`, `undersized-ui-text`, and
+`buried-raster`. `buried-raster` measures the element's own opacity, so for it
+only ancestors count toward transparency, and a raster under 0.15 opacity that
+declares an opacity transition (`opacity` or `all` with a non-zero duration) or
+an animation whose keyframes move opacity (or cannot be read) is a state layer
+between two states (a crossfade, a slideshow, a lazy-load fade) and is skipped.
+
+Not covered: the visual-contrast pixel pass, the page passes (`heading-rhythm`,
+`text-occlusion`, `first-viewport-column-overflow`, `kicker-above-heading`,
+`repeated-container-text`, `em-dash-overuse`, the typography pass),
+`content-hidden-at-rest` (hidden text is what it reports), the style tells that
+describe authored CSS in whatever state is showing (`gradient-text`,
+`ai-color-palette`, `overused-font`, `side-tab`, `dark-glow`,
+`italic-serif-display`, `icon-tile-stack`, `nested-cards`,
+`clipped-overflow-container`, the `design-system-*` rules), rule-pack findings,
+and the static HTML and text engines, which measure no boxes.
+
+The new fixture `painted-at-capture.html` pairs each hidden case (a collapsed
+submenu, the third cell of a horizontal scroller, a wrapper with no size, a
+faded crossfade layer, an off-canvas panel) with a visible twin carrying the
+same measurement, plus a popover that escapes a clip below its containing
+block. The file scan has no boxes and reports all fifteen; the browser test
+`the_rule_pass_skips_what_is_not_painted` (crates/browser/tests/evidence.rs)
+pins that the URL engine reports only the twins, and fails with the gate off.
+
+On the run 9 recordings the gate removes 3,816 of 15,609 findings and adds none.
+Every harmful cluster it touches keeps a painted finding in the same capture
+except the yna.co.kr weather carousel, whose green and orange status words are
+only off-screen slides at capture.
+
+- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: new cases, the static engine's fifteen findings.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` (409 to 424), `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same fifteen findings in the sweeps; every changed line adds a finding on the new fixture or moves the count.

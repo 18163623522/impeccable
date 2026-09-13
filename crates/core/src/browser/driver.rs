@@ -1449,6 +1449,11 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
             design_system.as_ref(),
             &mut design_seen,
         ));
+        // Text and raster measurements score what a visitor sees, so an
+        // element that is not painted at capture (a collapsed submenu, a
+        // scroller cell past its edge, a crossfade layer) has nothing for
+        // them to score.
+        super::painted::retain_painted(dom, el, &mut findings);
         // Rule-pack element rules run last, so the built-in findings for this
         // element keep their order and their position in the group.
         if let Some(pack) = config.rule_pack {
@@ -1651,6 +1656,38 @@ mod tests {
         d.el_mut(q).check_visibility = Some(false);
         let mut seen2 = DesignSeen::default();
         assert!(check_element_design_system_dom(&d, q, Some(&ds), &mut seen2).is_empty());
+    }
+
+    #[test]
+    fn text_rules_skip_what_is_not_painted() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 1280.0, 2000.0);
+        d.set_rect(body, 0.0, 0.0, 1280.0, 2000.0);
+        d.el_mut(html).scroll_width = 1280.0;
+        let label = |d: &mut FakeDom, parent: ElId, y: f64| {
+            let s = d.add(Some(parent), "span");
+            d.add_text(s, "Meta 12:00");
+            d.set_style(s, "fontSize", "9px");
+            d.set_rect(s, 40.0, y, 60.0, 12.0);
+            d.el_mut(s).check_visibility = Some(true);
+            s
+        };
+        let visible = label(&mut d, body, 100.0);
+        // The same label inside a submenu held at max-height: 0.
+        let submenu = d.add(Some(body), "ul");
+        d.set_styles(submenu, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(submenu, 0.0, 300.0, 390.0, 0.0);
+        let collapsed = label(&mut d, submenu, 300.0);
+
+        let out = collect_browser_findings(&d, &BrowserConfig::default());
+        let undersized_on = |el: ElId| {
+            out.groups
+                .iter()
+                .any(|g| g.el == el && g.findings.iter().any(|f| f.type_ == "undersized-ui-text"))
+        };
+        assert!(undersized_on(visible), "{:?}", out.groups);
+        assert!(!undersized_on(collapsed), "{:?}", out.groups);
     }
 
     #[test]

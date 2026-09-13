@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Link And Span Text Contrast — Should Flag vs Should Pass</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #ffffff; color: #1f2937; margin: 0; padding: 24px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; max-width: 1200px; margin: 0 auto; }
+    .col h2 { font-size: 24px; margin: 0 0 16px; color: #1f2937; }
+    .col h3 { font-size: 18px; margin: 20px 0 6px; color: #1f2937; }
+    .row { width: 320px; padding: 8px 0; }
+    table { border-collapse: collapse; width: 320px; }
+    td { padding: 8px; font-size: 14px; }
+    ul.nav { list-style: none; margin: 0; padding: 0; width: 320px; }
+    address { font-style: normal; width: 320px; }
+
+    /* Should flag: each case gets its own colour so the finding names it. */
+    .flag-accent-link { color: #f37b2e; font-size: 14px; text-decoration: none; }
+    .flag-footer-note { color: #8a8a8a; font-size: 13px; }
+    .flag-chip { background: #fff7ed; padding: 4px 12px; text-decoration: none; display: inline-block; }
+    .flag-chip-label { color: #ea580c; font-size: 14px; font-weight: 500; }
+    .flag-nav-item { color: #9b9b9b; font-size: 14px; padding: 6px 0; }
+    .flag-cell { color: #8d99a6; font-size: 14px; }
+    .flag-ghost-button { background: transparent; border: 0; color: #7c8494; font-size: 14px; padding: 8px 0; }
+    .flag-field-label { color: #949494; font-size: 14px; }
+    .flag-muted-copy { color: #999999; font-size: 14px; }
+    .flag-repeated-link { color: #888888; font-size: 14px; text-decoration: none; }
+
+    /* Should pass: this column must stay finding-free. */
+    .pass-strong-link { color: #0b4fbc; font-size: 14px; }
+    .pass-large-link { color: #838383; font-size: 26px; text-decoration: none; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); color: #b1b1b1; font-size: 14px; }
+    .pass-icon-glyph { color: #b2b2b2; font-size: 14px; }
+    .pass-empty-link { color: #b3b3b3; font-size: 14px; display: inline-block; width: 24px; height: 24px; }
+    .pass-emoji { color: #b4b4b4; font-size: 14px; }
+    .pass-disabled-button { background: transparent; border: 0; color: #b6b6b6; font-size: 14px; padding: 8px 0; }
+  </style>
+</head>
+<body>
+  <div class="grid">
+
+    <div class="col" data-col="flag">
+      <h2>Should flag</h2>
+
+      <h3>Accent link on white</h3>
+      <div class="row"><a class="flag-accent-link" href="/more">Read more about the service</a></div>
+
+      <h3>Footer imprint span</h3>
+      <address><span class="flag-footer-note">Kerkstraat 12, 1421 AB Uithoorn</span></address>
+
+      <h3>Badge label inside a filled anchor</h3>
+      <div class="row"><a class="flag-chip" href="/backers"><span class="flag-chip-label">Backed by our investors</span></a></div>
+
+      <h3>List item with its own text</h3>
+      <ul class="nav"><li class="flag-nav-item">Pricing and plans</li></ul>
+
+      <h3>Table cell</h3>
+      <table><tr><td class="flag-cell">Order shipped on Tuesday</td></tr></table>
+
+      <h3>Ghost button with no fill</h3>
+      <div class="row"><button class="flag-ghost-button" type="button">Dismiss this notice</button></div>
+
+      <h3>Form label</h3>
+      <div class="row"><label class="flag-field-label" for="email">Work email address</label></div>
+
+      <!-- One finding, on the paragraph. The run inside it inherits the same
+           colour on the same surface and stays silent. -->
+      <h3>Paragraph reported once, not again on its run</h3>
+      <p class="flag-muted-copy">Muted paragraph copy <span>with an inherited run inside it</span></p>
+
+      <!-- One finding for the whole nav. Eight links, one washed-out colour,
+           and the first link is the one that carries the report. -->
+      <h3>Eight links in one colour, reported once</h3>
+      <ul class="nav">
+        <li><a class="flag-repeated-link" href="/a">Overview</a></li>
+        <li><a class="flag-repeated-link" href="/b">Pricing</a></li>
+        <li><a class="flag-repeated-link" href="/c">Customers</a></li>
+        <li><a class="flag-repeated-link" href="/d">Changelog</a></li>
+        <li><a class="flag-repeated-link" href="/e">Careers</a></li>
+        <li><a class="flag-repeated-link" href="/f">Support</a></li>
+        <li><a class="flag-repeated-link" href="/g">Security</a></li>
+        <li><a class="flag-repeated-link" href="/h">Contact</a></li>
+      </ul>
+    </div>
+
+    <div class="col" data-col="pass">
+      <h2>Should pass</h2>
+
+      <h3>Link in a readable blue</h3>
+      <div class="row"><a class="pass-strong-link" href="/docs">Read the documentation</a></div>
+
+      <!-- 3.8:1 at 26px clears the 3:1 large-text threshold; the same colour
+           at body size would not clear 4.5:1. -->
+      <h3>Large link above the large-text threshold</h3>
+      <div class="row"><a class="pass-large-link" href="/plans">Compare the plans</a></div>
+
+      <h3>Screen-reader-only text</h3>
+      <div class="row"><a href="/cart">Cart<span class="sr-only">Opens the shopping cart</span></a></div>
+
+      <h3>Icon glyph with no reading load</h3>
+      <div class="row"><span class="pass-icon-glyph">&#8594;</span></div>
+
+      <h3>Link with no text of its own</h3>
+      <div class="row"><a class="pass-empty-link" href="/profile"><svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#1f2937"></circle></svg></a></div>
+
+      <h3>Emoji-only span</h3>
+      <div class="row"><span class="pass-emoji">&#127881;</span></div>
+
+      <h3>Disabled control</h3>
+      <div class="row"><button class="pass-disabled-button" type="button" disabled>Generate the report</button></div>
+    </div>
+
+  </div>
+</body>
+</html>

@@ -1318,6 +1318,8 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     let rule_ok = |id: &str| disabled.is_empty() || !disabled.iter().any(|d| d == id);
     let design_system = browser_design_system_config(config);
     let mut design_seen = DesignSeen::default();
+    // One page, one set of already-reported SAFE_TAGS text colours.
+    let mut color_seen = crate::checks::rules::SafeTagTextSeen::default();
     let body = dom.body();
     let root = dom.document_element();
     // JS `document.body` may be null on a bare document; every
@@ -1350,7 +1352,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         let mut findings: Vec<BrowserFinding> = Vec::new();
         findings.extend(hits(ec::check_element_borders_dom(dom, el)));
         findings.extend(hits(ec::check_element_pseudo_stripe_dom(dom, el)));
-        findings.extend(hits(ec::check_element_colors_dom(dom, el)));
+        findings.extend(hits(ec::check_element_colors_dom(dom, el, &mut color_seen)));
         findings.extend(hits(ec::check_element_motion_dom(dom, el)));
         findings.extend(hits(ec::check_element_glow_dom(dom, el)));
         findings.extend(hits(ec::check_element_ai_palette_dom(dom, el)));

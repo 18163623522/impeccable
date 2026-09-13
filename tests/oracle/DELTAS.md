@@ -164,3 +164,38 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: links and spans are scored for text contrast
+
+The SAFE_TAGS gate in `check_colors` skipped every `a`, `span`, `li`, `td`,
+`label` and `button` that did not paint its own background, so a page's links,
+nav labels, table cells and small print went unscored while the heading above
+them in the same colour was reported. The gate now lets the WCAG contrast
+verdict through for a SAFE_TAGS element that paints reading text of its own:
+direct text that is not an icon glyph or emoji, at least 9px (the floor the
+styled control path already used), not visually hidden, not inside a disabled
+control, on the page's own width, and in a colour that no text-bearing
+ancestor on the same surface already carries, so an inherited run stays its
+paragraph's single finding. `gray-on-color` and the class-list heuristics
+(gradient-text, ai-color-palette) stay behind the tag gate.
+
+Two things bound what this can print. A background the walk resolves to the
+text colour itself is dropped, because a `1.0:1 — text #ffffff on #ffffff` is
+the walk seeing through an image or a video to the page's own fill, never a
+real report. And each page reports one colour pair from this path once: a nav
+of fifty links in one washed-out colour is one finding on the first link, not
+fifty identical lines. The dedupe is scoped to this path, so no finding that
+predates the change moves.
+
+Each golden below was read by hand.
+
+- `detect-fixture-json-color-html`, `detect-fixture-text-color-html`: +1, the `.inline-link-low` anchor, `#aaaaaa` on `#fafafa` at 2.2:1. The fixture's note that plain inline links "must remain skipped" was written for the old gate and is rewritten in the same commit; the sub-9px `.chip-sub9-low` chip stays exempt.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: +1. The panel has three `.tiny` spans in `#374151` on `#1f2937` at 1.4:1; they are one colour on one surface, so they report once.
+- `detect-fixture-json-link-text-contrast-html`, `detect-fixture-text-link-text-contrast-html`: new fixture, nine findings, all from the should-flag column (accent link, footer span, badge label inside a filled anchor, list item, table cell, ghost button, form label, a paragraph whose inner run stays silent, and a nav of eight links in one colour reporting once). The should-pass column is finding-free.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep total moves from 419 to 430, which is the two findings above plus the nine the new fixture carries.
+
+`legitimate-borders.html` is a negative control whose golden is an empty
+result. Its trial-banner link was `#d97706` on the banner's own `#fffbeb` at
+3.1:1, a real failure that the old gate hid; the link is darkened to `#92400e`
+(6.8:1) in the same commit so the fixture keeps being a clean baseline and its
+goldens do not move.

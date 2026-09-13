@@ -27,7 +27,7 @@ use crate::page::{
 use crate::profile::{self, Meta, ProfileSink};
 use crate::quality::{check_element_quality, check_page_quality_from_doc, pf0};
 use impeccable_core::checks::html_patterns::{check_html_patterns, HtmlPatternCorpora};
-use impeccable_core::checks::rules::RuleHit;
+use impeccable_core::checks::rules::{RuleHit, SafeTagTextSeen};
 use impeccable_core::findings::{try_finding, Finding};
 use impeccable_core::inline_ignores::apply_inline_ignores;
 use impeccable_core::page::is_full_page;
@@ -119,14 +119,19 @@ const STATIC_ELEMENT_RULES: &[(&str, &str)] = &[
     ("radial-spotlight-glow", "*"),
 ];
 
-fn run_rule(rule_id: &str, el: &StaticElement<'_>, tag: &str) -> Vec<RuleHit> {
+fn run_rule(
+    rule_id: &str,
+    el: &StaticElement<'_>,
+    tag: &str,
+    color_seen: &mut SafeTagTextSeen,
+) -> Vec<RuleHit> {
     let style = el.style();
     match rule_id {
         "border-rules" => {
             let radius = resolve_border_radius_px(style, pf0(sv(style, "width")));
             check_element_borders(tag, style, radius, el)
         }
-        "color-rules" => check_element_colors(el, style, tag, None),
+        "color-rules" => check_element_colors(el, style, tag, None, color_seen),
         "hover-color-rules" => check_element_hover_contrast(el, style, tag),
         "dark-glow" => {
             let base = el.parent_element().unwrap_or(*el);
@@ -216,13 +221,15 @@ pub fn detect_html_source(
 
     for (rule_id, selector) in STATIC_ELEMENT_RULES {
         let elements = doc.query_selector_all(selector);
+        // One document, one set of already-reported SAFE_TAGS text colours.
+        let mut color_seen = SafeTagTextSeen::default();
         for el in &elements {
             let tag = el.tag_lower();
             let hits = profile::findings(
                 profile,
                 Meta::new("element", rule_id, fp),
                 |h: &RuleHit| h.id.as_str(),
-                || run_rule(rule_id, el, &tag),
+                || run_rule(rule_id, el, &tag, &mut color_seen),
             );
             for h in hits {
                 if scoped_ignore_active(el, &h.id) {

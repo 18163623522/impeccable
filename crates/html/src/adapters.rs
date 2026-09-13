@@ -11,18 +11,19 @@ use crate::background::{
 };
 use crate::cascade::StyleValues;
 use crate::dom::{StaticDocument, StaticElement};
-use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
+use crate::quality::{collapse_ws, is_visually_hidden, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
     GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
 };
 use impeccable_core::checks::rules::{
-    check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
+    check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
-    check_placeholder_colors, is_emoji_only_text, is_heading_tag, resolve_hero_heading_size_px,
-    BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts, HoverContrastOpts, IconTileOpts,
-    ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit, Sides,
+    check_placeholder_colors, is_emoji_only_text, is_glyph_only_text, is_heading_tag,
+    resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
+    HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit,
+    SafeTagTextSeen, Sides,
 };
 use impeccable_core::checks::text_rules::{
     check_numbered_section_labels, is_kicker_candidate, is_numbered_section_label_candidate,
@@ -30,7 +31,8 @@ use impeccable_core::checks::text_rules::{
     NumberedLabelCandidateInput, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
     POSITIONED_CHILD_INTERACTIVE_SELECTOR,
 };
-use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb};
+use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb, Rgba};
+use impeccable_core::constants::SAFE_TAGS;
 use impeccable_core::js::{self, parse_float, parse_int};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::slice_utf16_prefix;
@@ -460,12 +462,73 @@ pub fn check_element_borders(
     )
 }
 
+/// The element's `color`, custom properties resolved first as the colour
+/// checks read it.
+fn resolved_text_color(style: &StyleValues, custom_props: CustomPropMap<'_>) -> Option<Rgba> {
+    custom_props
+        .and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)))
+        .or_else(|| parse_rgb(sv_opt(style, "color")))
+}
+
+/// Whether an ancestor carrying direct text is one the contrast pass
+/// actually scores, so a descendant sharing its colour can stand down. A
+/// SAFE_TAG ancestor is only scored under the same predicate its
+/// descendant is, and an ancestor whose own text is an arrow or an icon
+/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
+/// report the span, because nothing reports the anchor.
+fn ancestor_scores_its_text(el: &StaticElement<'_>, direct: &str) -> bool {
+    if is_emoji_only_text(direct) {
+        return false;
+    }
+    if !SAFE_TAGS.contains(&el.tag_lower().as_str()) {
+        return true;
+    }
+    !is_glyph_only_text(direct) && !is_visually_hidden(el, el.style())
+}
+
+/// Whether this element's `color` comes from an ancestor the contrast pass
+/// scores on its own, so repeating it here would report one washed-out
+/// colour twice. The walk stops at the first ancestor painting a different
+/// colour (nothing above it can be the source of this one), at the first
+/// one painting a surface of its own without text on it (above that the
+/// colour is judged against a different background, which is a different
+/// verdict), and at a fixed depth, so it costs a handful of parent hops.
+fn inherits_scored_text_color(
+    el: &StaticElement<'_>,
+    text_color: Option<Rgba>,
+    custom_props: CustomPropMap<'_>,
+) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if resolved_text_color(c.style(), custom_props) != text_color {
+            return false;
+        }
+        let direct = c.direct_text();
+        if !js::trim(&direct).is_empty() {
+            return ancestor_scores_its_text(&c, &direct);
+        }
+        if read_own_background_color(&c, c.style()).map_or(false, |b| a_gt(&b, 0.0)) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
+/// An inactive control. WCAG 1.4.3 exempts them, and a ghost or transparent
+/// disabled button is exactly the shape the SAFE_TAGS text path would
+/// otherwise start reporting.
+const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
     style: &StyleValues,
     tag: &str,
     custom_props: CustomPropMap<'_>,
+    seen: &mut SafeTagTextSeen,
 ) -> Vec<RuleHit> {
     if sv_opt(style, "visibility") == Some("hidden") {
         return Vec::new();
@@ -489,11 +552,7 @@ pub fn check_element_colors(
 
     let bg_info = resolve_background_info(el, custom_props);
     let effective_bg = bg_info.color;
-    let mut text_color =
-        custom_props.and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)));
-    if text_color.is_none() {
-        text_color = parse_rgb(sv_opt(style, "color"));
-    }
+    let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
 
     let mut own_bg = custom_props
@@ -539,6 +598,15 @@ pub fn check_element_colors(
             sv(style, "backgroundClip")
         }
     };
+    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
+    // walk and the hidden-text selector run only for those tags.
+    let paints_own_text = has_direct_text
+        && SAFE_TAGS.contains(&tag)
+        && !is_emoji_only_text(&direct_text)
+        && !is_glyph_only_text(&direct_text)
+        && !is_visually_hidden(el, style)
+        && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
+        && !inherits_scored_text_color(el, text_color, custom_props);
     let color_opts = ColorOpts {
         tag: tag.to_string(),
         text_color,
@@ -553,12 +621,13 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
+        paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
         bg_image: Some(sv(style, "backgroundImage").to_string()),
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
     };
-    let mut findings = check_colors(&color_opts);
+    let mut findings = check_colors_deduped(&color_opts, seen);
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();
         if !placeholder.is_empty() {

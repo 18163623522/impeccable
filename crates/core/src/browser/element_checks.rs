@@ -12,17 +12,18 @@ use super::dom::{
     matches_or_false, pf0, safe_id, style_px, tag_lower, Dom, ElId, ElStyle, Rect,
 };
 use super::BrowserFinding;
+use crate::browser::quality::is_visually_hidden;
 use crate::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, is_screen_reader_only_text_style,
-    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input,
-    RadialSpotlightInput, SrOnlyMetrics,
+    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput,
+    SrOnlyMetrics,
 };
 use crate::checks::rules::{
-    check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
-    check_italic_serif, check_motion, check_placeholder_colors, is_emoji_only_text, BorderOpts,
-    ColorOpts, GlowOpts, HeroEyebrowOpts, IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit,
-    Sides, HEADING_TAGS,
+    check_borders, check_colors, check_colors_deduped, check_glow, check_hero_eyebrow,
+    check_icon_tile, check_italic_serif, check_motion, check_placeholder_colors,
+    is_emoji_only_text, is_glyph_only_text, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
+    IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit, SafeTagTextSeen, Sides, HEADING_TAGS,
 };
 use crate::checks::text_rules::{
     CURSOR_FIRST_VIEWPORT_PX, CURSOR_GLYPH_RE, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
@@ -408,8 +409,72 @@ pub fn read_pseudo_surface_dom(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<R
 
 // ── colors ────────────────────────────────────────────────────────────────
 
+/// Whether an ancestor carrying direct text is one the contrast pass
+/// actually scores, so a descendant sharing its colour can stand down. A
+/// SAFE_TAG ancestor is only scored under the same predicate its
+/// descendant is, and an ancestor whose own text is an arrow or an icon
+/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
+/// report the span, because nothing reports the anchor.
+fn ancestor_scores_its_text(dom: &dyn Dom, el: ElId, direct: &str) -> bool {
+    if is_emoji_only_text(direct) {
+        return false;
+    }
+    if !SAFE_TAGS.contains(&tag_lower(dom, el).as_str()) {
+        return true;
+    }
+    !is_glyph_only_text(direct) && !is_visually_hidden(dom, el)
+}
+
+/// Whether this element's `color` comes from an ancestor the contrast pass
+/// scores on its own, so repeating it here would report one washed-out
+/// colour twice. The walk stops at the first ancestor painting a different
+/// colour (nothing above it can be the source of this one), at the first
+/// one painting a surface of its own without text on it (above that the
+/// colour is judged against a different background, which is a different
+/// verdict), and at a fixed depth, so it costs a handful of parent hops.
+fn inherits_scored_text_color(dom: &dyn Dom, el: ElId, text_color: Option<Rgba>) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if parse_rgb_or_any(&dom.style(c, "color")) != text_color {
+            return false;
+        }
+        let direct = direct_text(dom, c);
+        if !js::trim(&direct).is_empty() {
+            return ancestor_scores_its_text(dom, c, &direct);
+        }
+        if read_own_background_color(dom, c).map_or(false, |b| b.alpha_or_one() > 0.0) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
+/// Whether the element sits within the page's own width. A carousel's
+/// off-screen slides and an off-canvas drawer are parked beside the page,
+/// and the copy of the same label a visitor can actually read is scored
+/// where it stands.
+fn overlaps_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
+    let width = dom.inner_width();
+    if !num_truthy(width) {
+        return true;
+    }
+    rect.left < width && rect.left + rect.width > 0.0
+}
+
+/// An inactive control. WCAG 1.4.3 exempts them, and a ghost or transparent
+/// disabled button is exactly the shape the SAFE_TAGS text path would
+/// otherwise start reporting.
+const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
+
 /// JS: checks.mjs#checkElementColorsDOM(el)
-pub fn check_element_colors_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+pub fn check_element_colors_dom(
+    dom: &dyn Dom,
+    el: ElId,
+    seen: &mut SafeTagTextSeen,
+) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
     let rect = dom.rect(el);
     if rect.width < 10.0 || rect.height < 10.0 {
@@ -460,9 +525,21 @@ pub fn check_element_colors_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     } else {
         resolve_gradient_stops(dom, el)
     };
+    let text_color = parse_rgb_or_any(&dom.style(el, "color"));
+    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
+    // walk and the hidden-text selector run only for those tags.
+    let paints_own_text = has_direct_text
+        && SAFE_TAGS.contains(&tag.as_str())
+        && !is_emoji_only_text(&direct)
+        && !is_glyph_only_text(&direct)
+        && !is_visually_hidden(dom, el)
+        && overlaps_page_width(dom, &rect)
+        && !matches_or_false(dom, el, DISABLED_CONTROL_SELECTOR)
+        && closest_or_none(dom, el, DISABLED_CONTROL_SELECTOR).is_none()
+        && !inherits_scored_text_color(dom, el, text_color);
     let color_opts = ColorOpts {
         tag: tag.clone(),
-        text_color: parse_rgb_or_any(&dom.style(el, "color")),
+        text_color,
         bg_color: own_bg,
         effective_bg: if surface_unresolved {
             None
@@ -474,12 +551,13 @@ pub fn check_element_colors_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct),
+        paints_own_text,
         bg_clip: Some(bg_clip),
         bg_image: Some(dom.style(el, "backgroundImage")),
         class_list: Some(class_attr(dom, el)),
         detector_is_browser: true,
     };
-    let mut findings = check_colors(&color_opts);
+    let mut findings = check_colors_deduped(&color_opts, seen);
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -1317,6 +1395,11 @@ mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
 
+    /// One element, its own page-level dedupe state.
+    fn colors(d: &FakeDom, el: ElId) -> Vec<RuleHit> {
+        check_element_colors_dom(d, el, &mut SafeTagTextSeen::default())
+    }
+
     fn page() -> (FakeDom, ElId) {
         let mut d = FakeDom::new();
         let (html, body) = d.with_page();
@@ -1427,11 +1510,12 @@ mod tests {
         );
         d.set_pseudo_style(input, "::placeholder", "color", "rgb(187, 187, 187)");
         d.add_selector(input, ":placeholder-shown");
-        let hits = check_element_colors_dom(&d, input);
+        let hits = colors(&d, input);
         assert!(
             hits.iter().any(|h| {
                 h.id == "low-contrast"
-                    && h.snippet.contains("placeholder \"Pale Placeholder On White Field\"")
+                    && h.snippet
+                        .contains("placeholder \"Pale Placeholder On White Field\"")
             }),
             "{hits:?}"
         );
@@ -1456,7 +1540,7 @@ mod tests {
             ],
         );
         d.set_pseudo_style(input, "::placeholder", "color", "rgb(187, 187, 187)");
-        let hits = check_element_colors_dom(&d, input);
+        let hits = colors(&d, input);
         assert!(
             hits.iter().all(|h| h.id != "low-contrast"),
             "live filled field must not score a hidden placeholder, {hits:?}"
@@ -1480,11 +1564,293 @@ mod tests {
                 ("webkitBackgroundClip", "border-box"),
             ],
         );
-        let hits = check_element_colors_dom(&d, p);
+        let hits = colors(&d, p);
         assert!(hits.iter().any(|h| h.id == "low-contrast"), "{hits:?}");
         // hidden by opacity: nothing
         d.set_style(p, "opacity", "0");
-        assert!(check_element_colors_dom(&d, p).is_empty());
+        assert!(colors(&d, p).is_empty());
+    }
+
+    /// A link or span with its own washed-out text, inside a wrapper that
+    /// carries none, on a white page.
+    fn muted_text_in_wrapper(tag: &str, text: &str, color: &str) -> (FakeDom, ElId, ElId) {
+        let (mut d, body) = page();
+        let wrap = d.add(Some(body), "div");
+        visible(&mut d, wrap);
+        d.set_rect(wrap, 0.0, 0.0, 300.0, 40.0);
+        d.set_styles(
+            wrap,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let el = d.add(Some(wrap), tag);
+        visible(&mut d, el);
+        d.add_text(el, text);
+        d.set_rect(el, 0.0, 0.0, 120.0, 20.0);
+        d.set_styles(
+            el,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", color),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        (d, wrap, el)
+    }
+
+    #[test]
+    fn plain_link_text_is_scored_against_its_surface() {
+        let (d, _wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(243, 123, 46)");
+        let hits = colors(&d, a);
+        assert!(
+            hits.iter()
+                .any(|h| h.id == "low-contrast" && h.snippet.contains("#f37b2e on #ffffff")),
+            "{hits:?}"
+        );
+        // A span nested in a styled anchor is scored against the anchor's fill.
+        let (mut d, _wrap, chip) = muted_text_in_wrapper("a", "", "rgb(234, 88, 12)");
+        d.set_style(chip, "backgroundColor", "rgb(255, 247, 237)");
+        let label = d.add(Some(chip), "span");
+        visible(&mut d, label);
+        d.add_text(label, "Backed by");
+        d.set_rect(label, 0.0, 0.0, 100.0, 20.0);
+        d.set_styles(
+            label,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(234, 88, 12)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "500"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        let hits = colors(&d, label);
+        assert!(
+            hits.iter()
+                .any(|h| h.id == "low-contrast" && h.snippet.contains("#ea580c on #fff7ed")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn safe_tag_text_keeps_its_old_exemptions() {
+        // Readable colour: nothing.
+        let (d, _wrap, a) = muted_text_in_wrapper("a", "Read more", "rgb(20, 60, 140)");
+        assert!(colors(&d, a).is_empty());
+        // Icon-font glyph, no reading load.
+        let (d, _wrap, icon) = muted_text_in_wrapper("span", "\u{f09a}", "rgb(180, 180, 180)");
+        assert!(colors(&d, icon).is_empty());
+        // Screen-reader-only text.
+        let (mut d, _wrap, sr) =
+            muted_text_in_wrapper("span", "Opens a new tab", "rgb(180, 180, 180)");
+        d.add_selector(sr, crate::checks::text_rules::SR_ONLY_SELECTOR);
+        assert!(colors(&d, sr).is_empty());
+        // An empty link has nothing to score.
+        let (mut d, _wrap, empty) = muted_text_in_wrapper("a", "", "rgb(180, 180, 180)");
+        d.set_rect(empty, 0.0, 0.0, 24.0, 24.0);
+        assert!(colors(&d, empty).is_empty());
+        // Parked beside the page: the readable copy of the slide is scored.
+        let (mut d, _wrap, off) = muted_text_in_wrapper("span", "60%", "rgb(180, 180, 180)");
+        d.set_rect(off, 1400.0, 20.0, 60.0, 20.0);
+        assert!(colors(&d, off).is_empty());
+        // The host heuristics stay behind the tag gate: a purple span heading
+        // is still not an ai-color-palette hit.
+        let (mut d, _wrap, purple) =
+            muted_text_in_wrapper("span", "Ship faster", "rgb(168, 85, 247)");
+        d.set_style(purple, "fontSize", "28px");
+        let hits = colors(&d, purple);
+        assert!(hits.iter().all(|h| h.id == "low-contrast"), "{hits:?}");
+    }
+
+    #[test]
+    fn inherited_colour_is_reported_once() {
+        let (mut d, body) = page();
+        let p = d.add(Some(body), "p");
+        visible(&mut d, p);
+        d.add_text(p, "Terms of service ");
+        d.set_rect(p, 0.0, 0.0, 300.0, 20.0);
+        d.set_styles(
+            p,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(170, 170, 170)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        let run = d.add(Some(p), "span");
+        visible(&mut d, run);
+        d.add_text(run, "and privacy");
+        d.set_rect(run, 0.0, 0.0, 100.0, 20.0);
+        d.set_styles(
+            run,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(170, 170, 170)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(colors(&d, p).iter().any(|h| h.id == "low-contrast"));
+        assert!(
+            colors(&d, run).is_empty(),
+            "the paragraph already carries this colour"
+        );
+        // Its own colour, and it is scored.
+        d.set_style(run, "color", "rgb(200, 200, 200)");
+        assert!(colors(&d, run).iter().any(|h| h.id == "low-contrast"));
+    }
+
+    #[test]
+    fn an_ancestor_nothing_scores_does_not_silence_its_run() {
+        // `<a><span>Read more</span> →</a>`: the anchor's own text is an
+        // arrow, which the glyph exemption drops, so the span has to report.
+        let (mut d, _wrap, a) = muted_text_in_wrapper("a", " \u{2192}", "rgb(148, 148, 148)");
+        let label = d.add(Some(a), "span");
+        visible(&mut d, label);
+        d.add_text(label, "Read more about the service");
+        d.set_rect(label, 0.0, 0.0, 180.0, 20.0);
+        d.set_styles(
+            label,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(148, 148, 148)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(colors(&d, a).is_empty(), "the arrow is not read");
+        assert!(
+            colors(&d, label)
+                .iter()
+                .any(|h| h.id == "low-contrast" && h.snippet.contains("#949494 on #ffffff")),
+            "nothing above the span reports this colour"
+        );
+    }
+
+    #[test]
+    fn a_run_on_its_own_surface_is_scored_on_that_surface() {
+        // White copy on a light section, repeated inside a green card: the
+        // ancestor's verdict is a different one, so the run keeps its own.
+        let (mut d, body) = page();
+        let section = d.add(Some(body), "p");
+        visible(&mut d, section);
+        d.add_text(section, "Try the demo");
+        d.set_rect(section, 0.0, 0.0, 400.0, 20.0);
+        d.set_styles(
+            section,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(255, 255, 255)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        let card = d.add(Some(section), "div");
+        visible(&mut d, card);
+        d.set_rect(card, 0.0, 0.0, 200.0, 40.0);
+        d.set_styles(
+            card,
+            &[
+                ("backgroundColor", "rgb(22, 163, 74)"),
+                ("color", "rgb(255, 255, 255)"),
+            ],
+        );
+        let run = d.add(Some(card), "span");
+        visible(&mut d, run);
+        d.add_text(run, "Book a slot");
+        d.set_rect(run, 0.0, 0.0, 120.0, 20.0);
+        d.set_styles(
+            run,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(255, 255, 255)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(
+            colors(&d, run)
+                .iter()
+                .any(|h| h.id == "low-contrast" && h.snippet.contains("#ffffff on #16a34a")),
+            "the card's surface is not the section's"
+        );
+    }
+
+    #[test]
+    fn a_background_the_walk_read_as_the_text_colour_is_not_a_report() {
+        // White label over a hero photo: the background walk sees through the
+        // image to the page's own white and would report 1.0:1.
+        let (d, _wrap, label) = muted_text_in_wrapper("span", "EN", "rgb(255, 255, 255)");
+        assert!(colors(&d, label).is_empty());
+    }
+
+    #[test]
+    fn a_disabled_control_is_not_scored() {
+        let (mut d, _wrap, button) =
+            muted_text_in_wrapper("button", "Generate", "rgb(176, 176, 176)");
+        d.add_selector(button, "[disabled]");
+        assert!(colors(&d, button).is_empty());
+        let (mut d, _wrap, button) =
+            muted_text_in_wrapper("button", "Generate", "rgb(176, 176, 176)");
+        d.add_selector(button, "[aria-disabled=\"true\"]");
+        assert!(colors(&d, button).is_empty());
+    }
+
+    #[test]
+    fn one_washed_out_colour_is_one_finding_per_page() {
+        let (mut d, body) = page();
+        let nav = d.add(Some(body), "nav");
+        visible(&mut d, nav);
+        d.set_rect(nav, 0.0, 0.0, 600.0, 40.0);
+        d.set_styles(
+            nav,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(17, 17, 17)"),
+            ],
+        );
+        let mut links = Vec::new();
+        for i in 0..8 {
+            let a = d.add(Some(nav), "a");
+            visible(&mut d, a);
+            d.add_text(a, &format!("Section {i}"));
+            d.set_rect(a, (i as f64) * 70.0, 0.0, 60.0, 20.0);
+            d.set_styles(
+                a,
+                &[
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("color", "rgb(136, 136, 136)"),
+                    ("fontSize", "14px"),
+                    ("fontWeight", "400"),
+                    ("webkitBackgroundClip", "border-box"),
+                ],
+            );
+            links.push(a);
+        }
+        let mut seen = SafeTagTextSeen::default();
+        let total: usize = links
+            .iter()
+            .map(|a| check_element_colors_dom(&d, *a, &mut seen).len())
+            .sum();
+        assert_eq!(total, 1, "one colour, one finding");
+        // A second colour still reports once of its own.
+        d.set_style(links[5], "color", "rgb(153, 153, 153)");
+        let mut seen = SafeTagTextSeen::default();
+        let total: usize = links
+            .iter()
+            .map(|a| check_element_colors_dom(&d, *a, &mut seen).len())
+            .sum();
+        assert_eq!(total, 2);
     }
 
     #[test]

@@ -15,10 +15,9 @@ use super::BrowserFinding;
 use crate::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
     check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_row_finding,
-    gpt_border_shadow_sibling_window, gpt_border_shadow_sizes_match,
-    gpt_thin_border_wide_shadow_pair, is_screen_reader_only_text_style,
-    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput,
-    SrOnlyMetrics, GPT_BORDER_SHADOW_MIN_ROW,
+    gpt_border_shadow_row_size, gpt_border_shadow_sizes_match, gpt_thin_border_wide_shadow_pair,
+    is_screen_reader_only_text_style, positioned_style_implies_escape, GptBorderShadowInput,
+    GptBorderShadowRowTree, OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
@@ -911,55 +910,58 @@ fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     })
 }
 
-/// How many boxes of `el`'s sibling row carry the same pair at a comparable
-/// size, `el` included. Counting stops at the threshold, and the walk covers
-/// a bounded window of siblings around `el`, so a long list costs no more
-/// than a row of cards and a card deep inside one still finds its row-mates.
-fn gpt_border_shadow_row_size(dom: &dyn Dom, el: ElId) -> usize {
-    let Some(parent) = dom.parent(el) else {
-        return 1;
-    };
-    let own = dom.rect(el);
-    let own = measures::Rect {
-        width: own.width,
-        height: own.height,
-    };
-    let siblings = dom.children(parent);
-    let mut row = 1usize;
-    let window =
-        gpt_border_shadow_sibling_window(&siblings, siblings.iter().position(|&s| s == el));
-    for &sibling in window {
-        if row >= GPT_BORDER_SHADOW_MIN_ROW {
-            break;
-        }
-        if sibling == el {
-            continue;
-        }
-        let r = dom.rect(sibling);
-        let r = measures::Rect {
+/// The laid-out tree a row walk reads in a browser scan: wrappers of one
+/// kind share a tag, and two boxes are the same card when their rects are
+/// comparable, which also keeps a box that paints nothing out of every row.
+struct DomRowTree<'a> {
+    dom: &'a dyn Dom,
+}
+
+impl DomRowTree<'_> {
+    fn size(&self, el: ElId) -> measures::Rect {
+        let r = self.dom.rect(el);
+        measures::Rect {
             width: r.width,
             height: r.height,
-        };
-        if !gpt_border_shadow_sizes_match(&own, &r) {
-            continue;
-        }
-        if gpt_border_shadow_pair_dom(dom, sibling).is_some() {
-            row += 1;
         }
     }
-    row
+}
+
+impl GptBorderShadowRowTree for DomRowTree<'_> {
+    type El = ElId;
+    fn parent(&self, el: &ElId) -> Option<ElId> {
+        self.dom.parent(*el)
+    }
+    fn previous_sibling(&self, el: &ElId) -> Option<ElId> {
+        self.dom.previous_element_sibling(*el)
+    }
+    fn next_sibling(&self, el: &ElId) -> Option<ElId> {
+        self.dom.next_element_sibling(*el)
+    }
+    fn children(&self, el: &ElId) -> Vec<ElId> {
+        self.dom.children(*el)
+    }
+    fn same_cell(&self, cell: &ElId, other: &ElId) -> bool {
+        self.dom.tag_name(*cell) == self.dom.tag_name(*other)
+    }
+    fn same_card(&self, card: &ElId, other: &ElId) -> bool {
+        gpt_border_shadow_sizes_match(&self.size(*card), &self.size(*other))
+    }
+    fn carries_pair(&self, el: &ElId) -> bool {
+        gpt_border_shadow_pair_dom(self.dom, *el).is_some()
+    }
 }
 
 /// JS: checks.mjs#checkElementGptBorderShadowDOM(el)
 pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
-    // The sibling walk is worth paying for only once this element carries the
+    // The row walk is worth paying for only once this element carries the
     // pair itself.
     let Some(pair) = gpt_border_shadow_pair_dom(dom, el) else {
         return Vec::new();
     };
     finding_hits(gpt_border_shadow_row_finding(
         pair,
-        gpt_border_shadow_row_size(dom, el),
+        gpt_border_shadow_row_size(&DomRowTree { dom }, &el),
     ))
 }
 
@@ -1780,7 +1782,7 @@ mod tests {
     #[test]
     fn gpt_border_shadow_finds_row_mates_past_the_sibling_bound() {
         // A card sitting deep inside a long list still sees the boxes beside
-        // it: the walk reads a window around the element, not the head of the
+        // it: the walk reads outward from the element, not the head of the
         // list.
         let (mut d, body) = page();
         let row = d.add(Some(body), "div");
@@ -1823,5 +1825,134 @@ mod tests {
             d.set_rect(card, 0.0, 0.0, 0.0, 0.0);
         }
         assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+    }
+
+    /// Wraps a new hairline card in the tags of `wrappers`, outermost first,
+    /// under `parent`; returns the card.
+    fn wrapped_card(
+        d: &mut FakeDom,
+        parent: ElId,
+        wrappers: &[&str],
+        w: f64,
+        h: f64,
+        shadow: &str,
+    ) -> ElId {
+        let mut at = parent;
+        for tag in wrappers {
+            at = d.add(Some(at), tag);
+            visible(d, at);
+        }
+        hairline_card(d, at, w, h, shadow)
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_cards_wrapped_in_grid_items() {
+        // The common generated grid wraps every card in its own link, so no
+        // two cards are DOM siblings; the page still shows one row of three.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo))
+            .collect();
+        for card in cards {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, card).len(), 1);
+        }
+
+        // Two wrappers down, as in a list item holding a link.
+        let (mut d, body) = page();
+        let list = d.add(Some(body), "ul");
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, list, &["li", "a"], 180.0, 140.0, halo))
+            .collect();
+        for card in cards {
+            assert_eq!(check_element_gpt_border_shadow_dom(&d, card).len(), 1);
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_panels_repeated_one_per_article() {
+        // Three articles down a page, each holding copy beside a panel, the
+        // middle one flipped so the panel comes first: the panels sit at the
+        // same depth but not at the same index, and they are one repetition.
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let halo = "rgba(255, 255, 255, 0.04) 0px 1px 0px 0px inset, rgba(8, 33, 25, 0.6) 0px 30px 60px -40px";
+        let mut panels = Vec::new();
+        for flipped in [false, true, false] {
+            let article = d.add(Some(stack), "article");
+            visible(&mut d, article);
+            if !flipped {
+                let copy = d.add(Some(article), "p");
+                visible(&mut d, copy);
+            }
+            let viz = d.add(Some(article), "div");
+            visible(&mut d, viz);
+            panels.push(hairline_card(&mut d, viz, 491.0, 265.0, halo));
+            if flipped {
+                let copy = d.add(Some(article), "p");
+                visible(&mut d, copy);
+            }
+        }
+        for panel in panels {
+            let hits = check_element_gpt_border_shadow_dom(&d, panel);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(
+                hits[0].snippet,
+                "1px border + 60px shadow blur, repeated across the row"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_lone_panel_among_repeated_articles_stays_silent() {
+        // A repeated layout is not enough: the other cells have to hold the
+        // same card.
+        let (mut d, body) = page();
+        let stack = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let panel = wrapped_card(&mut d, stack, &["article", "div"], 491.0, 265.0, halo);
+        for _ in 0..3 {
+            let article = d.add(Some(stack), "article");
+            visible(&mut d, article);
+            let viz = d.add(Some(article), "div");
+            visible(&mut d, viz);
+            let plain = d.add(Some(viz), "div");
+            visible(&mut d, plain);
+            d.set_rect(plain, 0.0, 0.0, 491.0, 265.0);
+        }
+        assert!(check_element_gpt_border_shadow_dom(&d, panel).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_wrapped_row_needs_comparable_cards_and_cells() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+
+        // Same wrappers, cards of very different sizes.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let first = wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["a"], 600.0, 90.0, halo);
+        wrapped_card(&mut d, grid, &["a"], 64.0, 400.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // Comparable cards, but under wrappers of three different kinds.
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let first = wrapped_card(&mut d, grid, &["a"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["section"], 180.0, 140.0, halo);
+        wrapped_card(&mut d, grid, &["aside"], 180.0, 140.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+    }
+
+    #[test]
+    fn gpt_border_shadow_climbs_at_most_two_wrappers() {
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let (mut d, body) = page();
+        let grid = d.add(Some(body), "div");
+        let cards: Vec<ElId> = (0..3)
+            .map(|_| wrapped_card(&mut d, grid, &["li", "a", "span"], 180.0, 140.0, halo))
+            .collect();
+        assert!(check_element_gpt_border_shadow_dom(&d, cards[0]).is_empty());
     }
 }

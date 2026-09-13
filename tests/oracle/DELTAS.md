@@ -179,10 +179,16 @@ pair, both measured on what the element already declares:
   is not an elevation under it). Offsets are read by nothing: every step of
   every mainstream elevation scale casts a y-offset, so a shadow lit from
   above is the common case rather than the exception.
-- at least three boxes of the element's own sibling row carry the same pair at
-  a comparable size. A browser scan compares rects, which also silences an
-  element that paints nothing, such as a closed dropdown; a file scan has no
-  layout and reads same-tag siblings instead.
+- at least three comparable boxes of one row carry the same pair. The row is
+  what the layout repeats, not only the element's DOM siblings: the walk
+  climbs at most two wrappers, and at each level reads the wrapper's siblings
+  of the same tag for a card at the element's own depth below them, so a grid
+  whose cells each wrap their card in a link, or a stack of articles each
+  holding one panel, is one row. It reads at most 24 siblings on each side per
+  level and 32 boxes inside each sibling cell. A browser scan compares rects,
+  which also silences an element that paints nothing, such as a closed
+  dropdown; a file scan has no layout and asks for the same tag plus
+  comparable pixel sizes wherever both boxes declare them.
 
 The snippet now says which of the two the reader has to act on, so removing
 the shadow from the one named card does not read as the whole repair:
@@ -199,13 +205,17 @@ a standing exception to a golden it would otherwise fail on.
   lone hairline card, a 24px halo on one box, now sits in the pass column; the
   rule's own cases moved to the new `gpt-thin-border-wide-shadow.html`.
 - New cases for that fixture: `detect-fixture-json-gpt-thin-border-wide-shadow-html`
-  and `detect-fixture-text-gpt-thin-border-wide-shadow-html`. Nine findings,
-  one per card of its three flag rows (a 40px halo, a 48px halo across cards of
-  slightly different sizes, and a row lit from above at 8px offset under a 40px
-  blur); its six pass rows (a lone popover, a pair of cards, a tight shadow, a
-  shadow drawn inside the box, a border too faint to read, a heavy border)
-  report nothing.
+  and `detect-fixture-text-gpt-thin-border-wide-shadow-html`. Fifteen findings,
+  one per card of its five flag rows (a 40px halo, a 48px halo across cards of
+  slightly different sizes, a row lit from above at 8px offset under a 40px
+  blur, grid cells that each wrap their card in a link, and one panel per
+  article two wrappers down with the middle article flipped); its eight pass
+  rows (a lone popover, a pair of cards, a tight shadow, a shadow drawn inside
+  the box, a border too faint to read, a heavy border, three boxes of one tag
+  sized nothing alike, one panel in a stack of articles that hold no panel)
+  report nothing. A browser scan of the file reports the same fifteen and
+  nothing else.
 - Re-recorded sweeps: `detect-dir-json-all-fixtures`,
   `detect-dir-text-all-fixtures` and `detect-dir-quiet-all-fixtures` carry both
-  files, 436 findings to 444 and 17 advisory notes to 25. The counted total
+  files, 436 findings to 450 and 17 advisory notes to 31. The counted total
   stays at 419; no other rule's output moves.

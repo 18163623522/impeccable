@@ -459,6 +459,14 @@ impl<'a> StaticElement<'a> {
             .map(|n| self.doc.wrap(n))
     }
 
+    /// JS `nextElementSibling`: the nearest following `tag`-typed sibling.
+    pub fn next_element_sibling(&self) -> Option<StaticElement<'a>> {
+        self.node
+            .next_siblings()
+            .find(node_is_plain_tag)
+            .map(|n| self.doc.wrap(n))
+    }
+
     /// JS `children`: `tag`-typed child nodes.
     pub fn children(&self) -> Vec<StaticElement<'a>> {
         self.node

@@ -465,31 +465,7 @@ fn split_shadow_layers(s: &str) -> Vec<&str> {
 /// JS: checks.mjs#shadowMaxBlurPx. Largest blur radius across the layers
 /// whose color alpha is at least `min_alpha` (JS default 0).
 pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
-    re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
-    re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
-    let min_alpha = min_alpha.unwrap_or(0.0);
-    let Some(box_shadow) = box_shadow else {
-        return 0.0;
-    };
-    if box_shadow.is_empty() || box_shadow == "none" {
-        return 0.0;
-    }
-    let mut max_blur = 0.0f64;
-    for layer in split_shadow_layers(box_shadow) {
-        if shadow_layer_alpha(layer) < min_alpha {
-            continue;
-        }
-        let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
-        let cleaned = WORD_RE.replace_all(&cleaned, " ");
-        let nums: Vec<f64> = NUM_RE
-            .find_iter(&cleaned)
-            .map(|m| parse_float(m.as_str()))
-            .collect();
-        if nums.len() >= 3 {
-            max_blur = math_max(max_blur, nums[2]);
-        }
-    }
-    max_blur
+    shadow_max_blur_px_among(box_shadow, min_alpha, false)
 }
 
 /// Largest blur radius across the layers drawn outside the box: not `inset`,
@@ -499,6 +475,16 @@ pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f
 /// every mainstream elevation scale casts a y-offset, so a shadow lit from
 /// above is the common case rather than the exception.
 pub fn shadow_max_outer_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    shadow_max_blur_px_among(box_shadow, min_alpha, true)
+}
+
+/// The one box-shadow parse behind [`shadow_max_blur_px`] and
+/// [`shadow_max_outer_blur_px`]; `outer_only` skips `inset` layers.
+fn shadow_max_blur_px_among(
+    box_shadow: Option<&str>,
+    min_alpha: Option<f64>,
+    outer_only: bool,
+) -> f64 {
     re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
     re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
     re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
@@ -515,7 +501,7 @@ pub fn shadow_max_outer_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>
             continue;
         }
         let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
-        if INSET_RE.is_match(&cleaned) {
+        if outer_only && INSET_RE.is_match(&cleaned) {
             continue;
         }
         let cleaned = WORD_RE.replace_all(&cleaned, " ");

@@ -14,10 +14,10 @@ use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
-    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_row_finding,
-    gpt_border_shadow_sibling_window, gpt_thin_border_wide_shadow_pair,
-    positioned_style_implies_escape, resolve_length_px, GptBorderShadowInput, OversizedH1Input,
-    RadialSpotlightInput, StyleMap, GPT_BORDER_SHADOW_MIN_ROW,
+    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close,
+    gpt_border_shadow_row_finding, gpt_border_shadow_row_size, gpt_thin_border_wide_shadow_pair,
+    positioned_style_implies_escape, resolve_length_px, GptBorderShadowInput,
+    GptBorderShadowRowTree, OversizedH1Input, RadialSpotlightInput, StyleMap,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -859,31 +859,58 @@ fn gpt_border_shadow_pair(style: &StyleValues) -> Option<(f64, f64)> {
     })
 }
 
-/// How many boxes of `el`'s sibling row carry the same pair, `el` included.
-/// A file scan has no layout to compare sizes with, so same-tag siblings
-/// stand in for cards of one row. Counting stops at the threshold, and the
-/// walk covers a bounded window of siblings around `el`.
-fn gpt_border_shadow_row_size(el: &StaticElement<'_>) -> usize {
-    let Some(parent) = el.parent_element() else {
-        return 1;
-    };
-    let tag = el.tag_lower();
-    let siblings = parent.children();
-    let window =
-        gpt_border_shadow_sibling_window(&siblings, siblings.iter().position(|s| s == el));
-    let mut row = 1usize;
-    for sibling in window {
-        if row >= GPT_BORDER_SHADOW_MIN_ROW {
-            break;
-        }
-        if sibling == el || sibling.tag_lower() != tag {
-            continue;
-        }
-        if gpt_border_shadow_pair(sibling.style()).is_some() {
-            row += 1;
-        }
+/// A declared pixel length (`width: 180px`), or `None` for anything a file
+/// scan cannot size without layout (`auto`, percentages, keywords).
+fn gpt_border_shadow_declared_px(style: &StyleValues, prop: &str) -> Option<f64> {
+    let value = sv(style, prop).trim();
+    if !value.ends_with("px") {
+        return None;
     }
-    row
+    let px = parse_float(value);
+    (!px.is_nan()).then_some(px)
+}
+
+/// The tree a row walk reads in a file scan, which has no layout: wrappers of
+/// one kind share a tag, and two boxes are the same card when they share a
+/// tag and every pixel length both of them declare is comparable. A length
+/// only one of them declares, or neither, compares as unknown rather than as
+/// a mismatch.
+struct StaticRowTree<'a>(std::marker::PhantomData<StaticElement<'a>>);
+
+impl<'a> GptBorderShadowRowTree for StaticRowTree<'a> {
+    type El = StaticElement<'a>;
+    fn parent(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.parent_element()
+    }
+    fn previous_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.previous_element_sibling()
+    }
+    fn next_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.next_element_sibling()
+    }
+    fn children(&self, el: &StaticElement<'a>) -> Vec<StaticElement<'a>> {
+        el.children()
+    }
+    fn same_cell(&self, cell: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        cell.tag_lower() == other.tag_lower()
+    }
+    fn same_card(&self, card: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        if card.tag_lower() != other.tag_lower() {
+            return false;
+        }
+        ["width", "height"].into_iter().all(|prop| {
+            match (
+                gpt_border_shadow_declared_px(card.style(), prop),
+                gpt_border_shadow_declared_px(other.style(), prop),
+            ) {
+                (Some(a), Some(b)) => gpt_border_shadow_lengths_close(a, b),
+                _ => true,
+            }
+        })
+    }
+    fn carries_pair(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_pair(el.style()).is_some()
+    }
 }
 
 /// JS: checks.mjs#checkElementGptBorderShadow(el, style)
@@ -891,14 +918,14 @@ pub fn check_element_gpt_border_shadow(
     el: &StaticElement<'_>,
     style: &StyleValues,
 ) -> Vec<RuleHit> {
-    // The sibling walk is worth paying for only once this element carries the
+    // The row walk is worth paying for only once this element carries the
     // pair itself.
     let Some(pair) = gpt_border_shadow_pair(style) else {
         return Vec::new();
     };
     hits(gpt_border_shadow_row_finding(
         pair,
-        gpt_border_shadow_row_size(el),
+        gpt_border_shadow_row_size(&StaticRowTree(std::marker::PhantomData), el),
     ))
 }
 

@@ -5,12 +5,16 @@
   <title>Hairline border with wide shadow fixture</title>
   <!--
     The rule reports a hairline border paired with a wide shadow only where a
-    row of comparable sibling cards all wear it. A lone popover, a pair of
-    cards, a tight shadow and a shadow drawn inside the box are the resting
+    row of comparable cards all wear it. The row is what the layout repeats:
+    the card's siblings, or the cards at the same depth inside sibling
+    wrappers of one kind (a link per grid cell, an article per panel), up to
+    two wrappers up. A lone popover, a pair of cards, a tight shadow, a shadow
+    drawn inside the box and boxes of very different sizes are the resting
     styles of most design systems and stay silent.
 
-    A file scan has no layout, so the sibling row is read as same-tag siblings
-    there; the size tolerance is exercised by the browser tests in
+    A file scan has no layout, so it reads a card of the row as a box with the
+    same tag whose declared pixel sizes are comparable; a browser scan compares
+    rects, and the size tolerance is exercised further by the browser tests in
     crates/core/src/browser/element_checks.rs.
   -->
   <style>
@@ -22,6 +26,11 @@
     .case { margin: 0 0 16px; }
     .row { display: flex; gap: 16px; }
     .card { width: 180px; height: 88px; padding: 12px; border-radius: 12px; box-sizing: border-box; font-size: 13px; }
+    .cell { display: block; color: inherit; text-decoration: none; }
+    .stack { display: flex; flex-direction: column; gap: 12px; }
+    .outcome { display: flex; gap: 16px; align-items: center; }
+    .copy { width: 160px; margin: 0; font-size: 13px; }
+    .panel { margin: 0; }
   </style>
 </head>
 <body>
@@ -54,6 +63,33 @@
           <div class="card flag-offset-first" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">First priced tier.</div>
           <div class="card flag-offset-second" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Second priced tier.</div>
           <div class="card flag-offset-third" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Third priced tier.</div>
+        </div>
+      </div>
+
+      <div class="case">
+        <h3>Grid cells that each wrap their card in a link</h3>
+        <div class="row">
+          <a class="cell" href="#first"><div class="card flag-wrapped-first" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">First linked card.</div></a>
+          <a class="cell" href="#second"><div class="card flag-wrapped-second" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Second linked card.</div></a>
+          <a class="cell" href="#third"><div class="card flag-wrapped-third" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Third linked card.</div></a>
+        </div>
+      </div>
+
+      <div class="case">
+        <h3>One panel per article, two wrappers down, the middle one flipped</h3>
+        <div class="stack">
+          <article class="outcome">
+            <p class="copy">First outcome.</p>
+            <div class="viz"><figure class="card panel flag-panel-first" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+          </article>
+          <article class="outcome">
+            <div class="viz"><figure class="card panel flag-panel-second" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+            <p class="copy">Second outcome.</p>
+          </article>
+          <article class="outcome">
+            <p class="copy">Third outcome.</p>
+            <div class="viz"><figure class="card panel flag-panel-third" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+          </article>
         </div>
       </div>
     </section>
@@ -110,6 +146,33 @@
           <div class="card pass-thick-first" style="border: 3px solid #18181b; box-shadow: 0 0 40px rgba(15,23,42,0.18)">First framed card.</div>
           <div class="card pass-thick-second" style="border: 3px solid #18181b; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Second framed card.</div>
           <div class="card pass-thick-third" style="border: 3px solid #18181b; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Third framed card.</div>
+        </div>
+      </div>
+
+      <div class="case">
+        <h3>Three boxes of one tag and treatment, sized nothing alike</h3>
+        <div class="row">
+          <div class="card pass-mismatch-rail" style="width: 72px; height: 150px; border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Rail.</div>
+          <div class="card pass-mismatch-banner" style="width: 280px; height: 56px; border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Banner panel.</div>
+          <div class="card pass-mismatch-chip" style="width: 140px; height: 32px; border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Chip.</div>
+        </div>
+      </div>
+
+      <div class="case">
+        <h3>One panel in a stack of articles that hold no panel</h3>
+        <div class="stack">
+          <article class="outcome">
+            <p class="copy">The one outcome with a chart.</p>
+            <div class="viz"><figure class="card panel pass-lone-panel" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+          </article>
+          <article class="outcome">
+            <p class="copy">An outcome told in words.</p>
+            <div class="viz"><figure class="card panel pass-plain-panel-second"></figure></div>
+          </article>
+          <article class="outcome">
+            <p class="copy">Another outcome told in words.</p>
+            <div class="viz"><figure class="card panel pass-plain-panel-third"></figure></div>
+          </article>
         </div>
       </div>
     </section>

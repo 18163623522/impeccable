@@ -178,8 +178,24 @@ applies the same gate to a left or right stripe. Top and bottom accents are
 unchanged: `border-accent-on-rounded` already owns the rounded half of that
 scope.
 
-The fixtures moved with the rule, so the goldens below carry a fixture edit,
-not a lost finding. Case counts are identical.
+Corners are read from every declaration that names one. The static cascade
+now collects the four `border-<corner>-radius` longhands, which is how a
+utility framework writes `rounded-r-lg`; without them a card rounded only by
+longhands read as square and its stripe went silent. A radius the parser
+cannot resolve (a `calc()`, an unresolved `var()`, a unit that needs context
+the engine does not have, a snapshot missing the column) is unknown rather
+than zero, and an unknown card keeps its finding.
 
-- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: `border-baseline.html` retired its square `border-left: 4px` flag case (it now sits in the should-pass column as a square callout) and added `border-left: 6px` on a card rounded away from the stripe, so one snippet changes.
+Two halves of the scope are deliberately left alone, and both are visible to
+users. A square card with `border-top: 4px solid teal` still reports
+`side-tab` while the same card with `border-left` does not: the corpus judged
+the side accent, not the horizontal band, and silencing the band would drop
+findings on no evidence. The text and regex engines (`impeccable detect` on
+`.css` / `.jsx` / `.tsx`) also still report a square side accent, because
+their line-at-a-time heuristic cannot see a radius declared on another line.
+
+The fixtures moved with the rule, so the goldens below carry fixture edits,
+not lost findings.
+
+- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: `border-baseline.html` retired its square `border-left: 4px` flag case (it now sits in the should-pass column as a square callout), added `border-left: 6px` on a card rounded away from the stripe, and added two flag cases the corner read has to keep catching: a card rounded by `border-top-right-radius` / `border-bottom-right-radius`, and one whose radius is a `calc()`. Net for the whole-directory cases: two more findings, 419 to 421.
 - `detect-unreadable-file-in-dir`: the case's readable `a.html` carries `border-radius: 10px`, so it still produces the finding the case exists to show next to the unreadable file's error; the snippet gains `+ border-radius: 10px`.

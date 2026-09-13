@@ -99,40 +99,47 @@ pub fn parse_radius_to_px(value: Option<&str>, width_px: f64) -> Option<f64> {
     Some(num)
 }
 
-/// One `border-radius` token in px. Percentages resolve against `width_px`
-/// the way [`parse_radius_to_px`] resolves them; `em` and `rem` resolve
-/// against the 16px root default, which is close enough to tell a square
-/// corner from a rounded one without walking the font-size chain.
-fn radius_token_px(token: &str, width_px: f64) -> f64 {
-    let num = parse_radius_to_px(Some(token), width_px).unwrap_or(0.0);
-    if token.ends_with("em") {
-        num * 16.0
-    } else {
-        num
+/// One `border-radius` token in px, or `None` when it is not a length this
+/// can resolve: a `calc()`, an unresolved `var()`, a keyword, a unit whose
+/// px value depends on something not in hand. Percentages resolve against
+/// `width_px` the way [`parse_radius_to_px`] resolves them; `em` and `rem`
+/// resolve against the 16px root default, which is close enough to tell a
+/// square corner from a rounded one without walking the font-size chain.
+/// Unit matching is case-insensitive: CSS units are, and a stylesheet
+/// carrying `0.5REM` still describes a rounded corner.
+fn radius_token_px(token: &str, width_px: f64) -> Option<f64> {
+    let token = js::trim(token);
+    let num = parse_radius_to_px(Some(token), width_px)?;
+    let unit = token.trim_start_matches(|c: char| !c.is_ascii_alphabetic() && c != '%');
+    match js::to_lower_case(unit).as_str() {
+        "px" | "%" => Some(num),
+        "em" | "rem" => Some(num * 16.0),
+        // A bare `0` is the one unitless radius CSS allows.
+        "" if num == 0.0 => Some(0.0),
+        _ => None,
     }
 }
 
 /// The corners of a `border-radius` shorthand, in px. Reads the horizontal
 /// radii (the half before any `/`) and fills the 1-, 2- and 3-value forms out
-/// the way the shorthand does.
-pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Corners {
+/// the way the shorthand does. `None` when the declaration is missing, empty
+/// or carries a token this cannot resolve: a caller that cannot see the
+/// corners should keep reporting rather than read the box as square.
+pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corners> {
     re!(WS_SPLIT, format!("{}+", WS));
-    let Some(value) = value else {
-        return Corners::default();
-    };
-    let horizontal = value.split('/').next().unwrap_or("");
+    let horizontal = value?.split('/').next().unwrap_or("");
     let trimmed = js::trim(horizontal);
     if trimmed.is_empty() {
-        return Corners::default();
+        return None;
     }
     let parts: Vec<f64> = WS_SPLIT
         .split(trimmed)
         .filter(|t| !t.is_empty())
         .map(|t| radius_token_px(t, width_px))
-        .collect();
+        .collect::<Option<Vec<f64>>>()?;
     let at = |i: usize| parts.get(i).copied().unwrap_or(0.0);
-    match parts.len() {
-        0 => Corners::default(),
+    Some(match parts.len() {
+        0 => return None,
         1 => Corners {
             top_left: at(0),
             top_right: at(0),
@@ -157,7 +164,17 @@ pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Corners {
             bottom_right: at(2),
             bottom_left: at(3),
         },
-    }
+    })
+}
+
+/// One `border-<corner>-radius` longhand in px: its horizontal radius, the
+/// half a stripe runs along. `None` on the same terms as
+/// [`parse_radius_corners`].
+pub fn parse_radius_corner_px(value: Option<&str>, width_px: f64) -> Option<f64> {
+    re!(WS_SPLIT_ONE, format!("{}+", WS));
+    let trimmed = js::trim(value?);
+    let first = WS_SPLIT_ONE.split(trimmed).find(|t| !t.is_empty())?;
+    radius_token_px(first, width_px)
 }
 
 /// The custom-property lookup `resolveVarRefs` reads (`customPropMap.get`).
@@ -830,7 +847,7 @@ mod tests {
 
     #[test]
     fn radius_corner_shorthand_cases() {
-        let c = |v: &str| parse_radius_corners(Some(v), 200.0);
+        let c = |v: &str| parse_radius_corners(Some(v), 200.0).expect(v);
         assert_eq!(
             c("8px"),
             Corners {
@@ -872,8 +889,38 @@ mod tests {
         // rem and em read against the 16px root default; % against the box.
         assert_eq!(c("0.375rem").top_left, 6.0);
         assert_eq!(c("0.5em").bottom_right, 8.0);
+        // Units are case-insensitive in CSS.
+        assert_eq!(c("0.5REM").top_left, 8.0);
+        assert_eq!(c("10PX").top_left, 10.0);
         assert_eq!(c("50%").top_right, 100.0);
-        assert_eq!(c(""), Corners::default());
-        assert_eq!(parse_radius_corners(None, 200.0), Corners::default());
+        assert_eq!(c("0").top_left, 0.0);
+        assert_eq!(c("0 10px 10px 0").bottom_left, 0.0);
+    }
+
+    #[test]
+    fn radius_corners_unreadable_values_are_unknown() {
+        let c = |v: Option<&str>| parse_radius_corners(v, 200.0);
+        // A radius this cannot resolve is unknown, not zero: the caller keeps
+        // reporting rather than reading the box as square.
+        assert_eq!(c(Some("calc(0.5rem)")), None);
+        assert_eq!(c(Some("var(--radius)")), None);
+        assert_eq!(c(Some("0px calc(8px + 2px)")), None);
+        assert_eq!(c(Some("1vw")), None);
+        assert_eq!(c(Some("")), None);
+        assert_eq!(c(Some("   ")), None);
+        assert_eq!(c(None), None);
+    }
+
+    #[test]
+    fn radius_corner_longhand_cases() {
+        let c = |v: &str| parse_radius_corner_px(Some(v), 200.0);
+        assert_eq!(c("10px"), Some(10.0));
+        assert_eq!(c("0.5rem"), Some(8.0));
+        // A longhand may carry both radii; a stripe runs along the first.
+        assert_eq!(c("10px 4px"), Some(10.0));
+        assert_eq!(c("50%"), Some(100.0));
+        assert_eq!(c("calc(1rem)"), None);
+        assert_eq!(c(""), None);
+        assert_eq!(parse_radius_corner_px(None, 200.0), None);
     }
 }

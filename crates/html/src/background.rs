@@ -7,13 +7,14 @@
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
 use impeccable_core::checks::measures::{
-    parse_color_resolved, parse_radius_corners, parse_radius_to_px, CustomProps,
+    parse_color_resolved, parse_radius_corner_px, parse_radius_corners, parse_radius_to_px,
+    CustomProps,
 };
+use impeccable_core::checks::rules::Corners;
 use impeccable_core::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_gradient_colors,
     parse_rgb, split_top_level_commas, Rgba,
 };
-use impeccable_core::checks::rules::Corners;
 use impeccable_core::js;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -335,8 +336,28 @@ pub fn resolve_border_radius_px(style: &StyleValues, width_px: f64) -> f64 {
     parse_radius_to_px(sv_opt(style, "borderRadius"), width_px).unwrap_or(0.0)
 }
 
-/// The four corner radii in px, read from the same declaration
-/// `resolve_border_radius_px` reads.
-pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Corners {
-    parse_radius_corners(sv_opt(style, "borderRadius"), width_px)
+/// The four corner radii in px: the shorthand `resolve_border_radius_px`
+/// reads, with each `border-<corner>-radius` longhand folded over it.
+/// `None` when a declaration in play is one the parser cannot resolve, so the
+/// caller keeps reporting instead of reading the box as square.
+///
+/// The cascade stores every declaration under its own key, so a longhand and
+/// the shorthand cannot be ordered against each other here. A corner takes
+/// the larger of the two, the answer that keeps a finding rather than
+/// silencing one: a rounded card squared off at a single corner still
+/// reports.
+pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Option<Corners> {
+    let mut corners = parse_radius_corners(sv_opt(style, "borderRadius"), width_px)?;
+    for (prop, corner) in [
+        ("borderTopLeftRadius", &mut corners.top_left),
+        ("borderTopRightRadius", &mut corners.top_right),
+        ("borderBottomRightRadius", &mut corners.bottom_right),
+        ("borderBottomLeftRadius", &mut corners.bottom_left),
+    ] {
+        let Some(raw) = sv_opt(style, prop) else {
+            continue;
+        };
+        *corner = corner.max(parse_radius_corner_px(Some(raw), width_px)?);
+    }
+    Some(corners)
 }

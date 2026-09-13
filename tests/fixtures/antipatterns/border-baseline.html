@@ -77,6 +77,19 @@
       border-radius: 0 10px 10px 0;
     }
 
+    .flag-left-longhand {
+      border-left-width: 4px;
+      border-left-style: solid;
+      border-left-color: #b45309;
+      border-top-right-radius: 10px;
+      border-bottom-right-radius: 10px;
+    }
+
+    .flag-left-calc {
+      border-left: 4px solid #4338ca;
+      border-radius: calc(5px + 5px);
+    }
+
     .flag-top {
       border-top: 4px solid #7c3aed;
       border-radius: 10px;
@@ -179,6 +192,16 @@
       <div class="case flag-left-tab">
         <h3>Card rounded away from its left stripe</h3>
         <p>The stripe runs down the square edge and the far corners are rounded: the tab shape.</p>
+      </div>
+
+      <div class="case flag-left-longhand">
+        <h3>Card rounded by corner longhands</h3>
+        <p>The utility-class form writes border-top-right-radius and border-bottom-right-radius instead of the shorthand; the card is just as round.</p>
+      </div>
+
+      <div class="case flag-left-calc">
+        <h3>Card whose radius is a calc expression</h3>
+        <p>A radius the engine cannot resolve is unknown, not square, so the stripe on it is still reported.</p>
       </div>
 
       <div class="case flag-top">

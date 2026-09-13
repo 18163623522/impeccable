@@ -120,6 +120,14 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     }
     let own_bg = parse_rgb_or_any(&dom.style(el, "backgroundColor"));
     let badge_like = own_bg.map_or(false, |c| c.alpha_or_one() > 0.1);
+    let radius_value = dom.style(el, "borderRadius");
+    // Only a left or right accent is gated on the corners, so read them out
+    // of the one radius value only when one of those sides carries a border.
+    let corners = if widths[1] > 0.0 || widths[3] > 0.0 {
+        parse_radius_corners(Some(&radius_value), rect.width)
+    } else {
+        None
+    };
     check_borders(
         &tag,
         &Sides {
@@ -134,19 +142,20 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             bottom: Some(colors[2].as_str()),
             left: Some(colors[3].as_str()),
         },
-        style_px(dom, el, "borderRadius"),
+        pf0(&radius_value),
         &BorderOpts {
             badge_like,
             status_context: is_status_context_element(dom, el),
             tab_context: is_tab_context_element(dom, el),
-            corners: Some(corner_radii(dom, el, &rect)),
+            corners,
         },
     )
 }
 
 /// The element's four corner radii in px, read from the computed
-/// `border-radius` shorthand the snapshot carries.
-fn corner_radii(dom: &dyn Dom, el: ElId, rect: &Rect) -> Corners {
+/// `border-radius` shorthand the snapshot carries. `None` when the snapshot
+/// has no readable radius for it.
+fn corner_radii(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<Corners> {
     parse_radius_corners(Some(&dom.style(el, "borderRadius")), rect.width)
 }
 
@@ -361,7 +370,7 @@ pub fn check_element_pseudo_stripe_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             _ => None,
         };
         if let Some(i) = side_index {
-            if !is_rounded_away_from_side(Some(&corner_radii(dom, el, &rect)), i) {
+            if !is_rounded_away_from_side(corner_radii(dom, el, &rect).as_ref(), i) {
                 continue;
             }
         }
@@ -1503,6 +1512,15 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "side-tab");
         assert_eq!(hits[0].snippet, "border-left: 4px");
+
+        // A radius the engine cannot read is unknown, not square: a snapshot
+        // missing the column, or a value no parser resolves, keeps the find.
+        for unreadable in ["", "calc(0.5rem)", "var(--radius)"] {
+            with_radius(&mut d, unreadable);
+            let hits = check_element_borders_dom(&d, card);
+            assert_eq!(hits.len(), 1, "radius {unreadable:?}");
+            assert_eq!(hits[0].id, "side-tab");
+        }
     }
 
     #[test]

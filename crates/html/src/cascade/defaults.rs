@@ -72,6 +72,14 @@ pub const STATIC_DEFAULT_STYLE: &[(&str, &str)] = &[
     ("borderBottomColor", "rgb(0, 0, 0)"),
     ("borderLeftColor", "rgb(0, 0, 0)"),
     ("borderRadius", "0px"),
+    // Past the JS table: the corner longhands a utility framework emits for
+    // `rounded-r-lg` and friends. A property with no default here is dropped
+    // by the cascade, and without these a card rounded only by longhands
+    // reads as square.
+    ("borderTopLeftRadius", "0px"),
+    ("borderTopRightRadius", "0px"),
+    ("borderBottomRightRadius", "0px"),
+    ("borderBottomLeftRadius", "0px"),
     ("outlineWidth", "0px"),
     ("outlineColor", "rgb(0, 0, 0)"),
     ("outlineStyle", "none"),
@@ -138,6 +146,10 @@ pub const STATIC_PROP_MAP: &[(&str, &str)] = &[
     ("background-clip", "backgroundClip"),
     ("-webkit-background-clip", "webkitBackgroundClip"),
     ("border-radius", "borderRadius"),
+    ("border-top-left-radius", "borderTopLeftRadius"),
+    ("border-top-right-radius", "borderTopRightRadius"),
+    ("border-bottom-right-radius", "borderBottomRightRadius"),
+    ("border-bottom-left-radius", "borderBottomLeftRadius"),
     ("border-top-width", "borderTopWidth"),
     ("border-right-width", "borderRightWidth"),
     ("border-bottom-width", "borderBottomWidth"),

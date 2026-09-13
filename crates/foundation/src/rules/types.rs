@@ -105,9 +105,11 @@ pub struct BorderOpts {
     pub badge_like: bool,
     pub status_context: bool,
     pub tab_context: bool,
-    /// The element's four corner radii, when the caller read them. The
-    /// recorded call vectors predate the corner read and leave this `None`,
-    /// which replays the shorthand-only behavior they pin.
+    /// The element's four corner radii, when the caller could read them.
+    /// `None` means unknown, not square: a radius the engine cannot resolve
+    /// (a `calc()`, a snapshot missing the column) leaves a side accent
+    /// reported. The recorded call vectors predate the corner read and leave
+    /// this `None`, which replays the behavior they pin.
     pub corners: Option<Corners>,
 }
 

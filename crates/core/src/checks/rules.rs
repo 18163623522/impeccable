@@ -41,8 +41,9 @@ pub const SIDE_ACCENT_MIN_RADIUS_PX: f64 = 4.0;
 /// table row marker) and says nothing. The corners that decide it are the two
 /// the stripe does not touch, so a box rounded only along the stripe
 /// (`border-radius: 8px 0 0 8px` under a left rule) still reads as square.
-/// A caller that read no corners (the recorded call vectors) gets the answer
-/// those vectors pin, which is "rounded".
+/// `None` is unknown, not square: a caller that could not read the corners
+/// (a radius the engine cannot resolve, a snapshot without the column, the
+/// recorded call vectors) keeps its finding.
 pub fn is_rounded_away_from_side(corners: Option<&Corners>, i: usize) -> bool {
     let Some(corners) = corners else {
         return true;
@@ -106,6 +107,10 @@ pub fn check_borders(
                 format!("border-{sn}: {w_s}px + border-radius: {r_s}px"),
             ));
         } else if !opts.tab_context && w >= 3.0 && w <= 12.0 {
+            // A square top or bottom band still reports. The rounded-card
+            // gate above covers the left and right accent the corpus judged;
+            // the square horizontal band was never judged, and silencing it
+            // here would drop findings on no evidence.
             findings.push(RuleHit::new("side-tab", format!("border-{sn}: {w_s}px")));
         }
     }

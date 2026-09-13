@@ -1071,7 +1071,15 @@ pub struct FileSheet<'a> {
     corners: once_cell::unsync::OnceCell<DeclaredCorners>,
     style_text: once_cell::unsync::OnceCell<Option<(String, Vec<(usize, usize)>)>>,
     style_sources: once_cell::unsync::OnceCell<String>,
+    imports_stylesheet: once_cell::unsync::OnceCell<bool>,
 }
+
+re!(
+    STYLESHEET_IMPORT_RE,
+    r#"(?i)\bimport\s*(?:[\w$*{}\s,]+?\s*from\s*)?\(?\s*['"][^'"\n]+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss)(?:\?[^'"\n]*)?['"]|\brequire\s*\(\s*['"][^'"\n]+\.(?:css|scss|sass|less|styl|stylus|pcss|postcss)(?:\?[^'"\n]*)?['"]\s*\)|@import\b|<style\b[^>]*\bsrc\s*=|<link\b[^>]*\brel\s*=\s*['"]?stylesheet"#
+        .to_string()
+);
+re!(SASS_USE_RE, r#"@use\s+['"]([^'"\n]*)['"]"#.to_string());
 
 impl<'a> FileSheet<'a> {
     /// `content` is the file as read, `source` the comment-blanked text the
@@ -1084,7 +1092,22 @@ impl<'a> FileSheet<'a> {
             corners: once_cell::unsync::OnceCell::new(),
             style_text: once_cell::unsync::OnceCell::new(),
             style_sources: once_cell::unsync::OnceCell::new(),
+            imports_stylesheet: once_cell::unsync::OnceCell::new(),
         }
+    }
+
+    /// Whether the file brings in a stylesheet the reader does not follow: a
+    /// script `import` or `require` of a stylesheet (a CSS module too), an
+    /// `@import` or a non-`sass:` `@use` in its style text, a `<style src>`
+    /// block, or a `<link rel="stylesheet">`. Such a stylesheet could round
+    /// any class a markup tag carries.
+    pub fn imports_stylesheet(&self) -> bool {
+        *self.imports_stylesheet.get_or_init(|| {
+            STYLESHEET_IMPORT_RE.is_match(self.source)
+                || SASS_USE_RE
+                    .captures_iter(self.source)
+                    .any(|c| !c[1].starts_with("sass:"))
+        })
     }
 
     /// A component or script file's `<style>` blocks and CSS-in-JS templates
@@ -1543,6 +1566,7 @@ pub fn run_regex_matchers(
                                             &markup_index,
                                             sheet.style_sources(),
                                             &sheet.corners(),
+                                            sheet.imports_stylesheet(),
                                         ),
                                     }
                                 })
@@ -1995,6 +2019,52 @@ const Card = styled.div`\n  border-radius: 12px;\n`;\n\
 export const A = () => <Card className=\"border-l-4 p-4\">x</Card>;\n\
 export const B = () => <div className=\"border-r-4 p-4\">x</div>;\n";
         assert_eq!(side_tabs(styled, "/x/styled.tsx"), flag);
+    }
+
+    /// A markup accent in a file that imports a stylesheet reports unless its
+    /// own tag squares it off: the import could round any class it carries.
+    #[test]
+    fn markup_accents_keep_reporting_beside_an_imported_stylesheet() {
+        let side_tabs = |src: &str, path: &str| -> Vec<String> {
+            let mut out: Vec<String> = detect_text(src, path, &TextOptions::default())
+                .into_iter()
+                .filter(|f| f.antipattern == "side-tab")
+                .map(|f| f.snippet)
+                .collect();
+            out.sort();
+            out
+        };
+        let flag = vec!["border-l-4".to_string()];
+        let none = Vec::<String>::new();
+        let tag = "<div className=\"card border-l-4 border-teal-700 p-4\">x</div>";
+        for import in [
+            "import './card.css';",
+            "import styles from './card.module.css';",
+            "import * as s from \"./card.scss\";",
+            "require('./card.scss');",
+            "import('./card.less');",
+        ] {
+            let src = format!("{import}\nexport const A = () => {tag};\n");
+            assert_eq!(side_tabs(&src, "/x/a.jsx"), flag, "{import}");
+        }
+        // Without an import, or with a script import, the tag reads as before.
+        assert_eq!(side_tabs(&format!("export const A = () => {tag};\n"), "/x/a.jsx"), none);
+        assert_eq!(side_tabs(&format!("import {{ cn }} from './utils';\nexport const A = () => {tag};\n"), "/x/a.jsx"), none);
+        // A tag that squares itself off.
+        let square = "import './card.css';\n\
+export const A = () => <div className=\"card rounded-none border-l-4 p-4\">x</div>;\n\
+export const B = () => <div className=\"card border-l-4 p-4\" style={{ borderRadius: 0 }}>x</div>;\n\
+export const C = () => <Box className=\"card\" sx={{ borderRadius: 0, borderLeft: '5px solid #6366f1' }}>x</Box>;\n";
+        assert_eq!(side_tabs(square, "/x/b.jsx"), none);
+        // A radius on one corner away from the stripe leaves the other open.
+        let one_corner = "import './card.css';\nexport const A = () => <div className=\"card border-l-4 p-4\" style={{ borderTopRightRadius: 0 }}>x</div>;\n";
+        assert_eq!(side_tabs(one_corner, "/x/c.jsx"), flag);
+        // Component files: an `@import` in the style block, and a `src` block.
+        let vue = |style: &str| format!("<template>\n  <div class=\"card border-l-4 p-4\" />\n</template>\n{style}\n");
+        assert_eq!(side_tabs(&vue("<style scoped>\n@import './card.css';\n</style>"), "/x/a.vue"), flag);
+        assert_eq!(side_tabs(&vue("<style scoped src=\"./card.css\"></style>"), "/x/a.vue"), flag);
+        // A `sass:` module brings no CSS.
+        assert_eq!(side_tabs(&vue("<style lang=\"scss\" scoped>\n@use 'sass:math';\n</style>"), "/x/a.vue"), none);
     }
 
     /// A border accent reads the stylesheet the way the pseudo-element and

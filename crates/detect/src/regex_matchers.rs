@@ -670,6 +670,13 @@ fn markup_tag_corners(line: &str, index: usize) -> DeclaredCorners {
             corners = classes;
         }
     }
+    tag_own_corners(tag, corners)
+}
+
+/// The radius a markup tag declares on itself over `corners`: its
+/// styled-system radius props, then the radius in its `style` attribute or
+/// style object. Unknown when a style expression could add a radius unseen.
+fn tag_own_corners(tag: &str, mut corners: DeclaredCorners) -> DeclaredCorners {
     for c in RADIUS_PROP_ATTR_RE.captures_iter(tag) {
         let prop = &c[1];
         let value = c[2]
@@ -818,8 +825,14 @@ fn inside_interpolation(b: &[u8], tick: usize) -> bool {
 /// `.dark &` and a BEM modifier name the same element; a descendant stops the
 /// walk. Wherever the walk cannot name the element (an interpolated selector
 /// or key, a match inside an interpolation, a `css` template nested in
-/// another template) the corners start unknown.
-fn brace_scope_corners(source: &SourceText, i: usize, index: usize) -> DeclaredCorners {
+/// another template) the corners start unknown; otherwise the statements apply
+/// over `base`.
+fn brace_scope_corners(
+    source: &SourceText,
+    i: usize,
+    index: usize,
+    base: DeclaredCorners,
+) -> DeclaredCorners {
     let text = source.text.as_str();
     let b = text.as_bytes();
     let (mut start, mut end, mut open) = block_bounds(b, source.line_starts[i] + index);
@@ -858,7 +871,7 @@ fn brace_scope_corners(source: &SourceText, i: usize, index: usize) -> DeclaredC
     let mut corners = if unknown {
         DeclaredCorners::unknown()
     } else {
-        DeclaredCorners::default()
+        base
     };
     for &(s, e, object) in chunks.iter().rev() {
         apply_statements(
@@ -983,7 +996,7 @@ pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sa
     } else if sass {
         sass_scope_corners(source, i, DeclaredCorners::default())
     } else {
-        brace_scope_corners(source, i, m.index)
+        brace_scope_corners(source, i, m.index, DeclaredCorners::default())
     };
     corners.is_rounded_away_from_side(side)
 }
@@ -1059,6 +1072,29 @@ fn literal_tag_classes(tag: &str) -> Option<Vec<String>> {
     Some(classes)
 }
 
+/// Whether a markup tag squares its own corners away from `side` off: a
+/// `rounded-none` or `rounded-0` utility, or literal square radii its radius
+/// props, `style` attribute or style object declare, or, for a match inside a
+/// style object on the tag (`sx={{ ... }}`), that object. A corner nothing on
+/// the tag declares could come from a stylesheet.
+fn tag_squares_itself(m: &MatchCtx, source: &SourceText, i: usize, tag: &str, side: usize) -> bool {
+    if literal_tag_classes(tag)
+        .is_some_and(|classes| classes.iter().any(|c| c == "rounded-none" || c == "rounded-0"))
+    {
+        return true;
+    }
+    if !tag_own_corners(tag, DeclaredCorners::unknown()).is_rounded_away_from_side(side) {
+        return true;
+    }
+    let whole = m.whole();
+    let in_object = !TW_SIDE_TAB_WHOLE_RE.is_match(whole)
+        && !JSX_SIDE_PROP_RE.is_match(whole)
+        && !in_style_attribute(source.line(i), m.index);
+    in_object
+        && !brace_scope_corners(source, i, m.index, DeclaredCorners::unknown())
+            .is_rounded_away_from_side(side)
+}
+
 /// The stripe side of a `side-tab` match: `3` for left or start, else `1`.
 fn side_tab_side(whole: &str) -> usize {
     if let Some(c) = TW_SIDE_TAB_WHOLE_RE.captures(whole) {
@@ -1083,6 +1119,11 @@ fn side_tab_side(whole: &str) -> usize {
 /// the reader cannot spell out, is never known square. A match that sits in
 /// no tag on the line (a template declaration, a standalone object) is not
 /// markup and is left as read.
+///
+/// A file that imports a stylesheet (`imports_stylesheet`) could round any
+/// class the tag carries, and the reader does not follow the import, so there
+/// the tag is known square only when it squares itself off
+/// ([`tag_squares_itself`]).
 pub fn side_tab_markup_known_square<'s>(
     m: &MatchCtx,
     source: &SourceText,
@@ -1090,13 +1131,20 @@ pub fn side_tab_markup_known_square<'s>(
     index: &once_cell::unsync::OnceCell<CssHostIndex<'s>>,
     index_text: &'s str,
     sheet: &DeclaredCorners,
+    imports_stylesheet: bool,
 ) -> bool {
-    if !sheet.declared() {
+    if !sheet.declared() && !imports_stylesheet {
         return true;
     }
     let Some(tag) = complete_markup_tag(source.line(i), m.index) else {
         return true;
     };
+    if imports_stylesheet && !tag_squares_itself(m, source, i, tag, side_tab_side(m.whole())) {
+        return false;
+    }
+    if !sheet.declared() {
+        return true;
+    }
     if CSS_PROP_ATTR_RE.is_match(tag) {
         return false;
     }

@@ -287,6 +287,16 @@ against it, through the same host index:
 
 `rounded-*` utilities on the tag still round it.
 
+A file that imports a stylesheet the reader does not follow (a script `import`
+or `require` of a `.css`, `.scss`, `.sass`, `.less`, `.styl` or `.pcss` file, a
+CSS module among them, an `@import` or a non-`sass:` `@use` in its style text,
+a `<style src>` block, a `<link rel="stylesheet">`) could round any class a tag
+carries. There a markup accent drops only when its own tag squares it off: a
+`rounded-none` or `rounded-0` utility, or literal square radii for both corners
+away from the stripe in its radius props, `style` attribute, style object or
+`sx` object. Every other tag keeps the finding, and a file with no such import
+answers as described above.
+
 The static border snippet now prints the radius in px, the way the browser's
 computed style does: `border-radius: 0.375rem` reports `6px` where it used to
 print the unconverted `0.375px`.
@@ -354,3 +364,13 @@ because the markup reader saw only the tag.
 - `detect-fixture-json-side-accent-markup-square-vue`, `detect-fixture-text-side-accent-markup-square-vue`, `detect-fixture-json-side-accent-markup-square-svelte`, `detect-fixture-text-side-accent-markup-square-svelte`: new fixtures, the same markup with a scoped `.card { border-radius: 0 }`; no findings.
 - `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`, `detect-fixture-json-side-accent-producers-jsx`, `detect-fixture-text-side-accent-producers-jsx`: the two `sx` media-key cases moved from `side-accent-nested.tsx` to `side-accent-producers.jsx`. In the templates file their `<Box>` has no class the index can tie, and the file's style text holds unknown radii (an interpolated radius, a bare `${cardShape}`), so the square twin would now report. The style-object reading they pin needs a file without style text. `side-accent-nested.tsx` 5 to 4 findings, `side-accent-producers.jsx` 3 to 4 (`borderLeft: '10px solid`, line 32); the square twin stays silent.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 462 to 464 findings (479 to 481 with advisories).
+
+Recorded 2026-09-13, the import revision (the imported-stylesheet rule above).
+Base reported a utility accent on a tag whose class an imported stylesheet may
+round (`import './card.css'` with `className="card border-l-4"`), and the gate
+had silenced it because the file carried no style text of its own. The import
+is not followed; it only makes the tag's radius unknown.
+
+- `detect-fixture-json-side-accent-import-jsx`, `detect-fixture-text-side-accent-import-jsx`: new fixture, `import './side-accent-import-card.css'` next to `<div className="card border-l-4 border-teal-700 p-4">`; one finding (line 7).
+- `detect-fixture-json-side-accent-css-module-tsx`, `detect-fixture-text-side-accent-css-module-tsx`: new fixture, a CSS module import next to ``className={`${styles.card} border-l-4 border-teal-700 p-4`}``; one finding (line 7). The class expression already read as unknown, so this pins the shape rather than a change.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 464 to 466 findings (481 to 483 with advisories). No other golden moves: the framework fixtures' `globals.css` imports sit in layout files with no side accent.

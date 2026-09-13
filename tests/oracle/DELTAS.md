@@ -345,7 +345,139 @@ for this revision. The review's repro pages, scanned live from a local
 server: the orange links over a dark photo above and below the
 fold both report nothing, the `#999` link on the white card reports
 `2.8:1, text #999999 on #ffffff`, and the textured section's link reports
-`2.7:1, text #9d9d9d on #ffffff`.
+`2.7:1, text #9d9d9d on #ffffff`. These numbers are superseded by the next
+revision.
+
+### Revision: the layer under a link, past the page's own fill
+
+A review of the revision above found the geometric climb treating an opaque
+`body` or `html` as the surface, so the hit-test fallback only ever ran for a
+fully transparent document. A photo laid after the content at
+`z-index: -1` reported `2.7:1, text #f37b2e on #ffffff`, and a photo inside
+zero-height wrapper divs reported `2.6:1, text #f58030 on #ffffff`, where
+revision 3 had been silent on both. Across the corpus, 56 of 395 added
+findings inside the screenshot sat on pixels more than 60 away from the
+background they named, and 9 of 10 cropped named a surface that was not under
+the text: text over photos (thairath.co.th, zigzag.kr), a dark hero behind a
+transparent header (aisupply.framer.website), white labels on green buttons
+reported on pink or near-white (bt.cn). A second finding: a link or its list
+item carrying a small icon image was dropped as if it sat over a photo.
+
+**What the browser test answers.** `media_layer_under_text` is replaced by
+`layer_under_text`, which names what paints under the text instead of
+answering yes or no: a picture, an opaque surface the background walk never
+read (`Detached`, with its colour), paint the walk cannot turn into a colour
+(`Unmodelled`), the ancestor fill the walk answers with (`Ancestor`), or
+nothing decided. `resolved_surface_is_under_text` keeps a hit on the SAFE_TAGS
+text path for `Ancestor` and for nothing decided, and for a `Detached` surface
+only where its colour sits within 24 (summed over the three channels) of the
+background the walk resolved. Where the snapshot cannot say what is under the
+text, this path stays silent rather than name a surface a reader does not see.
+No candidate is handed to the visual-contrast pass; that pass's budget is
+unchanged.
+
+**The climb.** At each level it reads the box's own paint first:
+
+- a `::before` or `::after` that is absolutely or fixed positioned, painted,
+  and at least the size of the text: a raster image is a picture, a gradient
+  or a translucent colour is unmodelled, an opaque colour is a detached
+  surface;
+- a raster background that is neither an icon (below) nor a texture tile of a
+  stated size, which is a picture;
+- a gradient drawn larger than its box (`background-size` above 100%, or in
+  pixels larger than the box), which shows one slice of its stops at a time
+  and is unmodelled: the animated `200% 200%` install button on bt.cn;
+- an opaque fill, which ends the climb as `Ancestor`.
+
+Then it reads the siblings that paint beneath the text, topmost first, on a
+coarse stacking scale: negative `z-index`, then in-flow boxes, then positioned
+boxes at 0, then positive `z-index`, where `z-index` counts for a positioned
+box or a flex or grid item and an opacity below 1 or a transform opens a
+context at 0. A later sibling counts only on a strictly lower layer than the
+text (the `z-index: -1` photo, the section under a `z-index: 1` header). An
+earlier sibling counts unless it opens a positive `z-index` above the text,
+because a positioned `z-index: 0` media box before in-flow text is, on real
+pages, under that text (microsoft.com's store cards). Inside a sibling the
+test descends where the sibling covers the text or lets its children overflow
+(`display: contents` clips nothing), and below that only into children that
+cover the text, have no size, or use `display: contents`, so a zero-height
+wrapper, a carousel track narrower than its slides and a `display: contents`
+section are looked inside while off-screen slides are skipped. A box a few
+levels in that covers the text decides it. Bounds: 32 levels, 32 siblings
+each side, depth 6, 64 children per box, 1024 nodes per test.
+
+**The opaque document.** Where the climb reaches an opaque `body` or `html`,
+or a transparent document, the hit-test stack answers, read down to the first
+opaque box: a picture needs every answered point (a run half over a photo and
+half over the page is scored on the page, which that half does fail), a
+detached or unmodelled answer at any point stands, and otherwise the page
+fill stands. Hit tests can only be asked for points inside the viewport, so
+this runs in a live scan above the fold. In a replayed capture it answers
+only the points the capture recorded, and below the fold, or for an
+unrecorded point, the page fill stands.
+
+**Icons and textures.** A background image on the text's own element or its
+nearest `li` is an icon, not a picture, where it is one `no-repeat` image of a
+size the style states at most 32px on both axes: pixel `background-size`
+values, or the intrinsic size of an inline SVG data URI at `auto`. For those
+boxes the background walk runs again with their images read as absent
+(`resolve_background_info_skipping_images`), which is what lets the link be
+scored at all, since the walk gives up on any raster image. A texture tile now
+needs a stated size too: a remote file drawn at `auto` has no size the style
+states, so it is a picture, which silences bt.cn's green tab image on a
+`#f7f8f9` list item.
+
+**The static engine.** It has no layout, no rects and no `z-index`, and
+carries neither `background-size` nor `background-repeat`, so it reads
+structure (`picture_under_text` in `crates/html/src/layer.rs`): a media
+element or a raster box taken out of flow and stretched over its containing
+block (`inset: 0`, every side at 0, or `width` and `height` at 100%), where
+no positioned box between the sibling and the photo bounds it, so the
+containing block holds the text; and a `::before` or `::after` photo drawn
+the same way on the text's element or an ancestor, which the cascade pre-pass
+now marks (`set_pseudo_picture`). The climb stops at the first opaque ancestor
+fill. It reads a stretched photo before or after the content as beneath,
+because one stretched over the text it covers would hide that text. Icons are
+inline SVG only, and `data_svg_intrinsic_size` resolves the CSS escapes the
+static serializer writes into an unquoted `url()`.
+
+**Two effects of the earlier revisions, stated.** Removing `map` from
+`NON_RENDERED_TAGS` also adds `tiny-text` for text written directly inside a
+`<map>`: the review's repro now reports `9px body text` beside its contrast
+finding, in both engines. No fixture carries that shape and no golden moves.
+And the static engine scores a `hidden` menu that a mobile-only media query
+reveals, because the static cascade reads every `@media` block: the review's
+repro reports `2.6:1, text #a1a1a1 on #ffffff` statically, and a browser at
+1280px reports nothing.
+
+Each golden below was compared finding by finding against the previous
+recording: two added, none removed.
+
+- `detect-fixture-json-link-text-contrast-html`, `detect-fixture-text-link-text-contrast-html`: 16 to 18. Two should-flag cases join: a link with its own external-link icon (`#979797`, 2.9:1) and a link in a list item with an arrow bullet image (`#989898`, 2.9:1). The should-pass column gains four links over photos, none reporting: inside zero-height wrappers, after the content at `z-index: -1`, in content raised to `z-index: 1` over a later photo, and over a `::before` photo.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep total moves from 437 to 439, which is those two findings.
+
+**Corpus, run 2, 346 captures.** Removed 0, added 391, violations 0 (423
+before this revision). The review's pixel scan, repeated over the new added
+set (the median of the screenshot pixels just outside each finding's rect
+against the background it names): 34 of 365 differ by more
+than 60 (56 of 395 before), 16 by more than 120. Of the review's ten
+crops, aisupply.framer.website (three captures), bt.cn (four) and zigzag.kr
+now add nothing there, and thairath.co.th's photo-card label is silent.
+ladepeche.fr and yna.co.kr stay. The ladepeche title sits in a white section
+in the capture's own geometry and on a photo in the screenshot, which moved
+between the two; the yna selector matches two elements, and the finding
+belongs to the second, white on its own green `#75a54f`, while the scan crops
+the first. microsoft.com's near-white card caption over its product image,
+which the first draft of this revision still reported, is silent. Of the
+other remaining rows read by hand, two land on content the snapshot does not
+place there (aajtak.in, a second thairath.co.th label), two are real surfaces
+the scan reads around rather than under (yungching.com.tw's grey search
+field on a dark band, whose rect is the field itself, and an app sidebar
+under a modal backdrop), and one is a verdict against the walk's gradient
+stops (white on `#ffee99` over an orange hero gradient, hrsimple.app), which
+is how the walk scores every gradient. The review's
+repro pages, scanned live and statically, all answer as intended; the table
+is in the commit message.
 
 ### Risks carried, not fixed
 
@@ -355,11 +487,37 @@ fold both report nothing, the `#999` link on the white card reports
   still reports, and the guard covers only the SAFE_TAGS text path, so `<p>`
   and `<div>` still report the `1.0:1`. Written into
   `resolved_bg_matches_text`'s doc comment beside the code.
-- The wrong-layer test is the browser path's. The static engine has no layout
-  and no hit testing, so a link over a positioned photo is still scored
-  against whatever the ancestor walk resolved there.
-- The ratio label can still name the wrong surface where nothing media-shaped
-  is involved: an opaque sibling panel that is not an ancestor is not in the
-  set the test reads. The real fix for all of it is a resolved background that
-  carries where it came from, which is not cheap from `ColorOpts` as it
-  stands.
+- The hit-test fallback runs only where the climb reaches an opaque `body` or
+  `html`, or a transparent document, and only for points inside the viewport
+  that a live browser answers or a capture recorded. A photo the climb cannot
+  reach within its bounds is missed below the fold and in replay, and the link
+  is scored on the page fill.
+- The stacking scale is coarse. It knows `z-index`, positioning, flex and grid
+  items, opacity and transforms, and not `isolation`, `filter`, `will-change`
+  or `contain`, and an earlier sibling at layer 0 is read as beneath in-flow
+  text by rule. A later sibling laid beneath the text by anything the scale
+  does not know is not read, and the link is scored on the fill the walk
+  found.
+- A rect is read unclipped: a photo inside an ancestor that clips it away
+  still covers the text for this test. Children that neither cover the text
+  nor have no size are skipped, so a covering photo inside a sized,
+  non-covering box further down is not reached.
+- A pseudo-element photo is read where the pseudo is absolutely or fixed
+  positioned with a computed size that covers the text. An inline or
+  statically laid out pseudo is not read.
+- An icon or a texture tile needs a size the style states. A remote icon
+  drawn at `auto` leaves its link unscored, as before this branch, and a
+  remote texture drawn at `auto` is now a picture, which silences the links on
+  it. The static engine reads only inline SVG sizes and cannot see
+  `no-repeat`, so a repeating inline SVG of at most 32px on the link is read
+  as an icon there.
+- A detached surface within 24, summed over the channels, of the resolved
+  background is taken to be the same surface.
+- The static engine reads structure, not layout. A photo stretched over a
+  positioned wrapper that is itself sized to the section (`height: 100%`) is
+  bounded by that wrapper and is not read, so the link over it is scored on the
+  page fill. Pseudo-element photos are read only from author rules with
+  `inset`, every side at 0, or `width` and `height` at 100%.
+- A gradient under the text is scored against its stops, the worst of which
+  may not be the part under the run. The gradient drawn larger than its box is
+  the one shape this path stands down for.

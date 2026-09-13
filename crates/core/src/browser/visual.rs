@@ -11,6 +11,7 @@ use super::dom::{
 };
 use super::element_checks::parse_rgb_or_any;
 use crate::color::{contrast_ratio, parse_gradient_colors, parse_rgb, Rgba};
+use impeccable_foundation::css::measures::{data_svg_intrinsic_size, ICON_MAX_PX};
 use crate::constants::{SAFE_TAGS, WCAG_LARGE_BOLD_TEXT_PX, WCAG_LARGE_TEXT_PX};
 use crate::js::{self, math_max, math_min, math_round, number_to_string, parse_float, parse_int, to_fixed, WS};
 use crate::js_ext_a::{num_truthy, split_ws};
@@ -206,63 +207,219 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
 /// Replaced boxes that paint a picture rather than a colour.
 const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
 
-/// Bounds on [`media_layer_under_text`], each a count of DOM hops. The test
-/// runs only for an element the rule failed whose colour pair the page has
-/// not reported yet, and the sibling scan descends only into a box whose
-/// rect covers the text, so the bounds are rarely reached.
+/// Bounds on [`layer_under_text`]. The test runs only for an element the rule
+/// failed whose colour pair the page has not reported yet, so a page pays for
+/// a handful of them, and the node budget caps the most expensive one.
 const LAYER_MAX_LEVELS: usize = 32;
 const LAYER_MAX_SIBLINGS: usize = 32;
-const LAYER_MAX_DEPTH: usize = 3;
-const LAYER_MAX_CHILDREN: usize = 8;
+const LAYER_MAX_DEPTH: usize = 6;
+const LAYER_MAX_CHILDREN: usize = 64;
+const LAYER_MAX_NODES: usize = 1024;
 
 /// The largest tile, per axis, a raster background can be drawn at and still
 /// count as a texture over its element's own colour.
 const TEXTURE_MAX_TILE_PX: f64 = 256.0;
 
+/// How far apart, summed over the three channels, a surface the background
+/// walk never read and the one it resolved may be and still be one surface.
+const SAME_SURFACE_DISTANCE: f64 = 24.0;
+
+/// In-flow boxes paint above negative `z-index` and below positioned boxes,
+/// so they sit between the two on this coarse scale.
+const FLOW_LAYER: f64 = -0.5;
+
 /// A background colour nothing behind it shows through.
-fn paints_opaque_color(dom: &dyn Dom, node: ElId) -> bool {
-    parse_rgb_or_any(&dom.style(node, "backgroundColor"))
-        .map_or(false, |c| c.alpha_or_one() >= 0.95)
+fn paints_opaque_color(dom: &dyn Dom, node: ElId) -> Option<Rgba> {
+    parse_rgb_or_any(&dom.style(node, "backgroundColor")).filter(|c| c.alpha_or_one() >= 0.95)
+}
+
+/// The size a box's single background image is drawn at, where the computed
+/// style says it: explicit pixel sizes, or the intrinsic size of an inline SVG
+/// data URI where the size is `auto`. A remote file drawn at `auto`, `cover`,
+/// `contain` or a percentage has no size this can read.
+fn drawn_image_size(dom: &dyn Dom, node: ElId) -> Option<(f64, f64)> {
+    let size = js::to_lower_case(&dom.style(node, "backgroundSize"));
+    let first = size.split(',').next().unwrap_or("");
+    let tokens: Vec<&str> = first.split_ascii_whitespace().collect();
+    let intrinsic = || data_svg_intrinsic_size(&dom.style(node, "backgroundImage"));
+    let px = |t: &str| {
+        t.ends_with("px")
+            .then(|| parse_float(t))
+            .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    match tokens.as_slice() {
+        [] | ["auto"] | ["auto", "auto"] => intrinsic(),
+        ["auto", h] => {
+            let h = px(h)?;
+            let (iw, ih) = intrinsic()?;
+            Some((h * iw / ih, h))
+        }
+        [w] | [w, "auto"] => {
+            let w = px(w)?;
+            let (iw, ih) = intrinsic()?;
+            Some((w, w * ih / iw))
+        }
+        [w, h] => Some((px(w)?, px(h)?)),
+        _ => None,
+    }
 }
 
 /// Whether an element's raster background is a small repeating tile: a
 /// noise, grain or dot texture laid over the element's own colour. The
 /// tile's pixels are not in the computed style, so "faint" cannot be
 /// measured; what can be measured is the shape a photograph is almost never
-/// drawn in. `no-repeat`, `cover`, `contain`, a percentage, or a tile larger
-/// than [`TEXTURE_MAX_TILE_PX`] is a picture. An unknown size is a picture
-/// too, so a capture that did not record the property keeps the quiet
-/// answer.
+/// drawn in. `no-repeat`, a size this cannot read (a remote file at `auto`,
+/// `cover`, `contain`, a percentage), or a tile larger than
+/// [`TEXTURE_MAX_TILE_PX`] is a picture.
 fn raster_tiles_as_texture(dom: &dyn Dom, node: ElId) -> bool {
     if js::to_lower_case(&dom.style(node, "background")).contains("no-repeat") {
         return false;
     }
-    let size = js::to_lower_case(&dom.style(node, "backgroundSize"));
-    let mut tokens = size
+    drawn_image_size(dom, node)
+        .map_or(false, |(w, h)| w <= TEXTURE_MAX_TILE_PX && h <= TEXTURE_MAX_TILE_PX)
+}
+
+/// Whether a box's background image is an icon rather than a picture: one
+/// `no-repeat` image at most [`ICON_MAX_PX`] on both axes, at a size the
+/// computed style states.
+fn background_is_icon(dom: &dyn Dom, node: ElId) -> bool {
+    let image = dom.style(node, "backgroundImage");
+    if GRADIENT_RE.is_match(&image) || js::to_lower_case(&image).matches("url(").count() != 1 {
+        return false;
+    }
+    if !js::to_lower_case(&dom.style(node, "background")).contains("no-repeat") {
+        return false;
+    }
+    drawn_image_size(dom, node).map_or(false, |(w, h)| w <= ICON_MAX_PX && h <= ICON_MAX_PX)
+}
+
+/// The boxes whose background image is an icon beside this element's text:
+/// the element itself (an external-link mark) and its nearest `li` (an arrow
+/// bullet). The background walk and the layer test both read those images
+/// as absent.
+pub fn icon_hosts(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
+    const MAX_ANCESTORS: usize = 12;
+    let mut hosts = Vec::new();
+    if background_is_icon(dom, el) {
+        hosts.push(el);
+    }
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { break };
+        if tag_lower(dom, c) == "li" {
+            if background_is_icon(dom, c) {
+                hosts.push(c);
+            }
+            break;
+        }
+        cur = dom.parent(c);
+    }
+    hosts
+}
+
+/// What one box paints, in the terms the layer test needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Paint {
+    /// A raster image, or a replaced media element.
+    Picture,
+    /// Its own opaque background colour.
+    Fill(Rgba),
+    /// An opaque colour drawn by its `::before` or `::after`.
+    PseudoFill(Rgba),
+    /// Paint the background walk cannot turn into a colour: a translucent or
+    /// gradient pseudo-element over the box, a gradient drawn larger than it.
+    Unmodelled,
+}
+
+/// A `::before` or `::after` stretched over at least the text and painting
+/// something. A small pseudo (an underline, a bullet, a badge dot) is not a
+/// surface, and neither is one laid out inline.
+fn pseudo_paint(dom: &dyn Dom, node: ElId, text: &Rect) -> Option<Paint> {
+    for which in ["::before", "::after"] {
+        let get = |prop: &str| dom.pseudo_style(node, which, prop).unwrap_or_default();
+        let content = get("content");
+        let content = js::trim(&content);
+        if content.is_empty() || content == "none" || content == "normal" {
+            continue;
+        }
+        if get("display") == "none" || get("visibility") == "hidden" {
+            continue;
+        }
+        let opacity = get("opacity");
+        if !js::trim(&opacity).is_empty() && parse_float(&opacity) < 0.1 {
+            continue;
+        }
+        let position = get("position");
+        if position != "absolute" && position != "fixed" {
+            continue;
+        }
+        let (w, h) = (parse_float(&get("width")), parse_float(&get("height")));
+        if !(w >= text.width - 4.0 && h >= text.height - 4.0) {
+            continue;
+        }
+        let image = get("backgroundImage");
+        if URL_RE.is_match(&image) {
+            return Some(Paint::Picture);
+        }
+        if GRADIENT_RE.is_match(&image) {
+            return Some(Paint::Unmodelled);
+        }
+        if let Some(c) = parse_rgb_or_any(&get("backgroundColor")) {
+            if c.alpha_or_one() >= 0.9 {
+                return Some(Paint::PseudoFill(c));
+            }
+            if c.alpha_or_one() > 0.1 {
+                return Some(Paint::Unmodelled);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a gradient background is drawn larger than its box, so the part
+/// under the text is a slice of the stops and not all of them: the animated
+/// button that sweeps a `200% 200%` gradient across itself shows one colour
+/// at a time, and scoring every stop names colours nobody sees there.
+fn gradient_drawn_larger_than_box(dom: &dyn Dom, node: ElId) -> bool {
+    if !GRADIENT_RE.is_match(&dom.style(node, "backgroundImage")) {
+        return false;
+    }
+    let rect = dom.rect(node);
+    let largest = math_max(rect.width, rect.height);
+    js::to_lower_case(&dom.style(node, "backgroundSize"))
         .split(|c: char| c == ',' || c.is_ascii_whitespace())
-        .filter(|t| !t.is_empty())
-        .peekable();
-    tokens.peek().is_some()
-        && tokens.all(|t| {
-            t == "auto" || (t.ends_with("px") && parse_float(t) <= TEXTURE_MAX_TILE_PX)
+        .any(|t| {
+            (t.ends_with('%') && parse_float(t) > 100.5)
+                || (t.ends_with("px") && parse_float(t) > largest + 1.0)
         })
 }
 
-/// What a box's own background says about the layer under the text:
-/// `Some(true)` for a picture, `Some(false)` for an opaque surface that
-/// covers everything painted before it, `None` for nothing that decides.
-/// A solid colour carrying a texture tile is a surface. `body` and `html`
-/// paint the document itself, and their images are not a layer over it.
-fn own_background_layer(dom: &dyn Dom, node: ElId, document_surface: bool) -> Option<bool> {
-    let opaque = paints_opaque_color(dom, node);
-    let raster = !document_surface && URL_RE.is_match(&dom.style(node, "backgroundImage"));
-    if raster && !(opaque && raster_tiles_as_texture(dom, node)) {
-        return Some(true);
+/// What a box paints under text above it, pseudo-elements first because they
+/// paint over the box's own background. `body` and `html` paint the document
+/// itself, and their images are not a layer over it. `icon_host` says this
+/// box's background image is an icon beside the text.
+fn own_paint(
+    dom: &dyn Dom,
+    node: ElId,
+    text: &Rect,
+    document_surface: bool,
+    icon_host: bool,
+) -> Option<Paint> {
+    if let Some(paint) = pseudo_paint(dom, node, text) {
+        return Some(paint);
     }
-    if opaque {
-        return Some(false);
+    let fill = paints_opaque_color(dom, node);
+    if !document_surface
+        && URL_RE.is_match(&dom.style(node, "backgroundImage"))
+        && !(icon_host && background_is_icon(dom, node))
+        && !(fill.is_some() && raster_tiles_as_texture(dom, node))
+    {
+        return Some(Paint::Picture);
     }
-    None
+    if !document_surface && gradient_drawn_larger_than_box(dom, node) {
+        return Some(Paint::Unmodelled);
+    }
+    fill.map(Paint::Fill)
 }
 
 /// Whether `outer` covers `inner`, give or take a pixel of rounding.
@@ -278,36 +435,244 @@ fn rect_covers(outer: &Rect, inner: &Rect) -> bool {
         && outer.top + outer.height >= inner.top + inner.height - SLACK
 }
 
-/// The layer an earlier-painted box puts under the text, looked at the way
-/// a reader looks down through it: its children topmost first, then its own
-/// background. A box that does not cover the text paints nothing under it
-/// and decides nothing.
-fn layer_in_box(dom: &dyn Dom, node: ElId, text: &Rect, depth: usize) -> Option<bool> {
-    if !rect_covers(&dom.rect(node), text) {
+/// A box's place in paint order, coarsely: `context` is the `z-index` of a
+/// stacking context it opens (an opacity below 1 or a transform opens one at
+/// 0), `positioned` whether it paints with the positioned boxes.
+#[derive(Debug, Clone, Copy)]
+struct BoxLayer {
+    context: Option<f64>,
+    positioned: bool,
+}
+
+fn box_layer(dom: &dyn Dom, node: ElId) -> BoxLayer {
+    let position = dom.style(node, "position");
+    let position = js::trim(&position);
+    let positioned = !position.is_empty() && position != "static";
+    let z_applies = positioned
+        || dom.parent(node).map_or(false, |p| {
+            let display = dom.style(p, "display");
+            display.contains("flex") || display.contains("grid")
+        });
+    let z_raw = dom.style(node, "zIndex");
+    let z_raw = js::trim(&z_raw);
+    let z = (z_applies && !z_raw.is_empty() && z_raw != "auto")
+        .then(|| parse_float(z_raw))
+        .filter(|z| z.is_finite());
+    let context = z.or_else(|| {
+        let opacity = dom.style(node, "opacity");
+        let translucent = !js::trim(&opacity).is_empty() && parse_float(&opacity) < 1.0;
+        let transform = dom.style(node, "transform");
+        let transform = js::trim(&transform);
+        let transformed = !transform.is_empty() && transform != "none";
+        (translucent || transformed).then_some(0.0)
+    });
+    BoxLayer {
+        context,
+        positioned,
+    }
+}
+
+/// The layer the text paints in, seen one ancestor further out: the
+/// outermost stacking context wins, and a positioned box lifts in-flow text
+/// to the positioned layer.
+fn outer_layer(inner: f64, b: BoxLayer) -> f64 {
+    match b.context {
+        Some(z) => z,
+        None if b.positioned && inner == FLOW_LAYER => 0.0,
+        None => inner,
+    }
+}
+
+/// The layer a descendant of a sibling paints in, one level further in. Once
+/// a stacking context is met, everything inside it paints at its `z-index`.
+fn inner_layer(outer: (f64, bool), b: BoxLayer) -> (f64, bool) {
+    let (layer, locked) = outer;
+    if locked {
+        return outer;
+    }
+    match b.context {
+        Some(z) => (z, true),
+        None if b.positioned && layer == FLOW_LAYER => (0.0, false),
+        None => outer,
+    }
+}
+
+/// Whether a box at `layer` paints beneath text at `text_layer`.
+///
+/// A later sibling has to prove it: only a strictly lower layer puts it under
+/// the text, the `z-index: -1` photo after the content or the section laid
+/// under a `z-index: 1` header. An earlier sibling is beneath unless it opens
+/// a positive `z-index` above the text, which is what a modal or a popover
+/// does. The strict order would put an earlier `position: relative;
+/// z-index: 0` media box over in-flow text, and on real pages that text is
+/// visible over the picture (a component's own styles the snapshot cannot
+/// express), so an earlier box at layer 0 or below counts as underneath.
+fn paints_beneath(layer: f64, text_layer: f64, earlier: bool) -> bool {
+    if earlier {
+        layer <= text_layer.max(0.0)
+    } else {
+        layer < text_layer
+    }
+}
+
+/// Whether a box lets its children paint outside its own rect. A
+/// `display: contents` element has no box, so its `overflow` clips nothing.
+fn overflow_visible(dom: &dyn Dom, node: ElId) -> bool {
+    if dom.style(node, "display") == "contents" {
+        return true;
+    }
+    let overflow = dom.style(node, "overflow");
+    let overflow = js::trim(&overflow);
+    overflow.is_empty() || overflow == "visible"
+}
+
+/// Whether a child is worth looking inside for paint under the text: its own
+/// rect covers the text, or it has no box of its own (zero size, or
+/// `display: contents`) and so says nothing about where its children lie.
+/// A slide parked beside the viewport, or a card elsewhere on the page, is
+/// skipped without spending the budget.
+fn may_reach_text(dom: &dyn Dom, child: ElId, text: &Rect) -> bool {
+    let rect = dom.rect(child);
+    rect_covers(&rect, text)
+        || rect.width <= 0.0
+        || rect.height <= 0.0
+        || dom.style(child, "display") == "contents"
+}
+
+/// The paint a sibling box, or something inside it, puts under the text,
+/// looked at the way a reader looks down through it: its children topmost
+/// first, then its own background. Only a box that covers the text rect can
+/// decide, and only where it paints beneath the text. A box that does not
+/// cover it is still looked inside where nothing clips its children: a
+/// zero-height wrapper around an absolutely positioned photo, a
+/// `display: contents` section, a carousel track narrower than its slides.
+/// Below the sibling itself, only children that may reach the text are
+/// visited ([`may_reach_text`]).
+#[allow(clippy::too_many_arguments)]
+fn layer_in_box(
+    dom: &dyn Dom,
+    node: ElId,
+    text: &Rect,
+    text_layer: f64,
+    earlier: bool,
+    depth: usize,
+    outer: (f64, bool),
+    budget: &mut usize,
+) -> Option<Paint> {
+    if *budget == 0 {
         return None;
     }
+    *budget -= 1;
     if dom.style(node, "visibility") == "hidden" || parse_float(&dom.style(node, "opacity")) < 0.05
     {
         return None;
     }
-    if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
-        return Some(true);
+    let layer = inner_layer(outer, box_layer(dom, node));
+    let beneath = paints_beneath(layer.0, text_layer, earlier);
+    let covers = rect_covers(&dom.rect(node), text);
+    if covers && beneath && MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+        return Some(Paint::Picture);
     }
-    if depth < LAYER_MAX_DEPTH {
-        for &child in dom.children(node).iter().rev().take(LAYER_MAX_CHILDREN) {
-            if let Some(layer) = layer_in_box(dom, child, text, depth + 1) {
-                return Some(layer);
+    if depth < LAYER_MAX_DEPTH && (covers || overflow_visible(dom, node)) {
+        let children = dom.children(node);
+        let reaching = children
+            .iter()
+            .rev()
+            .filter(|&&child| may_reach_text(dom, child, text))
+            .take(LAYER_MAX_CHILDREN);
+        for &child in reaching {
+            if let Some(paint) =
+                layer_in_box(dom, child, text, text_layer, earlier, depth + 1, layer, budget)
+            {
+                return Some(paint);
             }
         }
     }
-    own_background_layer(dom, node, false)
+    if covers && beneath {
+        own_paint(dom, node, text, false, false)
+    } else {
+        None
+    }
 }
 
-/// The hit-test answer, for a page the geometric walk could not decide: a
-/// transparent document, or a tree deeper than its bounds. Only points in
-/// the viewport can be asked, and the scan stops at the first opaque box
-/// under the text, because nothing below that box is seen.
-fn media_in_hit_test_stack(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
+/// What paints under a run of text, as far as layout can say, next to the
+/// answer the background walk already gave.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayerUnder {
+    /// An image, a video, a canvas or a raster background under the whole run.
+    Picture,
+    /// An opaque surface that is nobody's ancestor fill: a sibling panel, a
+    /// section a later box lays beneath the text, a pseudo-element's colour.
+    /// The walk reads ancestor fills only, so it never saw this one.
+    Detached(Rgba),
+    /// Paint under the text the walk cannot turn into a colour.
+    Unmodelled,
+    /// The first opaque surface under the text is an ancestor's own fill,
+    /// which is the surface the walk answers with.
+    Ancestor,
+    /// Nothing decided it.
+    Undecided,
+}
+
+impl From<Paint> for LayerUnder {
+    fn from(paint: Paint) -> Self {
+        match paint {
+            Paint::Picture => LayerUnder::Picture,
+            Paint::Fill(c) | Paint::PseudoFill(c) => LayerUnder::Detached(c),
+            Paint::Unmodelled => LayerUnder::Unmodelled,
+        }
+    }
+}
+
+/// The siblings of `node` that may paint beneath the text, topmost first:
+/// the higher layer first, and at one layer the later box first.
+fn sibling_layer(
+    dom: &dyn Dom,
+    parent: ElId,
+    node: ElId,
+    text: &Rect,
+    text_layer: f64,
+    budget: &mut usize,
+) -> Option<LayerUnder> {
+    let siblings = dom.children(parent);
+    let index = siblings.iter().position(|&s| s == node)?;
+    let earlier = (0..index).rev().take(LAYER_MAX_SIBLINGS).map(|i| (i, true));
+    let later = (index + 1..siblings.len())
+        .take(LAYER_MAX_SIBLINGS)
+        .map(|i| (i, false));
+    let mut candidates: Vec<(f64, usize, bool)> = earlier
+        .chain(later)
+        .map(|(i, is_earlier)| {
+            let layer = inner_layer((FLOW_LAYER, false), box_layer(dom, siblings[i])).0;
+            (layer, i, is_earlier)
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.1.cmp(&a.1))
+    });
+    for (_, i, is_earlier) in candidates {
+        let outer = (FLOW_LAYER, false);
+        if let Some(paint) =
+            layer_in_box(dom, siblings[i], text, text_layer, is_earlier, 0, outer, budget)
+        {
+            return Some(paint.into());
+        }
+    }
+    None
+}
+
+/// The hit-test answer, for a page the geometric climb could not decide or
+/// that ends at an opaque `body` or `html`, which is the surface the walk
+/// falls back to and not proof that nothing paints above it. Only points in
+/// the viewport can be asked, so this runs where a live browser answers and
+/// is silent below the fold and in a replayed capture that did not record the
+/// point. Each point reads the stack under the text down to the first opaque
+/// box. A picture needs every answered point, the same whole-run test the
+/// climb makes, so a run half over a photo and half over the page is scored
+/// on the page. `None` when no point was answered.
+fn hit_test_layer(dom: &dyn Dom, el: ElId, text: &Rect) -> Option<LayerUnder> {
     let vw = dom.inner_width();
     let vh = dom.inner_height();
     let y = text.top + text.height / 2.0;
@@ -316,6 +681,7 @@ fn media_in_hit_test_stack(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.25)),
         text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.75)),
     ];
+    let mut answers = Vec::new();
     for x in xs {
         if x < 0.0 || y < 0.0 || x > vw || y > vh {
             continue;
@@ -327,66 +693,113 @@ fn media_in_hit_test_stack(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         else {
             continue;
         };
+        let mut answer = LayerUnder::Undecided;
         for &node in &stack[self_index + 1..] {
-            if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
-                return true;
+            if dom.contains(node, el) {
+                if paints_opaque_color(dom, node).is_some() {
+                    answer = LayerUnder::Ancestor;
+                    break;
+                }
+                continue;
             }
-            if paints_opaque_color(dom, node) {
+            if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+                answer = LayerUnder::Picture;
+                break;
+            }
+            if let Some(paint) = own_paint(dom, node, text, false, false) {
+                answer = paint.into();
                 break;
             }
         }
+        answers.push(answer);
     }
-    false
+    if answers.is_empty() {
+        return None;
+    }
+    if answers.iter().all(|a| *a == LayerUnder::Picture) {
+        return Some(LayerUnder::Picture);
+    }
+    answers
+        .iter()
+        .copied()
+        .find(|a| matches!(a, LayerUnder::Detached(_) | LayerUnder::Unmodelled))
+        .or_else(|| {
+            answers
+                .contains(&LayerUnder::Ancestor)
+                .then_some(LayerUnder::Ancestor)
+        })
 }
 
-/// Whether a picture, rather than a surface, is what this element's text is
-/// read against, which is to say whether the surface
-/// `resolve_background_info` returned is one nobody sees.
+/// What paints under this element's text, which says whether the surface
+/// `resolve_background_info` returned is the one a reader sees.
 ///
-/// The background walk reads the ancestor chain, so it is blind in two
-/// directions: an ancestor that paints a raster image over its own colour
-/// (the walk answers with the colour it can parse), and a positioned
-/// sibling (hero photo, video, canvas) that is nobody's ancestor. Both
-/// answer with a fill under the picture, which is how white text over a
-/// photograph is reported as `1.0:1 on #ffffff`.
+/// The background walk reads the ancestor chain and answers with the first
+/// opaque colour on it, so it is blind in several directions: an ancestor that
+/// paints a raster image or a pseudo-element over its own colour, a positioned
+/// sibling (hero photo, video, canvas, a dark section) that is nobody's
+/// ancestor, and a gradient drawn larger than its box. Each answers with a
+/// fill that is not under the text, which is how white text over a
+/// photograph is reported as `1.1:1 on #f7f8f9`.
 ///
 /// The test is geometric, so it works at any scroll position without a hit
 /// test. It climbs from the element and at each level asks two things in
-/// paint order, nearest first: the box's own background, then its earlier
-/// siblings, which paint beneath it. An earlier sibling, or a descendant of
-/// one a few levels down, that covers the text rect and is an `img`,
-/// `picture`, `video` or `canvas`, or carries a raster background, is a
-/// picture under the text. The first opaque surface met on the way, ancestor
-/// or covering sibling, ends the test with no picture: the card sitting on
-/// the hero photo is what the link on it is read against. A solid colour
-/// carrying a small tiled texture is such a surface
-/// ([`raster_tiles_as_texture`]). Only a page the climb cannot decide falls
-/// back to hit tests.
+/// paint order: the box's own paint (pseudo-elements, then its background),
+/// then its siblings that paint beneath the text, earlier ones at the text's
+/// layer or below and later ones strictly below it (a `z-index: -1` photo
+/// after the content, or a section laid under a `z-index: 1` header). A
+/// sibling, or a box a few levels inside it, that covers the text rect decides
+/// it. The first opaque ancestor fill ends the climb with
+/// [`LayerUnder::Ancestor`]: the card on the hero photo is what the link on it
+/// is read against. A solid colour carrying a small tiled texture of a size
+/// the style states is such a surface, and an icon on the text's own element
+/// or its `li` is not a picture at all. Where the climb reaches an opaque
+/// `body` or `html`, or a transparent document, the hit-test stack answers
+/// instead, and a page nothing decides is [`LayerUnder::Undecided`].
 ///
-/// A gradient is not a picture. The walk scores it against its stops.
-pub fn media_layer_under_text(dom: &dyn Dom, el: ElId) -> bool {
+/// A gradient under the text is not a picture. The walk scores it against
+/// its stops.
+pub fn layer_under_text(dom: &dyn Dom, el: ElId) -> LayerUnder {
     let text = dom.direct_text_rect(el).unwrap_or_else(|| dom.rect(el));
+    let hosts = icon_hosts(dom, el);
+    let mut budget = LAYER_MAX_NODES;
+    let mut text_layer = FLOW_LAYER;
     let mut node = el;
     for _ in 0..LAYER_MAX_LEVELS {
         let tag = tag_lower(dom, node);
         let document_surface = tag == "body" || tag == "html";
-        if let Some(layer) = own_background_layer(dom, node, document_surface) {
+        text_layer = outer_layer(text_layer, box_layer(dom, node));
+        match own_paint(dom, node, &text, document_surface, hosts.contains(&node)) {
+            Some(Paint::Fill(_)) if document_surface => {
+                return hit_test_layer(dom, el, &text).unwrap_or(LayerUnder::Ancestor);
+            }
+            Some(Paint::Fill(_)) => return LayerUnder::Ancestor,
+            Some(paint) => return paint.into(),
+            None => {}
+        }
+        let Some(parent) = dom.parent(node) else {
+            break;
+        };
+        if let Some(layer) = sibling_layer(dom, parent, node, &text, text_layer, &mut budget) {
             return layer;
         }
-        let mut sibling = dom.previous_element_sibling(node);
-        for _ in 0..LAYER_MAX_SIBLINGS {
-            let Some(s) = sibling else { break };
-            if let Some(layer) = layer_in_box(dom, s, &text, 0) {
-                return layer;
-            }
-            sibling = dom.previous_element_sibling(s);
-        }
-        match dom.parent(node) {
-            Some(p) => node = p,
-            None => break,
-        }
+        node = parent;
     }
-    media_in_hit_test_stack(dom, el, &text)
+    hit_test_layer(dom, el, &text).unwrap_or(LayerUnder::Undecided)
+}
+
+/// Whether the surface the background walk resolved is the one under this
+/// element's text, so a contrast verdict against it is about something a
+/// reader sees. A picture, or paint the walk cannot model, is not; a surface
+/// the walk never read is only where its colour is the one the walk named.
+pub fn resolved_surface_is_under_text(dom: &dyn Dom, el: ElId, resolved: Option<Rgba>) -> bool {
+    match layer_under_text(dom, el) {
+        LayerUnder::Picture | LayerUnder::Unmodelled => false,
+        LayerUnder::Detached(surface) => resolved.map_or(false, |bg| {
+            (bg.r - surface.r).abs() + (bg.g - surface.g).abs() + (bg.b - surface.b).abs()
+                <= SAME_SURFACE_DISTANCE
+        }),
+        LayerUnder::Ancestor | LayerUnder::Undecided => true,
+    }
 }
 
 /// JS: index.mjs#collectVisualContrastCandidates(options)

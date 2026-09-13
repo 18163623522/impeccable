@@ -68,6 +68,27 @@
        a declared colour that is painted nowhere. */
     .pass-wordsplit { background-image: linear-gradient(90deg, #fde68a, #fbcfe8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #fdfdfd; font-size: 18px; display: inline-block; }
     .pass-gradlink { background-image: linear-gradient(90deg, #b45309, #be123c); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: #d1d5db; font-size: 15px; display: inline-block; }
+    /* Icons beside the text: an external-link mark on the link itself, an
+       arrow bullet on its list item. Neither is a picture under the words. */
+    .flag-icon-link { color: #979797; font-size: 14px; padding-right: 18px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Cpath d='M0 0h10v10' fill='%23999999'/%3E%3C/svg%3E") no-repeat right center; }
+    ul.flag-arrows { list-style: none; margin: 0; padding: 0; width: 320px; }
+    ul.flag-arrows li { padding-left: 14px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Cpath d='M0 0l8 4-8 4z' fill='%23333333'/%3E%3C/svg%3E") no-repeat 0 50%; }
+    .flag-bullet-link { color: #989898; font-size: 14px; }
+    /* Photos laid under the text in the shapes a hero is written in. A browser
+       reads the layers; the static engine reads the stretched, out-of-flow
+       photo beside the content. */
+    .pass-hero { position: relative; width: 320px; height: 120px; }
+    .pass-hero-content { position: relative; padding: 48px 16px; }
+    .pass-stretched-photo { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .pass-z-under { position: relative; z-index: 0; }
+    .pass-z-under .pass-hero-content { position: static; }
+    .pass-z-under .pass-stretched-photo { z-index: -1; }
+    .pass-z-over-content { position: relative; z-index: 1; }
+    .pass-pseudo-hero::before { content: ""; position: absolute; inset: 0; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23112233'/%3E%3C/svg%3E") center / cover no-repeat; }
+    .pass-wrapper-photo-link { color: #f08a3c; font-size: 14px; }
+    .pass-later-photo-link { color: #f08b3d; font-size: 14px; }
+    .pass-raised-content-link { color: #f08c3e; font-size: 14px; }
+    .pass-pseudo-photo-link { color: #f08d3f; font-size: 14px; }
   </style>
 </head>
 <body>
@@ -139,6 +160,12 @@
       <!-- A `<map>` is an inline box and its flow content renders. -->
       <h3>Link inside a &lt;map&gt;</h3>
       <div class="row"><map name="site-map"><a class="flag-map-link" href="/sitemap">Browse the site map</a></map></div>
+
+      <h3>Link with its own external-link icon</h3>
+      <div class="row"><a class="flag-icon-link" href="https://example.com/docs">Read the external docs</a></div>
+
+      <h3>Link in a list item with an arrow bullet image</h3>
+      <ul class="flag-arrows"><li><a class="flag-bullet-link" href="/guides">Browse the guides</a></li></ul>
     </div>
 
     <div class="col" data-col="pass">
@@ -205,6 +232,20 @@
 
       <h3>Gradient link whose words sit in a span</h3>
       <p><a class="pass-gradlink" href="/learn"><span>Learn more about it</span></a></p>
+
+      <!-- The orange is scored against a photograph, not the page's white, so
+           this path stays quiet and leaves it to the visual pass. -->
+      <h3>Link over a photo inside zero-height wrappers</h3>
+      <div class="pass-hero"><div class="pass-media"><div class="pass-frame"><img class="pass-stretched-photo" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23112233'/%3E%3C/svg%3E"></div></div><div class="pass-hero-content"><a class="pass-wrapper-photo-link" href="/wrapped">See the wrapped hero</a></div></div>
+
+      <h3>Link over a later photo at z-index -1</h3>
+      <div class="pass-hero pass-z-under"><div class="pass-hero-content"><a class="pass-later-photo-link" href="/later">See the later hero</a></div><img class="pass-stretched-photo" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23112233'/%3E%3C/svg%3E"></div>
+
+      <h3>Link in raised content over a later photo</h3>
+      <div class="pass-hero"><div class="pass-hero-content pass-z-over-content"><a class="pass-raised-content-link" href="/raised">See the raised hero</a></div><img class="pass-stretched-photo" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23112233'/%3E%3C/svg%3E"></div>
+
+      <h3>Link over a photo drawn by ::before</h3>
+      <div class="pass-hero pass-pseudo-hero"><div class="pass-hero-content"><a class="pass-pseudo-photo-link" href="/pseudo">See the pseudo hero</a></div></div>
     </div>
 
   </div>

@@ -47,6 +47,8 @@ fn fixture_flags_every_should_flag_case() {
         ("link on a white section with a texture tile", "#969696"),
         ("paragraph in a [hidden] panel author CSS reveals", "#8c8c8c"),
         ("link inside a <map>", "#919191"),
+        ("link with its own external-link icon", "#979797"),
+        ("link in a list item with an arrow bullet image", "#989898"),
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(color)),
@@ -74,6 +76,10 @@ fn fixture_passes_every_should_pass_case() {
         ("link fourteen levels inside a <template>", "#bcbcbc"),
         ("word spans of a gradient-clipped caption", "#fdfdfd"),
         ("span inside a gradient-clipped link", "#d1d5db"),
+        ("link over a photo inside zero-height wrappers", "#f08a3c"),
+        ("link over a later photo at z-index -1", "#f08b3d"),
+        ("link in raised content over a later photo", "#f08c3e"),
+        ("link over a photo drawn by ::before", "#f08d3f"),
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(color)),
@@ -516,4 +522,128 @@ span.chip { background: #b6322d; color: #5c5449; font-size: 14px; padding: 4px 8
     let ids: Vec<&str> = findings.iter().map(|f| f.antipattern.as_str()).collect();
     assert!(ids.contains(&"low-contrast"), "{findings:?}");
     assert!(ids.contains(&"gray-on-color"), "{findings:?}");
+}
+
+/// A page of one hero: a positioned section, the content, and a photo, in
+/// whatever markup `body` gives.
+fn hero_page(css: &str, body: &str) -> Vec<String> {
+    let html = format!(
+        "<!doctype html><html><head><style>body {{ background: #ffffff; color: #111111; }} \
+         .o {{ color: #f37b2e; font-size: 15px; }} {css}</style></head><body>{body}</body></html>"
+    );
+    low_contrast_snippets(&html, Path::new("hero.html"))
+}
+
+const PHOTO: &str = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Crect width='10' height='10' fill='%23112233'/%3E%3C/svg%3E";
+
+#[test]
+fn a_stretched_photo_beside_the_content_is_under_the_text() {
+    let css = ".hero { position: relative; height: 500px; } \
+               .photo { position: absolute; inset: 0; width: 100%; height: 100%; } \
+               .content { position: relative; padding: 200px 100px; }";
+    // Zero-height wrappers around the photo.
+    let wrapped = format!(
+        "<section class=\"hero\"><div class=\"media\"><div class=\"frame\"><img class=\"photo\" src=\"{PHOTO}\"></div></div>\
+         <div class=\"content\"><a class=\"o\" href=\"#\">Orange link over a wrapped photo</a></div></section>"
+    );
+    assert!(hero_page(css, &wrapped).is_empty(), "{:?}", hero_page(css, &wrapped));
+    // The photo after the content, laid beneath it by z-index.
+    let later = format!(
+        "<section class=\"hero\"><div class=\"content\"><a class=\"o\" href=\"#\">Orange link over a later photo</a></div>\
+         <img class=\"photo\" style=\"z-index: -1\" src=\"{PHOTO}\"></section>"
+    );
+    assert!(hero_page(css, &later).is_empty(), "{:?}", hero_page(css, &later));
+    // Control: no photo, and the page's white is the surface.
+    let bare = "<section class=\"hero\"><div class=\"content\"><a class=\"o\" href=\"#\">Orange link on the page</a></div></section>";
+    assert!(
+        hero_page(css, bare).iter().any(|s| s.contains("#f37b2e on #ffffff")),
+        "{:?}",
+        hero_page(css, bare)
+    );
+}
+
+#[test]
+fn a_photo_drawn_by_a_pseudo_element_is_under_the_text() {
+    let css = ".hero { position: relative; height: 400px; } \
+               .hero::before { content: \"\"; position: absolute; inset: 0; background: url(\"hero.jpg\") center / cover no-repeat; } \
+               .content { position: relative; padding: 150px 100px; }";
+    let body = "<section class=\"hero\"><div class=\"content\"><a class=\"o\" href=\"#\">Orange link over a pseudo photo</a></div></section>";
+    assert!(hero_page(css, body).is_empty(), "{:?}", hero_page(css, body));
+}
+
+#[test]
+fn a_photo_sized_to_part_of_its_block_is_not_under_the_whole_run() {
+    // A half-width picture: the run straddles the photo and the page, and the
+    // half on the page does fail. The browser path scores it the same way.
+    let css = ".split { position: relative; height: 400px; } \
+               .split picture { position: absolute; left: 0; top: 0; width: 50%; height: 100%; } \
+               .content { position: relative; padding: 180px 0 0 400px; }";
+    let body = format!(
+        "<section class=\"split\"><picture><img src=\"{PHOTO}\"></picture>\
+         <div class=\"content\"><a class=\"o\" href=\"#\">Orange link half over a picture</a></div></section>"
+    );
+    assert!(
+        hero_page(css, &body).iter().any(|s| s.contains("#f37b2e on #ffffff")),
+        "{:?}",
+        hero_page(css, &body)
+    );
+}
+
+#[test]
+fn an_opaque_card_over_the_photo_is_still_the_surface() {
+    let css = ".hero { position: relative; height: 500px; } \
+               .photo { position: absolute; inset: 0; width: 100%; height: 100%; } \
+               .card { position: absolute; left: 100px; top: 100px; width: 400px; padding: 30px; background: #ffffff; } \
+               .glass { position: absolute; left: 600px; top: 100px; width: 400px; padding: 30px; background: rgba(255, 255, 255, 0.7); } \
+               .g1 { color: #949494; font-size: 15px; } .g2 { color: #959595; font-size: 15px; }";
+    let body = format!(
+        "<section class=\"hero\"><img class=\"photo\" src=\"{PHOTO}\">\
+         <div class=\"card\"><a class=\"g1\" href=\"#\">Opaque card link</a></div>\
+         <div class=\"glass\"><a class=\"g2\" href=\"#\">Glass card link</a></div></section>"
+    );
+    let snippets = hero_page(css, &body);
+    assert!(snippets.iter().any(|s| s.contains("#949494 on #ffffff")), "{snippets:?}");
+    assert!(
+        !snippets.iter().any(|s| s.contains("#959595")),
+        "translucent glass over a photo is not a surface this can name, {snippets:?}"
+    );
+}
+
+#[test]
+fn an_icon_beside_the_text_does_not_hide_its_surface() {
+    let icon = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10'%3E%3Cpath d='M0 0h10v10'/%3E%3C/svg%3E";
+    let css = format!(
+        ".ext {{ color: #9f9f9f; font-size: 15px; padding-right: 18px; background: url(\"{icon}\") no-repeat right center; }} \
+         ul.arrows li {{ padding-left: 14px; background: url(\"{icon}\") no-repeat 0 50%; }} \
+         .m6 {{ color: #9e9e9e; font-size: 15px; }} \
+         .photo-link {{ color: #9d9d9d; font-size: 15px; background: url(\"/photo.jpg\") no-repeat; }}"
+    );
+    let body = "<p><a class=\"ext\" href=\"#\">Grey external link with its own icon</a></p>\
+                <ul class=\"arrows\"><li><a class=\"m6\" href=\"#\">Grey link in a list item with an arrow bullet</a></li></ul>\
+                <p><a class=\"photo-link\" href=\"#\">Grey link over its own remote image</a></p>";
+    let snippets = hero_page(&css, body);
+    assert!(snippets.iter().any(|s| s.contains("#9f9f9f on #ffffff")), "{snippets:?}");
+    assert!(snippets.iter().any(|s| s.contains("#9e9e9e on #ffffff")), "{snippets:?}");
+    assert!(
+        !snippets.iter().any(|s| s.contains("#9d9d9d")),
+        "a remote image has no size this engine can read, {snippets:?}"
+    );
+}
+
+#[test]
+fn a_photo_stretched_over_another_section_is_not_under_the_text() {
+    // The hero's photo fills the hero, which is positioned; the link sits in
+    // the next section on the page's own white and is scored there.
+    let css = ".hero { position: relative; height: 500px; } \
+               .hero img { position: absolute; inset: 0; width: 100%; height: 100%; } \
+               .plain { padding: 100px; } .lnk2 { color: #9c9c9c; font-size: 15px; }";
+    let body = format!(
+        "<section class=\"hero\"><img src=\"{PHOTO}\"></section>\
+         <section class=\"plain\"><div><a class=\"lnk2\" href=\"#\">Control link on page white</a></div></section>"
+    );
+    assert!(
+        hero_page(css, &body).iter().any(|s| s.contains("#9c9c9c on #ffffff")),
+        "{:?}",
+        hero_page(css, &body)
+    );
 }

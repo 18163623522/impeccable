@@ -349,7 +349,7 @@ fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
 /// coincidence rather than as a verdict about the walk: the browser engine
 /// asks the real question one layer out, where it has layout, and drops a
 /// hit from this path whose text reads over a picture
-/// (`media_layer_under_text`). Here the coincidence is all there is to go
+/// (`resolved_surface_is_under_text`). Here the coincidence is all there is to go
 /// on, and it covers the static engine, which has no layout to test.
 fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
     let text_hex = color_to_hex(Some(text_color));

@@ -7,9 +7,11 @@
 
 use crate::background::{
     a_ge, a_gt, read_own_background_color, resolve_background, resolve_background_info,
+    resolve_background_info_skipping_images,
     resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
 };
 use crate::cascade::StyleValues;
+use crate::layer::picture_under_text;
 use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{
     collapse_ws, is_in_non_rendered_markup, is_visually_hidden, pf0, resolve_font_size_px,
@@ -17,7 +19,8 @@ use crate::quality::{
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
-    GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
+    data_svg_intrinsic_size, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput,
+    StyleMap, ICON_MAX_PX,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -556,6 +559,40 @@ fn text_clipped_by_an_ancestor(el: &StaticElement<'_>) -> bool {
     false
 }
 
+/// Whether an element's background image is an icon beside its text: one
+/// inline SVG at most `ICON_MAX_PX` on both axes. The static cascade carries
+/// neither `background-size` nor `background-repeat`, so only a data URI,
+/// whose root `<svg>` states its size, can be read as one. A remote file has
+/// no size this engine can read and stays a picture.
+fn background_is_icon(el: &StaticElement<'_>) -> bool {
+    let image = sv(el.style(), "backgroundImage");
+    !js::to_lower_case(image).contains("gradient")
+        && data_svg_intrinsic_size(image).map_or(false, |(w, h)| w <= ICON_MAX_PX && h <= ICON_MAX_PX)
+}
+
+/// The boxes whose background image is an icon beside this element's text:
+/// the element itself (an external-link mark) and its nearest `li` (an arrow
+/// bullet).
+fn icon_hosts(el: &StaticElement<'_>) -> Vec<ego_tree::NodeId> {
+    const MAX_ANCESTORS: usize = 12;
+    let mut hosts = Vec::new();
+    if background_is_icon(el) {
+        hosts.push(el.id());
+    }
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { break };
+        if c.tag_lower() == "li" {
+            if background_is_icon(&c) {
+                hosts.push(c.id());
+            }
+            break;
+        }
+        cur = c.parent_element();
+    }
+    hosts
+}
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
@@ -591,11 +628,40 @@ pub fn check_element_colors(
     }
     let direct_text = el.direct_text();
     let has_direct_text = !js::trim(&direct_text).is_empty();
-
-    let bg_info = resolve_background_info(el, custom_props);
-    let effective_bg = bg_info.color;
     let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
+
+    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
+    // walk and the hidden-text selector run only for those tags.
+    let paints_own_text = has_direct_text
+        && SAFE_TAGS.contains(&tag)
+        && !is_emoji_only_text(&direct_text)
+        && !is_glyph_only_text(&direct_text)
+        && !is_visually_hidden(el, style)
+        // The browser path also stands down where `-webkit-text-fill-color`
+        // paints the glyphs in nothing. This engine cannot: the static
+        // cascade drops that property, and a recorded call vector pins it
+        // dropping it. The clip that property travels with is carried, so
+        // a run inside a gradient-clipped parent is caught by the clip.
+        && !text_clipped_by_an_ancestor(el)
+        && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
+        && !inherits_scored_text_color(el, text_color, custom_props);
+
+    // The walk gives up on any raster image, so a link with an external-link
+    // mark, or one in a list item with an arrow bullet, reads as unresolved
+    // and goes unscored. On the SAFE_TAGS text path an icon is read as
+    // absent; everywhere else the walk is what it always was.
+    let icons = if paints_own_text {
+        icon_hosts(el)
+    } else {
+        Vec::new()
+    };
+    let bg_info = if icons.is_empty() {
+        resolve_background_info(el, custom_props)
+    } else {
+        resolve_background_info_skipping_images(el, custom_props, &|c| icons.contains(&c.id()))
+    };
+    let effective_bg = bg_info.color;
 
     let mut own_bg = custom_props
         .and_then(|m| measures::parse_color_resolved(sv_opt(style, "backgroundColor"), Some(m)))
@@ -640,21 +706,6 @@ pub fn check_element_colors(
             sv(style, "backgroundClip")
         }
     };
-    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
-    // walk and the hidden-text selector run only for those tags.
-    let paints_own_text = has_direct_text
-        && SAFE_TAGS.contains(&tag)
-        && !is_emoji_only_text(&direct_text)
-        && !is_glyph_only_text(&direct_text)
-        && !is_visually_hidden(el, style)
-        // The browser path also stands down where `-webkit-text-fill-color`
-        // paints the glyphs in nothing. This engine cannot: the static
-        // cascade drops that property, and a recorded call vector pins it
-        // dropping it. The clip that property travels with is carried, so
-        // a run inside a gradient-clipped parent is caught by the clip.
-        && !text_clipped_by_an_ancestor(el)
-        && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
-        && !inherits_scored_text_color(el, text_color, custom_props);
     let color_opts = ColorOpts {
         tag: tag.to_string(),
         text_color,
@@ -677,11 +728,12 @@ pub fn check_element_colors(
     };
     // The page's one report of a colour pair goes to an element that will
     // actually print it, so an inline ignore on the first of fifty links
-    // waives that link and not the other forty-nine. The static engine has
-    // no layout, so it cannot ask the browser path's second question, about
-    // a picture painting behind the text.
+    // waives that link and not the other forty-nine. A background photo laid
+    // under the text waives it too: this engine has no layout, so it reads
+    // the stretched, out-of-flow shape such a photo is written in
+    // (`picture_under_text`), where the browser path measures the layers.
     let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
-        !scoped_ignore_active(el, &h.id)
+        !scoped_ignore_active(el, &h.id) && !picture_under_text(el)
     });
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();

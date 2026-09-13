@@ -1,7 +1,8 @@
 // Side accents inside styled-components templates. The template's own
 // declarations style its element, so a nested bar or state rule reads the
-// template's radius. Each case uses a unique width so every finding
-// attributes to one.
+// template's radius. The flag cases round other templates in this file, so
+// every square case squares itself off. Each case uses a unique width so
+// every finding attributes to one.
 import styled from 'styled-components';
 
 export const FlagTemplatePseudo = styled.div`
@@ -27,6 +28,7 @@ export const FlagTemplateState = styled.div`
 
 export const PassTemplatePseudo = styled.div`
   position: relative;
+  border-radius: 0;
   &::after {
     content: "";
     position: absolute;
@@ -40,6 +42,7 @@ export const PassTemplatePseudo = styled.div`
 
 export const PassTemplateState = styled.div`
   padding: 16px;
+  border-radius: 0;
   &.active {
     border-left: 6px solid #0f766e;
   }

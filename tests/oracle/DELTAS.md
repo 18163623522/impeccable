@@ -238,10 +238,36 @@ elements it may reach, a `rounded-*` class with no compiled rule (read off the
 utility scale), and, for a card no read declaration gave a radius, a linked
 stylesheet the engine did not read (other than a font service). A radius on a
 pseudo-element or behind a hover or focus state cannot round the card at rest
-and is not counted. One reach stays out of the text engine: a radius declared
-on a different selector of the same element (another class) is not tied to the
-stripe rule, so that rule reads as its own declarations say. The static and
-browser engines read the cascade and see it.
+and is not counted.
+
+In stylesheet text (a `.css`, `.scss`, `.sass` or `.less` file, a Vue, Svelte
+or Astro `<style>` block, a CSS-in-JS template) the declarations around an
+accent are not enough to call the card square: another rule for the same
+element, or a class the element may carry, can round it. So a left or right
+accent there drops only when one of two things holds, and the border
+declaration, the pseudo-element bar and the inset box-shadow all read it
+through the stylesheet's host index, so one visual answers the same way
+however it is drawn:
+
+- (a) the element is known square: the index ties the accent's rule to the
+  radius rules for the same element (the same selector, a compound such as
+  `.card` for `.card.is-active` or `.card:hover`, a grouped selector, a nested
+  `&` rule), and those rules declare both corners away from the stripe with
+  literal values under the threshold, with no unknown radius among them;
+- (b) the whole file is known square: no radius declaration in any of its
+  stylesheets can round those corners (none at all, or only literal values
+  under the threshold, read corner by corner at their largest), and nothing in
+  them could bring a radius in unseen (a mixin call, `@extend`, `@apply`,
+  `composes`, a spread, a bare interpolation, an interpolation naming a radius,
+  a `var()` or other value the reader cannot resolve).
+
+Everything else reports as it did before the gate: a tied rule that rounds the
+card or leaves its radius unknown, and a file that declares a radius on some
+selector the index cannot tie to the accent's rule. Indented Sass has no index;
+its accent reads (a) from its indentation scope and (b) from the file. The
+markup readers (utility classes, `style` attributes, style objects, JSX props)
+read their own tag as described above. The static and browser engines read the
+cascade.
 
 The static border snippet now prints the radius in px, the way the browser's
 computed style does: `border-radius: 0.375rem` reports `6px` where it used to
@@ -271,3 +297,30 @@ same shape and stays silent.
 - `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`: `side-accent-nested.tsx` gains a template whose radius is `${({ theme }) => theme.radii.md}` with a nested `&::before` bar (7px), a template a bare `${cardShape}` interpolation styles with a nested `&::after` bar (8px), and an `sx` style object with a `'@media (min-width: 600px)'` key holding the accent on a rounded card (`borderLeft: '10px solid`), with square twins for the literal template and the style object. 2 to 5 findings.
 - `detect-fixture-json-side-accent-nested-sass`, `detect-fixture-text-side-accent-nested-sass`: new fixture for indented Sass. It reports its three flag cases (an `&.on` rule under a rounded card, an accent inside `@media` on a rounded card, an `&.on` rule under a card a `+card-shape` mixin styles) and none of its square pass cases.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 442 to 451 findings (459 to 468 with advisories).
+
+Recorded 2026-09-13, the stylesheet revision (rules (a) and (b) above). Base
+reported every accent whose card another rule rounds, and the text engine's
+border matchers had silenced them because they read only the accent's own block
+and the blocks around it: `.card { border-radius }` then `.card.is-active {
+border-left }`, the same with `:hover`, a second `.alert` block, a grouped
+`.panel, .widget` radius, a second SCSS block, a Vue `<style scoped>` block, and
+the unknown cases (`.list-item { border-radius: var(--radius) }` with
+`.list-item.active`, a radius on `.card` with the accent on `.card-accent`). The
+pseudo-element and inset scans already asked the index for the tied rules; they
+now also read (b), so a bar on a class no radius rule names reports in a file
+that rounds another class.
+
+Pass cases that sat square in a file whose flag cases round other selectors
+answered square only because their own rule declared no radius. That is the
+separate-class shape rule (b) keeps, so those cases now square themselves off
+with `border-radius: 0` (rule (a)), and the no-radius-anywhere shape moved to a
+fixture of its own.
+
+- `detect-fixture-json-side-accent-producers-css`, `detect-fixture-text-side-accent-producers-css`: the five square pass cases gain `border-radius: 0`, and the file gains flag cases for the same selector (`border-left: 13px`), a compound rule (14px), a grouped radius (`border-right: 15px`), a `var()` radius (16px) and a radius on another class, as a border (17px) and as a `::before` bar (6px). The six original findings move down by the inserted lines; 6 to 12 findings.
+- `detect-fixture-json-side-accent-nested-scss`, `detect-fixture-text-side-accent-nested-scss`: the square nested bar, the square children and the square BEM element gain `border-radius: 0`, and the file gains a state rule in a second block for a card rounded in the first (17px) and a flat compound rule after the card's rule (`border-right: 18px`). 8 to 10 findings.
+- `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`: the two square templates gain `border-radius: 0`; the findings are the same and move down by the inserted lines. `side-accent-nested.sass` squares its child case off the same way and its goldens do not move.
+- `detect-fixture-json-pseudo-stripe-css`, `detect-fixture-text-pseudo-stripe-css`: the square host pass case gains a `border-radius: 0` host rule; the findings are the same and move down by the inserted lines. `pseudo-stripe.vue` and `astro-inset-shadow-stripe.astro` square their pass cases off the same way, below their findings, so their goldens do not move.
+- `detect-fixture-json-side-accent-square-sheet-css`, `detect-fixture-text-side-accent-square-sheet-css`: new fixture, a stylesheet that rounds nothing but a `2px` chip. A border, a width longhand, a logical border, a `::before` bar, an inset shadow and an accent on a separate class all pass; no findings.
+- `detect-fixture-json-side-accent-flat-vue`, `detect-fixture-text-side-accent-flat-vue`: new fixture, a Vue `<style scoped>` block with a compound accent on a rounded card (`border-left: 4px`, line 16) and a radius on another class (`border-right: 5px`), both reported, and a card squared off in its own rule, silent. The whole-file pass gates a declaration inside a `<style>` block the way the block pass does, so the finding keeps the line the whole-file pass reports, as on base.
+- `detect-fixture-json-framework-next-modules`, `detect-fixture-text-framework-next-modules`, `detect-framework-next-modules-text`: `Sidebar.module.css` declares `border-radius: 8px` on `.navItem`, a selector the index cannot tie to `.sidebar`, so the sidebar's `border-right: 3px solid #4f46e5` reports again, as on base (5 to 6 findings).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 451 to 462 findings (468 to 479 with advisories).

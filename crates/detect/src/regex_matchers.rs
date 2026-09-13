@@ -3,7 +3,7 @@
 
 use impeccable_core::checks::css_scan::{
     has_interpolation, is_unseen_declaration_source, names_same_element, scan_css_text_for_glow,
-    scan_css_text_for_marquee, scan_css_text_for_radial_halo,
+    scan_css_text_for_marquee, scan_css_text_for_radial_halo, CssHostIndex,
 };
 use impeccable_core::checks::rules::{
     find_solid_chromatic_bg, DeclaredCorners, NOMINAL_CARD_WIDTH_PX,
@@ -332,6 +332,16 @@ impl SourceText {
             text: lines.join("\n"),
             line_starts,
         }
+    }
+
+    /// The joined text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The byte offset of `index` on line `i` in the joined text.
+    pub fn offset(&self, i: usize, index: usize) -> usize {
+        self.line_starts[i] + index
     }
 
     fn line(&self, i: usize) -> &str {
@@ -865,7 +875,9 @@ fn brace_scope_corners(source: &SourceText, i: usize, index: usize) -> DeclaredC
 /// for every parent it passes through (an at-rule, a `+mixin` wrapper) or
 /// names with `&`. An indented `+mixin` or `@include` statement makes the
 /// corners unknown; an interpolated parent selector starts them unknown.
-fn sass_scope_corners(source: &SourceText, i: usize) -> DeclaredCorners {
+/// Otherwise the statements apply over `base`: the cascade's `0`, or unknown
+/// corners to learn which ones the scope declares.
+fn sass_scope_corners(source: &SourceText, i: usize, base: DeclaredCorners) -> DeclaredCorners {
     let indent = |l: &str| l.len() - l.trim_start().len();
     let blank = |l: &str| l.trim().is_empty();
     let mut chunks: Vec<Vec<String>> = Vec::new();
@@ -929,7 +941,7 @@ fn sass_scope_corners(source: &SourceText, i: usize) -> DeclaredCorners {
     let mut corners = if unknown {
         DeclaredCorners::unknown()
     } else {
-        DeclaredCorners::default()
+        base
     };
     for statements in chunks.iter().rev() {
         apply_statements(&mut corners, statements, false);
@@ -950,8 +962,9 @@ fn sass_scope_corners(source: &SourceText, i: usize) -> DeclaredCorners {
 /// radius (an interpolation, an unresolved `var()`, a theme token, a mixin
 /// call, a spread, a class expression, a tag that does not close on the line)
 /// the corners are unknown and the finding stays. A radius declared on a
-/// different selector of the same element is out of reach, and the box reads
-/// as its own block declares it.
+/// different selector of the same element is out of this reader's reach: in
+/// stylesheet text [`side_tab_known_square_in_sheet`] reads the stylesheet
+/// before a square answer drops the finding.
 pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sass: bool) -> bool {
     let whole = m.whole();
     let line = source.line(i);
@@ -968,11 +981,99 @@ pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sa
     let corners = if JSX_SIDE_PROP_RE.is_match(whole) || in_style_attribute(line, m.index) {
         markup_tag_corners(line, m.index)
     } else if sass {
-        sass_scope_corners(source, i)
+        sass_scope_corners(source, i, DeclaredCorners::default())
     } else {
         brace_scope_corners(source, i, m.index)
     };
     corners.is_rounded_away_from_side(side)
+}
+
+/// The second half of the gate for a declaration in stylesheet text (a `.css`,
+/// `.scss`, `.sass` or `.less` file, a `<style>` block, a CSS-in-JS template):
+/// whether a match [`side_tab_rounded_in_scope`] read as square sits on a box
+/// known to be square. Reading the declarations around the match alone cannot
+/// say so: another rule for the same element (`.card` before
+/// `.card.is-active`), or a class the element may carry, can round it.
+///
+/// Braces syntax asks the stylesheet's [`CssHostIndex`], the reading the
+/// pseudo-element and inset-shadow scans take, so one visual answers the same
+/// way however it is drawn. Indented Sass has no index: the box is known
+/// square when its scope declares both corners away from the stripe with
+/// literal values under the threshold, or when `sheet` (every radius the
+/// file's stylesheets declare, corner by corner at its largest) cannot round
+/// them. A utility class in stylesheet text is never known square.
+///
+/// `index_text` is what the index is built on, byte for byte in step with the
+/// source: the source itself, or a component file with everything outside its
+/// `<style>` blocks blanked.
+pub fn side_tab_known_square_in_sheet<'s>(
+    m: &MatchCtx,
+    source: &SourceText,
+    i: usize,
+    sass: bool,
+    index: &once_cell::unsync::OnceCell<CssHostIndex<'s>>,
+    index_text: &'s str,
+    sheet: &DeclaredCorners,
+) -> bool {
+    let whole = m.whole();
+    if TW_SIDE_TAB_WHOLE_RE.is_match(whole) {
+        return false;
+    }
+    let lower = js::to_lower_case(whole);
+    let side = if lower.contains("left") || lower.contains("start") {
+        3
+    } else {
+        1
+    };
+    if sass {
+        return !sass_scope_corners(source, i, DeclaredCorners::unknown())
+            .is_rounded_away_from_side(side)
+            || !sheet.is_rounded_away_from_side(side);
+    }
+    index
+        .get_or_init(|| CssHostIndex::new(index_text))
+        .is_declaration_known_square(source.offset(i, m.index), side, sheet)
+}
+
+/// The indentation-syntax Sass reading of [`CssHostIndex::sheet_corners`]:
+/// every radius declaration in the text, corner by corner at its largest.
+/// A mixin call, `@extend`, `@apply` or a bare interpolation standing where a
+/// declaration would makes every corner unknown, as does an interpolated
+/// radius. A line that opens a block (a selector, an at-rule, a `+mixin`
+/// wrapper) is not a statement.
+pub fn sass_sheet_corners(text: &str) -> DeclaredCorners {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut sheet = DeclaredCorners::default();
+    for (j, line) in lines.iter().enumerate() {
+        let statement = js::trim(line);
+        if statement.is_empty() {
+            continue;
+        }
+        let opens_block = lines[j + 1..]
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .is_some_and(|next| indent(next) > indent(line));
+        if opens_block {
+            continue;
+        }
+        if is_unseen_declaration_source(statement) {
+            sheet.set_unknown();
+            continue;
+        }
+        let lower = statement.to_ascii_lowercase();
+        if has_interpolation(statement) && (lower.contains("radius") || lower.contains("rounded")) {
+            sheet.set_unknown();
+            continue;
+        }
+        if let Some((prop, value)) = split_declaration(statement) {
+            let mut one = DeclaredCorners::default();
+            if one.apply(&prop, &value, NOMINAL_CARD_WIDTH_PX) {
+                sheet.raise_to(&one);
+            }
+        }
+    }
+    sheet
 }
 
 pub struct Matcher {

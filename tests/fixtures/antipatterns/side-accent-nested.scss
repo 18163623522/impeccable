@@ -2,8 +2,9 @@
  * Side accents written with nesting, the way SCSS, Less and CSS-in-JS
  * author them. A left or right accent reports only on a card rounded away
  * from the stripe, and a nested rule that names its parent with an
- * ampersand reads the parent's corners. Every case carries a unique stripe
- * width so each finding attributes to one case.
+ * ampersand reads the parent's corners. The flag cases round other selectors
+ * in this file, so every square case squares itself off. Every case carries a
+ * unique stripe width so each finding attributes to one case.
  */
 
 /* ── FLAG: nested ::before bar on a rounded card ── */
@@ -72,6 +73,7 @@
 /* ── PASS: nested ::before bar on a square box ── */
 .pass-nested-pseudo {
   position: relative;
+  border-radius: 0;
   &::before {
     content: "";
     position: absolute;
@@ -83,9 +85,12 @@
   }
 }
 
-/* ── PASS: bars on the children of a rounded card ── */
+/* ── PASS: bars on the square children of a rounded card ── */
 .pass-nested-child {
   border-radius: 12px;
+  & .row {
+    border-radius: 0;
+  }
   & .row::before {
     content: "";
     position: absolute;
@@ -96,14 +101,16 @@
     background: #0f766e;
   }
   .note {
+    border-radius: 0;
     border-left: 10px solid #0f766e;
   }
 }
 
-/* ── PASS: a BEM element of a rounded card ── */
+/* ── PASS: a square BEM element of a rounded card ── */
 .pass-nested-element {
   border-radius: 12px;
   &__part {
+    border-radius: 0;
     border-left: 11px solid #0f766e;
   }
 }
@@ -153,4 +160,22 @@
   @include breakpoint(md) {
     border-right: 16px solid #0f766e;
   }
+}
+
+/* ── FLAG: a state rule in a second block for a card rounded in the first ── */
+.flag-second-block {
+  border-radius: 12px;
+}
+.flag-second-block {
+  &.is-accent {
+    border-left: 17px solid #0f766e;
+  }
+}
+
+/* ── FLAG: a flat compound rule after the card's own rule ── */
+.flag-flat-compound {
+  border-radius: 12px;
+}
+.flag-flat-compound.is-accent {
+  border-right: 18px solid #0f766e;
 }

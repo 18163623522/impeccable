@@ -95,9 +95,9 @@ const title = 'Astro inset shadow stripe regression';
   [data-case="Two Length Blurred Edge"] { box-shadow: inset 4px 0 5px var(--brand-accent); }
 
   /* A left or right stripe is the tell only on a rounded card: every left or
-     right flag case above rounds its box, and this one stays square. The
+     right flag case above rounds its box, and this one squares itself off. The
      text engine reads this style block only, so the case has no article. */
-  [data-case="Square Box Edge"] { box-shadow: inset 4px 0 0 #6366f1; }
+  [data-case="Square Box Edge"] { border-radius: 0; box-shadow: inset 4px 0 0 #6366f1; }
 
   /* Commented-out rules are not live CSS.
   [data-case="Commented Out Edge"] { box-shadow: inset 4px 0 0 var(--brand-accent); }

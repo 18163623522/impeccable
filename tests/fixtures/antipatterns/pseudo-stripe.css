@@ -13,7 +13,9 @@
 }
 
 /* The side accent is the tell on a rounded card, so each left or right flag
-   case rounds its host; the bottom-edge case needs no radius. */
+   case rounds its host; the bottom-edge case needs no radius. A host no
+   radius rule names reads the whole file, so the square pass case squares
+   its host off. */
 .card[data-case="Inset Shorthand Left Edge"],
 .card[data-case="Longhand Left Edge"] {
   border-radius: 12px;
@@ -65,6 +67,9 @@
 }
 
 /* ── PASS: a chromatic stripe on a square host is the old callout rule ── */
+.card[data-case="Square Host Left Edge"] {
+  border-radius: 0;
+}
 .card[data-case="Square Host Left Edge"]::before {
   content: "";
   position: absolute;

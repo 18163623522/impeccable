@@ -23,6 +23,9 @@ const label = 'pseudo-stripe fixture';
 }
 
 /* PASS: the same bar on a square host */
+.card[data-case="Component Square Host"] {
+  border-radius: 0;
+}
 .card[data-case="Component Square Host"]::before {
   content: "";
   position: absolute;

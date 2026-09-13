@@ -1206,6 +1206,9 @@ struct HostFrame {
     styles_elements: bool,
     /// This block is a style rule, not an at-rule or the top level.
     is_rule: bool,
+    /// This block's index into [`CssHostIndex::opens`]; `usize::MAX` at the
+    /// top level.
+    block: usize,
     order: usize,
     direct: String,
     chunk_start: usize,
@@ -1221,8 +1224,10 @@ pub struct CssHostIndex<'a> {
     raw: &'a str,
     content: String,
     /// Offsets of every block's `{` in the comment-blanked text, ascending,
-    /// parallel to `hosts` and `hosts_unknown`.
+    /// parallel to `closes`, `hosts` and `hosts_unknown`.
     opens: Vec<usize>,
+    /// Offsets of every block's `}`, the text's length for a block left open.
+    closes: Vec<usize>,
     hosts: Vec<Vec<String>>,
     hosts_unknown: Vec<bool>,
     rules: Vec<RadiusRule>,
@@ -1245,6 +1250,7 @@ impl<'a> CssHostIndex<'a> {
             raw: css,
             content: String::new(),
             opens: Vec::new(),
+            closes: Vec::new(),
             hosts: Vec::new(),
             hosts_unknown: Vec::new(),
             rules: Vec::new(),
@@ -1263,6 +1269,7 @@ impl<'a> CssHostIndex<'a> {
             static_reachable: true,
             styles_elements: true,
             is_rule: false,
+            block: usize::MAX,
             order: 0,
             direct: String::new(),
             chunk_start: 0,
@@ -1305,6 +1312,7 @@ impl<'a> CssHostIndex<'a> {
                 }
                 b';' => stack.last_mut().unwrap().seg_start = p + 1,
                 b'{' => {
+                    let block = index.opens.len();
                     let top = stack.last_mut().unwrap();
                     let selector = js::trim(&content[top.seg_start..p]);
                     top.direct
@@ -1324,6 +1332,7 @@ impl<'a> CssHostIndex<'a> {
                             styles_elements: top.styles_elements
                                 && at_rule_can_style_elements(selector),
                             is_rule: false,
+                            block,
                             order: p,
                             direct: String::new(),
                             chunk_start: p + 1,
@@ -1347,6 +1356,7 @@ impl<'a> CssHostIndex<'a> {
                             static_reachable: top.static_reachable && !top.in_rule,
                             styles_elements: top.styles_elements,
                             is_rule: true,
+                            block,
                             order: p,
                             direct: String::new(),
                             chunk_start: p + 1,
@@ -1354,6 +1364,7 @@ impl<'a> CssHostIndex<'a> {
                         }
                     };
                     index.opens.push(p);
+                    index.closes.push(b.len());
                     index.hosts.push(frame.hosts.clone());
                     index.hosts_unknown.push(frame.hosts_unknown);
                     stack.push(frame);
@@ -1361,6 +1372,7 @@ impl<'a> CssHostIndex<'a> {
                 b'}' => {
                     if stack.len() > 1 {
                         let mut frame = stack.pop().unwrap();
+                        index.closes[frame.block] = p;
                         frame.direct.push_str(&content[frame.chunk_start..p]);
                         index.add_rule(frame, &custom_props);
                     } else {
@@ -1442,6 +1454,16 @@ impl<'a> CssHostIndex<'a> {
     /// is a single compound every part of which the host's last compound
     /// carries (`.card` styles `.card.is-accent`).
     pub fn corners_for_hosts(&self, hosts: &[String]) -> DeclaredCorners {
+        let mut corners = DeclaredCorners::default();
+        for id in self.tied_rules(hosts) {
+            self.rules[id].apply_to(&mut corners);
+        }
+        corners
+    }
+
+    /// The radius rules naming one of `hosts`, in source order: what
+    /// [`corners_for_hosts`](Self::corners_for_hosts) applies.
+    fn tied_rules(&self, hosts: &[String]) -> Vec<usize> {
         let mut ids: Vec<usize> = Vec::new();
         for host in hosts {
             if let Some(found) = self.exact.get(host) {
@@ -1458,11 +1480,157 @@ impl<'a> CssHostIndex<'a> {
         }
         ids.sort_unstable_by_key(|id| (self.rules[*id].order, *id));
         ids.dedup();
-        let mut corners = DeclaredCorners::default();
-        for id in ids {
-            self.rules[id].apply_to(&mut corners);
+        ids
+    }
+
+    /// Every radius the text declares, corner by corner at its largest: a
+    /// corner no declaration names stays `0`, and one some declaration set to
+    /// a value the reader cannot resolve is unknown. A statement that could
+    /// bring in declarations the reader cannot see (a mixin call, `@apply`,
+    /// `composes`, a spread, a bare interpolation) makes every corner unknown,
+    /// as does an interpolation that could carry a radius (one naming a
+    /// radius, or a template nested in it). What
+    /// [`is_rule_known_square`](Self::is_rule_known_square) reads for a box
+    /// no radius rule ties to.
+    pub fn sheet_corners(&self) -> DeclaredCorners {
+        let mut sheet = DeclaredCorners::default();
+        for rule in &self.rules {
+            for decl in &rule.decls {
+                match decl {
+                    RadiusDecl::Set(prop, value) => {
+                        let mut one = DeclaredCorners::default();
+                        one.apply(prop, value, NOMINAL_CARD_WIDTH_PX);
+                        sheet.raise_to(&one);
+                    }
+                    RadiusDecl::Unseen => sheet.set_unknown(),
+                }
+            }
         }
-        corners
+        for &(start, end) in &self.interpolations {
+            let text = &self.content[start..(end + 1).min(self.content.len())];
+            let lower = text.to_ascii_lowercase();
+            if text.contains('`') || lower.contains("radius") || lower.contains("rounded") {
+                sheet.set_unknown();
+            }
+        }
+        sheet
+    }
+
+    /// Whether the rule whose selector starts at `pos` (a byte offset into the
+    /// comment-blanked text) styles a box known to be square away from `side`,
+    /// the text engine's reading. `sheet` is [`sheet_corners`](Self::sheet_corners)
+    /// over every stylesheet the file carries.
+    ///
+    /// The box is known square when the index names it and either (a) the
+    /// radius rules tied to it (the same, compound or grouped selectors)
+    /// declare both corners away from the stripe with literal values under the
+    /// rounded threshold, or (b) no declaration anywhere in the file can round
+    /// those corners and nothing in it could bring in a radius unseen. A box
+    /// the index cannot name, a tied rule that rounds it or leaves its radius
+    /// unknown, and a file that declares a radius on some selector the index
+    /// cannot tie to this rule (the element may carry that class) all keep
+    /// the finding.
+    pub fn is_rule_known_square(
+        &self,
+        pos: usize,
+        selector: &str,
+        side: usize,
+        sheet: &DeclaredCorners,
+    ) -> bool {
+        self.hosts_known_square(self.hosts_at(pos, selector), side, sheet)
+    }
+
+    /// [`is_rule_known_square`](Self::is_rule_known_square) for a declaration:
+    /// `pos` is a byte offset into the text the index was built on, and the
+    /// rule is the innermost block around it (a CSS-in-JS template's own
+    /// declarations style `&`).
+    pub fn is_declaration_known_square(
+        &self,
+        pos: usize,
+        side: usize,
+        sheet: &DeclaredCorners,
+    ) -> bool {
+        let pos = self.content_offset(pos);
+        if self
+            .interpolations
+            .iter()
+            .any(|(start, end)| *start <= pos && pos <= *end)
+        {
+            return false;
+        }
+        let before = self.opens.partition_point(|open| *open < pos);
+        let block = (0..before).rev().find(|b| self.closes[*b] >= pos);
+        let hosts = match block {
+            None => Some(vec!["&".to_string()]),
+            Some(b) if self.hosts_unknown[b] => None,
+            Some(b) => Some(self.host_forms(&self.hosts[b])),
+        };
+        self.hosts_known_square(hosts, side, sheet)
+    }
+
+    /// [`side_stripe_on_rounded_host`](Self::side_stripe_on_rounded_host)'s
+    /// text engine twin: whether a left or right stripe from this text sits on
+    /// a box known square, so the finding drops. Anything but a left or right
+    /// `side-tab` stripe is never known square.
+    pub fn side_stripe_known_square(&self, finding: &PatternFinding, sheet: &DeclaredCorners) -> bool {
+        let Some(side) = side_stripe_index(finding) else {
+            return false;
+        };
+        let pos = self.content_offset(finding.index.unwrap_or(0));
+        let selector = finding.selector.as_deref().unwrap_or("");
+        self.is_rule_known_square(pos, selector, side, sheet)
+    }
+
+    fn hosts_known_square(
+        &self,
+        hosts: Option<Vec<String>>,
+        side: usize,
+        sheet: &DeclaredCorners,
+    ) -> bool {
+        let Some(hosts) = hosts else {
+            return false;
+        };
+        let ids = self.tied_rules(&hosts);
+        // What the tied rules give the box, the cascade's `0` where they name
+        // no corner: a rounded or unknown corner keeps the finding.
+        let mut tied = DeclaredCorners::default();
+        // The same rules over corners that start unknown: a corner stays
+        // unknown unless a tied rule declares it.
+        let mut declared = DeclaredCorners::unknown();
+        for &id in &ids {
+            self.rules[id].apply_to(&mut tied);
+            self.rules[id].apply_to(&mut declared);
+        }
+        if tied.is_rounded_away_from_side(side) {
+            return false;
+        }
+        !declared.is_rounded_away_from_side(side) || !sheet.is_rounded_away_from_side(side)
+    }
+
+    /// A raw-text byte offset in the comment-blanked text.
+    fn content_offset(&self, raw_index: usize) -> usize {
+        if self.raw.len() == self.content.len() {
+            raw_index
+        } else {
+            advance_utf16(&self.content, 0, utf16_index(self.raw, raw_index))
+        }
+    }
+
+    /// A block's host selectors with pseudo-elements removed, and again with
+    /// every pseudo removed.
+    fn host_forms(&self, selectors: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in selectors {
+            for host in [
+                normalize_selector(&pseudo_host_selector(s)),
+                pseudo_stripped_selector(s),
+            ] {
+                if !host.is_empty() && !out.contains(&host) {
+                    out.push(host);
+                }
+            }
+        }
+        out
     }
 
     /// The host selectors of the rule whose selector starts at `pos`, a byte
@@ -1489,18 +1657,7 @@ impl<'a> CssHostIndex<'a> {
             Some(hosts) if !hosts.is_empty() => hosts,
             _ => &written,
         };
-        let mut out: Vec<String> = Vec::new();
-        for s in selectors {
-            for host in [
-                normalize_selector(&pseudo_host_selector(s)),
-                pseudo_stripped_selector(s),
-            ] {
-                if !host.is_empty() && !out.contains(&host) {
-                    out.push(host);
-                }
-            }
-        }
-        Some(out)
+        Some(self.host_forms(selectors))
     }
 
     /// Whether the rule whose selector starts at `pos` (a byte offset into the
@@ -1540,12 +1697,7 @@ impl<'a> CssHostIndex<'a> {
         let Some(side) = side_stripe_index(finding) else {
             return true;
         };
-        let raw_index = finding.index.unwrap_or(0);
-        let pos = if self.raw.len() == self.content.len() {
-            raw_index
-        } else {
-            advance_utf16(&self.content, 0, utf16_index(self.raw, raw_index))
-        };
+        let pos = self.content_offset(finding.index.unwrap_or(0));
         let selector = finding.selector.as_deref().unwrap_or("");
         self.is_rule_rounded_away_from_side(pos, selector, side)
     }

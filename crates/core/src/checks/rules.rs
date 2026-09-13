@@ -111,6 +111,18 @@ impl DeclaredCorners {
         };
     }
 
+    /// Every corner raised to at least `other`'s, an unknown corner staying
+    /// unknown: the largest radius any of several declarations can give each
+    /// corner. Nothing happens when `other` declared nothing.
+    pub fn raise_to(&mut self, other: &DeclaredCorners) {
+        if !other.declared {
+            return;
+        }
+        for i in 0..4 {
+            self.raise_corner(i, other.corners[i]);
+        }
+    }
+
     /// A box whose corners the reader cannot see: every corner unknown, so a
     /// side accent on it keeps its finding until a later literal radius
     /// replaces them.

@@ -1552,3 +1552,35 @@ retired square flag case, the reworded `6px` snippets, and findings that moved
 down by inserted fixture lines), nothing extra and nothing missing. The only
 text lines that differ from the branch are the summary counts, 453 to 500 here
 against 419 to 466 there (523 to 570 with advisories).
+
+## Recorded 2026-09-13: full-page screenshot fixtures
+
+`corpus/fix-fullpage-screenshot` adds four fixtures for the URL engine's
+evidence screenshot: `fullpage-screenshot.html` (a tall, wide document),
+`fullpage-screenshot-scroller.html` (the body scrolls instead of the document),
+`fullpage-screenshot-frame.html` (a fixed frame a smooth-scroll library moves)
+and `fullpage-screenshot-virtual.html` (rows rendered once scrolled to). Their
+URL behavior is pinned by `crates/browser/tests/fullpage_screenshot.rs`; the
+static engine runs no script and measures no boxes, so its output for them is
+ordinary.
+
+New goldens, recorded from the binary and read by hand:
+`detect-fixture-json-fullpage-screenshot-html`,
+`detect-fixture-text-fullpage-screenshot-html`,
+`detect-fixture-json-fullpage-screenshot-scroller-html`,
+`detect-fixture-text-fullpage-screenshot-scroller-html`,
+`detect-fixture-json-fullpage-screenshot-frame-html`,
+`detect-fixture-text-fullpage-screenshot-frame-html`,
+`detect-fixture-json-fullpage-screenshot-virtual-html` and
+`detect-fixture-text-fullpage-screenshot-virtual-html`. The tall, scroller and
+frame fixtures each report `low-contrast` on the faint foot copy,
+`overused-font` for Arial and `repeating-stripes-gradient` for the striped
+spacers; the virtual fixture reports `overused-font` only.
+
+Re-recorded sweeps, compared finding by finding against the previous goldens:
+`detect-dir-json-all-fixtures` (570 to 580), `detect-scope-type` (150 to 154),
+`detect-scope-both` (188 to 192), `detect-no-advisory-json` (500 to 507), and
+the text forms `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`
+and `detect-no-advisory-text`. Every added finding belongs to the four new
+fixtures and nothing was removed; in the text forms the only removed lines are
+the summary counts (500 to 507 anti-patterns, 70 to 73 advisory notes).

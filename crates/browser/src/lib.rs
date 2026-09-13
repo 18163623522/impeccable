@@ -28,6 +28,7 @@
 
 pub mod cdp;
 pub mod discovery;
+pub mod fullpage;
 pub mod screenshot_contrast;
 pub mod snapshot_engine;
 pub mod validity;
@@ -47,6 +48,7 @@ use impeccable_detect::profiler::{DetectorProfile, ProfileMeta};
 use serde_json::{json, Map, Value};
 
 use cdp::{Browser, CdpError, Page, Viewport};
+pub use fullpage::ElementShot;
 use validity::{DocumentResponse, PageProbe, PageValidity};
 
 /// puppeteer's default `page.goto` timeout the JS passes explicitly.
@@ -308,17 +310,26 @@ pub struct Evidence {
     pub screenshot: Option<Screenshot>,
     /// Why no screenshot was taken, when one was requested and failed.
     pub screenshot_error: Option<String>,
+    /// A viewport shot per flagged selector whose rect falls outside
+    /// [`Evidence::screenshot`] (past its cut or its right edge), taken with
+    /// the element scrolled into view. See [`fullpage`].
+    pub element_shots: Vec<ElementShot>,
 }
 
-/// A full-page screenshot taken after the scan.
+/// A full-page screenshot taken after the scan. Its pixels line up with
+/// [`Evidence::element_rects`].
 #[derive(Debug, Clone)]
 pub struct Screenshot {
     pub jpeg_base64: String,
-    /// CSS pixels (the scan uses a device scale factor of 1).
+    /// CSS pixels (the scan uses a device scale factor of 1). The document's
+    /// scroll width, at least the viewport's.
     pub width: f64,
     pub height: f64,
-    /// The document's height; larger than `height` when the capture was cut.
+    /// The page's height, with an inner page scroller unrolled; larger than
+    /// `height` when the capture was cut.
     pub document_height: f64,
+    /// How it was captured, one of [`fullpage::method`].
+    pub method: &'static str,
 }
 
 /// What [`detect_url_evidence`] should capture beyond the findings.
@@ -856,9 +867,10 @@ fn scan_page_inner(
     Ok(results)
 }
 
-/// Element rects and the screenshot, after every pass has run, so a live
-/// scan and an evidence scan drive the page identically up to here. Failures
-/// are recorded on the evidence, never raised: the findings stand without them.
+/// Element rects, the screenshot and the element shots, after every pass has
+/// run, so a live scan and an evidence scan drive the page identically up to
+/// here. Failures are recorded on the evidence, never raised: the findings
+/// stand without them.
 fn capture_post_scan(
     page: &mut Page<'_>,
     ev: &mut Evidence,
@@ -904,27 +916,16 @@ fn capture_post_scan(
     if !request.screenshot {
         return;
     }
-    let dims = page.evaluate_value(
-        "(() => ({ w: window.innerWidth, h: Math.max(document.documentElement ? document.documentElement.scrollHeight : 0, document.body ? document.body.scrollHeight : 0, window.innerHeight) }))()",
-    );
-    let dims = match dims {
-        Ok(d) => d,
-        Err(e) => {
-            ev.screenshot_error = Some(e.message);
-            return;
-        }
-    };
-    let width = dims.get("w").and_then(Value::as_f64).unwrap_or(1280.0).max(1.0);
-    let document_height = dims.get("h").and_then(Value::as_f64).unwrap_or(800.0).max(1.0);
-    let height = document_height.min(request.max_screenshot_height);
-    match page.screenshot_jpeg(0.0, 0.0, width, height, request.jpeg_quality) {
-        Ok(jpeg_base64) => {
-            ev.screenshot = Some(Screenshot {
-                jpeg_base64,
-                width,
-                height,
-                document_height,
-            })
+    match fullpage::capture_full_page(page, request.max_screenshot_height, request.jpeg_quality) {
+        Ok(shot) => {
+            ev.element_shots = fullpage::capture_element_shots(
+                page,
+                &ev.element_rects,
+                shot.width,
+                shot.height,
+                request.jpeg_quality,
+            );
+            ev.screenshot = Some(shot);
         }
         Err(e) => ev.screenshot_error = Some(e.message),
     }

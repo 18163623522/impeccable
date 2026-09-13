@@ -217,12 +217,22 @@ pub fn build_html_pattern_corpora(html: &str) -> HtmlPatternCorpora {
 
 // ─── checkHtmlPatterns ──────────────────────────────────────────────────────
 
-const PURPLE_HEX_ALT: &str = "7c3aed|8b5cf6|a855f7|9333ea|7e22ce|6d28d9|6366f1|764ba2|667eea";
+/// The stock violet hexes the page-level accent check keys on. Kept as a
+/// list rather than a regex fragment because a consumer that can render the
+/// page (the browser pass) asks whether one of them is actually painted
+/// before reporting it.
+pub const PURPLE_ACCENT_HEXES: [&str; 9] = [
+    "7c3aed", "8b5cf6", "a855f7", "9333ea", "7e22ce", "6d28d9", "6366f1", "764ba2", "667eea",
+];
 fn ci_alt(alts: &str) -> String {
     alts.split('|').map(ci).collect::<Vec<_>>().join("|")
 }
 static PURPLE_HEX_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(&format!(r"#(?:{}){B}", ci_alt(PURPLE_HEX_ALT))).expect("PURPLE_HEX_RE")
+    Regex::new(&format!(
+        r"#(?:{}){B}",
+        ci_alt(&PURPLE_ACCENT_HEXES.join("|"))
+    ))
+    .expect("PURPLE_HEX_RE")
 });
 static PURPLE_TEXT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(

@@ -716,64 +716,312 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     })
 }
 
+/// The two hue bands the rule is about: the stock violet-to-cyan ramp.
+const AI_PALETTE_VIOLET_BAND: (f64, f64) = (260.0, 310.0);
+const AI_PALETTE_CYAN_BAND: (f64, f64) = (160.0, 200.0);
+/// A stop painting under this much alpha is a tint over whatever sits behind
+/// it, not a palette decision (Tailwind's `/5` and `/10` fills, 0.13 washes).
+const AI_PALETTE_MIN_STOP_ALPHA: f64 = 0.15;
+/// Past this blur radius a gradient is atmosphere: no edge and no hue
+/// survives it as something a visitor reads as a color choice.
+const AI_PALETTE_MAX_BLUR_PX: f64 = 24.0;
+/// A gradient needs a surface. Hairline rails, 1x2px underline dots and
+/// zero-boxed nav chrome paint no palette however they are declared.
+const AI_PALETTE_MIN_GRADIENT_SIDE: f64 = 8.0;
+const AI_PALETTE_MIN_GRADIENT_AREA: f64 = 256.0;
+/// A shorter run of glyphs is a texture or a spacer, not neon type: one bit
+/// of binary rain, a non-breaking space holding two icons apart.
+const AI_PALETTE_MIN_TEXT_CHARS: usize = 2;
+
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// Elements that paint their own pixels over a parent's background.
+const OPAQUE_MEDIA_TAGS: [&str; 5] = ["img", "video", "canvas", "picture", "object"];
+
+/// `object-fit` values that fill the box. `contain` and `scale-down`
+/// letterbox, so the gradient underneath still shows.
+fn object_fit_covers(value: &str) -> bool {
+    let v = js::to_lower_case(js::trim(value));
+    v.is_empty() || v == "fill" || v == "cover"
+}
+
+/// The element whose `object-fit` decides a media child's coverage.
+/// `<picture>` is a wrapper: it renders through the `<img>` it holds and
+/// `object-fit` never applies to the wrapper, so reading the wrapper's
+/// computed `fill` would count a letterboxed image as full coverage. A
+/// `<picture>` holding no image paints nothing.
+fn media_fit_host(dom: &dyn Dom, el: ElId) -> Option<ElId> {
+    if tag_lower(dom, el) != "picture" {
+        return Some(el);
+    }
+    dom.children(el)
+        .into_iter()
+        .find(|&c| tag_lower(dom, c) == "img")
+}
+
+/// A media child hides what is behind it only while it is itself switched on
+/// and effectively opaque.
+fn media_child_paints(dom: &dyn Dom, el: ElId) -> bool {
+    if dom.style(el, "display") == "none" {
+        return false;
+    }
+    let visibility = js::to_lower_case(&dom.style(el, "visibility"));
+    if visibility == "hidden" || visibility == "collapse" {
+        return false;
+    }
+    own_opacity(dom, el) >= 0.95
+}
+
+/// The visibility model both halves of the rule use, and the page-level
+/// accent sweep with them. It climbs the ancestor chain for the switches
+/// that hide a subtree outright (`display: none`, `visibility: hidden` /
+/// `collapse`) and deliberately leaves out the inherited opacity product: a
+/// scroll-reveal wrapper sits at `opacity: 0` in a captured snapshot while
+/// its content is exactly what the visitor sees. Opacity is judged per
+/// element instead, against the color that element declares.
+pub fn ai_palette_is_visible(dom: &dyn Dom, el: ElId) -> bool {
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if dom.style(c, "display") == "none" {
+            return false;
+        }
+        let visibility = js::to_lower_case(&dom.style(c, "visibility"));
+        if visibility == "hidden" || visibility == "collapse" {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
+}
+
+/// The element's own `opacity`, defaulting to 1 when the style is absent.
+/// Deliberately not the inherited product: the rule scores what this element
+/// declares, and an ancestor's animation state is not that.
+fn own_opacity(dom: &dyn Dom, el: ElId) -> f64 {
+    let raw = dom.style(el, "opacity");
+    if raw.is_empty() {
+        return 1.0;
+    }
+    let v = parse_float(&raw);
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+fn ai_palette_band(hue: f64) -> Option<&'static str> {
+    if hue >= AI_PALETTE_VIOLET_BAND.0 && hue <= AI_PALETTE_VIOLET_BAND.1 {
+        Some("Purple/violet")
+    } else if hue >= AI_PALETTE_CYAN_BAND.0 && hue <= AI_PALETTE_CYAN_BAND.1 {
+        Some("Cyan")
+    } else {
+        None
+    }
+}
+
+re!(
+    BLUR_FN_RE,
+    format!(
+        "{blur}{ws}*\\({ws}*([0-9.]+)({px}|{rem}|{em})?{ws}*\\)",
+        blur = js::ci("blur"),
+        px = js::ci("px"),
+        rem = js::ci("rem"),
+        em = js::ci("em"),
+        ws = WS
+    )
+);
+
+/// The widest `blur()` radius in a filter-shaped value, in px.
+fn blur_radius_px(value: &str) -> f64 {
+    let mut widest = 0.0f64;
+    for m in BLUR_FN_RE.captures_iter(value) {
+        let n = parse_float(m.get(1).map(|g| g.as_str()).unwrap_or(""));
+        if !n.is_finite() {
+            continue;
+        }
+        let unit = js::to_lower_case(m.get(2).map(|g| g.as_str()).unwrap_or("px"));
+        let px = if unit == "rem" || unit == "em" {
+            n * 16.0
+        } else {
+            n
+        };
+        if px > widest {
+            widest = px;
+        }
+    }
+    widest
+}
+
+/// The blur that reaches this element's own paint: its `filter` plus every
+/// ancestor `filter`, because a blurred wrapper blurs the whole subtree it
+/// renders, which is how a glow blob is usually softened. `backdrop-filter`
+/// is deliberately not read here: it blurs what sits behind the element,
+/// and the element's own background is painted on top of that, sharp.
+fn ai_palette_blur_px(dom: &dyn Dom, el: ElId) -> f64 {
+    let mut widest = 0.0f64;
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        let px = blur_radius_px(&dom.style(c, "filter"));
+        if px > widest {
+            widest = px;
+        }
+        cur = dom.parent(c);
+    }
+    widest
+}
+
+/// True when a direct child paints over the whole box: the placeholder
+/// gradient behind a `position: absolute; inset: 0; object-fit: cover`
+/// image is never seen, so its stops are not the page's palette.
+fn gradient_occluded_by_media_child(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    for child in dom.children(el) {
+        if !OPAQUE_MEDIA_TAGS.contains(&tag_lower(dom, child).as_str()) {
+            continue;
+        }
+        let Some(fit_host) = media_fit_host(dom, child) else {
+            continue;
+        };
+        if !object_fit_covers(&dom.style(fit_host, "objectFit")) {
+            continue;
+        }
+        if !media_child_paints(dom, child) {
+            continue;
+        }
+        let Some(cr) = element_rect(dom, child) else {
+            continue;
+        };
+        let slack = 1.0;
+        if cr.left <= rect.left + slack
+            && cr.top <= rect.top + slack
+            && cr.right >= rect.right - slack
+            && cr.bottom >= rect.bottom - slack
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The gradient half of the rule: a surface whose ramp is mostly violet or
+/// cyan. Stops that paint nothing (too transparent, flat repeats of one
+/// color) and surfaces nobody sees (hairlines, heavy blur, covered by an
+/// image) never reach the hue test.
+fn ai_palette_gradient_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
+    let bg_image = dom.style(el, "backgroundImage");
+    let stops = parse_gradient_colors(Some(&bg_image));
+    if stops.len() < 2 {
+        return None;
+    }
+    // Stops that repeat one color exactly are a flat fill written as a
+    // gradient. Alpha is part of "one color": a same-hue fade to transparent
+    // is a real ramp, and it is how a glow blob is usually written.
+    let first = stops[0];
+    if stops.iter().all(|c| {
+        c.r == first.r
+            && c.g == first.g
+            && c.b == first.b
+            && c.alpha_or_one() == first.alpha_or_one()
+    }) {
+        return None;
+    }
+    let rect = element_rect(dom, el)?;
+    if rect.width.min(rect.height) < AI_PALETTE_MIN_GRADIENT_SIDE
+        || rect.width * rect.height < AI_PALETTE_MIN_GRADIENT_AREA
+    {
+        return None;
+    }
+    if ai_palette_blur_px(dom, el) >= AI_PALETTE_MAX_BLUR_PX {
+        return None;
+    }
+    if gradient_occluded_by_media_child(dom, el, &rect) {
+        return None;
+    }
+    let opacity = own_opacity(dom, el);
+    let mut painted = 0usize;
+    let mut in_band = 0usize;
+    let mut label: Option<&'static str> = None;
+    for c in &stops {
+        if c.alpha_or_one() * opacity < AI_PALETTE_MIN_STOP_ALPHA {
+            continue;
+        }
+        if !has_chroma(Some(c), Some(50.0)) {
+            continue;
+        }
+        painted += 1;
+        if let Some(band) = ai_palette_band(get_hue(Some(c))) {
+            in_band += 1;
+            if label.is_none() {
+                label = Some(band);
+            }
+        }
+    }
+    let label = label?;
+    // One stop grazing a band edge inside an otherwise warm or brand ramp is
+    // that ramp's accident, not a violet-to-cyan palette.
+    if in_band * 2 < painted {
+        return None;
+    }
+    Some(RuleHit::new(
+        "ai-color-palette",
+        format!("{label} gradient background"),
+    ))
+}
+
+/// The neon-text half: a run of glyphs the element paints itself, in band,
+/// on a dark surface. SVG geometry, icon wrappers and spacer characters
+/// inherit `color` without painting text, and one glyph is a texture.
+fn ai_palette_text_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
+    if dom.namespace_uri(el) == SVG_NS {
+        return None;
+    }
+    // The concatenated direct text, not the longest single node: a
+    // typewriter or split-text hero puts every glyph in its own text node
+    // and still paints the whole word.
+    let text = direct_text(dom, el);
+    if utf16_len(js::trim(&text)) < AI_PALETTE_MIN_TEXT_CHARS {
+        return None;
+    }
+    let tc = parse_rgb_or_any(&dom.style(el, "color"))?;
+    if tc.alpha_or_one() * own_opacity(dom, el) < AI_PALETTE_MIN_STOP_ALPHA {
+        return None;
+    }
+    if !has_chroma(Some(&tc), Some(80.0)) {
+        return None;
+    }
+    let label = ai_palette_band(get_hue(Some(&tc)))?;
+    let parent = dom.parent(el);
+    let parent_bg_info = match parent {
+        Some(p) => resolve_background_info(dom, p),
+        None => BackgroundInfo {
+            color: None,
+            unresolved: false,
+        },
+    };
+    let mut effective_bg = parent_bg_info.color;
+    if effective_bg.is_none() && !parent_bg_info.unresolved {
+        effective_bg = gradient_ancestor_average(dom, parent);
+    }
+    let bg = effective_bg?;
+    if relative_luminance(&bg) >= 0.1 {
+        return None;
+    }
+    Some(RuleHit::new(
+        "ai-color-palette",
+        format!("{label} neon text on dark background"),
+    ))
+}
+
 /// JS: checks.mjs#checkElementAIPaletteDOM(el)
 pub fn check_element_ai_palette_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+    // An element with no box paints nothing; see `ai_palette_is_visible` for
+    // why the chain above it is read for the display switches only.
+    if element_rect(dom, el).is_none() || !ai_palette_is_visible(dom, el) {
+        return Vec::new();
+    }
     let mut findings = Vec::new();
-    let bg_image = dom.style(el, "backgroundImage");
-    for c in parse_gradient_colors(Some(&bg_image)) {
-        if has_chroma(Some(&c), Some(50.0)) {
-            let hue = get_hue(Some(&c));
-            if hue >= 260.0 && hue <= 310.0 {
-                findings.push(RuleHit::new(
-                    "ai-color-palette",
-                    "Purple/violet gradient background".to_string(),
-                ));
-                break;
-            }
-            if hue >= 160.0 && hue <= 200.0 {
-                findings.push(RuleHit::new(
-                    "ai-color-palette",
-                    "Cyan gradient background".to_string(),
-                ));
-                break;
-            }
-        }
-    }
-    let text_color = parse_rgb_or_any(&dom.style(el, "color"));
-    if let Some(tc) = text_color {
-        if has_chroma(Some(&tc), Some(80.0)) {
-            let hue = get_hue(Some(&tc));
-            let is_ai_palette =
-                (hue >= 160.0 && hue <= 200.0) || (hue >= 260.0 && hue <= 310.0);
-            if is_ai_palette {
-                let parent = dom.parent(el);
-                let parent_bg_info = match parent {
-                    Some(p) => resolve_background_info(dom, p),
-                    None => BackgroundInfo {
-                        color: None,
-                        unresolved: false,
-                    },
-                };
-                let mut effective_bg = parent_bg_info.color;
-                if effective_bg.is_none() && !parent_bg_info.unresolved {
-                    effective_bg = gradient_ancestor_average(dom, parent);
-                }
-                if let Some(bg) = effective_bg {
-                    if relative_luminance(&bg) < 0.1 {
-                        let label = if hue >= 260.0 {
-                            "Purple/violet"
-                        } else {
-                            "Cyan"
-                        };
-                        findings.push(RuleHit::new(
-                            "ai-color-palette",
-                            format!("{label} neon text on dark background"),
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    findings.extend(ai_palette_gradient_hit(dom, el));
+    findings.extend(ai_palette_text_hit(dom, el));
     findings
 }
 
@@ -1528,6 +1776,8 @@ mod tests {
         assert_eq!(hits[0].snippet, "Colored box-shadow glow (#3b82f6) on dark background");
 
         let hero = d.add(Some(body), "section");
+        visible(&mut d, hero);
+        d.set_rect(hero, 0.0, 0.0, 800.0, 400.0);
         d.set_style(
             hero,
             "backgroundImage",
@@ -1537,6 +1787,314 @@ mod tests {
         let hits = check_element_ai_palette_dom(&d, hero);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+    }
+
+    /// A surface carrying `gradient`, sized and positioned so only the
+    /// gradient gates decide.
+    fn gradient_surface(d: &mut FakeDom, parent: ElId, gradient: &str) -> ElId {
+        let el = d.add(Some(parent), "div");
+        visible(d, el);
+        d.set_rect(el, 0.0, 0.0, 320.0, 180.0);
+        d.set_styles(
+            el,
+            &[("backgroundImage", gradient), ("color", "rgb(0, 0, 0)")],
+        );
+        el
+    }
+
+    #[test]
+    fn ai_palette_gradient_keeps_the_stock_ramps() {
+        let (mut d, body) = page();
+        // Cyan to indigo to violet on a CTA: two of three stops in band.
+        let cta = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(90deg, rgb(130, 255, 247) 0%, rgb(71, 81, 255) 49%, rgb(133, 38, 254) 100%)",
+        );
+        d.set_rect(cta, 0.0, 0.0, 186.0, 70.0);
+        let hits = check_element_ai_palette_dom(&d, cta);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Cyan gradient background");
+
+        // Orange to violet to teal full-bleed hero wash.
+        let hero = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(135deg, rgb(255, 87, 36) 0%, rgb(192, 88, 243) 50%, rgb(42, 157, 144) 100%)",
+        );
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 800.0);
+        let hits = check_element_ai_palette_dom(&d, hero);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+
+        // A violet glow blob: one chromatic stop, the other fully transparent.
+        let glow = gradient_surface(
+            &mut d,
+            body,
+            "radial-gradient(50% 50%, rgba(133, 38, 254, 0.82) 0%, rgba(171, 171, 171, 0) 100%)",
+        );
+        d.set_rect(glow, 0.0, 0.0, 158.0, 158.0);
+        let hits = check_element_ai_palette_dom(&d, glow);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+
+        // A 20% violet overlay still paints a visible lavender corner.
+        let overlay = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(to right top, rgba(192, 88, 243, 0.2), rgba(255, 255, 255, 0.6), rgba(255, 87, 36, 0.25))",
+        );
+        d.set_rect(overlay, 0.0, 0.0, 1280.0, 800.0);
+        let hits = check_element_ai_palette_dom(&d, overlay);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+    }
+
+    #[test]
+    fn ai_palette_gradient_skips_what_never_paints() {
+        let (mut d, body) = page();
+
+        // A 5% tint reads as flat near-white.
+        let tint = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(to right bottom, rgba(63, 176, 224, 0.05) 0%, rgba(42, 157, 144, 0.05) 100%)",
+        );
+        assert!(check_element_ai_palette_dom(&d, tint).is_empty());
+
+        // A 120px blur is atmosphere, not a palette.
+        let wash = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(90deg, rgb(130, 255, 247), rgb(255, 176, 5))",
+        );
+        d.set_style(wash, "filter", "blur(120px)");
+        assert!(check_element_ai_palette_dom(&d, wash).is_empty());
+
+        // A 1px timeline rail is not a surface.
+        let rail = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(90deg, rgba(63, 227, 223, 0.35), rgba(96, 165, 250, 0.14))",
+        );
+        d.set_rect(rail, 0.0, 0.0, 237.0, 1.0);
+        assert!(check_element_ai_palette_dom(&d, rail).is_empty());
+
+        // One magenta stop grazing the band inside a warm story ring.
+        let ring = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(rgb(213, 0, 194), rgb(255, 53, 60), rgb(255, 136, 0), rgb(255, 201, 0))",
+        );
+        d.set_rect(ring, 0.0, 0.0, 84.0, 84.0);
+        assert!(check_element_ai_palette_dom(&d, ring).is_empty());
+
+        // Two identical stops, alpha included, are a flat fill written as a
+        // gradient.
+        let flat = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(270deg, rgb(77, 20, 140) 0%, rgb(77, 20, 140) 100%)",
+        );
+        assert!(check_element_ai_palette_dom(&d, flat).is_empty());
+        d.set_style(
+            flat,
+            "backgroundImage",
+            "linear-gradient(270deg, rgba(77, 20, 140, 0.4) 0%, rgba(77, 20, 140, 0.4) 100%)",
+        );
+        assert!(check_element_ai_palette_dom(&d, flat).is_empty());
+
+        // display:none nav chrome with a zero box.
+        let hidden = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(90deg, rgb(0, 159, 219), rgb(130, 255, 247))",
+        );
+        d.set_style(hidden, "display", "none");
+        assert!(check_element_ai_palette_dom(&d, hidden).is_empty());
+
+        // A `visibility: hidden` ancestor hides the subtree for good.
+        let shell = d.add(Some(body), "div");
+        visible(&mut d, shell);
+        d.set_rect(shell, 0.0, 0.0, 320.0, 180.0);
+        d.set_style(shell, "visibility", "hidden");
+        let offscreen = gradient_surface(
+            &mut d,
+            shell,
+            "linear-gradient(90deg, rgb(0, 159, 219), rgb(130, 255, 247))",
+        );
+        assert!(check_element_ai_palette_dom(&d, offscreen).is_empty());
+    }
+
+    #[test]
+    fn ai_palette_gradient_reads_the_blur_of_the_whole_chain() {
+        let (mut d, body) = page();
+        // The blob idiom: the wrapper carries the blur, the child the ramp.
+        let wrapper = d.add(Some(body), "div");
+        visible(&mut d, wrapper);
+        d.set_rect(wrapper, 0.0, 0.0, 400.0, 400.0);
+        let blob = gradient_surface(
+            &mut d,
+            wrapper,
+            "radial-gradient(rgba(133, 38, 254, 0.82), rgba(133, 38, 254, 0) 100%)",
+        );
+        assert_eq!(check_element_ai_palette_dom(&d, blob).len(), 1);
+        d.set_style(wrapper, "filter", "blur(120px)");
+        assert!(check_element_ai_palette_dom(&d, blob).is_empty());
+
+        // `backdrop-filter` blurs what is behind the element; the element's
+        // own background is painted on top of it, sharp.
+        d.set_style(wrapper, "filter", "none");
+        d.set_style(blob, "backdropFilter", "blur(120px)");
+        assert_eq!(check_element_ai_palette_dom(&d, blob).len(), 1);
+    }
+
+    #[test]
+    fn ai_palette_gradient_keeps_a_same_color_alpha_fade() {
+        let (mut d, body) = page();
+        // The stock violet glow: one color fading out. Same r/g/b in every
+        // stop, so only the alpha tells it apart from a flat fill.
+        let glow = gradient_surface(
+            &mut d,
+            body,
+            "radial-gradient(circle, rgba(168, 85, 247, 0.8) 0%, rgba(168, 85, 247, 0) 100%)",
+        );
+        let hits = check_element_ai_palette_dom(&d, glow);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+    }
+
+    #[test]
+    fn ai_palette_keeps_what_a_scroll_reveal_wrapper_holds() {
+        let (mut d, body) = page();
+        // A captured snapshot freezes the reveal at opacity 0; the visitor
+        // sees the content the moment it scrolls in.
+        let reveal = d.add(Some(body), "div");
+        visible(&mut d, reveal);
+        d.set_rect(reveal, 0.0, 0.0, 320.0, 180.0);
+        d.set_style(reveal, "opacity", "0");
+        let hero = gradient_surface(
+            &mut d,
+            reveal,
+            "linear-gradient(90deg, rgb(168, 85, 247), rgb(130, 255, 247))",
+        );
+        assert_eq!(check_element_ai_palette_dom(&d, hero).len(), 1);
+    }
+
+    #[test]
+    fn ai_palette_gradient_skips_a_placeholder_under_its_image() {
+        let (mut d, body) = page();
+        let fill = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(150deg, rgb(168, 200, 232), rgb(167, 229, 211))",
+        );
+        d.set_rect(fill, 0.0, 0.0, 120.0, 213.0);
+        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+
+        let img = d.add(Some(fill), "img");
+        visible(&mut d, img);
+        d.set_rect(img, 0.0, 0.0, 120.0, 213.0);
+        d.set_style(img, "objectFit", "cover");
+        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+
+        // A contained image letterboxes, so the gradient still shows.
+        d.set_style(img, "objectFit", "contain");
+        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+
+        // A hidden image covers nothing.
+        d.set_style(img, "objectFit", "cover");
+        d.set_style(img, "visibility", "hidden");
+        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+        d.set_style(img, "visibility", "visible");
+        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+    }
+
+    #[test]
+    fn ai_palette_reads_object_fit_through_a_picture() {
+        let (mut d, body) = page();
+        let fill = gradient_surface(
+            &mut d,
+            body,
+            "linear-gradient(150deg, rgb(168, 85, 247), rgb(130, 255, 247))",
+        );
+        d.set_rect(fill, 0.0, 0.0, 120.0, 213.0);
+
+        // `object-fit` is the image's property, never the wrapper's, so a
+        // `<picture>` around a letterboxed image is not full coverage.
+        let picture = d.add(Some(fill), "picture");
+        visible(&mut d, picture);
+        d.set_rect(picture, 0.0, 0.0, 120.0, 213.0);
+        let inner = d.add(Some(picture), "img");
+        visible(&mut d, inner);
+        d.set_rect(inner, 0.0, 0.0, 120.0, 213.0);
+        d.set_style(inner, "objectFit", "contain");
+        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+
+        d.set_style(inner, "objectFit", "cover");
+        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+    }
+
+    /// A cyan run of text on a black page: only the element under test varies.
+    fn neon_text_host(d: &mut FakeDom, body: ElId, tag: &str, text: &str) -> ElId {
+        d.set_style(body, "backgroundColor", "rgb(0, 0, 0)");
+        let el = d.add(Some(body), tag);
+        visible(d, el);
+        d.set_rect(el, 0.0, 0.0, 120.0, 30.0);
+        d.set_styles(
+            el,
+            &[
+                ("color", "rgb(130, 255, 247)"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+            ],
+        );
+        if !text.is_empty() {
+            d.add_text(el, text);
+        }
+        el
+    }
+
+    #[test]
+    fn ai_palette_neon_text_needs_painted_glyphs() {
+        let (mut d, body) = page();
+        let heading = neon_text_host(&mut d, body, "h3", "Download");
+        let hits = check_element_ai_palette_dom(&d, heading);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Cyan neon text on dark background");
+
+        // An icon wrapper carries the color but paints no text.
+        let wrapper = neon_text_host(&mut d, body, "div", "");
+        assert!(check_element_ai_palette_dom(&d, wrapper).is_empty());
+
+        // SVG geometry inherits currentColor from the icon above it. Each
+        // host is given real text so the namespace is the only thing that
+        // can stop it: an <svg> reports once per shape otherwise.
+        for tag in ["svg", "path", "circle", "line", "g"] {
+            let shape = neon_text_host(&mut d, body, tag, "Download");
+            assert!(
+                check_element_ai_palette_dom(&d, shape).is_empty(),
+                "<{tag}> reported"
+            );
+        }
+
+        // A single glyph in a binary-rain texture is not neon text.
+        let bit = neon_text_host(&mut d, body, "span", "1");
+        d.set_rect(bit, 0.0, 0.0, 6.6, 11.0);
+        assert!(check_element_ai_palette_dom(&d, bit).is_empty());
+
+        // A whitespace-only span paints nothing either.
+        let spacer = neon_text_host(&mut d, body, "span", " ");
+        assert!(check_element_ai_palette_dom(&d, spacer).is_empty());
+
+        // A typewriter hero splits the word into one text node per glyph and
+        // paints every one of them.
+        let typed = neon_text_host(&mut d, body, "span", "");
+        for glyph in ["I", "m", "a", "g", "e"] {
+            d.add_text(typed, glyph);
+        }
+        let hits = check_element_ai_palette_dom(&d, typed);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "Cyan neon text on dark background");
     }
 
     #[test]

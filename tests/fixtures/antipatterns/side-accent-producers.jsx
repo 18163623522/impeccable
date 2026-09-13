@@ -26,3 +26,12 @@ export function PassTailwindSquaredOff() {
 export function PassStyleObjectSquare() {
   return <div style={{ borderLeft: '6px solid #0f766e', padding: 16 }}>Style object on a square box</div>;
 }
+
+// A style-object accent inside a media query key reads the object around it.
+export function FlagObjectMediaRounded() {
+  return <Box sx={{ borderRadius: '12px', '@media (min-width: 600px)': { borderLeft: '10px solid #0f766e' } }}>Rounded card</Box>;
+}
+
+export function PassObjectMediaSquare() {
+  return <Box sx={{ borderRadius: 0, '@media (min-width: 600px)': { borderLeft: '11px solid #0f766e' } }}>Square box</Box>;
+}

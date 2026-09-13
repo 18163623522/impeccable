@@ -1035,6 +1035,95 @@ pub fn side_tab_known_square_in_sheet<'s>(
         .is_declaration_known_square(source.offset(i, m.index), side, sheet)
 }
 
+re!(MARKUP_TAG_NAME_RE, r"^<([A-Za-z][-\w.:]*)".to_string());
+re!(CSS_PROP_ATTR_RE, r"(?:^|\s)css\s*=".to_string());
+
+/// The literal class names a markup tag carries, or `None` when a class
+/// attribute is an expression or a bound class the reader cannot spell out.
+fn literal_tag_classes(tag: &str) -> Option<Vec<String>> {
+    let mut classes = Vec::new();
+    for c in CLASS_ATTR_RE.captures_iter(tag) {
+        let name = &c[1];
+        let value = c.get(2).unwrap();
+        let text = if value.as_str() == "{" {
+            balanced_braces(tag, value.start()).and_then(literal_class_text)
+        } else if matches!(name, "class" | "className" | "tw") {
+            let quoted = value.as_str();
+            let inner = &quoted[1..quoted.len() - 1];
+            (!inner.contains('{')).then(|| inner.to_string())
+        } else {
+            None
+        };
+        classes.extend(text?.split_whitespace().map(str::to_string));
+    }
+    Some(classes)
+}
+
+/// The stripe side of a `side-tab` match: `3` for left or start, else `1`.
+fn side_tab_side(whole: &str) -> usize {
+    if let Some(c) = TW_SIDE_TAB_WHOLE_RE.captures(whole) {
+        return if matches!(&c[1], "l" | "s") { 3 } else { 1 };
+    }
+    let lower = js::to_lower_case(whole);
+    if lower.contains("left") || lower.contains("start") {
+        3
+    } else {
+        1
+    }
+}
+
+/// The second half of the gate for a markup accent (a utility class, a
+/// `style` attribute, a style object or a JSX prop inside a tag on the line)
+/// that [`side_tab_rounded_in_scope`] read as square: whether the element is
+/// known square given the file's `<style>` blocks and CSS-in-JS rules, which
+/// can round a class the tag carries. A file whose style text declares no
+/// radius leaves the tag's own reading as it was; otherwise
+/// [`CssHostIndex::is_element_known_square`] answers, over an index built on
+/// `index_text` (that style text). A tag with a `css` prop, or whose classes
+/// the reader cannot spell out, is never known square. A match that sits in
+/// no tag on the line (a template declaration, a standalone object) is not
+/// markup and is left as read.
+pub fn side_tab_markup_known_square<'s>(
+    m: &MatchCtx,
+    source: &SourceText,
+    i: usize,
+    index: &once_cell::unsync::OnceCell<CssHostIndex<'s>>,
+    index_text: &'s str,
+    sheet: &DeclaredCorners,
+) -> bool {
+    if !sheet.declared() {
+        return true;
+    }
+    let Some(tag) = complete_markup_tag(source.line(i), m.index) else {
+        return true;
+    };
+    if CSS_PROP_ATTR_RE.is_match(tag) {
+        return false;
+    }
+    let Some(classes) = literal_tag_classes(tag) else {
+        return false;
+    };
+    let name = MARKUP_TAG_NAME_RE
+        .captures(tag)
+        .map_or(String::new(), |c| c[1].to_string());
+    let component = name.starts_with(|c: char| c.is_ascii_uppercase()) || name.contains('.');
+    let tag_type = (!component && !name.is_empty()).then(|| name.to_ascii_lowercase());
+    // A styled component the file defines takes its template's own
+    // declarations.
+    let styled_root = component
+        && Regex::new(&format!(r"\b{}\s*=\s*styled\b", regex::escape(&name)))
+            .map_or(true, |re| re.is_match(source.text()));
+    index
+        .get_or_init(|| CssHostIndex::new(index_text))
+        .is_element_known_square(
+            tag_type.as_deref(),
+            styled_root,
+            &classes,
+            side_tab_side(m.whole()),
+            sheet,
+        )
+}
+
 /// The indentation-syntax Sass reading of [`CssHostIndex::sheet_corners`]:
 /// every radius declaration in the text, corner by corner at its largest.
 /// A mixin call, `@extend`, `@apply` or a bare interpolation standing where a

@@ -18,7 +18,8 @@ use crate::design_system::{check_source_design_system, DesignSystem};
 use crate::profiler::{profile_findings, profile_step, DetectorProfile, ProfileMeta};
 use crate::regex_matchers::{
     analyzer_rule_id, is_neutral_authored_color, sass_sheet_corners,
-    side_tab_known_square_in_sheet, side_tab_rounded_in_scope, MatchCtx, SourceText,
+    side_tab_known_square_in_sheet, side_tab_markup_known_square, side_tab_rounded_in_scope,
+    MatchCtx, SourceText,
     REGEX_ANALYZERS, REGEX_MATCHERS, TEXT_CONTENT_ANALYZER_IDS,
 };
 use crate::util::{line_of_offset, re, ANY, B, D, W, WS, WS_CHARS};
@@ -1069,6 +1070,7 @@ pub struct FileSheet<'a> {
     ext: String,
     corners: once_cell::unsync::OnceCell<DeclaredCorners>,
     style_text: once_cell::unsync::OnceCell<Option<(String, Vec<(usize, usize)>)>>,
+    style_sources: once_cell::unsync::OnceCell<String>,
 }
 
 impl<'a> FileSheet<'a> {
@@ -1081,7 +1083,29 @@ impl<'a> FileSheet<'a> {
             ext: js::to_lower_case(ext),
             corners: once_cell::unsync::OnceCell::new(),
             style_text: once_cell::unsync::OnceCell::new(),
+            style_sources: once_cell::unsync::OnceCell::new(),
         }
+    }
+
+    /// A component or script file's `<style>` blocks and CSS-in-JS templates
+    /// joined into one text: what a markup accent's classes are read against.
+    pub fn style_sources(&self) -> &str {
+        self.style_sources.get_or_init(|| {
+            let mut text = String::new();
+            for block in extract_style_blocks(self.content, &self.ext) {
+                text.push_str(&blank_css_line_comments(&strip_css_comments(&block.content)));
+                text.push('\n');
+            }
+            for block in extract_css_in_js(self.source, &self.ext) {
+                text.push_str(&strip_css_comments(&block.content));
+                text.push('\n');
+            }
+            for global in global_style_templates(self.source, &self.ext) {
+                text.push_str(&global);
+                text.push('\n');
+            }
+            text
+        })
     }
 
     /// For a component file (`.astro`, `.vue`, `.svelte`), the source with
@@ -1141,6 +1165,9 @@ impl<'a> FileSheet<'a> {
             }
             for block in extract_css_in_js(self.source, ext) {
                 let text = strip_css_comments(&block.content);
+                sheet.raise_to(&CssHostIndex::new(&text).sheet_corners());
+            }
+            for text in global_style_templates(self.source, ext) {
                 sheet.raise_to(&CssHostIndex::new(&text).sheet_corners());
             }
             sheet
@@ -1377,6 +1404,35 @@ fn find_css_in_js_templates(content: &str) -> Vec<Template> {
     templates
 }
 
+re!(
+    GLOBAL_STYLE_TEMPLATE_RE,
+    r"\b(?:createGlobalStyle|injectGlobal)\s*`|<style\b[^>]*>\s*\{\s*`".to_string()
+);
+
+/// The global style templates a script file carries that [`extract_css_in_js`]
+/// does not read: `createGlobalStyle` and `injectGlobal` templates, and a
+/// styled-jsx `<style>{`...`}` block. They can round a class a markup tag
+/// carries, so the side accent gate reads them with the file's other style
+/// text; no other rule scans them.
+fn global_style_templates(source: &str, ext: &str) -> Vec<String> {
+    if !CSS_IN_JS_EXTENSIONS.contains(&js::to_lower_case(ext).as_str())
+        || !GLOBAL_STYLE_TEMPLATE_RE.is_match(source)
+    {
+        return vec![];
+    }
+    let chars: Vec<char> = source.chars().collect();
+    GLOBAL_STYLE_TEMPLATE_RE
+        .find_iter(source)
+        .filter_map(|m| {
+            let tick = source[..m.end()].chars().count() - 1;
+            let end = find_template_literal_end(&chars, tick)?;
+            Some(strip_css_comments(
+                &chars[tick + 1..end].iter().collect::<String>(),
+            ))
+        })
+        .collect()
+}
+
 /// JS: detect-text.mjs#extractCSSinJS
 pub fn extract_css_in_js(content: &str, ext: &str) -> Vec<Block> {
     let ext = js::to_lower_case(ext);
@@ -1432,6 +1488,7 @@ pub fn run_regex_matchers(
     // and the stylesheet index over it, built on the first accent it gates.
     let source = once_cell::unsync::OnceCell::new();
     let index = once_cell::unsync::OnceCell::new();
+    let markup_index = once_cell::unsync::OnceCell::new();
     for matcher in REGEX_MATCHERS.iter() {
         let run = || {
             let mut matches = Vec::new();
@@ -1467,8 +1524,8 @@ pub fn run_regex_matchers(
                                                 .then_some(text.as_str())
                                         })
                                     };
-                                    index_text.is_some_and(|text| {
-                                        !side_tab_known_square_in_sheet(
+                                    match index_text {
+                                        Some(text) => !side_tab_known_square_in_sheet(
                                             &m,
                                             source,
                                             i,
@@ -1476,8 +1533,18 @@ pub fn run_regex_matchers(
                                             &index,
                                             text,
                                             &sheet.corners(),
-                                        )
-                                    })
+                                        ),
+                                        // Markup: the tag's classes against the
+                                        // file's style blocks and CSS-in-JS rules.
+                                        None => !side_tab_markup_known_square(
+                                            &m,
+                                            source,
+                                            i,
+                                            &markup_index,
+                                            sheet.style_sources(),
+                                            &sheet.corners(),
+                                        ),
+                                    }
                                 })
                         })
                     {
@@ -1875,6 +1942,59 @@ export const Card = styled.div`\n  position: relative;\n  border-radius: 12px;\n
                 "border-left: 6px solid #6366f1".to_string(),
             ]
         );
+    }
+
+    /// A markup accent in a file whose style blocks or CSS-in-JS rules
+    /// declare a radius reads them for the classes its tag carries; a file
+    /// with no radius in its style text leaves the tag as read.
+    #[test]
+    fn markup_accents_read_the_file_style_text() {
+        let side_tabs = |src: &str, path: &str| -> Vec<String> {
+            let mut out: Vec<String> = detect_text(src, path, &TextOptions::default())
+                .into_iter()
+                .filter(|f| f.antipattern == "side-tab")
+                .map(|f| f.snippet)
+                .collect();
+            out.sort();
+            out
+        };
+        let tag = "<div class=\"card border-l-4 border-teal-700 p-4\">x</div>";
+        let vue = |css: &str| format!("<template>\n  {tag}\n</template>\n<style scoped>\n{css}\n</style>\n");
+        let flag = vec!["border-l-4".to_string()];
+        let none = Vec::<String>::new();
+        // The class the tag carries is rounded, in a compound or descendant
+        // rule, or behind a value the reader cannot resolve.
+        assert_eq!(side_tabs(&vue(".card { border-radius: 12px; }"), "/x/a.vue"), flag);
+        assert_eq!(side_tabs(&vue(".list .card { border-radius: 12px; }"), "/x/a.vue"), flag);
+        assert_eq!(side_tabs(&vue(".card { border-radius: var(--r); }"), "/x/a.vue"), flag);
+        assert_eq!(side_tabs(&vue(".card { @apply rounded-lg; }"), "/x/a.vue"), flag);
+        // A radius no rule for this tag declares, but unknown: fail safe.
+        assert_eq!(side_tabs(&vue(".other { border-radius: var(--r); }"), "/x/a.vue"), flag);
+        // Known square: the tag's own class squares it, or every radius is
+        // literal and names another class, a pseudo-element or another type.
+        assert_eq!(side_tabs(&vue(".card { border-radius: 0; }"), "/x/a.vue"), none);
+        assert_eq!(side_tabs(&vue(".other { border-radius: 12px; }\n.card::before { border-radius: 12px; }\nspan { border-radius: 12px; }"), "/x/a.vue"), none);
+        let svelte = format!("{tag}\n<style>\n.card {{ border-radius: 12px; }}\n</style>\n");
+        assert_eq!(side_tabs(&svelte, "/x/a.svelte"), flag);
+        // No radius in the style text: the tag's own reading, as before.
+        assert_eq!(side_tabs(&vue(".card { padding: 8px; }"), "/x/a.vue"), none);
+        assert_eq!(side_tabs(&format!("export const A = () => {tag};\n").replace("class=", "className="), "/x/a.tsx"), none);
+        // Radius utilities on the tag still round it.
+        assert_eq!(side_tabs(&vue(".card { border-radius: 0; }").replace("p-4", "rounded-lg p-4"), "/x/a.vue"), flag);
+        // CSS-in-JS: a global rule for the class, and a styled component's own
+        // template, which styles only that component.
+        let tsx = "import styled, { createGlobalStyle } from 'styled-components';\n\
+const Global = createGlobalStyle`\n  .card { border-radius: 12px; }\n`;\n\
+export const A = () => <div className=\"card border-l-4 p-4\">x</div>;\n";
+        assert_eq!(side_tabs(tsx, "/x/global.tsx"), flag);
+        let jsx = "export const A = () => (\n  <>\n    <div className=\"card border-l-4 p-4\">x</div>\n    <style jsx>{`\n      .card { border-radius: 12px; }\n    `}</style>\n  </>\n);\n";
+        assert_eq!(side_tabs(jsx, "/x/styled-jsx.jsx"), flag);
+        assert_eq!(side_tabs(&jsx.replace("12px", "0"), "/x/styled-jsx.jsx"), none);
+        let styled = "import styled from 'styled-components';\n\
+const Card = styled.div`\n  border-radius: 12px;\n`;\n\
+export const A = () => <Card className=\"border-l-4 p-4\">x</Card>;\n\
+export const B = () => <div className=\"border-r-4 p-4\">x</div>;\n";
+        assert_eq!(side_tabs(styled, "/x/styled.tsx"), flag);
     }
 
     /// A border accent reads the stylesheet the way the pseudo-element and

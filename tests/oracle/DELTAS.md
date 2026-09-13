@@ -265,9 +265,27 @@ Everything else reports as it did before the gate: a tied rule that rounds the
 card or leaves its radius unknown, and a file that declares a radius on some
 selector the index cannot tie to the accent's rule. Indented Sass has no index;
 its accent reads (a) from its indentation scope and (b) from the file. The
-markup readers (utility classes, `style` attributes, style objects, JSX props)
-read their own tag as described above. The static and browser engines read the
-cascade.
+static and browser engines read the cascade.
+
+A markup accent (a utility class, a `style` attribute, a style object or a JSX
+prop inside a tag) reads its own tag as described above, and in a file with no
+radius in its style text (its `<style>` blocks, CSS-in-JS templates,
+`createGlobalStyle` / `injectGlobal` templates and styled-jsx blocks) that is
+the whole answer, so a plain Tailwind file answers as before. When the file's
+style text does declare a radius, a tag that reads square is also checked
+against it, through the same host index:
+
+- every radius rule whose subject could match the tag (each class it names is
+  on the tag, its type is the tag's, it paints no pseudo-element; a template's
+  own `&` declarations only for a styled component the file defines) must leave
+  the corners away from the stripe square, and one that rounds them or leaves
+  them unknown (`var()`, a mixin, an interpolation) keeps the finding;
+- past that, the tag is known square when a rule tied to its own classes
+  declares both corners square, or when every radius in the style text is
+  literal. A tag with a `css` prop, or whose classes are an expression, keeps
+  the finding.
+
+`rounded-*` utilities on the tag still round it.
 
 The static border snippet now prints the radius in px, the way the browser's
 computed style does: `border-radius: 0.375rem` reports `6px` where it used to
@@ -324,3 +342,15 @@ fixture of its own.
 - `detect-fixture-json-side-accent-flat-vue`, `detect-fixture-text-side-accent-flat-vue`: new fixture, a Vue `<style scoped>` block with a compound accent on a rounded card (`border-left: 4px`, line 16) and a radius on another class (`border-right: 5px`), both reported, and a card squared off in its own rule, silent. The whole-file pass gates a declaration inside a `<style>` block the way the block pass does, so the finding keeps the line the whole-file pass reports, as on base.
 - `detect-fixture-json-framework-next-modules`, `detect-fixture-text-framework-next-modules`, `detect-framework-next-modules-text`: `Sidebar.module.css` declares `border-radius: 8px` on `.navItem`, a selector the index cannot tie to `.sidebar`, so the sidebar's `border-right: 3px solid #4f46e5` reports again, as on base (5 to 6 findings).
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 451 to 462 findings (468 to 479 with advisories).
+
+Recorded 2026-09-13, the markup revision (the markup accent rule above). Base
+reported a utility accent on a tag whose class the file's own style text rounds
+(`<div class="card border-l-4">` with a scoped `.card { border-radius: 12px }`
+in Vue, Svelte or Astro, a `createGlobalStyle` or styled-jsx `.card` rule, a
+styled component whose template rounds it), and the gate had silenced it
+because the markup reader saw only the tag.
+
+- `detect-fixture-json-side-accent-markup-vue`, `detect-fixture-text-side-accent-markup-vue`, `detect-fixture-json-side-accent-markup-svelte`, `detect-fixture-text-side-accent-markup-svelte`: new fixtures, a scoped `.card { border-radius: 12px }` next to `<div class="card border-l-4 border-teal-700 p-4">`; one finding each.
+- `detect-fixture-json-side-accent-markup-square-vue`, `detect-fixture-text-side-accent-markup-square-vue`, `detect-fixture-json-side-accent-markup-square-svelte`, `detect-fixture-text-side-accent-markup-square-svelte`: new fixtures, the same markup with a scoped `.card { border-radius: 0 }`; no findings.
+- `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`, `detect-fixture-json-side-accent-producers-jsx`, `detect-fixture-text-side-accent-producers-jsx`: the two `sx` media-key cases moved from `side-accent-nested.tsx` to `side-accent-producers.jsx`. In the templates file their `<Box>` has no class the index can tie, and the file's style text holds unknown radii (an interpolated radius, a bare `${cardShape}`), so the square twin would now report. The style-object reading they pin needs a file without style text. `side-accent-nested.tsx` 5 to 4 findings, `side-accent-producers.jsx` 3 to 4 (`borderLeft: '10px solid`, line 32); the square twin stays silent.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 462 to 464 findings (479 to 481 with advisories).

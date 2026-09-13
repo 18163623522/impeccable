@@ -1581,6 +1581,63 @@ impl<'a> CssHostIndex<'a> {
         self.is_rule_known_square(pos, selector, side, sheet)
     }
 
+    /// The markup reading: whether an element a markup side accent sits on
+    /// (a utility class, a `style` attribute, a style object, a JSX prop) is
+    /// known square away from `side`, against the style blocks and CSS-in-JS
+    /// rules of its file this index was built on. `tag` is the element's type
+    /// (`None` for a component), `styled_root` whether the tag is a styled
+    /// component the file defines, so a template's own declarations can style
+    /// it, and `classes` its literal class names. `sheet` is
+    /// [`sheet_corners`](Self::sheet_corners) over the same style text.
+    ///
+    /// A file whose style text declares no radius leaves the element to its
+    /// own tag. Otherwise every radius rule whose subject could match the
+    /// element (each class it names is on the tag, its type is the tag's, it
+    /// is not a pseudo-element) must leave the corners away from the stripe
+    /// square, an unknown radius counting as round. Past that, the element is
+    /// known square when a rule tied to its own classes declares both corners
+    /// square, or when every radius in the style text is literal.
+    pub fn is_element_known_square(
+        &self,
+        tag: Option<&str>,
+        styled_root: bool,
+        classes: &[String],
+        side: usize,
+        sheet: &DeclaredCorners,
+    ) -> bool {
+        if !sheet.declared() {
+            return true;
+        }
+        let mut applicable: Vec<usize> = self
+            .exact
+            .iter()
+            .filter(|(selector, _)| selector_could_apply(selector, tag, styled_root, classes))
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+        applicable.sort_unstable();
+        applicable.dedup();
+        for id in applicable {
+            let mut corners = DeclaredCorners::default();
+            self.rules[id].apply_to(&mut corners);
+            if corners.is_rounded_away_from_side(side) {
+                return false;
+            }
+        }
+        let mut host = tag.unwrap_or("").to_string();
+        for class in classes.iter().filter(|c| is_plain_class_name(c)) {
+            host.push('.');
+            host.push_str(class);
+        }
+        let tied_square = !host.is_empty() && {
+            let mut declared = DeclaredCorners::unknown();
+            for id in self.tied_rules(&[host]) {
+                self.rules[id].apply_to(&mut declared);
+            }
+            !declared.is_rounded_away_from_side(side)
+        };
+        tied_square || sheet.to_corners().is_some()
+    }
+
     fn hosts_known_square(
         &self,
         hosts: Option<Vec<String>>,
@@ -1701,6 +1758,57 @@ impl<'a> CssHostIndex<'a> {
         let selector = finding.selector.as_deref().unwrap_or("");
         self.is_rule_rounded_away_from_side(pos, selector, side)
     }
+}
+
+/// Whether a class name can be written as a plain `.name` selector.
+fn is_plain_class_name(class: &str) -> bool {
+    !class.is_empty()
+        && !class.starts_with(|c: char| c.is_ascii_digit())
+        && class
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Whether a rule's selector could style a markup element: every class its
+/// subject names is on the element, its type is the element's (a component
+/// has no known type), and it paints no pseudo-element. A subject written
+/// with `&` (a CSS-in-JS template's own declarations) styles only a styled
+/// component, and an interpolated selector could match anything.
+fn selector_could_apply(
+    selector: &str,
+    tag: Option<&str>,
+    styled_root: bool,
+    classes: &[String],
+) -> bool {
+    if has_interpolation(selector) {
+        return true;
+    }
+    let subject = last_compound(selector);
+    if subject.contains('&') {
+        return styled_root;
+    }
+    for token in compound_tokens(subject) {
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("::")
+            || matches!(
+                lower.as_str(),
+                ":before" | ":after" | ":first-line" | ":first-letter"
+            )
+        {
+            return false;
+        }
+        if let Some(class) = token.strip_prefix('.') {
+            let class = class.replace('\\', "");
+            if !classes.iter().any(|c| *c == class) {
+                return false;
+            }
+        } else if token.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            if tag.is_some_and(|t| !t.eq_ignore_ascii_case(&token)) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// The corner radii a stylesheet declares for `host_selector` (a selector

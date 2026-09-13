@@ -90,12 +90,3 @@ export const PassTemplateLiteralSquare = styled.div`
     background: #0f766e;
   }
 `;
-
-// A style-object accent inside a media query key.
-export function FlagObjectMediaRounded() {
-  return <Box sx={{ borderRadius: '12px', '@media (min-width: 600px)': { borderLeft: '10px solid #0f766e' } }}>Rounded card</Box>;
-}
-
-export function PassObjectMediaSquare() {
-  return <Box sx={{ borderRadius: 0, '@media (min-width: 600px)': { borderLeft: '11px solid #0f766e' } }}>Square box</Box>;
-}

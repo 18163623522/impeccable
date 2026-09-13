@@ -72,17 +72,29 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         .collect();
 
     for heading in [
-        "Flag Crowded One",
-        "Flag Crowded Two",
-        "Flag Crowded Three",
-        "Flag Wrapped Section Title",
+        "\"Flag Crowded One\"",
+        "\"Flag Crowded Two\"",
+        "\"Flag Crowded Three\"",
+        "\"Flag Wrapped Section Title\"",
+        // The wrapper spacing column: the title's wrapper, a stretched row, a
+        // grid column or a spacer holds the gap, and it is still measured.
+        "\"Flag Header Padding\" has 16px above vs 48px below",
+        "\"Flag Block Padding\" has 16px above vs 48px below",
+        "\"Flag Small Padding\" has 16px above vs 48px below",
+        "\"Flag Icon Beside Heading\" has 22px above vs 54px below",
+        "\"Flag Tall Button Row\" has 26px above vs 58px below",
+        "\"Flag Column Heading\" has 12px above vs 48px below",
+        "\"Flag Spacer Below\" has 10px above vs 48px below",
+        "\"Flag Stack Heading\" has 16px above vs 48px below",
+        // A date line set like body copy is not folded in as a label.
+        "\"Flag Plain Line Above\" has 10px above vs 48px below",
     ] {
         assert!(
-            snippets.iter().any(|s| s.contains(&format!("\"{heading}\""))),
+            snippets.iter().any(|s| s.contains(heading)),
             "expected {heading:?} to flag, got {snippets:?}"
         );
     }
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
-    assert_eq!(snippets.len(), 4, "{snippets:?}");
+    assert_eq!(snippets.len(), 13, "{snippets:?}");
 }

@@ -492,29 +492,207 @@ fn rhythm_lowest_content(dom: &dyn Dom, el: ElId) -> f64 {
     dom.rect(cur).bottom
 }
 
+const RHYTHM_HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+
+fn rhythm_font_size(dom: &dyn Dom, el: ElId) -> f64 {
+    let n = parse_float(&dom.style(el, "fontSize"));
+    if num_truthy(n) {
+        n
+    } else {
+        16.0
+    }
+}
+
+/// `el` and its descendants in document order, at most `limit` of them.
+fn rhythm_subtree(dom: &dyn Dom, el: ElId, limit: usize) -> Vec<ElId> {
+    let mut out = Vec::new();
+    let mut stack = vec![el];
+    while let Some(c) = stack.pop() {
+        if out.len() >= limit {
+            break;
+        }
+        out.push(c);
+        let mut kids = dom.children(c);
+        kids.reverse();
+        stack.extend(kids);
+    }
+    out
+}
+
+fn rhythm_has_words(dom: &dyn Dom, el: ElId) -> bool {
+    dom.direct_text_nodes(el).iter().any(|t| !js::trim(t).is_empty())
+}
+
+/// The size of the text a block sets: that of the first element in it that
+/// holds words, or the block's own size when none does.
+fn rhythm_text_size(dom: &dyn Dom, el: ElId) -> f64 {
+    let first = rhythm_subtree(dom, el, 60)
+        .into_iter()
+        .find(|&e| rhythm_has_words(dom, e))
+        .unwrap_or(el);
+    rhythm_font_size(dom, first)
+}
+
+/// A short line above a heading that reads as the heading's label: set
+/// smaller than the body text (`text_size`), in capitals, tracked out, or
+/// as a chip that paints its own small box. A line set like the body copy is
+/// content of its own (a date, a byline, a closing sentence), not a label.
+fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: f64) -> bool {
+    let heading_size = rhythm_font_size(dom, heading);
+    let span = math_max(dom.rect(heading).width, dom.rect(line).width);
+    for e in rhythm_subtree(dom, line, 40) {
+        let er = dom.rect(e);
+        if rhythm_paints_edge(dom, e, "Bottom")
+            && er.width >= 1.0
+            && er.width < span * 0.6
+            && !js::trim(&dom.text_content(e)).is_empty()
+        {
+            return true;
+        }
+        if !rhythm_has_words(dom, e) {
+            continue;
+        }
+        let size = rhythm_font_size(dom, e);
+        if size > heading_size {
+            continue;
+        }
+        if size < text_size * 0.92 || dom.style(e, "textTransform") == "uppercase" {
+            return true;
+        }
+        let tracking = parse_float(&dom.style(e, "letterSpacing"));
+        if tracking.is_finite() && tracking >= 0.5 {
+            return true;
+        }
+        let text = dom.direct_text_nodes(e).concat();
+        let cased: Vec<char> = text
+            .chars()
+            .filter(|c| c.is_uppercase() || c.is_lowercase())
+            .collect();
+        if cased.len() >= 3 && cased.iter().all(|c| c.is_uppercase()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn rhythm_painted_background(dom: &dyn Dom, el: ElId) -> Option<crate::color::Rgba> {
+    parse_any_color(Some(&dom.style(el, "backgroundColor"))).filter(|c| c.alpha_or_one() > 0.05)
+}
+
+/// A box that shows where it ends: a bottom border, a shadow, or a background
+/// band that differs from the backdrop behind what follows it.
+fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
+    if rhythm_is_contents(dom, el) {
+        return false;
+    }
+    if style_px(dom, el, "borderBottomWidth") > 0.0 {
+        return true;
+    }
+    let bs = dom.style(el, "boxShadow");
+    if !bs.is_empty() && bs != "none" {
+        return true;
+    }
+    let Some(band) = rhythm_painted_background(dom, el) else { return false };
+    let mut backdrop = crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0);
+    let mut cur = dom.parent(el);
+    while let Some(c) = cur {
+        if let Some(bg) = rhythm_painted_background(dom, c) {
+            backdrop = bg;
+            break;
+        }
+        cur = dom.parent(c);
+    }
+    (band.r - backdrop.r).abs() > 2.0
+        || (band.g - backdrop.g).abs() > 2.0
+        || (band.b - backdrop.b).abs() > 2.0
+        || (band.alpha_or_one() - backdrop.alpha_or_one()).abs() > 0.02
+}
+
+/// The outline of a box's rendered structure: tags only, a few levels deep.
+fn rhythm_shape(dom: &dyn Dom, el: ElId, depth: usize, budget: &mut usize, out: &mut String) {
+    out.push_str(&tag_lower(dom, el));
+    if depth == 0 {
+        return;
+    }
+    let kids = rhythm_rendered_children(dom, el);
+    if kids.is_empty() {
+        return;
+    }
+    out.push('(');
+    for k in kids {
+        if *budget == 0 {
+            out.push('+');
+            break;
+        }
+        *budget -= 1;
+        rhythm_shape(dom, k, depth - 1, budget, out);
+        out.push(' ');
+    }
+    out.push(')');
+}
+
+fn rhythm_shape_of(dom: &dyn Dom, el: ElId) -> String {
+    let mut out = String::new();
+    let mut budget = 24;
+    rhythm_shape(dom, el, 3, &mut budget, &mut out);
+    out
+}
+
+/// A box that is one of a run of like boxes: an accordion row, a list item, a
+/// card in a grid. The box laid out next to it on either side has the same
+/// tag, holds a heading too, and shares the box's class or its structure.
+fn rhythm_repeats(dom: &dyn Dom, el: ElId) -> bool {
+    let tag = tag_lower(dom, el);
+    let class = class_attr(dom, el);
+    let shape = rhythm_shape_of(dom, el);
+    let lays_out = |s: ElId| -> bool {
+        let pos = dom.style(s, "position");
+        let r = dom.rect(s);
+        dom.style(s, "display") != "none"
+            && pos != "absolute"
+            && pos != "fixed"
+            && r.width >= 1.0
+            && r.height >= 1.0
+            && !rhythm_is_spacer(dom, s)
+    };
+    let alike = |s: ElId| -> bool {
+        tag_lower(dom, s) == tag
+            && rhythm_subtree(dom, s, 400)
+                .into_iter()
+                .any(|e| RHYTHM_HEADING_TAGS.contains(&tag_lower(dom, e).as_str()))
+            && ((!class.is_empty() && class_attr(dom, s) == class) || rhythm_shape_of(dom, s) == shape)
+    };
+    let mut prev = dom.previous_element_sibling(el);
+    while let Some(s) = prev {
+        if lays_out(s) {
+            if alike(s) {
+                return true;
+            }
+            break;
+        }
+        prev = dom.previous_element_sibling(s);
+    }
+    let mut next = dom.next_element_sibling(el);
+    while let Some(s) = next {
+        if lays_out(s) {
+            return alike(s);
+        }
+        next = dom.next_element_sibling(s);
+    }
+    false
+}
+
 /// JS: checks.mjs#checkHeadingRhythmDOM()
 pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     const MIN_VIOLATIONS: usize = 2;
     const CARD_EXEMPT_HEIGHT: f64 = 200.0;
     const MAX_BELOW_PX: f64 = 160.0;
     const MIN_DEFICIT_PX: f64 = 12.0;
-    /// How far a box may run past the heading's bottom (beyond the margins
-    /// the walk has climbed through) before the heading counts as the last
-    /// thing in that box.
-    const TRAILING_SLACK_PX: f64 = 2.0;
     let body = dom.body();
 
     let is_visible_flow = |el: ElId| rhythm_visible_flow(dom, el);
     let overlaps_x = rhythm_overlaps_x;
     let has_own_top_boundary = |el: ElId| rhythm_paints_edge(dom, el, "Top");
-    let font_size_or_16 = |el: ElId| -> f64 {
-        let n = parse_float(&dom.style(el, "fontSize"));
-        if num_truthy(n) {
-            n
-        } else {
-            16.0
-        }
-    };
     // The nearest previous sibling that lays out a box, looking through
     // `display: contents` and past elements that render nothing.
     let previous_box = |n: ElId| -> Option<ElId> {
@@ -542,9 +720,9 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     // wrapper that starts where the cluster starts: per-text wrappers
     // (`<div><p>Label</p></div><div><h2>…</h2></div>`) are how site builders
     // emit an eyebrow, and missing them measured the gap to the heading's
-    // own label.
-    let cluster_top = |h: ElId, rect: &Rect| -> (ElId, f64) {
-        let heading_font_size = font_size_or_16(h);
+    // own label. Only a line that reads as a label folds in: `text_size` is
+    // the size of the body text it is set against.
+    let cluster_top = |h: ElId, rect: &Rect, text_size: f64| -> (ElId, f64) {
         let mut top_el = h;
         let mut top = rect.top;
         let mut cursor = h;
@@ -585,9 +763,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(tag_lower(dom, sib).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
                 break;
             }
-            let sib_font_size = font_size_or_16(sib);
-            let label_like = sib_font_size < heading_font_size * 0.75 || text_len <= 40;
-            if !label_like || text_len > 80 {
+            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size) {
                 break;
             }
             top_el = sib;
@@ -596,38 +772,6 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             folded += 1;
         }
         (top_el, top)
-    };
-    // A box that sits beside a sibling holding text is one column of a row:
-    // a grid card, a sidebar, a header row. Once the walk below has left a
-    // column, what it finds sits under the whole row and belongs to none of
-    // the columns in particular.
-    let is_column = |n: ElId| -> bool {
-        let nr = dom.rect(n);
-        let beside = |s: ElId| -> bool {
-            if !is_visible_flow(s) {
-                return false;
-            }
-            let sr = dom.rect(s);
-            let shared_height = math_min(sr.bottom, nr.bottom) - math_max(sr.top, nr.top);
-            shared_height >= math_min(sr.height, nr.height) * 0.5
-                && !overlaps_x(&sr, &nr)
-                && !js::trim(&dom.text_content(s)).is_empty()
-        };
-        let mut sib = dom.previous_element_sibling(n);
-        while let Some(s) = sib {
-            if beside(s) {
-                return true;
-            }
-            sib = dom.previous_element_sibling(s);
-        }
-        let mut sib = dom.next_element_sibling(n);
-        while let Some(s) = sib {
-            if beside(s) {
-                return true;
-            }
-            sib = dom.next_element_sibling(s);
-        }
-        false
     };
     // The block above, and where its content ends. The gap a reader sees
     // runs from that content to the cluster's own first line: empty spacer
@@ -675,27 +819,31 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         None
     };
-    // The content the heading introduces. When the walk has to leave a box
-    // to find it, and that box runs past the heading (its own padding, a
-    // stretched row, a card) or paints a bottom edge, the heading is the last
-    // thing in its box: an accordion trigger, a list-row headline, a card
-    // title. What follows belongs to the next box, so there is nothing below
-    // to measure.
-    let edge_below = |h: ElId, rect: &Rect| -> Option<f64> {
+    // The content the heading introduces: the nearest block below it, with
+    // empty spacer boxes counted as space. When the heading is the last thing
+    // in its box, the walk leaves the box, and the box's bottom padding and
+    // margin are space below: a padded section header, a title row stretched
+    // by a button or an icon beside the heading. The exception is a box that
+    // ends visibly (a bottom border, a shadow, a band of its own color) or is
+    // one of a run of like boxes (accordion rows, list items, cards in a
+    // grid). Then the heading ends its box, what follows belongs to the next
+    // box, and there is nothing below to measure.
+    let edge_below = |h: ElId, rect: &Rect| -> Option<(f64, ElId)> {
         let pick = |sr: &Rect| sr.top >= rect.bottom - 2.0;
-        let mut slack = math_max(0.0, style_px(dom, h, "marginBottom")) + TRAILING_SLACK_PX;
         let mut node = Some(h);
         while let Some(n) = node {
             if Some(n) == body {
                 break;
             }
-            let mut nearest: Option<f64> = None;
+            let mut nearest: Option<(f64, ElId)> = None;
             let mut sib = dom.next_element_sibling(n);
             while let Some(s) = sib {
                 if let Some(b) = rhythm_flow_box(dom, s, rect, false, &pick) {
-                    let t = dom.rect(b).top;
-                    if nearest.map_or(true, |nt| t < nt) {
-                        nearest = Some(t);
+                    if !rhythm_is_spacer(dom, b) {
+                        let t = dom.rect(b).top;
+                        if nearest.map_or(true, |(nt, _)| t < nt) {
+                            nearest = Some((t, b));
+                        }
                     }
                 }
                 sib = dom.next_element_sibling(s);
@@ -704,14 +852,11 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 return nearest;
             }
             let p = dom.parent(n)?;
-            if n != h && is_column(n) {
+            if Some(p) != body
+                && !rhythm_is_contents(dom, p)
+                && (rhythm_draws_bottom_edge(dom, p) || rhythm_repeats(dom, p))
+            {
                 return None;
-            }
-            if Some(p) != body && !rhythm_is_contents(dom, p) {
-                if rhythm_paints_edge(dom, p, "Bottom") || dom.rect(p).bottom - rect.bottom > slack {
-                    return None;
-                }
-                slack += math_max(0.0, style_px(dom, p, "marginBottom"));
             }
             node = Some(p);
         }
@@ -756,8 +901,14 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if has_own_top_boundary(h) {
             continue;
         }
-        let Some(below_top) = edge_below(h, &rect) else { continue };
-        let (top_el, top) = cluster_top(h, &rect);
+        let Some((below_top, below_el)) = edge_below(h, &rect) else { continue };
+        // The body text a label is set against: the page's own text size, or
+        // the text the heading introduces when that is set larger.
+        let text_size = math_max(
+            body.map_or(16.0, |b| rhythm_font_size(dom, b)),
+            rhythm_text_size(dom, below_el),
+        );
+        let (top_el, top) = cluster_top(h, &rect, text_size);
         let Some((above_bottom, above_el)) = edge_above(top_el, top, &rect) else { continue };
         if inside_small_card(h) {
             continue;

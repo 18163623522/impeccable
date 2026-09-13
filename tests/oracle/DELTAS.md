@@ -466,11 +466,35 @@ check misread their layouts: eyebrows wrapped in their own boxes, accordion
 triggers and card headlines that end their box, rules, photos, icon badges and
 stacked headings above, title bands that draw their own rule, standfirsts behind
 `display: contents`, empty spacers and padding held open above. heading-rhythm
-is browser-only, so no static golden moves. `heading-rhythm.html` was rewritten
-into two columns (should flag, should pass) with a case per misread shape; the
-static engine's one finding on it, cramped-padding on `.pass-band`, is kept
-byte for byte, so the fixture and directory goldens are unchanged. The browser
-behavior is pinned by `crates/browser/tests/heading_rhythm.rs` and
-`crates/core/tests/heading_rhythm.rs`.
+is browser-only, so no static golden moves.
+
+What the check now treats as the end of a heading's box, and so as nothing below
+to measure: a box that draws a bottom edge (a border, a shadow, a background band
+that differs from its backdrop), or a box that repeats as a run of like siblings
+(same tag, holding a heading, sharing a class or structure: accordion rows, list
+items, cards in a grid). Any other wrapper is measured past, and its bottom
+padding and margin count as space below, so a padded section header, a
+block-editor heading block, a title row stretched by an icon or a tall button,
+and a heading last in one grid column with content under the row all flag as
+integration did. Empty spacer boxes count as space below as well as above, so
+builder layouts that hold every gap open with a spacer can flag. A line above the
+heading folds into its cluster only when it reads as a label (smaller than the
+body text, uppercase, tracked out, or a small chip); a plain date line set like
+body copy stays content of its own.
+
+Policy kept deliberately: a heading set tight under a picture (a photo, a card
+thumbnail, a hero image) or under a block that ends in a rule (an hr, a divided
+list) is not flagged. The picture or rule already separates it, matching the
+rubric's `media-above` and `divider-above` codes and the judges' labels.
+
+`heading-rhythm.html` was rewritten into two columns (should flag, should pass)
+with a case per misread shape, and a third column after them holds the wrapper
+spacing cases (header padding, block padding, small padding, icon row, tall
+button row, grid column, spacer below, spacer stack, plain line above) plus a
+heading that ends a ruled box. `.tiles` gained a background so the tile row reads
+as content rather than a spacer. The static engine's one finding on the fixture,
+cramped-padding on `.pass-band`, is kept byte for byte, so the fixture and
+directory goldens are unchanged. The browser behavior is pinned by
+`crates/browser/tests/heading_rhythm.rs` and `crates/core/tests/heading_rhythm.rs`.
 
 - No golden re-recorded.

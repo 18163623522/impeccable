@@ -15,7 +15,7 @@
   /* Each case opens with a rule, so no walk crosses from one case into the next. */
   .case { border-top: 1px solid #d8d2c8; padding-top: 24px; margin-bottom: 48px; }
   .blk { height: 48px; overflow: hidden; }
-  .tiles { height: 120px; }
+  .tiles { height: 120px; background: #e6e6e6; }
   .above-4 { margin-top: 4px; }
   .above-10 { margin-top: 10px; }
   .above-12 { margin-top: 12px; }
@@ -188,6 +188,93 @@
         <h2>Pass Band Heading</h2>
         <p class="blk">This heading is the first content inside a section that draws its own background, so the band edge separates.</p>
       </div>
+    </section>
+  </section>
+
+  <section class="col" aria-label="Wrapper spacing">
+    <style>
+      /* FLAG: the title's wrapper holds the spacing, as padding or as the row an icon or a button stretches */
+      .pad-head { padding: 16px 0 48px; }
+      .pad-6 { padding-bottom: 6px; margin: 16px 0 42px; }
+      .icon-row { display: flex; align-items: center; gap: 12px; margin: 16px 0 48px; }
+      .icon { width: 48px; height: 48px; border-radius: 24px; background: #e4e0f5; flex: none; }
+      .title-row { display: flex; justify-content: space-between; align-items: center; margin: 16px 0 48px; }
+      .btn-tall { display: inline-block; padding: 16px 28px; line-height: 24px; background: #222; color: #fff; }
+      /* FLAG: the title ends one column of a row, and its content runs under the row */
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-bottom: 48px; }
+      /* FLAG: builder layouts that hold every gap open with an empty box */
+      .stack { display: flex; flex-direction: column; }
+      .spacer-16 { height: 16px; }
+      .spacer-48 { height: 48px; }
+    </style>
+    <h1>Wrapper spacing</h1>
+
+    <section class="case">
+      <p class="blk">A closing paragraph above a section header whose own padding holds sixteen pixels above the title.</p>
+      <header class="pad-head"><h2>Flag Header Padding</h2></header>
+      <p class="blk">The header's forty-eight pixels of bottom padding sit between the title and this, the content it introduces.</p>
+    </section>
+
+    <section class="case">
+      <div><p class="blk">A block editor wraps every text in a box. This one is the previous block, closing its content.</p></div>
+      <div class="pad-head"><h2>Flag Block Padding</h2></div>
+      <div><p class="blk">The heading block's own padding holds the spacing: sixteen above the title, forty-eight below it.</p></div>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph above a title wrapper with a few pixels of bottom padding and a margin under it.</p>
+      <div class="pad-6"><h2>Flag Small Padding</h2></div>
+      <p class="blk">Six pixels of padding and forty-two of margin still put forty-eight pixels between the title and this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph above a title set beside an icon that is taller than the title's own line.</p>
+      <div class="icon-row"><span class="icon"></span><h2>Flag Icon Beside Heading</h2></div>
+      <p class="blk">The icon stretches the row, and the row's margin puts this content well away from the title.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph above a pricing title row whose button is taller than the title.</p>
+      <div class="title-row"><h2>Flag Tall Button Row</h2><a class="btn-tall" href="#">View all plans</a></div>
+      <p class="blk">The plans the title introduces start under the whole row, fifty-eight pixels below the title.</p>
+    </section>
+
+    <section class="case">
+      <div class="grid2">
+        <div><p class="blk">The left column closes with a paragraph and then a title.</p><h3 class="above-12">Flag Column Heading</h3></div>
+        <div><p class="blk">The right column holds a shorter paragraph.</p></div>
+      </div>
+      <p class="blk">What the column title introduces runs under the whole row, forty-eight pixels below the title.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph ten pixels above a heading whose gap below is an empty spacer box.</p>
+      <h2 class="above-10">Flag Spacer Below</h2>
+      <div class="spacer-48"></div>
+      <p class="blk">The spacer holds forty-eight pixels open between the heading and this content.</p>
+    </section>
+
+    <section class="case">
+      <div class="stack">
+        <div><p class="blk">A builder's flex stack puts every text in a wrapper of its own and every gap in an empty box.</p></div>
+        <div class="spacer-16"></div>
+        <div><h2>Flag Stack Heading</h2></div>
+        <div class="spacer-48"></div>
+        <div><p class="blk">Sixteen pixels of spacer above the title, forty-eight below it before this content.</p></div>
+      </div>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a date line in a wrapper, set like the body copy rather than as a label.</p>
+      <div><p class="above-24">Updated March 2026</p></div>
+      <div><h2 class="above-10 below-48">Flag Plain Line Above</h2></div>
+      <p class="blk">The date is content of its own, so the title sits ten pixels under it and forty-eight above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph above a heading that ends a box drawing a rule under it.</p>
+      <div class="ruled above-10 below-36"><h3>Pass Heading Ends Ruled Box</h3></div>
+      <p class="blk">The rule under the box ends the heading's box, so this content belongs to the next one.</p>
     </section>
   </section>
 </main>

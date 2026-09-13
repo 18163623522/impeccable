@@ -84,6 +84,13 @@ fn assert_only_crowded(p: &Page) {
     assert!(flagged.iter().all(|s| s.contains("Crowded")), "{flagged:#?}");
 }
 
+/// The two crowded headings plus one more, the one `needle` names.
+fn assert_flags(p: &Page, needle: &str) {
+    let flagged = p.flagged();
+    assert_eq!(flagged.len(), 3, "{flagged:#?}");
+    assert!(flagged.iter().any(|s| s.contains(needle)), "{flagged:#?}");
+}
+
 fn crowded_pair() -> Page {
     let mut p = Page::new();
     p.crowded("Crowded One");
@@ -312,5 +319,192 @@ fn a_standfirst_behind_display_contents_is_what_sits_below() {
     let contents = p.el(sec, "div", (0.0, 0.0, 0.0, 0.0), &[("display", "contents")], "");
     p.el(contents, "p", (0.0, y + 106.0, W, 24.0), &[], "A short standfirst under the heading.");
     p.el(sec, "div", (0.0, y + 178.0, W, 60.0), &[], "Plans");
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_title_whose_wrapper_holds_the_spacing_measures_past_the_wrapper() {
+    // A section header whose padding holds sixteen pixels above the title and
+    // forty-eight below it.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let header = p.el(
+        sec,
+        "header",
+        (0.0, y + 48.0, W, 104.0),
+        &[("paddingTop", "16px"), ("paddingBottom", "48px")],
+        "",
+    );
+    p.el(header, "h2", (0.0, y + 64.0, W, 40.0), &[("fontSize", "32px")], "Header Padding");
+    p.el(sec, "p", (0.0, y + 152.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Header Padding\" has 16px above vs 48px below");
+
+    // Six pixels of bottom padding, the rest a margin.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let wrap = p.el(
+        sec,
+        "div",
+        (0.0, y + 64.0, W, 46.0),
+        &[("paddingBottom", "6px"), ("marginBottom", "42px")],
+        "",
+    );
+    p.el(wrap, "h2", (0.0, y + 64.0, W, 40.0), &[("fontSize", "32px")], "Small Padding");
+    p.el(sec, "p", (0.0, y + 152.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Small Padding\" has 16px above vs 48px below");
+}
+
+#[test]
+fn a_title_row_stretched_by_an_icon_or_a_button_measures_past_the_row() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let row = p.el(sec, "div", (0.0, y + 64.0, W, 48.0), &[("display", "flex"), ("marginBottom", "48px")], "");
+    p.el(row, "span", (0.0, y + 64.0, 48.0, 48.0), &[("backgroundColor", "rgb(228, 224, 245)")], "");
+    p.el(row, "h2", (60.0, y + 68.0, 740.0, 40.0), &[("fontSize", "32px")], "Icon Beside Heading");
+    p.el(sec, "p", (0.0, y + 160.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Icon Beside Heading\" has 20px above vs 52px below");
+
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let row = p.el(sec, "div", (0.0, y + 64.0, W, 56.0), &[("display", "flex"), ("marginBottom", "48px")], "");
+    p.el(row, "h2", (0.0, y + 72.0, 560.0, 40.0), &[("fontSize", "32px")], "Pricing Title Row");
+    p.el(row, "a", (600.0, y + 64.0, 200.0, 56.0), &[("backgroundColor", "rgb(34, 34, 34)")], "View all plans");
+    p.el(sec, "p", (0.0, y + 168.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Pricing Title Row\" has 24px above vs 56px below");
+}
+
+#[test]
+fn a_heading_last_in_one_column_measures_to_the_content_under_the_row() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    let grid = p.el(sec, "div", (0.0, y, W, 136.0), &[("display", "grid"), ("marginBottom", "48px")], "");
+    let left = p.el(grid, "div", (0.0, y, 380.0, 136.0), &[], "");
+    p.el(left, "p", (0.0, y, 380.0, 96.0), &[], LONG);
+    p.el(left, "h3", (0.0, y + 108.0, 380.0, 28.0), &[("fontSize", "22px")], "Column Heading");
+    let right = p.el(grid, "div", (420.0, y, 380.0, 96.0), &[], "");
+    p.el(right, "p", (420.0, y, 380.0, 96.0), &[], LONG);
+    p.el(sec, "p", (0.0, y + 184.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Column Heading\" has 12px above vs 48px below");
+}
+
+#[test]
+fn spacer_boxes_below_count_as_space_below() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "h2", (0.0, y + 56.0, W, 40.0), &[("fontSize", "32px")], "Heading Over A Spacer");
+    p.el(sec, "div", (0.0, y + 96.0, W, 48.0), &[], "");
+    p.el(sec, "p", (0.0, y + 144.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Heading Over A Spacer\" has 8px above vs 48px below");
+
+    // A builder's flex stack: every text in a wrapper, every gap a spacer box.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    let above = p.el(sec, "div", (0.0, y, W, 48.0), &[], "");
+    p.el(above, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "div", (0.0, y + 48.0, W, 16.0), &[], "");
+    let title = p.el(sec, "div", (0.0, y + 64.0, W, 40.0), &[], "");
+    p.el(title, "h2", (0.0, y + 64.0, W, 40.0), &[("fontSize", "32px")], "Stack Heading");
+    p.el(sec, "div", (0.0, y + 104.0, W, 48.0), &[], "");
+    let below = p.el(sec, "div", (0.0, y + 152.0, W, 48.0), &[], "");
+    p.el(below, "p", (0.0, y + 152.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Stack Heading\" has 16px above vs 48px below");
+}
+
+#[test]
+fn only_a_line_set_as_a_label_folds_into_the_heading() {
+    // A date line in its own wrapper, set like the body copy: content of its
+    // own, so the gap above is the ten pixels to it.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(300.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let line = p.el(sec, "div", (0.0, y + 120.0, W, 24.0), &[], "");
+    p.el(line, "p", (0.0, y + 120.0, W, 24.0), &[], "Updated March 2026");
+    let title = p.el(sec, "div", (0.0, y + 154.0, W, 40.0), &[], "");
+    p.el(title, "h2", (0.0, y + 154.0, W, 40.0), &[("fontSize", "32px")], "Wrapped Title");
+    p.el(sec, "p", (0.0, y + 242.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Wrapped Title\" has 10px above vs 48px below");
+
+    // The same place, a line set in tracked capitals: the title's label.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(300.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let line = p.el(sec, "div", (0.0, y + 120.0, W, 24.0), &[], "");
+    p.el(
+        line,
+        "p",
+        (0.0, y + 120.0, W, 24.0),
+        &[("textTransform", "uppercase"), ("letterSpacing", "1.6px")],
+        "Introducing",
+    );
+    let title = p.el(sec, "div", (0.0, y + 154.0, W, 40.0), &[], "");
+    p.el(title, "h2", (0.0, y + 154.0, W, 40.0), &[("fontSize", "32px")], "Labelled Title");
+    p.el(sec, "p", (0.0, y + 242.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_heading_that_ends_a_box_with_a_visible_edge_has_nothing_below() {
+    // The heading ends a box that draws a rule under it.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let boxed = p.el(
+        sec,
+        "div",
+        (0.0, y + 56.0, W, 72.0),
+        &[("borderBottomWidth", "1px"), ("paddingBottom", "31px")],
+        "",
+    );
+    p.el(boxed, "h3", (0.0, y + 56.0, W, 40.0), &[("fontSize", "24px")], "Heading Ending A Ruled Box");
+    p.el(sec, "p", (0.0, y + 152.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+
+    // The heading ends a band painted a color of its own.
+    let band = |color: &str| {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(340.0);
+        let band = p.el(
+            sec,
+            "div",
+            (0.0, y, W, 280.0),
+            &[("backgroundColor", color), ("paddingBottom", "32px")],
+            "",
+        );
+        p.el(band, "p", (0.0, y, W, 200.0), &[], LONG);
+        p.el(band, "h3", (0.0, y + 208.0, W, 40.0), &[("fontSize", "24px")], "Heading Ending A Band");
+        p.el(sec, "p", (0.0, y + 300.0, W, 48.0), &[], LONG);
+        p
+    };
+    assert_only_crowded(&band("rgb(236, 236, 236)"));
+    // A white box on the white page draws no edge, so its padding is space.
+    assert_flags(&band("rgb(255, 255, 255)"), "\"Heading Ending A Band\" has 8px above vs 52px below");
+}
+
+#[test]
+fn a_date_set_smaller_than_the_body_text_folds_into_a_card_title() {
+    // A news card: a thumbnail, a 12px date four pixels above the title, and
+    // a tag row set as small as the date. The date is the title's label, and
+    // the pair sits under the card's own picture.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(420.0);
+    let card = p.el(sec, "article", (0.0, y, 266.0, 380.0), &[("borderBottomWidth", "1px")], "");
+    let thumb = p.el(card, "div", (0.0, y, 266.0, 150.0), &[], "");
+    p.el(thumb, "img", (0.0, y, 266.0, 150.0), &[], "");
+    let text = p.el(
+        card,
+        "div",
+        (0.0, y + 150.0, 266.0, 186.0),
+        &[("paddingTop", "16px"), ("paddingBottom", "16px")],
+        "",
+    );
+    p.el(text, "time", (0.0, y + 166.0, 266.0, 18.0), &[("fontSize", "12px")], "August 27, 2026");
+    p.el(text, "h3", (0.0, y + 188.0, 266.0, 103.0), &[("fontSize", "18px")], "A News Card Title Under Its Date");
+    let tags = p.el(card, "ul", (0.0, y + 336.0, 266.0, 36.0), &[], "");
+    p.el(tags, "li", (0.0, y + 336.0, 80.0, 24.0), &[("fontSize", "12px")], "Raytheon");
     assert_only_crowded(&p);
 }

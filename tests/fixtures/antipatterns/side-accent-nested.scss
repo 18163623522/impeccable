@@ -107,3 +107,50 @@
     border-left: 11px solid #0f766e;
   }
 }
+
+/* ── FLAG: an accent inside a media query on a rounded card ── */
+.flag-media-accent {
+  border-radius: 12px;
+  @media (min-width: 600px) {
+    border-left: 12px solid #0f766e;
+  }
+}
+
+/* ── FLAG: an accent inside a mixin's content block on a rounded card ── */
+.flag-include-accent {
+  border-radius: 12px;
+  @include breakpoint(md) {
+    border-right: 13px solid #0f766e;
+  }
+}
+
+/* ── FLAG: a nested bar on a card a mixin rounds ── */
+.flag-mixin-radius {
+  position: relative;
+  @include card-shape;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: #0f766e;
+  }
+}
+
+/* ── PASS: an accent inside a media query on a square box ── */
+.pass-media-accent {
+  border-radius: 0;
+  @media (min-width: 600px) {
+    border-left: 15px solid #0f766e;
+  }
+}
+
+/* ── PASS: an accent inside a mixin's content block on a square box ── */
+.pass-include-accent {
+  border-radius: 0;
+  @include breakpoint(md) {
+    border-right: 16px solid #0f766e;
+  }
+}

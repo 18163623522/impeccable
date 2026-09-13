@@ -232,3 +232,102 @@ border-top-right-radius:0;border-bottom-right-radius:0;"
     )
     .is_empty());
 }
+
+fn side_tabs_on_page(head: &str, body: &str) -> Vec<String> {
+    let html = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>t</title>{head}\
+</head><body>{body}</body></html>"
+    );
+    let opts = DetectHtmlOptions::default();
+    let findings = detect_html_source(&html, Path::new("/nonexistent/dir/page.html"), &opts);
+    let value = serde_json::to_value(&findings).unwrap();
+    let mut out: Vec<String> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["antipattern"] == "side-tab")
+        .map(|f| f["snippet"].as_str().unwrap_or("").to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+const CARD: &str = "width:400px;height:120px;padding:16px;background:#fdfdfd;\
+border-left:4px solid #6366f1;";
+const CARD_BODY: &str = "<div class=\"card\"><h3>Card</h3><p>Body copy.</p></div>";
+
+/// Wherever the cascade cannot see a radius that may reach the card, the side
+/// accent keeps its finding, as it did before the rounded-card gate. A card
+/// whose every stylesheet the engine read, with no radius or a literal square
+/// one, still drops it.
+#[test]
+fn a_radius_the_cascade_cannot_see_keeps_the_finding() {
+    let page = |css: &str| side_tabs_on_page(&format!("<style>{css}</style>"), CARD_BODY);
+    // A radius in a nested rule or in a container query the cascade skips.
+    assert_eq!(
+        page(&format!(".card{{{CARD}&.card{{border-radius:12px}}}}")),
+        vec!["border-left: 4px"]
+    );
+    assert_eq!(
+        page(&format!(
+            ".card{{{CARD}}}@container (min-width:1px){{.card{{border-radius:12px}}}}"
+        )),
+        vec!["border-left: 4px"]
+    );
+    // The same shapes with a literal square radius, or a radius behind a
+    // hover state that cannot round the card at rest, stay silent.
+    assert!(page(&format!(".card{{{CARD}&.card{{border-radius:0}}}}")).is_empty());
+    assert!(page(&format!(".card{{{CARD}&:hover{{border-radius:12px}}}}")).is_empty());
+    assert!(page(&format!(".card{{{CARD}}}")).is_empty());
+}
+
+#[test]
+fn a_rounded_class_with_no_compiled_rule_reads_the_utility_scale() {
+    let css = format!("<style>.card{{{CARD}}}</style>");
+    let body =
+        |classes: &str| format!("<div class=\"{classes}\"><h3>Card</h3><p>Body copy.</p></div>");
+    assert_eq!(
+        side_tabs_on_page(&css, &body("card rounded-xl")),
+        vec!["border-left: 4px"]
+    );
+    // A theme size the scale does not name is unknown.
+    assert_eq!(
+        side_tabs_on_page(&css, &body("card rounded-card")),
+        vec!["border-left: 4px"]
+    );
+    assert!(side_tabs_on_page(&css, &body("card rounded-none")).is_empty());
+    // Rounded only along the left stripe: square where it counts.
+    assert!(side_tabs_on_page(&css, &body("card rounded-l-xl")).is_empty());
+}
+
+#[test]
+fn an_unread_stylesheet_keeps_a_card_it_never_saw_a_radius_for() {
+    let square = format!("<style>.card{{{CARD}}}</style>");
+    for href in ["https://cdn.example.com/ui.css", "missing.css"] {
+        assert_eq!(
+            side_tabs_on_page(
+                &format!("<link rel=\"stylesheet\" href=\"{href}\">{square}"),
+                CARD_BODY
+            ),
+            vec!["border-left: 4px"],
+            "{href}"
+        );
+    }
+    // A font service carries no box rules.
+    assert!(side_tabs_on_page(
+        &format!(
+            "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter\">{square}"
+        ),
+        CARD_BODY
+    )
+    .is_empty());
+    // A radius the engine read wins whatever else the page links.
+    assert!(side_tabs_on_page(
+        &format!(
+            "<link rel=\"stylesheet\" href=\"https://cdn.example.com/ui.css\">\
+<style>.card{{{CARD}border-radius:0}}</style>"
+        ),
+        CARD_BODY
+    )
+    .is_empty());
+}

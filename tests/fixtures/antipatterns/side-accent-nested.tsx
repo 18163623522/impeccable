@@ -44,3 +44,55 @@ export const PassTemplateState = styled.div`
     border-left: 6px solid #0f766e;
   }
 `;
+
+// A radius the reader cannot resolve keeps the finding.
+export const FlagTemplateInterpolatedRadius = styled.div`
+  position: relative;
+  border-radius: ${({ theme }) => theme.radii.md};
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 7px;
+    background: #0f766e;
+  }
+`;
+
+export const FlagTemplateMixin = styled.div`
+  position: relative;
+  ${cardShape}
+  &::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    background: #0f766e;
+  }
+`;
+
+export const PassTemplateLiteralSquare = styled.div`
+  position: relative;
+  border-radius: 0;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 9px;
+    background: #0f766e;
+  }
+`;
+
+// A style-object accent inside a media query key.
+export function FlagObjectMediaRounded() {
+  return <Box sx={{ borderRadius: '12px', '@media (min-width: 600px)': { borderLeft: '10px solid #0f766e' } }}>Rounded card</Box>;
+}
+
+export function PassObjectMediaSquare() {
+  return <Box sx={{ borderRadius: 0, '@media (min-width: 600px)': { borderLeft: '11px solid #0f766e' } }}>Square box</Box>;
+}

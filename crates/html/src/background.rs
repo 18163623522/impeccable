@@ -392,3 +392,38 @@ pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Opti
         bottom_left: corner("borderBottomLeftRadius", |c| c.bottom_left)?,
     })
 }
+
+/// The corners the side-accent gate reads for an element. The cascade is
+/// the answer only where it could see every radius that reaches the element,
+/// and everywhere else the corners are unknown, which keeps the finding:
+///
+/// - a radius the cascade could not apply may reach the element (a nested
+///   rule, a rule inside `@container` or an unknown at-rule, a selector the
+///   matcher refuses);
+/// - no applied declaration gave the element a radius, but its classes name
+///   one the page compiles at runtime (`rounded-lg` with no stylesheet rule
+///   for it): the utility classes decide, an unknown size stays unknown;
+/// - no applied declaration gave the element a radius and the page links a
+///   stylesheet the engine did not read.
+///
+/// Only a radius the engine reads, or the initial `0` of a box every
+/// stylesheet of which it read, silences a side accent.
+pub fn resolve_side_accent_corners(
+    el: &StaticElement<'_>,
+    style: &StyleValues,
+    width_px: f64,
+) -> Option<Corners> {
+    if el.radius_unseen() {
+        return None;
+    }
+    if !el.radius_declared() {
+        let classes = impeccable_core::checks::rules::tailwind_declared_corners(el.class_name());
+        if classes.declared() {
+            return classes.to_corners();
+        }
+        if el.page_has_unread_stylesheet() {
+            return None;
+        }
+    }
+    resolve_border_radius_corners(style, width_px)
+}

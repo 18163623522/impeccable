@@ -2,10 +2,9 @@
 //! analyzers from `cli/engine/engines/regex/detect-text.mjs`.
 
 use impeccable_core::checks::css_scan::{
-    names_same_element, scan_css_text_for_glow, scan_css_text_for_marquee,
-    scan_css_text_for_radial_halo,
+    has_interpolation, is_unseen_declaration_source, names_same_element, scan_css_text_for_glow,
+    scan_css_text_for_marquee, scan_css_text_for_radial_halo,
 };
-use impeccable_core::checks::measures::parse_radius_corner_px;
 use impeccable_core::checks::rules::{
     find_solid_chromatic_bg, DeclaredCorners, NOMINAL_CARD_WIDTH_PX,
 };
@@ -283,91 +282,35 @@ fn gray_on_color_pairs(line: &str, gray_class: &str, index: usize) -> Vec<String
 // [`side_tab_rounded_in_scope`] with the whole block in hand.
 
 re!(TW_SIDE_TAB_WHOLE_RE, format!("^border-([lrse])-{D}+$"));
-re!(
-    TW_ROUNDED_CLASS_RE,
-    r"^rounded(?:-(tl|tr|br|bl|ss|se|ee|es|t|r|b|l|s|e))?(?:-([a-z0-9-]+|\[[^\]]*\]|\([^)]*\)))?$"
-        .to_string()
-);
-re!(TW_CLASS_SPLIT_RE, r#"[\s"'`{}]+"#.to_string());
+/// The utility-class corner reader lives in core, where the static engine
+/// reads a runtime-compiled `rounded-*` class with it too.
+pub use impeccable_core::checks::rules::tailwind_declared_corners;
+
 re!(
     STYLE_ATTR_VALUE_RE,
     r#"(?i)\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')"#.to_string()
 );
+re!(STYLE_OBJECT_ATTR_RE, r"\bstyle\s*=\s*\{\{".to_string());
+re!(STYLE_EXPRESSION_ATTR_RE, r"\bstyle\s*=\s*\{".to_string());
+re!(JSX_SIDE_PROP_RE, r"^border(?:Left|Right)\s*=".to_string());
 re!(
-    SCOPE_RADIUS_DECL_RE,
-    r"(?i)(?:^|[^a-z0-9_-])(border(?:-?(?:top|bottom|start|end)-?(?:left|right|start|end))?-?radius)\s*:\s*([^;,}\n]+)"
+    CLASS_ATTR_RE,
+    r#"(?:^|[\s<])(className|class|tw|:class|v-bind:class|class:[-\w]+)\s*=\s*("[^"]*"|'[^']*'|\{)"#
         .to_string()
 );
-
-/// The corners a run of utility classes gives a box. `rounded-*` classes set
-/// every corner, then the side classes (`rounded-r-lg`), then the corner
-/// classes (`rounded-tr-lg`), the order the framework emits them in, so
-/// `rounded-lg rounded-r-none` squares the right corners off. A class behind
-/// a variant (`md:rounded-xl`) can only round a corner. A size the scale
-/// does not name (a theme key, a `(--var)`) is unknown.
-pub fn tailwind_declared_corners(scope: &str) -> DeclaredCorners {
-    let mut base: Vec<(u8, &'static [usize], Option<f64>)> = Vec::new();
-    let mut variants: Vec<(&'static [usize], Option<f64>)> = Vec::new();
-    for raw in TW_CLASS_SPLIT_RE.split(scope) {
-        let token = raw.trim_matches('!');
-        let bracket = token.find('[').unwrap_or(token.len());
-        let (variant, class) = match token[..bracket].rfind(':') {
-            Some(i) => (true, token[i + 1..].trim_start_matches('!')),
-            None => (false, token),
-        };
-        let Some(c) = TW_ROUNDED_CLASS_RE.captures(class) else {
-            continue;
-        };
-        let (group, corners): (u8, &'static [usize]) = match c.get(1).map(|m| m.as_str()) {
-            None => (0, &[0, 1, 2, 3]),
-            Some("t") => (1, &[0, 1]),
-            Some("r") | Some("e") => (1, &[1, 2]),
-            Some("b") => (1, &[2, 3]),
-            Some("l") | Some("s") => (1, &[0, 3]),
-            Some("tl") | Some("ss") => (2, &[0]),
-            Some("tr") | Some("se") => (2, &[1]),
-            Some("br") | Some("ee") => (2, &[2]),
-            _ => (2, &[3]),
-        };
-        let px = match c.get(2).map(|m| m.as_str()) {
-            // `rounded` is 4px; `rounded-sm` is 2px in v3 and 4px in v4, and
-            // the larger reading keeps the finding.
-            None | Some("sm") => Some(4.0),
-            Some("none") => Some(0.0),
-            Some("xs") => Some(2.0),
-            Some("md") => Some(6.0),
-            Some("lg") => Some(8.0),
-            Some("xl") => Some(12.0),
-            Some("2xl") => Some(16.0),
-            Some("3xl") => Some(24.0),
-            Some("4xl") => Some(32.0),
-            Some("full") => Some(9999.0),
-            Some(arbitrary) if arbitrary.starts_with('[') => parse_radius_corner_px(
-                Some(&arbitrary[1..arbitrary.len() - 1].replace('_', " ")),
-                NOMINAL_CARD_WIDTH_PX,
-            ),
-            Some(_) => None,
-        };
-        if variant {
-            variants.push((corners, px));
-        } else {
-            base.push((group, corners, px));
-        }
-    }
-    base.sort_by_key(|entry| entry.0);
-    let mut declared = DeclaredCorners::default();
-    for (_, corners, px) in base {
-        for &i in corners {
-            declared.set_corner(i, px);
-        }
-    }
-    for (corners, px) in variants {
-        for &i in corners {
-            declared.raise_corner(i, px);
-        }
-    }
-    declared
-}
+re!(
+    RADIUS_PROP_ATTR_RE,
+    r#"(?:^|\s)(borderRadius|border(?:Top|Bottom)(?:Left|Right)Radius|rounded(?:Top|Bottom|Left|Right|TopLeft|TopRight|BottomLeft|BottomRight)?)\s*=\s*("[^"]*"|'[^']*'|\{[^}]*\})"#
+        .to_string()
+);
+re!(
+    CLASS_HELPER_RE,
+    r"\b(?:cn|clsx|cx|classNames|classnames|twMerge|twJoin)\b".to_string()
+);
+re!(
+    BARE_NUMBER_RE,
+    r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$".to_string()
+);
 
 /// A matcher run's lines joined once, with the byte offset each line starts
 /// at: what the side accent scope reader walks, built once per file rather
@@ -452,99 +395,569 @@ fn block_bounds(b: &[u8], offset: usize) -> (usize, usize, Option<usize>) {
     (start, end, open)
 }
 
-/// A block's own text with its nested blocks dropped.
-fn direct_block_text(block: &str) -> String {
-    let mut out = String::with_capacity(block.len());
-    let mut nested = 0usize;
-    for ch in block.chars() {
-        match ch {
-            '{' => nested += 1,
-            '}' => nested = nested.saturating_sub(1),
-            _ if nested == 0 => out.push(ch),
+/// The index of the `}` closing the `{` at `open`, strings and template
+/// literals kept whole.
+fn matching_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut p = open;
+    while p < b.len() {
+        let c = b[p];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                p += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            p += 1;
+            continue;
+        }
+        match c {
+            b'"' | b'\'' | b'`' => quote = Some(c),
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(p);
+                }
+            }
             _ => {}
         }
+        p += 1;
+    }
+    None
+}
+
+/// The index of the `{` a `}` at `close` closes, walking back.
+fn matching_open(b: &[u8], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut p = close + 1;
+    while p > 0 {
+        p -= 1;
+        match b[p] {
+            b'}' => depth += 1,
+            b'{' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The contents of the balanced `{ ... }` at `open`, without the braces.
+fn balanced_braces(text: &str, open: usize) -> Option<&str> {
+    matching_close(text.as_bytes(), open).map(|close| &text[open + 1..close])
+}
+
+/// Whether the `{` at `open` belongs to an interpolation (`${`, `#{`, `@{`).
+fn opens_interpolation(b: &[u8], open: usize) -> bool {
+    open > 0 && matches!(b[open - 1], b'$' | b'#' | b'@')
+}
+
+/// A declaration block's statements at its own depth, in source order: split
+/// on `;` and newlines, and on `,` in a style object. Strings, parentheses,
+/// brackets and interpolations stay whole; a nested block (`&:hover {...}`,
+/// `'@media ...': {...}`) is dropped with the selector or key before it.
+fn split_statements(text: &str, object: bool) -> Vec<String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut seg_start = 0usize;
+    let mut depth = 0i32;
+    let mut p = 0usize;
+    let push = |out: &mut Vec<String>, from: usize, to: usize| {
+        let s = js::trim(&text[from..to]);
+        if !s.is_empty() {
+            out.push(s.to_string());
+        }
+    };
+    while p < b.len() {
+        match b[p] {
+            q @ (b'"' | b'\'' | b'`') => {
+                let mut e = p + 1;
+                while e < b.len() && b[e] != q {
+                    if b[e] == b'\\' {
+                        e += 1;
+                    }
+                    e += 1;
+                }
+                p = e.min(b.len());
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'{' => {
+                let close = matching_close(b, p).unwrap_or(b.len().saturating_sub(1));
+                if !opens_interpolation(b, p) && depth <= 0 {
+                    // A nested block and the selector before it.
+                    seg_start = close + 1;
+                }
+                p = close;
+            }
+            b';' | b'\n' if depth <= 0 => {
+                push(&mut out, seg_start, p);
+                seg_start = p + 1;
+            }
+            b',' if object && depth <= 0 => {
+                push(&mut out, seg_start, p);
+                seg_start = p + 1;
+            }
+            _ => {}
+        }
+        p += 1;
+    }
+    if seg_start < b.len() {
+        push(&mut out, seg_start, b.len());
     }
     out
 }
 
-/// The declarations that style the element a CSS or style-object match sits
-/// in: the enclosing `style="..."` value, else the innermost `{ ... }` block
-/// or template literal around the match with nested blocks dropped, else (in
-/// indentation-syntax Sass) the lines at the match's own indentation. A
-/// nested block that names its parent's element (`&.is-accent`, `&:hover`,
-/// `&--accent`) reads the parent's declarations first.
-fn declaration_scope(source: &SourceText, i: usize, index: usize, sass: bool) -> String {
-    let line = source.line(i);
-    for c in STYLE_ATTR_VALUE_RE.captures_iter(line) {
-        if let Some(value) = c.get(1).or_else(|| c.get(2)) {
-            if value.start() <= index && index <= value.end() {
-                return value.as_str().to_string();
-            }
+/// A statement's property and value, a quoted style-object key unquoted.
+fn split_declaration(statement: &str) -> Option<(String, String)> {
+    let s = js::trim(statement);
+    let first = s.chars().next()?;
+    let (prop, rest) = if matches!(first, '"' | '\'' | '`') {
+        let close = s[1..].find(first)? + 1;
+        (&s[1..close], js::trim(&s[close + 1..]).strip_prefix(':')?)
+    } else {
+        let idx = s.find(':')?;
+        (js::trim(&s[..idx]), &s[idx + 1..])
+    };
+    Some((prop.to_string(), js::trim(rest).to_string()))
+}
+
+/// Apply a block's statements to the corners in order. A statement that
+/// brings in declarations the reader cannot see (a mixin call, a spread, a
+/// bare interpolation) makes every corner unknown until a later literal
+/// radius replaces it. In a theme-scale object (`sx={{ ... }}`) a bare
+/// number is a theme multiple rather than px, so only a `0` is known.
+fn apply_statements(corners: &mut DeclaredCorners, statements: &[String], theme_scale: bool) {
+    for statement in statements {
+        if is_unseen_declaration_source(statement) {
+            corners.set_unknown();
+            continue;
         }
-    }
-    if sass {
-        let indent = |l: &str| l.len() - l.trim_start().len();
-        let base = indent(line);
-        let mut out = vec![line];
-        for l in (0..i).rev().map(|j| source.line(j)) {
-            if l.trim().is_empty() {
+        let Some((prop, value)) = split_declaration(statement) else {
+            continue;
+        };
+        if theme_scale && BARE_NUMBER_RE.is_match(&value) {
+            let key = prop.to_ascii_lowercase();
+            if key.starts_with("border") && key.ends_with("radius") {
+                if parse_float(&value) == 0.0 {
+                    corners.apply(&prop, "0", NOMINAL_CARD_WIDTH_PX);
+                } else {
+                    corners.set_unknown();
+                }
                 continue;
             }
-            match indent(l) {
-                d if d < base => break,
-                d if d == base => out.push(l),
-                _ => {}
-            }
         }
-        for l in (i + 1..source.line_count()).map(|j| source.line(j)) {
-            if l.trim().is_empty() {
-                continue;
-            }
-            match indent(l) {
-                d if d < base => break,
-                d if d == base => out.push(l),
-                _ => {}
-            }
-        }
-        return out.join("\n");
+        corners.apply(&prop, &value, NOMINAL_CARD_WIDTH_PX);
     }
+}
+
+/// The markup tag around `index` when the whole tag sits on the line.
+fn complete_markup_tag(line: &str, index: usize) -> Option<&str> {
+    let mut i = 0usize;
+    while i < line.len() {
+        let tag_start = i + line[i..].find('<')?;
+        let after = &line[tag_start + 1..];
+        if !after
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        {
+            i = tag_start + 1;
+            continue;
+        }
+        let mut tag_end: Option<usize> = None;
+        scan_js(line, tag_start + 1, |ch, j, _p, _n, depth| {
+            if ch == '>' && depth.brace == 0 {
+                tag_end = Some(j);
+                return true;
+            }
+            false
+        });
+        let end = tag_end?;
+        if index >= tag_start && index <= end {
+            return Some(&line[tag_start..end + 1]);
+        }
+        i = end + 1;
+    }
+    None
+}
+
+/// The class names a class attribute expression spells out, or `None` when
+/// it carries anything that could add a class the reader cannot see: a
+/// variable, a condition, a prop, a template interpolation.
+fn literal_class_text(expression: &str) -> Option<String> {
+    let b = expression.as_bytes();
+    let mut classes = String::new();
+    let mut rest = String::new();
+    let mut p = 0usize;
+    while p < b.len() {
+        let c = b[p];
+        if matches!(c, b'"' | b'\'' | b'`') {
+            let mut e = p + 1;
+            while e < b.len() && b[e] != c {
+                if b[e] == b'\\' {
+                    e += 1;
+                }
+                e += 1;
+            }
+            let literal = &expression[(p + 1).min(b.len())..e.min(b.len())];
+            if has_interpolation(literal) {
+                return None;
+            }
+            classes.push(' ');
+            classes.push_str(literal);
+            p = e + 1;
+            continue;
+        }
+        rest.push(c as char);
+        p += 1;
+    }
+    let rest = CLASS_HELPER_RE.replace_all(&rest, "");
+    rest.chars()
+        .all(|c| c.is_whitespace() || matches!(c, '(' | ')' | ',' | '+' | '[' | ']'))
+        .then_some(classes)
+}
+
+/// The corners a markup tag gives its element: the `rounded-*` classes of a
+/// literal class attribute, then any styled-system radius prop, then the
+/// radius in its `style` attribute or style object. Unknown when the tag does
+/// not close on the line, or carries a spread, a class expression or a style
+/// expression that could add a class or a radius the reader cannot see.
+fn markup_tag_corners(line: &str, index: usize) -> DeclaredCorners {
+    let Some(tag) = complete_markup_tag(line, index) else {
+        return DeclaredCorners::unknown();
+    };
+    if tag.contains("{...") || tag.contains("{ ...") {
+        return DeclaredCorners::unknown();
+    }
+    let mut corners = DeclaredCorners::default();
+    for c in CLASS_ATTR_RE.captures_iter(tag) {
+        let name = &c[1];
+        let value = c.get(2).unwrap();
+        let text = if value.as_str() == "{" {
+            balanced_braces(tag, value.start()).and_then(literal_class_text)
+        } else if matches!(name, "class" | "className" | "tw") {
+            let quoted = value.as_str();
+            let inner = &quoted[1..quoted.len() - 1];
+            (!inner.contains('{')).then(|| inner.to_string())
+        } else {
+            // A bound class (`:class`, `class:list`, `class:rounded-lg`).
+            None
+        };
+        let Some(text) = text else {
+            return DeclaredCorners::unknown();
+        };
+        let classes = tailwind_declared_corners(&text);
+        if classes.declared() {
+            corners = classes;
+        }
+    }
+    for c in RADIUS_PROP_ATTR_RE.captures_iter(tag) {
+        let prop = &c[1];
+        let value = c[2]
+            .trim_matches(|ch| matches!(ch, '"' | '\'' | '{' | '}'))
+            .trim()
+            .trim_matches(|ch| matches!(ch, '"' | '\''));
+        let zero = matches!(value, "0" | "0px" | "none");
+        if prop.starts_with("rounded") {
+            // A styled-system `rounded` prop names a theme size.
+            if !zero {
+                corners.set_unknown();
+            } else if prop == "rounded" {
+                corners.apply("border-radius", "0", NOMINAL_CARD_WIDTH_PX);
+            }
+            continue;
+        }
+        if !zero && BARE_NUMBER_RE.is_match(value) {
+            // A bare number on a styled-system prop is a theme multiple.
+            corners.set_unknown();
+            continue;
+        }
+        corners.apply(prop, value, NOMINAL_CARD_WIDTH_PX);
+    }
+    if let Some(c) = STYLE_ATTR_VALUE_RE.captures(tag) {
+        let value = c.get(1).or_else(|| c.get(2)).map_or("", |m| m.as_str());
+        apply_statements(&mut corners, &split_statements(value, false), false);
+    } else if let Some(m) = STYLE_OBJECT_ATTR_RE.find(tag) {
+        match balanced_braces(tag, m.end() - 1) {
+            Some(object) => apply_statements(&mut corners, &split_statements(object, true), false),
+            None => return DeclaredCorners::unknown(),
+        }
+    } else if STYLE_EXPRESSION_ATTR_RE.is_match(tag) {
+        return DeclaredCorners::unknown();
+    }
+    corners
+}
+
+/// Whether `index` sits inside a `style="..."` value or a `style={{ ... }}`
+/// object on the line (an object the line does not close counts).
+fn in_style_attribute(line: &str, index: usize) -> bool {
+    STYLE_ATTR_VALUE_RE.captures_iter(line).any(|c| {
+        c.get(1)
+            .or_else(|| c.get(2))
+            .is_some_and(|v| v.start() <= index && index <= v.end())
+    }) || STYLE_OBJECT_ATTR_RE.find_iter(line).any(|m| {
+        m.start() < index
+            && balanced_braces(line, m.end() - 1)
+                .map_or(true, |object| index <= m.end() + object.len())
+    })
+}
+
+/// Whether the `{` at `open` opens a style object rather than a CSS block:
+/// a value position (`=`, `:`, `(`, `,`, `[`, `{`, `?`, `=>`, `return`).
+fn is_object_open(text: &str, open: usize) -> bool {
+    let before = text[..open].trim_end();
+    before.ends_with(['{', '(', '=', ':', ',', '[', '?'])
+        || before.ends_with("=>")
+        || before.ends_with("return")
+}
+
+/// Whether the object at `open` is a theme-scale `sx={{ ... }}` prop.
+fn is_sx_object(text: &str, open: usize) -> bool {
+    let before = text[..open].trim_end();
+    let Some(before) = before.strip_suffix('{') else {
+        return false;
+    };
+    let Some(before) = before.trim_end().strip_suffix('=') else {
+        return false;
+    };
+    before.trim_end().ends_with("sx")
+}
+
+/// The key a nested style object sits under and where the key starts: `'@media
+/// (min-width: 600px)'`, `'&:hover'`, `root`. A computed key (`[theme.up('md')]`)
+/// is returned as an interpolation, since the reader cannot name it.
+fn object_key(text: &str, open: usize) -> (String, usize) {
+    let trimmed = text[..open].trim_end();
+    let Some(before) = trimmed.strip_suffix(':') else {
+        return (String::new(), open);
+    };
+    let before = before.trim_end();
+    if before.ends_with(']') {
+        return ("${computed}".to_string(), before.len());
+    }
+    if let Some(q) = before
+        .chars()
+        .last()
+        .filter(|c| matches!(c, '"' | '\'' | '`'))
+    {
+        if let Some(start) = before[..before.len() - 1].rfind(q) {
+            return (before[start + 1..before.len() - 1].to_string(), start);
+        }
+    }
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '&' | '-')))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    (before[start..].to_string(), start)
+}
+
+/// Where the selector before a CSS block's `{` starts, reading an
+/// interpolation inside the selector (`${Child} {`) as part of it.
+fn selector_begin(b: &[u8], open: usize) -> usize {
+    let mut p = open;
+    while p > 0 {
+        p -= 1;
+        match b[p] {
+            b'}' => {
+                if let Some(o) = matching_open(b, p).filter(|o| opens_interpolation(b, *o)) {
+                    p = o - 1;
+                    continue;
+                }
+                return p + 1;
+            }
+            b';' | b'{' | b'`' => return p + 1,
+            _ => {}
+        }
+    }
+    0
+}
+
+/// Whether the template literal whose opening backtick is at `tick` sits
+/// inside another template's interpolation (`${p => p.on && css`...`}`).
+fn inside_interpolation(b: &[u8], tick: usize) -> bool {
+    let mut depth = 0usize;
+    let mut p = tick;
+    while p > 0 {
+        p -= 1;
+        match b[p] {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => return p > 0 && b[p - 1] == b'$',
+            b'{' => depth -= 1,
+            b'`' if depth == 0 => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The corners of the element a CSS declaration or style-object property in
+/// a braces syntax sits on: the statements of its own block, and of every
+/// block around it it passes through or names with `&`, applied outermost
+/// first. An at-rule (`@media`, `@include breakpoint(md) {`) or a style-object
+/// at-rule key passes through to the rule around it; `&.x`, `&:hover`,
+/// `.dark &` and a BEM modifier name the same element; a descendant stops the
+/// walk. Wherever the walk cannot name the element (an interpolated selector
+/// or key, a match inside an interpolation, a `css` template nested in
+/// another template) the corners start unknown.
+fn brace_scope_corners(source: &SourceText, i: usize, index: usize) -> DeclaredCorners {
     let text = source.text.as_str();
     let b = text.as_bytes();
-    let (start, end, mut open) = block_bounds(b, source.line_starts[i] + index);
-    let mut scope = direct_block_text(&text[start..end]);
-    while let Some(o) = open {
-        let sel_begin = b[..o]
-            .iter()
-            .rposition(|c| matches!(c, b';' | b'{' | b'}' | b'`'))
-            .map_or(0, |p| p + 1);
-        if !names_same_element(&text[sel_begin..o]) {
+    let (mut start, mut end, mut open) = block_bounds(b, source.line_starts[i] + index);
+    let mut chunks: Vec<(usize, usize, bool)> = Vec::new();
+    let mut unknown = false;
+    let mut theme_scale = false;
+    loop {
+        let object = open.is_some_and(|o| is_object_open(text, o));
+        chunks.push((start, end, object));
+        let Some(o) = open else {
+            if start > 0 && b[start - 1] == b'`' && inside_interpolation(b, start - 1) {
+                unknown = true;
+            }
+            break;
+        };
+        if opens_interpolation(b, o) {
+            unknown = true;
             break;
         }
-        let (parent_start, parent_end, parent_open) = block_bounds(b, sel_begin);
-        scope = format!(
-            "{}\n{}",
-            direct_block_text(&text[parent_start..parent_end]),
-            scope
-        );
-        open = parent_open;
+        let (selector, selector_start) = if object {
+            theme_scale |= is_sx_object(text, o);
+            object_key(text, o)
+        } else {
+            let begin = selector_begin(b, o);
+            (js::trim(&text[begin..o]).to_string(), begin)
+        };
+        if has_interpolation(&selector) {
+            unknown = true;
+            break;
+        }
+        if !(selector.starts_with('@') || names_same_element(&selector)) {
+            break;
+        }
+        (start, end, open) = block_bounds(b, selector_start);
     }
-    scope
+    let mut corners = if unknown {
+        DeclaredCorners::unknown()
+    } else {
+        DeclaredCorners::default()
+    };
+    for &(s, e, object) in chunks.iter().rev() {
+        apply_statements(
+            &mut corners,
+            &split_statements(&text[s..e], object),
+            object && theme_scale,
+        );
+    }
+    corners
+}
+
+/// The indentation-syntax Sass reading of [`brace_scope_corners`]: the lines
+/// at the match's indentation that do not open a deeper block, then the same
+/// for every parent it passes through (an at-rule, a `+mixin` wrapper) or
+/// names with `&`. An indented `+mixin` or `@include` statement makes the
+/// corners unknown; an interpolated parent selector starts them unknown.
+fn sass_scope_corners(source: &SourceText, i: usize) -> DeclaredCorners {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let blank = |l: &str| l.trim().is_empty();
+    let mut chunks: Vec<Vec<String>> = Vec::new();
+    let mut unknown = false;
+    let mut at = i;
+    loop {
+        let level = indent(source.line(at));
+        let mut first = at;
+        let mut parent = None;
+        for j in (0..at).rev() {
+            let l = source.line(j);
+            if blank(l) {
+                continue;
+            }
+            if indent(l) < level {
+                parent = Some(j);
+                break;
+            }
+            first = j;
+        }
+        let mut last = at;
+        for j in at + 1..source.line_count() {
+            let l = source.line(j);
+            if blank(l) {
+                continue;
+            }
+            if indent(l) < level {
+                break;
+            }
+            last = j;
+        }
+        let mut statements = Vec::new();
+        for j in first..=last {
+            let l = source.line(j);
+            if blank(l) || indent(l) != level {
+                continue;
+            }
+            let opens_block = (j + 1..=last)
+                .map(|k| source.line(k))
+                .find(|k| !blank(k))
+                .is_some_and(|k| indent(k) > level);
+            if !opens_block {
+                statements.push(js::trim(l).to_string());
+            }
+        }
+        chunks.push(statements);
+        let Some(pj) = parent else {
+            break;
+        };
+        let selector = js::trim(source.line(pj));
+        if has_interpolation(selector) {
+            unknown = true;
+            break;
+        }
+        if !(selector.starts_with('@') || selector.starts_with('+') || names_same_element(selector))
+        {
+            break;
+        }
+        at = pj;
+    }
+    let mut corners = if unknown {
+        DeclaredCorners::unknown()
+    } else {
+        DeclaredCorners::default()
+    };
+    for statements in chunks.iter().rev() {
+        apply_statements(&mut corners, statements, false);
+    }
+    corners
 }
 
 /// Whether a `side-tab` match sits on a card rounded away from its stripe.
-/// A utility class reads the `rounded-*` classes in the same markup tag; a
-/// CSS declaration or style-object property reads the radius declarations in
-/// its own block, and in the blocks around it that it names with `&`. No
-/// radius in scope is a square box, which stays silent; a radius this cannot
-/// resolve (`$radius`, `var()`, `theme.radius`) keeps the finding. A radius
-/// declared somewhere else entirely (another class, another line of a
-/// multi-line `cn()` call) is out of reach, and the box reads square.
+/// A utility class, a styled-system prop and a `style` attribute read the
+/// markup tag they sit in; a CSS declaration or style-object property reads
+/// the statements of its own block and of the blocks around it it passes
+/// through or names with `&`; indentation-syntax Sass follows indentation the
+/// same way.
+///
+/// The reader fails safe to reporting. A scope it read completely that
+/// declares no radius is the initial square box and stays silent, as does a
+/// literal radius under the rounded threshold. Wherever it cannot see the
+/// radius (an interpolation, an unresolved `var()`, a theme token, a mixin
+/// call, a spread, a class expression, a tag that does not close on the line)
+/// the corners are unknown and the finding stays. A radius declared on a
+/// different selector of the same element is out of reach, and the box reads
+/// as its own block declares it.
 pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sass: bool) -> bool {
     let whole = m.whole();
+    let line = source.line(i);
     if let Some(c) = TW_SIDE_TAB_WHOLE_RE.captures(whole) {
         let side = if matches!(&c[1], "l" | "s") { 3 } else { 1 };
-        let scope = containing_markup_tag(source.line(i))(m.index);
-        return tailwind_declared_corners(&scope).is_rounded_away_from_side(side);
+        return markup_tag_corners(line, m.index).is_rounded_away_from_side(side);
     }
     let lower = js::to_lower_case(whole);
     let side = if lower.contains("left") || lower.contains("start") {
@@ -552,11 +965,13 @@ pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sa
     } else {
         1
     };
-    let scope = declaration_scope(source, i, m.index, sass);
-    let mut corners = DeclaredCorners::default();
-    for c in SCOPE_RADIUS_DECL_RE.captures_iter(&scope) {
-        corners.apply(&c[1], &c[2], NOMINAL_CARD_WIDTH_PX);
-    }
+    let corners = if JSX_SIDE_PROP_RE.is_match(whole) || in_style_attribute(line, m.index) {
+        markup_tag_corners(line, m.index)
+    } else if sass {
+        sass_scope_corners(source, i)
+    } else {
+        brace_scope_corners(source, i, m.index)
+    };
     corners.is_rounded_away_from_side(side)
 }
 
@@ -1866,6 +2281,193 @@ mod tests {
         // The nested rule's own longhand still wins over the parent's shorthand.
         assert!(!rounded(
             ".c {\n  border-radius: 12px;\n  &.flat { border-left: 4px solid #6366f1; border-top-right-radius: 0; }\n}"
+        ));
+    }
+
+    /// Wherever the scope reader cannot see the radius it keeps the finding,
+    /// as the engine did before the rounded-card gate; a literal square host
+    /// in the same shape still drops it.
+    #[test]
+    fn side_tab_scope_fails_safe_where_it_cannot_see_the_radius() {
+        let rounded = |text: &str, needle: &str, sass: bool| {
+            let lines: Vec<&str> = text.split('\n').collect();
+            let i = lines.iter().position(|l| l.contains(needle)).unwrap();
+            let index = lines[i].find(needle).unwrap();
+            let m = MatchCtx {
+                groups: vec![Some(needle.to_string())],
+                index,
+            };
+            side_tab_rounded_in_scope(&m, &SourceText::new(&lines), i, sass)
+        };
+        let accent = "border-left: 4px solid #6366f1";
+
+        // At-rules and mixin content blocks pass through to the card.
+        for wrapper in [
+            "@media (min-width: 600px)",
+            "@include breakpoint(md)",
+            "@supports (display: grid)",
+        ] {
+            let card = |radius: &str| {
+                format!(".c {{\n  border-radius: {radius};\n  {wrapper} {{\n    border-left: 4px solid #6366f1;\n  }}\n}}")
+            };
+            assert!(rounded(&card("12px"), accent, false), "{wrapper}");
+            assert!(!rounded(&card("0"), accent, false), "{wrapper}");
+        }
+        // A context rule styles the same element.
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  .dark & { border-left: 4px solid #6366f1; }\n}",
+            accent,
+            false
+        ));
+
+        // A mixin call could round the card; a later literal replaces it.
+        for mixin in ["@include card-shape;", ".rounded();", "@extend .card;"] {
+            let css = format!(".c {{\n  {mixin}\n  border-left: 4px solid #6366f1;\n}}");
+            assert!(rounded(&css, accent, false), "{mixin}");
+        }
+        assert!(!rounded(
+            ".c {\n  @include card-shape;\n  border-radius: 0;\n  border-left: 4px solid #6366f1;\n}",
+            accent,
+            false
+        ));
+        assert!(!rounded(
+            ".c {\n  box-shadow: 0 0 0 1px\n    #000;\n  border-left: 4px solid #6366f1;\n}",
+            accent,
+            false
+        ));
+
+        // Interpolations: a bare one, an interpolated radius or selector, a
+        // `css` template nested in another template's interpolation.
+        assert!(rounded(
+            "const A = styled.div`\n  ${cardShape}\n  &.on { border-left: 4px solid #6366f1; }\n`;",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            "const A = styled.div`\n  border-radius: ${({ theme }) => theme.radii.md};\n  &.on { border-left: 4px solid #6366f1; }\n`;",
+            accent,
+            false
+        ));
+        assert!(!rounded(
+            "const A = styled.div`\n  border-radius: 0;\n  &.on { border-left: 4px solid #6366f1; }\n`;",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            "const A = styled.div`\n  ${Child} { border-left: 4px solid #6366f1; }\n`;",
+            accent,
+            false
+        ));
+        assert!(rounded(
+            "const A = styled.div`\n  position: relative;\n  ${(p) => p.on && css`\n    border-left: 4px solid #6366f1;\n  `}\n`;",
+            accent,
+            false
+        ));
+
+        // Style objects: a media query key passes through, a theme-scale
+        // number is not px, and a spread could bring in a radius.
+        let obj = "borderLeft: '4px solid";
+        assert!(rounded(
+            "<Box sx={{ borderRadius: '12px', '@media (min-width: 600px)': { borderLeft: '4px solid #6366f1' } }} />",
+            obj,
+            false
+        ));
+        assert!(!rounded(
+            "<Box sx={{ borderRadius: 0, '@media (min-width: 600px)': { borderLeft: '4px solid #6366f1' } }} />",
+            obj,
+            false
+        ));
+        assert!(rounded(
+            "<Box sx={{ borderRadius: 2, borderLeft: '4px solid #6366f1' }} />",
+            obj,
+            false
+        ));
+        assert!(rounded(
+            "const s = { ...cardStyle, borderLeft: '4px solid #6366f1' };",
+            obj,
+            false
+        ));
+        assert!(rounded(
+            "const s = { [theme.breakpoints.up('md')]: { borderLeft: '4px solid #6366f1' } };",
+            obj,
+            false
+        ));
+
+        // Markup: a tag that does not close on the line, a class expression,
+        // a spread or a styled-system radius prop could round the card.
+        let tw = "border-l-4";
+        assert!(rounded(
+            "<div\n  className=\"border-l-4 border-indigo-500 p-4\"\n>",
+            tw,
+            false
+        ));
+        assert!(rounded(
+            "<div className={cn('border-l-4 border-indigo-500', className)} />",
+            tw,
+            false
+        ));
+        assert!(rounded(
+            "<div {...props} className=\"border-l-4 border-indigo-500\" />",
+            tw,
+            false
+        ));
+        assert!(rounded(
+            "<div className={`border-l-4 ${radius}`} />",
+            tw,
+            false
+        ));
+        assert!(!rounded(
+            "<div className={cn('border-l-4 border-indigo-500', 'p-4')} />",
+            tw,
+            false
+        ));
+        assert!(rounded(
+            "<div className=\"rounded-lg\" style={{ borderLeft: '4px solid #6366f1' }} />",
+            obj,
+            false
+        ));
+        let prop = "borderLeft=\"4px solid";
+        assert!(rounded(
+            "<Box borderLeft=\"4px solid #6366f1\" borderRadius=\"md\" />",
+            prop,
+            false
+        ));
+        assert!(!rounded(
+            "<Box borderLeft=\"4px solid #6366f1\" borderRadius={0} />",
+            prop,
+            false
+        ));
+
+        // Indented Sass follows `&` nesting and mixin wrappers.
+        assert!(rounded(
+            ".card\n  border-radius: 12px\n  &.on\n    border-left: 4px solid #6366f1",
+            accent,
+            true
+        ));
+        assert!(!rounded(
+            ".card\n  border-radius: 0\n  &.on\n    border-left: 4px solid #6366f1",
+            accent,
+            true
+        ));
+        assert!(rounded(
+            ".card\n  border-radius: 12px\n  +breakpoint(md)\n    border-left: 4px solid #6366f1",
+            accent,
+            true
+        ));
+        assert!(rounded(
+            ".card\n  +card-shape\n  &.on\n    border-left: 4px solid #6366f1",
+            accent,
+            true
+        ));
+        assert!(!rounded(
+            ".card\n  padding: 8px\n  &.on\n    border-left: 4px solid #6366f1\n  .inner\n    border-radius: 12px",
+            accent,
+            true
+        ));
+        assert!(rounded(
+            "#{$block}\n  &.on\n    border-left: 4px solid #6366f1",
+            accent,
+            true
         ));
     }
 

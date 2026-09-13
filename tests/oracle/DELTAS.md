@@ -215,9 +215,32 @@ the host the static engine looks up, and a rule whose selector is one compound
 style-text pseudo-element scan no longer dedupes a nested selector on its text,
 so a square card's `&::before` cannot hide a rounded card's `&::before` later
 in the same file. The text engine reads each stylesheet's blocks once, whatever
-the stripe count. What text still cannot see stays out of reach: a radius
-declared on a selector the stripe rule does not name, or on another line of a
-multi-line class list, reads as square in the text engine. The static and
+the stripe count.
+
+The gate fails safe to the pre-gate behavior. It removes a finding only where
+the card is known to be square: a scope the reader read completely that
+declares no radius (the initial square box), or a literal radius under the
+rounded threshold. Wherever a reader cannot determine the radius, the card is
+treated as possibly rounded and the finding stays, as it did before the gate.
+In the text engine that covers an interpolation (a `${...}` radius, a bare
+`${mixin}`, an interpolated selector, a `css` template inside another
+template's interpolation), an unresolved `var()` or theme token, a mixin call
+(`@include x;`, `+x`, `@extend`, `@apply`, `composes`, a Less `.x();`), a style
+object spread or a theme-scale number (`sx={{ borderRadius: 2 }}`), a class
+attribute that is an expression, and a markup tag that does not close on its
+line. At-rules (`@media`, `@supports`, a block `@include breakpoint(md) { }`)
+and style-object at-rule keys pass through to the card around them, a context
+rule (`.dark &`) names the same element, and indented Sass follows `&` nesting
+and `+mixin` wrappers the way braces do. In the static engine it covers a
+radius the cascade cannot apply (a rule nested in a style rule, a rule inside
+`@container` or an unknown at-rule, a selector the matcher refuses) on the
+elements it may reach, a `rounded-*` class with no compiled rule (read off the
+utility scale), and, for a card no read declaration gave a radius, a linked
+stylesheet the engine did not read (other than a font service). A radius on a
+pseudo-element or behind a hover or focus state cannot round the card at rest
+and is not counted. One reach stays out of the text engine: a radius declared
+on a different selector of the same element (another class) is not tied to the
+stripe rule, so that rule reads as its own declarations say. The static and
 browser engines read the cascade and see it.
 
 The static border snippet now prints the radius in px, the way the browser's
@@ -235,3 +258,16 @@ the two intended output changes, not lost findings.
 - `detect-fixture-json-side-accent-nested-scss`, `detect-fixture-text-side-accent-nested-scss`, `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`: new fixtures for nested accents, rounded and square, in SCSS and in styled-components templates. Each reports only its flag column: five findings for the stylesheet, two for the components.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 421 to 442 findings.
 - `detect-unreadable-file-in-dir`: the case's readable `a.html` carries `border-radius: 10px`, so it still produces the finding the case exists to show next to the unreadable file's error; the snippet gains `+ border-radius: 10px`.
+
+Recorded 2026-09-13, the fail-safe revision. Base reported every shape these
+cases add, and the gate had silenced three of them in the text engine: a
+styled-components card whose radius is an interpolation with a nested
+`&::before` bar, an accent inside `@media` or a block `@include` on a rounded
+card, and an indented Sass `&.on` rule under a rounded card. The goldens move
+only by the new flag cases; every pass case is a literal square host in the
+same shape and stays silent.
+
+- `detect-fixture-json-side-accent-nested-scss`, `detect-fixture-text-side-accent-nested-scss`: `side-accent-nested.scss` gains an accent inside `@media` (`border-left: 12px`) and inside a block `@include breakpoint(md)` (`border-right: 13px`) on a rounded card, and a nested bar on a card an `@include card-shape;` rounds (`&::before`, 6px), with square `border-radius: 0` twins for the two wrapped accents. 5 to 8 findings.
+- `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`: `side-accent-nested.tsx` gains a template whose radius is `${({ theme }) => theme.radii.md}` with a nested `&::before` bar (7px), a template a bare `${cardShape}` interpolation styles with a nested `&::after` bar (8px), and an `sx` style object with a `'@media (min-width: 600px)'` key holding the accent on a rounded card (`borderLeft: '10px solid`), with square twins for the literal template and the style object. 2 to 5 findings.
+- `detect-fixture-json-side-accent-nested-sass`, `detect-fixture-text-side-accent-nested-sass`: new fixture for indented Sass. It reports its three flag cases (an `&.on` rule under a rounded card, an accent inside `@media` on a rounded card, an `&.on` rule under a card a `+card-shape` mixin styles) and none of its square pass cases.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 442 to 451 findings (459 to 468 with advisories).

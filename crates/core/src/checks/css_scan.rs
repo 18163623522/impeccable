@@ -1003,14 +1003,113 @@ fn compound_tokens(compound: &str) -> Vec<String> {
 
 /// Whether a nested selector names the element of the rule it sits in:
 /// `&.is-accent`, `&:hover`, `&[data-x]`, `&::before` (painted on that
-/// element), and a BEM modifier `&--accent`, which by that convention rides
-/// on the block's own class. `& .child`, `&__part` and a bare `.child` name
-/// other elements.
+/// element), a BEM modifier `&--accent`, which by that convention rides on
+/// the block's own class, and a context rule `.dark &` or `:hover > &`,
+/// whose last compound is the element itself. `& .child`, `&__part` and a
+/// bare `.child` name other elements. A selector list names the element only
+/// when every selector in it does, and a quoted style-object key
+/// (`'&:hover'`) reads as the selector it quotes.
 pub fn names_same_element(selector: &str) -> bool {
-    let Some(rest) = js::trim(selector).strip_prefix('&') else {
+    let s = js::trim(selector).trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    let parts: Vec<&str> = split_commas_outside_parens(s)
+        .into_iter()
+        .map(js::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    !parts.is_empty()
+        && parts.iter().all(|part| {
+            let Some(rest) = last_compound(part).strip_prefix('&') else {
+                return false;
+            };
+            rest.is_empty() || rest.starts_with(['.', '#', '[', ':']) || rest.starts_with("--")
+        })
+}
+
+/// Whether text carries a preprocessor or template interpolation (`#{...}`,
+/// `${...}`, `@{...}`): a value or selector the text reader cannot resolve.
+pub fn has_interpolation(text: &str) -> bool {
+    text.contains("${") || text.contains("#{") || text.contains("@{")
+}
+
+re!(
+    LESS_MIXIN_CALL_RE,
+    r"^[.#][-_A-Za-z0-9]+(?:\s*>?\s*[.#][-_A-Za-z0-9]+)*\s*(?:\(.*\))?\s*(?:!important)?$"
+        .to_string()
+);
+
+/// Whether one declaration-level statement brings in declarations the text
+/// reader cannot see: a Sass `@include` / `@extend` or indented `+mixin`, a
+/// Tailwind `@apply`, a CSS Modules `composes`, a Less mixin call
+/// (`.rounded();`), a style object's `...spread`, or a bare template
+/// interpolation (`${truncate}`) standing where a declaration would. Any of
+/// them could set a radius, so the corners go unknown at that point. A
+/// block-form `@include breakpoint(md) { ... }` is a wrapper, not a
+/// statement, and is read through by the callers.
+pub fn is_unseen_declaration_source(statement: &str) -> bool {
+    let s = js::trim(statement);
+    if s.is_empty() {
         return false;
-    };
-    rest.is_empty() || rest.starts_with(['.', '#', '[', ':']) || rest.starts_with("--")
+    }
+    let lower = js::to_lower_case(s);
+    if lower.starts_with("@include")
+        || lower.starts_with("@extend")
+        || lower.starts_with("@apply")
+        || lower.starts_with("composes")
+        || s.starts_with("...")
+        || (s.starts_with('+') && s[1..].starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        return true;
+    }
+    // The property half of a declaration (or the whole statement when there
+    // is no colon) carrying an interpolation is a bare interpolation.
+    let prop = s.split(':').next().unwrap_or(s);
+    if has_interpolation(prop) {
+        return true;
+    }
+    // A Less mixin call: `.rounded;`, `.rounded();`, `#ns > .mixin(@r: 4px);`,
+    // never a hex color left over from a value that spans lines.
+    s.starts_with(['.', '#'])
+        && (!s.contains(':') || s.contains('('))
+        && !HEX_COLOR_RE.is_match(s)
+        && LESS_MIXIN_CALL_RE.is_match(s)
+}
+
+re!(HEX_COLOR_RE, r"^#[0-9a-fA-F]{3,8}\b".to_string());
+
+/// Whether an at-rule block could style an element's own box the static
+/// cascade never applies. Keyframes, font faces, pages and property
+/// registrations cannot round a card at rest.
+fn at_rule_can_style_elements(prelude: &str) -> bool {
+    let name: String = prelude
+        .trim_start_matches('@')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    !(name.ends_with("keyframes")
+        || matches!(
+            name.as_str(),
+            "font-face"
+                | "page"
+                | "property"
+                | "counter-style"
+                | "font-feature-values"
+                | "font-palette-values"
+                | "view-transition"
+                | "position-try"
+        ))
+}
+
+/// Whether the static cascade descends into an at-rule block: the ones
+/// `collect_static_css_rules` walks.
+fn static_cascade_descends(prelude: &str) -> bool {
+    let name: String = prelude
+        .trim_start_matches('@')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .to_ascii_lowercase();
+    matches!(name.as_str(), "media" | "supports" | "layer")
 }
 
 /// A nested rule's selector list with `&` replaced by each selector of the
@@ -1047,11 +1146,42 @@ fn resolve_nested_selectors(selector: &str, parent: Option<&[String]>) -> Vec<St
     out
 }
 
+/// One radius-relevant statement of a rule block, in source order.
+enum RadiusDecl {
+    /// A radius declaration.
+    Set(String, String),
+    /// A statement that could bring in a radius the reader cannot see.
+    Unseen,
+}
+
 /// The radius declarations of one rule block.
 struct RadiusRule {
     /// Source position of the block, the order its declarations apply in.
     order: usize,
-    decls: Vec<(String, String)>,
+    decls: Vec<RadiusDecl>,
+}
+
+impl RadiusRule {
+    fn apply_to(&self, corners: &mut DeclaredCorners) {
+        for decl in &self.decls {
+            match decl {
+                RadiusDecl::Set(prop, value) => {
+                    corners.apply(prop, value, NOMINAL_CARD_WIDTH_PX);
+                }
+                RadiusDecl::Unseen => corners.set_unknown(),
+            }
+        }
+    }
+}
+
+/// A rule block carrying a radius the static cascade never applies: a rule
+/// nested in another style rule, or one inside an at-rule the cascade skips
+/// (`@container`, `@scope`, an unknown at-rule).
+pub struct UnappliedRadiusRule {
+    /// The block's selectors, nesting resolved.
+    pub selectors: Vec<String>,
+    /// The corners the block's own statements declare.
+    pub corners: DeclaredCorners,
 }
 
 /// One open block while [`CssHostIndex::new`] walks the text.
@@ -1063,6 +1193,19 @@ struct HostFrame {
     /// The selectors naming the element this block styles, its own and those
     /// of the enclosing rules it names with `&` compounds.
     hosts: Vec<String>,
+    /// The element this block styles cannot be named: its selector, or the
+    /// selector of an enclosing rule it names with `&`, is interpolated.
+    hosts_unknown: bool,
+    /// A style rule is this block or encloses it.
+    in_rule: bool,
+    /// Whether the static cascade walks into this block: the top level, and
+    /// `@media` / `@supports` / `@layer` blocks outside any style rule.
+    static_reachable: bool,
+    /// Whether this block can style an element's box at rest (not inside
+    /// `@keyframes`, `@font-face`, `@page` and the like).
+    styles_elements: bool,
+    /// This block is a style rule, not an at-rule or the top level.
+    is_rule: bool,
     order: usize,
     direct: String,
     chunk_start: usize,
@@ -1078,10 +1221,15 @@ pub struct CssHostIndex<'a> {
     raw: &'a str,
     content: String,
     /// Offsets of every block's `{` in the comment-blanked text, ascending,
-    /// parallel to `hosts`.
+    /// parallel to `hosts` and `hosts_unknown`.
     opens: Vec<usize>,
     hosts: Vec<Vec<String>>,
+    hosts_unknown: Vec<bool>,
     rules: Vec<RadiusRule>,
+    /// Radius rules the static cascade never applies, by index into `rules`.
+    unapplied: Vec<(Vec<String>, usize)>,
+    /// Byte spans of the interpolations the walk read as text, ascending.
+    interpolations: Vec<(usize, usize)>,
     /// Radius rules by one of their selectors, exactly as resolved.
     exact: HashMap<String, Vec<usize>>,
     /// Radius rules whose selector is a single compound, by its first simple
@@ -1098,7 +1246,10 @@ impl<'a> CssHostIndex<'a> {
             content: String::new(),
             opens: Vec::new(),
             hosts: Vec::new(),
+            hosts_unknown: Vec::new(),
             rules: Vec::new(),
+            unapplied: Vec::new(),
+            interpolations: Vec::new(),
             exact: HashMap::new(),
             by_first_token: HashMap::new(),
         };
@@ -1107,6 +1258,11 @@ impl<'a> CssHostIndex<'a> {
             keys: vec!["&".to_string()],
             resolve_parent: None,
             hosts: vec!["&".to_string()],
+            hosts_unknown: false,
+            in_rule: false,
+            static_reachable: true,
+            styles_elements: true,
+            is_rule: false,
             order: 0,
             direct: String::new(),
             chunk_start: 0,
@@ -1126,8 +1282,9 @@ impl<'a> CssHostIndex<'a> {
                     }
                     p = e;
                 }
-                b'#' if b.get(p + 1) == Some(&b'{') => {
-                    // A Sass interpolation belongs to the text around it.
+                b'#' | b'$' | b'@' if b.get(p + 1) == Some(&b'{') => {
+                    // A Sass (`#{}`), template (`${}`) or Less (`@{}`)
+                    // interpolation belongs to the text around it.
                     let mut depth = 0usize;
                     let mut e = p + 1;
                     while e < b.len() {
@@ -1143,6 +1300,7 @@ impl<'a> CssHostIndex<'a> {
                         }
                         e += 1;
                     }
+                    index.interpolations.push((p, e));
                     p = e;
                 }
                 b';' => stack.last_mut().unwrap().seg_start = p + 1,
@@ -1152,11 +1310,20 @@ impl<'a> CssHostIndex<'a> {
                     top.direct
                         .push_str(&content[top.chunk_start..top.seg_start]);
                     let frame = if selector.starts_with('@') {
-                        // An at-rule styles whatever encloses it.
+                        // An at-rule styles whatever encloses it; a block
+                        // `@include breakpoint(md) { ... }` is a wrapper too.
                         HostFrame {
                             keys: top.keys.clone(),
                             resolve_parent: top.resolve_parent.clone(),
                             hosts: top.hosts.clone(),
+                            hosts_unknown: top.hosts_unknown,
+                            in_rule: top.in_rule,
+                            static_reachable: top.static_reachable
+                                && !top.in_rule
+                                && static_cascade_descends(selector),
+                            styles_elements: top.styles_elements
+                                && at_rule_can_style_elements(selector),
+                            is_rule: false,
                             order: p,
                             direct: String::new(),
                             chunk_start: p + 1,
@@ -1166,13 +1333,20 @@ impl<'a> CssHostIndex<'a> {
                         let resolved =
                             resolve_nested_selectors(selector, top.resolve_parent.as_deref());
                         let mut hosts = resolved.clone();
-                        if names_same_element(selector) {
+                        let same = names_same_element(selector);
+                        if same {
                             hosts.extend(top.hosts.iter().cloned());
                         }
                         HostFrame {
                             keys: resolved.clone(),
                             resolve_parent: Some(resolved),
                             hosts,
+                            hosts_unknown: has_interpolation(selector)
+                                || (same && top.hosts_unknown),
+                            in_rule: true,
+                            static_reachable: top.static_reachable && !top.in_rule,
+                            styles_elements: top.styles_elements,
+                            is_rule: true,
                             order: p,
                             direct: String::new(),
                             chunk_start: p + 1,
@@ -1181,6 +1355,7 @@ impl<'a> CssHostIndex<'a> {
                     };
                     index.opens.push(p);
                     index.hosts.push(frame.hosts.clone());
+                    index.hosts_unknown.push(frame.hosts_unknown);
                     stack.push(frame);
                 }
                 b'}' => {
@@ -1214,16 +1389,19 @@ impl<'a> CssHostIndex<'a> {
         if frame.keys.is_empty() {
             return;
         }
-        let decls: Vec<(String, String)> = frame
+        let decls: Vec<RadiusDecl> = frame
             .direct
             .split(';')
             .filter_map(|part| {
+                if is_unseen_declaration_source(part) {
+                    return Some(RadiusDecl::Unseen);
+                }
                 let idx = part.find(':').filter(|i| *i > 0)?;
                 let prop = js::trim(&part[..idx]);
                 if !prop.to_ascii_lowercase().ends_with("radius") {
                     return None;
                 }
-                Some((
+                Some(RadiusDecl::Set(
                     prop.to_string(),
                     resolve_var_refs(&part[idx + 1..], custom_props),
                 ))
@@ -1233,6 +1411,14 @@ impl<'a> CssHostIndex<'a> {
             return;
         }
         let id = self.rules.len();
+        // A block the static cascade never applies: nested in a style rule,
+        // or under an at-rule it skips.
+        if frame.styles_elements
+            && (frame.is_rule || frame.in_rule)
+            && !(frame.is_rule && frame.static_reachable)
+        {
+            self.unapplied.push((frame.keys.clone(), id));
+        }
         for key in &frame.keys {
             self.exact.entry(key.clone()).or_default().push(id);
             if last_compound(key) == key.as_str() {
@@ -1274,9 +1460,7 @@ impl<'a> CssHostIndex<'a> {
         ids.dedup();
         let mut corners = DeclaredCorners::default();
         for id in ids {
-            for (prop, value) in &self.rules[id].decls {
-                corners.apply(prop, value, NOMINAL_CARD_WIDTH_PX);
-            }
+            self.rules[id].apply_to(&mut corners);
         }
         corners
     }
@@ -1284,8 +1468,22 @@ impl<'a> CssHostIndex<'a> {
     /// The host selectors of the rule whose selector starts at `pos`, a byte
     /// offset into the comment-blanked text, with pseudo-elements removed and
     /// again with every pseudo removed. Falls back on `selector` as written.
-    fn hosts_at(&self, pos: usize, selector: &str) -> Vec<String> {
+    /// `None` when the element cannot be named: its selector, or that of an
+    /// enclosing rule it names with `&`, is interpolated, or the rule sits
+    /// inside an interpolation the walk read as text.
+    fn hosts_at(&self, pos: usize, selector: &str) -> Option<Vec<String>> {
+        if has_interpolation(selector)
+            || self
+                .interpolations
+                .iter()
+                .any(|(start, end)| *start <= pos && pos <= *end)
+        {
+            return None;
+        }
         let block = self.opens.partition_point(|open| *open < pos);
+        if self.hosts_unknown.get(block).copied().unwrap_or(false) {
+            return None;
+        }
         let written = [selector.to_string()];
         let selectors: &[String] = match self.hosts.get(block) {
             Some(hosts) if !hosts.is_empty() => hosts,
@@ -1302,14 +1500,37 @@ impl<'a> CssHostIndex<'a> {
                 }
             }
         }
-        out
+        Some(out)
     }
 
     /// Whether the rule whose selector starts at `pos` (a byte offset into the
-    /// comment-blanked text) styles a box rounded away from `side`.
+    /// comment-blanked text) styles a box rounded away from `side`. A host
+    /// the index cannot name keeps the finding.
     pub fn is_rule_rounded_away_from_side(&self, pos: usize, selector: &str, side: usize) -> bool {
-        self.corners_for_hosts(&self.hosts_at(pos, selector))
-            .is_rounded_away_from_side(side)
+        match self.hosts_at(pos, selector) {
+            None => true,
+            Some(hosts) => self
+                .corners_for_hosts(&hosts)
+                .is_rounded_away_from_side(side),
+        }
+    }
+
+    /// Every rule block carrying a radius statement the static cascade never
+    /// applies (nested in a style rule, or under an at-rule the cascade
+    /// skips), with the corners its own statements declare. The static engine
+    /// reads the elements they may reach as unknown.
+    pub fn unapplied_radius_rules(&self) -> Vec<UnappliedRadiusRule> {
+        self.unapplied
+            .iter()
+            .map(|(selectors, id)| {
+                let mut corners = DeclaredCorners::default();
+                self.rules[*id].apply_to(&mut corners);
+                UnappliedRadiusRule {
+                    selectors: selectors.clone(),
+                    corners,
+                }
+            })
+            .collect()
     }
 
     /// Whether a CSS-text finding from the text this index was built on
@@ -2258,6 +2479,104 @@ mod tests {
         assert!(!names_same_element("&__part"));
         assert!(!names_same_element(".child"));
         assert_eq!(pseudo_stripped_selector(".a:not(.b):hover::after"), ".a");
+    }
+
+    /// Where the index cannot see the radius it keeps the finding; a literal
+    /// square host in the same shape still drops it.
+    #[test]
+    fn host_index_fails_safe_where_the_radius_is_unseen() {
+        const BAR: &str = "content:\"\";position:absolute;top:0;bottom:0;background:#6366f1";
+        let kept = |css: &str| -> Vec<String> {
+            let css = css.replace("BAR", BAR);
+            let index = CssHostIndex::new(&css);
+            scan_css_text_for_pseudo_stripe(&css)
+                .into_iter()
+                .filter(|f| index.side_stripe_on_rounded_host(f))
+                .map(|f| f.snippet)
+                .collect()
+        };
+        // An interpolated radius in a CSS-in-JS template, and its literal
+        // square twin.
+        assert_eq!(
+            kept("position: relative;\n  border-radius: ${({ theme }) => theme.radii.md};\n  &::before { BAR; left: 0; width: 4px }"),
+            vec!["&::before — absolute 4px pseudo-element stripe (left: 0)".to_string()]
+        );
+        assert!(kept(
+            "position: relative;\n  border-radius: 0;\n  &::before { BAR; left: 0; width: 4px }"
+        )
+        .is_empty());
+        // A bare interpolation, a Sass include and a Less mixin call could
+        // round the card; a later literal radius replaces what they set.
+        for mixin in ["${cardShape}", "@include card-shape;", ".rounded();"] {
+            let css = format!(
+                ".c {{ position: relative; {mixin} &::before {{ BAR; left: 0; width: 5px }} }}"
+            );
+            assert_eq!(kept(&css).len(), 1, "{mixin}");
+        }
+        assert!(kept(
+            ".c { position: relative; @include card-shape; border-radius: 0; &::before { BAR; left: 0; width: 5px } }"
+        )
+        .is_empty());
+        // An interpolated selector names an element the index cannot find.
+        assert_eq!(
+            kept("${Row} { position: relative; &::after { BAR; right: 0; width: 6px } }").len(),
+            1
+        );
+        // A media query wrapper passes through to a literal square card.
+        assert!(kept(
+            ".c { border-radius: 0; @media (min-width: 1px) { &::before { BAR; left: 0; width: 7px } } }"
+        )
+        .is_empty());
+
+        assert!(names_same_element(".dark &"));
+        assert!(names_same_element("&:hover, &:focus-visible"));
+        assert!(names_same_element("'&:hover'"));
+        assert!(!names_same_element("&:hover, .other"));
+        assert!(!names_same_element("& > .child"));
+
+        for unseen in [
+            "@include rounded",
+            "@extend .card",
+            "@apply rounded-lg",
+            "composes: card from './card.css'",
+            "...base",
+            "+rounded",
+            "${shape}",
+            ".rounded()",
+            ".rounded",
+            "#ns > .mixin()",
+        ] {
+            assert!(is_unseen_declaration_source(unseen), "{unseen}");
+        }
+        for seen in [
+            "border-radius: 0",
+            "$radius: 12px",
+            "border-radius: ${r}px",
+            "#000",
+            "#fff",
+            "color: red",
+            "",
+        ] {
+            assert!(!is_unseen_declaration_source(seen), "{seen}");
+        }
+    }
+
+    /// The radius rules the static cascade never applies: nested in a style
+    /// rule, or under an at-rule it skips. Keyframes style no box at rest.
+    #[test]
+    fn host_index_lists_radius_rules_the_static_cascade_skips() {
+        let css = ".a { border-radius: 12px; }\n\
+                   @media (min-width: 1px) { .b { border-radius: 12px; } }\n\
+                   .c { & .d { border-radius: 12px; } @media (min-width: 1px) { border-radius: 8px; } }\n\
+                   @container (min-width: 1px) { .e { border-radius: 12px; } }\n\
+                   @keyframes k { from { border-radius: 0; } to { border-radius: 12px; } }";
+        let mut selectors: Vec<String> = CssHostIndex::new(css)
+            .unapplied_radius_rules()
+            .into_iter()
+            .flat_map(|r| r.selectors)
+            .collect();
+        selectors.sort();
+        assert_eq!(selectors, vec![".c", ".c .d", ".e"]);
     }
 
     #[test]

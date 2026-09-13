@@ -1741,4 +1741,42 @@ export const Card = styled.div`\n  position: relative;\n  border-radius: 12px;\n
             ]
         );
     }
+
+    /// The shapes whose radius the text engine cannot fully read report as
+    /// they did before the rounded-card gate, and a literal square host in
+    /// each shape stays silent.
+    #[test]
+    fn side_accents_fail_safe_to_reporting() {
+        let side_tabs = |src: &str, path: &str| -> Vec<String> {
+            let mut out: Vec<String> = detect_text(src, path, &TextOptions::default())
+                .into_iter()
+                .filter(|f| f.antipattern == "side-tab")
+                .map(|f| f.snippet)
+                .collect();
+            out.sort();
+            out
+        };
+        let tsx = "import styled from 'styled-components';\n\
+export const Card = styled.div`\n  position: relative;\n  border-radius: ${({ theme }) => theme.radii.md};\n  &::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #6366f1; }\n`;\n\
+export const Square = styled.div`\n  position: relative;\n  border-radius: 0;\n  &::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: #6366f1; }\n`;\n";
+        assert_eq!(
+            side_tabs(tsx, "/x/card.tsx"),
+            vec!["&::before — absolute 4px pseudo-element stripe (left: 0)".to_string()]
+        );
+        let scss = ".card {\n  border-radius: 12px;\n  @media (min-width: 600px) {\n    border-left: 4px solid #6366f1;\n  }\n  @include bp(md) {\n    border-left: 5px solid #6366f1;\n  }\n}\n\
+.sq {\n  border-radius: 0;\n  @media (min-width: 600px) {\n    border-left: 6px solid #6366f1;\n  }\n  @include bp(md) {\n    border-left: 7px solid #6366f1;\n  }\n}\n";
+        assert_eq!(
+            side_tabs(scss, "/x/card.scss"),
+            vec![
+                "border-left: 4px solid #6366f1".to_string(),
+                "border-left: 5px solid #6366f1".to_string(),
+            ]
+        );
+        let sass = ".card\n  border-radius: 12px\n  &.on\n    border-left: 4px solid #6366f1\n\
+.sq\n  border-radius: 0\n  &.on\n    border-left: 5px solid #6366f1\n";
+        assert_eq!(
+            side_tabs(sass, "/x/card.sass"),
+            vec!["border-left: 4px solid #6366f1".to_string()]
+        );
+    }
 }

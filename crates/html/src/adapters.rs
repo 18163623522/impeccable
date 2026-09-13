@@ -7,7 +7,7 @@
 
 use crate::background::{
     a_ge, a_gt, read_own_background_color, resolve_background, resolve_background_info,
-    resolve_border_radius_corners, resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt,
+    resolve_border_radius_px, resolve_gradient_stops, resolve_side_accent_corners, sv, sv_opt,
     CustomPropMap,
 };
 use crate::cascade::StyleValues;
@@ -450,7 +450,7 @@ pub fn check_element_borders(
     let own_bg = parse_any_color(sv_opt(style, "backgroundColor"));
     // Only a left or right accent is gated on the corners.
     let corners = if widths.right > 0.0 || widths.left > 0.0 {
-        resolve_border_radius_corners(style, pf0(sv(style, "width")))
+        resolve_side_accent_corners(el, style, pf0(sv(style, "width")))
     } else {
         None
     };

@@ -111,6 +111,33 @@ impl DeclaredCorners {
         };
     }
 
+    /// A box whose corners the reader cannot see: every corner unknown, so a
+    /// side accent on it keeps its finding until a later literal radius
+    /// replaces them.
+    pub fn unknown() -> Self {
+        let mut corners = DeclaredCorners::default();
+        corners.set_unknown();
+        corners
+    }
+
+    /// Every corner unknown from here on: what a construct the reader cannot
+    /// see through does to the corners (a mixin call, a spread, a bare
+    /// interpolation). A later literal declaration still replaces them.
+    pub fn set_unknown(&mut self) {
+        self.set_all(None);
+    }
+
+    /// The corners in px when every one is known, the cascade default `0`
+    /// where nothing declared one.
+    pub fn to_corners(&self) -> Option<Corners> {
+        Some(Corners {
+            top_left: self.corners[0]?,
+            top_right: self.corners[1]?,
+            bottom_right: self.corners[2]?,
+            bottom_left: self.corners[3]?,
+        })
+    }
+
     /// Apply one declaration when it names a radius: the `border-radius`
     /// shorthand, a physical or logical corner longhand, in CSS spelling or
     /// the camelCase a style object uses. A bare number on a camelCase
@@ -176,6 +203,85 @@ impl DeclaredCorners {
             _ => true,
         }
     }
+}
+
+re!(
+    TW_ROUNDED_CLASS_RE,
+    r"^rounded(?:-(tl|tr|br|bl|ss|se|ee|es|t|r|b|l|s|e))?(?:-([a-z0-9-]+|\[[^\]]*\]|\([^)]*\)))?$"
+        .to_string()
+);
+re!(TW_CLASS_SPLIT_RE, r#"[\s"'`{}]+"#.to_string());
+
+/// The corners a run of utility classes gives a box. `rounded-*` classes set
+/// every corner, then the side classes (`rounded-r-lg`), then the corner
+/// classes (`rounded-tr-lg`), the order the framework emits them in, so
+/// `rounded-lg rounded-r-none` squares the right corners off. A class behind
+/// a variant (`md:rounded-xl`) can only round a corner. A size the scale
+/// does not name (a theme key, a `(--var)`) is unknown.
+pub fn tailwind_declared_corners(scope: &str) -> DeclaredCorners {
+    let mut base: Vec<(u8, &'static [usize], Option<f64>)> = Vec::new();
+    let mut variants: Vec<(&'static [usize], Option<f64>)> = Vec::new();
+    for raw in TW_CLASS_SPLIT_RE.split(scope) {
+        let token = raw.trim_matches('!');
+        let bracket = token.find('[').unwrap_or(token.len());
+        let (variant, class) = match token[..bracket].rfind(':') {
+            Some(i) => (true, token[i + 1..].trim_start_matches('!')),
+            None => (false, token),
+        };
+        let Some(c) = TW_ROUNDED_CLASS_RE.captures(class) else {
+            continue;
+        };
+        let (group, corners): (u8, &'static [usize]) = match c.get(1).map(|m| m.as_str()) {
+            None => (0, &[0, 1, 2, 3]),
+            Some("t") => (1, &[0, 1]),
+            Some("r") | Some("e") => (1, &[1, 2]),
+            Some("b") => (1, &[2, 3]),
+            Some("l") | Some("s") => (1, &[0, 3]),
+            Some("tl") | Some("ss") => (2, &[0]),
+            Some("tr") | Some("se") => (2, &[1]),
+            Some("br") | Some("ee") => (2, &[2]),
+            _ => (2, &[3]),
+        };
+        let px = match c.get(2).map(|m| m.as_str()) {
+            // `rounded` is 4px; `rounded-sm` is 2px in v3 and 4px in v4, and
+            // the larger reading keeps the finding.
+            None | Some("sm") => Some(4.0),
+            Some("none") => Some(0.0),
+            Some("xs") => Some(2.0),
+            Some("md") => Some(6.0),
+            Some("lg") => Some(8.0),
+            Some("xl") => Some(12.0),
+            Some("2xl") => Some(16.0),
+            Some("3xl") => Some(24.0),
+            Some("4xl") => Some(32.0),
+            Some("full") => Some(9999.0),
+            Some(arbitrary) if arbitrary.starts_with('[') => {
+                crate::checks::measures::parse_radius_corner_px(
+                    Some(&arbitrary[1..arbitrary.len() - 1].replace('_', " ")),
+                    NOMINAL_CARD_WIDTH_PX,
+                )
+            }
+            Some(_) => None,
+        };
+        if variant {
+            variants.push((corners, px));
+        } else {
+            base.push((group, corners, px));
+        }
+    }
+    base.sort_by_key(|entry| entry.0);
+    let mut declared = DeclaredCorners::default();
+    for (_, corners, px) in base {
+        for &i in corners {
+            declared.set_corner(i, px);
+        }
+    }
+    for (corners, px) in variants {
+        for &i in corners {
+            declared.raise_corner(i, px);
+        }
+    }
+    declared
 }
 
 /// JS: checks.mjs#checkBorders
@@ -1162,6 +1268,32 @@ mod tests {
         raised.raise_corner(0, Some(0.0));
         assert!(raised.is_rounded_away_from_side(3));
         assert!(!raised.is_rounded_away_from_side(1));
+    }
+
+    #[test]
+    fn declared_corners_stay_unknown_until_a_literal_replaces_them() {
+        let mut c = DeclaredCorners::unknown();
+        assert!(c.declared());
+        assert!(c.is_rounded_away_from_side(3));
+        assert_eq!(c.to_corners(), None);
+        c.apply("border-radius", "0", NOMINAL_CARD_WIDTH_PX);
+        assert!(!c.is_rounded_away_from_side(3));
+        assert_eq!(c.to_corners(), Some(Corners::default()));
+        // A mixin after the literal makes the corners unknown again.
+        c.set_unknown();
+        assert!(c.is_rounded_away_from_side(1));
+        // No declaration at all is the cascade's square default.
+        assert_eq!(
+            DeclaredCorners::default().to_corners(),
+            Some(Corners::default())
+        );
+        // Utility classes: a known size resolves, an unknown one stays unknown.
+        assert_eq!(
+            tailwind_declared_corners("rounded-none").to_corners(),
+            Some(Corners::default())
+        );
+        assert_eq!(tailwind_declared_corners("rounded-card").to_corners(), None);
+        assert!(!tailwind_declared_corners("p-4 border-l-4").declared());
     }
 
     // Expected values below were produced by running the JS functions in

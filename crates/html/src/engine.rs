@@ -18,7 +18,7 @@ use crate::adapters::{
     check_numbered_section_labels_from_doc, scoped_ignore_active,
 };
 use crate::background::{
-    resolve_background, resolve_border_radius_corners, resolve_border_radius_scalar_px, sv,
+    resolve_background, resolve_border_radius_scalar_px, resolve_side_accent_corners, sv,
 };
 use crate::cascade::{build_static_style_map, collect_static_css_text};
 use crate::dom::{StaticDocument, StaticElement};
@@ -212,6 +212,11 @@ pub fn detect_html_source(
     );
     let css_text = collect_static_css_text(&doc, &file_dir, profile, fp, options.warn);
     build_static_style_map(&mut doc, css_text.as_str(), profile, fp);
+    // A stylesheet the engine could not read may round any card it never saw
+    // a radius for; the side-accent gate keeps those findings.
+    if crate::cascade::has_unread_stylesheet(&doc, &file_dir) {
+        doc.set_unread_stylesheet();
+    }
     let doc = doc;
 
     let mut findings: Vec<Finding> = Vec::new();
@@ -351,7 +356,8 @@ pub fn detect_html_source(
                 } else {
                     hosts.iter().any(|el| {
                         let style = el.style();
-                        let corners = resolve_border_radius_corners(style, pf0(sv(style, "width")));
+                        let corners =
+                            resolve_side_accent_corners(el, style, pf0(sv(style, "width")));
                         is_rounded_away_from_side(corners.as_ref(), side)
                     })
                 };

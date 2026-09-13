@@ -544,7 +544,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         id: "clipped-overflow-container",
         category: "quality",
         scopes: Some(&["layout"]),
-        severity: None,
+        severity: Some("advisory"),
         name: "Positioned child clipped by overflow container",
         description: "A clipping container (overflow hidden or clip) wrapping an absolutely-positioned child cuts off tooltips, menus, and popovers that need to escape. Let the overflow be visible, or move the positioned layer out of the clip.",
         skill_section: Some("Layout & Space"),
@@ -646,7 +646,6 @@ pub const IMMEDIATE_TIER_RULES: &[&str] = &[
     // Broken output.
     "broken-image",
     "text-overflow",
-    "clipped-overflow-container",
     "body-text-viewport-edge",
     // Objective contrast / legibility failures.
     "low-contrast",
@@ -845,6 +844,11 @@ mod tests {
         // measurement is right, the finding is almost never harmful.
         assert!(is_advisory_rule("layout-transition"));
         assert!(is_advisory_rule("bounce-easing"));
+        // A live recapture judged the fixed rule's new findings 0.08 pattern
+        // precision and 0.04 harm: the clip is almost always intended. An
+        // advisory rule is no longer an edit-time interruption either.
+        assert!(is_advisory_rule("clipped-overflow-container"));
+        assert!(!IMMEDIATE_TIER_RULES.contains(&"clipped-overflow-container"));
         // Retired by the same review. An id the registry does not carry
         // resolves to `None` rather than panicking, so a config or an inline
         // ignore naming it still parses.

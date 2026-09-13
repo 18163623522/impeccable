@@ -537,3 +537,24 @@ should-flag cases from each revision. The sweep goes from 452 findings to 458, a
 with advisories off.
 
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the radial-spotlight-glow delta on top of the integration above.
+
+## Recorded 2026-09-13: clipped-overflow-container goes advisory
+
+Even after the rule was fixed to name the child and drop the clips that do
+their job, the new findings of a live recapture judged 0.08 pattern precision
+and 0.04 harm: the clip is almost always the intended effect (carousels,
+tickers, accordions, collapsed nav variants, closed video menus). Its registry
+severity is now `advisory`, the same move `layout-transition` and
+`bounce-easing` made: still detected and listed, never counted, never in the
+exit code. It also leaves the design hook's immediate tier, which is reserved
+for unambiguous problems worth interrupting an edit for; the hook drops
+advisory findings by default, and with `advisoryRules: "include"` the rule now
+waits for the Stop deep pass. No finding was added or removed. Every golden
+change is the same findings moving from the counted list to the advisory
+section.
+
+- `detect-fixture-json-clipped-overflow-container-html`, `detect-fixture-text-clipped-overflow-container-html`: the twelve findings carry `severity: "advisory"` / `advisory: true` and print under the advisory heading; the fixture's only counted finding is the `cramped-padding` hit on `pass-split-container` (13 counted to 1).
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: the one clipped finding moves to the advisory section (32 counted to 31); the exit code stays 2 on the other findings.
+- `detect-scope-layout-text`, `detect-scope-both`: the same thirteen findings inside the layout-scope sweeps (`detect-scope-both` 166 counted to 153, 170 findings unchanged).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`: 458 findings unchanged, 415 counted to 402, advisory notes 43 to 56.
+- `detect-no-advisory-json`, `detect-no-advisory-text`: `--no-advisory` now drops the thirteen findings with the other advisories (415 to 402).

@@ -830,7 +830,7 @@ GENERATED_PATH = /(?:\.generated\.[a-z]+$|\.d\.ts$|\.min\.[a-z]+$|[/\\]node_modu
 
 TRUTHY = /^(1|true|yes|on)$/i          // truthy(v): typeof v === 'string' && TRUTHY.test(v)
 
-IMMEDIATE_TIER_RULES = { 'broken-image', 'text-overflow', 'clipped-overflow-container',
+IMMEDIATE_TIER_RULES = { 'broken-image', 'text-overflow',
   'body-text-viewport-edge', 'low-contrast', 'gray-on-color', 'tiny-text',
   'gradient-text', 'dark-glow', 'design-system-font', 'design-system-color',
   'design-system-radius', 'design-system-font-size' }

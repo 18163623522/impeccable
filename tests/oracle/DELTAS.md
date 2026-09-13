@@ -1218,3 +1218,84 @@ and `--no-advisory` sweeps, eighteen in the two scope sweeps, none removed,
 nothing extra and nothing missing. The only text lines that differ from the
 branch are the summary counts, 422 to 453 here against 409 to 440 there. The
 static engine measures no boxes, so no other fixture moves.
+
+## Recorded 2026-09-13: heading-rhythm reads the layouts the reveal sweep exposed
+
+Once URL scans measured the page after the reveal sweep, headings that sat at
+opacity 0 in the old first capture were measured for the first time, and the
+check misread their layouts: eyebrows wrapped in their own boxes, accordion
+triggers and card headlines that end their box, rules, photos, icon badges and
+stacked headings above, title bands that draw their own rule, standfirsts behind
+`display: contents`, empty spacers and padding held open above. heading-rhythm
+is browser-only, so no static golden moves.
+
+What the check now treats as the end of a heading's box, and so as nothing below
+to measure: a box that draws a bottom edge (a border, a shadow, a background band
+that differs from its backdrop), or a box that repeats as a run of like siblings:
+the neighbour has the same tag, holds a heading of the same level in the same
+place (the same child path, or the same chain of tags and classes down to it),
+and has a similar outline (accordion rows, list items, cards in a grid). A layout
+wrapper that shares a generic class with its neighbour but holds other content (a
+heading alone in a `.row` before a `.row` of feature columns, a `w-container`, a
+`wp-block-group`) repeats nothing. Any other wrapper is measured past, and its bottom
+padding and margin count as space below, so a padded section header, a
+block-editor heading block, a title row stretched by an icon or a tall button,
+and a heading last in one grid column with content under the row all flag as
+integration did. Empty spacer boxes count as space below as well as above, so
+builder layouts that hold every gap open with a spacer can flag. A line above the
+heading folds into its cluster only when it reads as a label (smaller than the
+body text, uppercase, tracked out, or a small chip); a plain date line set like
+body copy stays content of its own.
+
+Policy kept deliberately: a heading set tight under a picture (a photo, a card
+thumbnail, a hero image) or under a block that ends in a rule (an hr, a divided
+list) is not flagged. The picture or rule already separates it, matching the
+rubric's `media-above` and `divider-above` codes and the judges' labels. A rule
+is a bottom edge drawn alone: a code block, a panel, a table cell or a callout
+bordered on another side is framed content, and a heading tight under it flags.
+
+`heading-rhythm.html` was rewritten into two columns (should flag, should pass)
+with a case per misread shape, and a third column after them holds the wrapper
+spacing cases (header padding, block padding, small padding, icon row, tall
+button row, grid column, spacer below, spacer stack, plain line above, a framed
+code block above, a title alone in a layout row before a row of feature columns)
+plus a heading that ends a ruled box. `.tiles` gained a background so the tile row reads
+as content rather than a spacer. The static engine's one finding on the fixture,
+cramped-padding on `.pass-band`, is kept byte for byte, so the fixture and
+directory goldens are unchanged. The browser behavior is pinned by
+`crates/browser/tests/heading_rhythm.rs` and `crates/core/tests/heading_rhythm.rs`.
+
+- No golden re-recorded.
+
+### Known limits at merge
+
+1. **No corpus evidence for the recall fixes.** The padded-wrapper,
+   bordered-box and layout-row fixes are proven only on constructed pages. The
+   corpus had none of those shapes.
+2. **Cards whose structure differs.** A card with a badge beside one without,
+   sharing no class, is measured past. A heading ending such a card can flag.
+3. **Two-row accordion with one row open.** The closed row can score below the
+   0.7 structure overlap and is then measured as base does.
+4. **Kicker folding.** A same-size, mixed-case brand-colour kicker no longer
+   folds into the heading.
+5. **Background comparison.** It reads colour only and ignores images and
+   gradients.
+6. **Exempt by design.** A card title under an image, a heading directly under
+   an `hr` or a bottom-only rule, and a section heading that ends in its own
+   border.
+
+## Recorded 2026-09-13: heading-rhythm joins the integration
+
+`corpus/integration` merges `corpus/fix-heading-rhythm-reveal`. The code merged
+without conflicts: the integration had not touched `page_checks.rs` since the
+branch point. Only this file and the generated browser asset conflicted; the
+asset was regenerated with `cargo xtask bundle`. heading-rhythm is browser-only
+and the static engine's one finding on its fixture is unchanged, so every golden
+replays as recorded and none was re-recorded.
+
+heading-rhythm is a page pass and not one of the paint-gated rules, so the
+driver's painted predicate does not reach it. Its own candidate filter
+(`rhythm_visible_flow`) skips a heading that is itself `display: none`,
+`visibility: hidden`, at or below 0.05 opacity, out of flow, or without a box,
+but not a heading hidden by an ancestor's opacity, clipped by an ancestor, or
+off screen. This merge adds no gating.

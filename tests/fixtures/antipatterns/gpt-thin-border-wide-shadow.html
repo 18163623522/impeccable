@@ -4,10 +4,10 @@
   <meta charset="utf-8" />
   <title>Hairline border with wide shadow fixture</title>
   <!--
-    The rule reports a hairline border paired with a wide offsetless halo only
-    where a row of comparable sibling cards all wear it. A lone popover, a
-    dialog, a directional drop shadow and a tight halo are the resting styles
-    of most design systems and stay silent.
+    The rule reports a hairline border paired with a wide shadow only where a
+    row of comparable sibling cards all wear it. A lone popover, a pair of
+    cards, a tight shadow and a shadow drawn inside the box are the resting
+    styles of most design systems and stay silent.
 
     A file scan has no layout, so the sibling row is read as same-tag siblings
     there; the size tolerance is exercised by the browser tests in
@@ -17,11 +17,11 @@
     body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #fff; }
     .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px; }
     .col { padding: 16px; }
-    h2 { font-size: 20px; margin: 0 0 16px; }
+    h2 { font-size: 20px; margin: 0 0 12px; }
     h3 { font-size: 14px; margin: 0 0 8px; color: #52525b; }
-    .case { margin: 0 0 24px; }
+    .case { margin: 0 0 16px; }
     .row { display: flex; gap: 16px; }
-    .card { width: 180px; height: 140px; padding: 16px; border-radius: 12px; box-sizing: border-box; font-size: 13px; }
+    .card { width: 180px; height: 88px; padding: 12px; border-radius: 12px; box-sizing: border-box; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -31,7 +31,7 @@
       <h2>Every card of the row wears both</h2>
 
       <div class="case">
-        <h3>Three identical cards, 40px halo, no offset</h3>
+        <h3>Three identical cards, 40px halo</h3>
         <div class="row">
           <div class="card flag-row-first" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">First card of the row.</div>
           <div class="card flag-row-second" style="border: 1px solid #e5e7eb; box-shadow: 0 0 40px rgba(15,23,42,0.18)">Second card of the row.</div>
@@ -42,9 +42,18 @@
       <div class="case">
         <h3>Cards that differ a little in size still read as one row</h3>
         <div class="row">
-          <div class="card flag-tolerant-narrow" style="width: 168px; height: 132px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Narrower tile.</div>
-          <div class="card flag-tolerant-middle" style="width: 180px; height: 140px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Middle tile.</div>
-          <div class="card flag-tolerant-wide" style="width: 192px; height: 148px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Wider tile.</div>
+          <div class="card flag-tolerant-narrow" style="width: 168px; height: 80px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Narrower tile.</div>
+          <div class="card flag-tolerant-middle" style="width: 180px; height: 88px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Middle tile.</div>
+          <div class="card flag-tolerant-wide" style="width: 192px; height: 96px; border: 1px solid #d4d4d8; box-shadow: 0 0 48px rgba(15,23,42,0.2)">Wider tile.</div>
+        </div>
+      </div>
+
+      <div class="case">
+        <h3>A row lit from above, 8px offset under a 40px blur</h3>
+        <div class="row">
+          <div class="card flag-offset-first" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">First priced tier.</div>
+          <div class="card flag-offset-second" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Second priced tier.</div>
+          <div class="card flag-offset-third" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Third priced tier.</div>
         </div>
       </div>
     </section>
@@ -69,16 +78,7 @@
       </div>
 
       <div class="case">
-        <h3>A row lit from above: the shadow carries an offset</h3>
-        <div class="row">
-          <div class="card pass-offset-first" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">First priced tier.</div>
-          <div class="card pass-offset-second" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Second priced tier.</div>
-          <div class="card pass-offset-third" style="border: 1px solid #e5e7eb; box-shadow: 0 8px 40px rgba(15,23,42,0.22)">Third priced tier.</div>
-        </div>
-      </div>
-
-      <div class="case">
-        <h3>A row with a tight halo, not a wide one</h3>
+        <h3>A row with a tight shadow, not a wide one</h3>
         <div class="row">
           <div class="card pass-tight-first" style="border: 1px solid #e5e7eb; box-shadow: 0 0 24px rgba(15,23,42,0.18)">First pill.</div>
           <div class="card pass-tight-second" style="border: 1px solid #e5e7eb; box-shadow: 0 0 24px rgba(15,23,42,0.18)">Second pill.</div>

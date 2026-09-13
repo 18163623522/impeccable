@@ -13,11 +13,12 @@ use super::dom::{
 };
 use super::BrowserFinding;
 use crate::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style,
-    check_gpt_thin_border_wide_shadow_row, check_oversized_h1, check_radial_spotlight,
-    gpt_border_shadow_sizes_match, gpt_thin_border_wide_shadow_pair,
-    is_screen_reader_only_text_style, positioned_style_implies_escape, GptBorderShadowInput,
-    OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics, GPT_BORDER_SHADOW_MIN_ROW,
+    self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
+    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_row_finding,
+    gpt_border_shadow_sibling_window, gpt_border_shadow_sizes_match,
+    gpt_thin_border_wide_shadow_pair, is_screen_reader_only_text_style,
+    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput,
+    SrOnlyMetrics, GPT_BORDER_SHADOW_MIN_ROW,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
@@ -891,14 +892,18 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
 }
 
 /// The hairline-and-halo pair of one element, read off its computed style.
+/// The halo is measured first: it is one string parse, where the hairlines
+/// cost four style reads and two allocations, and a sibling row walk asks
+/// this of every box it passes.
 fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
+    let box_shadow = dom.style(el, "boxShadow");
+    gpt_border_shadow_halo_blur_px(Some(&box_shadow))?;
     let style = ElStyle { dom, el };
     let widths = border_widths_from_style(&style);
     let colors: Vec<Option<String>> = border_colors_from_style(&style)
         .into_iter()
         .map(Some)
         .collect();
-    let box_shadow = dom.style(el, "boxShadow");
     gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
@@ -907,10 +912,10 @@ fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
 }
 
 /// How many boxes of `el`'s sibling row carry the same pair at a comparable
-/// size, `el` included. Counting stops at the threshold and at a bounded
-/// number of siblings, so a long list costs no more than a row of cards.
+/// size, `el` included. Counting stops at the threshold, and the walk covers
+/// a bounded window of siblings around `el`, so a long list costs no more
+/// than a row of cards and a card deep inside one still finds its row-mates.
 fn gpt_border_shadow_row_size(dom: &dyn Dom, el: ElId) -> usize {
-    const MAX_SIBLINGS_SCANNED: usize = 200;
     let Some(parent) = dom.parent(el) else {
         return 1;
     };
@@ -919,8 +924,11 @@ fn gpt_border_shadow_row_size(dom: &dyn Dom, el: ElId) -> usize {
         width: own.width,
         height: own.height,
     };
+    let siblings = dom.children(parent);
     let mut row = 1usize;
-    for sibling in dom.children(parent).into_iter().take(MAX_SIBLINGS_SCANNED) {
+    let window =
+        gpt_border_shadow_sibling_window(&siblings, siblings.iter().position(|&s| s == el));
+    for &sibling in window {
         if row >= GPT_BORDER_SHADOW_MIN_ROW {
             break;
         }
@@ -946,22 +954,11 @@ fn gpt_border_shadow_row_size(dom: &dyn Dom, el: ElId) -> usize {
 pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     // The sibling walk is worth paying for only once this element carries the
     // pair itself.
-    if gpt_border_shadow_pair_dom(dom, el).is_none() {
+    let Some(pair) = gpt_border_shadow_pair_dom(dom, el) else {
         return Vec::new();
-    }
-    let style = ElStyle { dom, el };
-    let widths = border_widths_from_style(&style);
-    let colors: Vec<Option<String>> = border_colors_from_style(&style)
-        .into_iter()
-        .map(Some)
-        .collect();
-    let box_shadow = dom.style(el, "boxShadow");
-    finding_hits(check_gpt_thin_border_wide_shadow_row(
-        &GptBorderShadowInput {
-            border_widths: &widths,
-            border_colors: Some(&colors),
-            box_shadow: Some(&box_shadow),
-        },
+    };
+    finding_hits(gpt_border_shadow_row_finding(
+        pair,
         gpt_border_shadow_row_size(dom, el),
     ))
 }
@@ -1739,18 +1736,21 @@ mod tests {
         let hits = check_element_gpt_border_shadow_dom(&d, first);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "gpt-thin-border-wide-shadow");
-        assert_eq!(hits[0].snippet, "1px border + 40px shadow blur");
+        assert_eq!(
+            hits[0].snippet,
+            "1px border + 40px shadow blur, repeated across the row"
+        );
     }
 
     #[test]
-    fn gpt_border_shadow_ignores_offset_tight_and_inset_shadows() {
+    fn gpt_border_shadow_ignores_tight_and_inset_shadows() {
         for shadow in [
-            // lit from above: ordinary elevation
-            "rgba(15, 23, 42, 0.22) 0px 8px 40px 0px",
-            // a halo, but a tight one
+            // a wide shadow, but a tight one
             "rgba(15, 23, 42, 0.18) 0px 0px 24px 0px",
+            "rgba(15, 23, 42, 0.22) 0px 8px 24px 0px",
             // drawn inside the box
             "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px inset",
+            "rgba(15, 23, 42, 0.18) 0px 8px 40px 0px inset",
         ] {
             let (mut d, body) = page();
             let row = d.add(Some(body), "div");
@@ -1760,6 +1760,38 @@ mod tests {
                 "{shadow} should not read as the repeated signature"
             );
         }
+    }
+
+    #[test]
+    fn gpt_border_shadow_counts_a_row_lit_from_above() {
+        // Every step of every mainstream elevation scale casts a y-offset, so
+        // a repeated drop shadow is the population the rule is named for.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_row(&mut d, row, 3, "rgba(15, 23, 42, 0.22) 0px 8px 40px 0px");
+        let hits = check_element_gpt_border_shadow_dom(&d, first);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].snippet,
+            "1px border + 40px shadow blur, repeated across the row"
+        );
+    }
+
+    #[test]
+    fn gpt_border_shadow_finds_row_mates_past_the_sibling_bound() {
+        // A card sitting deep inside a long list still sees the boxes beside
+        // it: the walk reads a window around the element, not the head of the
+        // list.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        for _ in 0..400 {
+            let filler = d.add(Some(row), "div");
+            visible(&mut d, filler);
+            d.set_rect(filler, 0.0, 0.0, 180.0, 140.0);
+        }
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 3, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
     }
 
     #[test]

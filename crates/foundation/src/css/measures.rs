@@ -492,12 +492,13 @@ pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f
     max_blur
 }
 
-/// Largest blur radius across the layers that cast no direction: both
-/// offsets zero, not `inset`, and a color alpha of at least `min_alpha`.
-/// An offset shadow reads as light coming from somewhere, which is how
-/// ordinary elevation is drawn; an offsetless one is a halo sitting evenly
-/// around the box.
-pub fn shadow_max_offsetless_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+/// Largest blur radius across the layers drawn outside the box: not `inset`,
+/// with a color alpha of at least `min_alpha`. An inset layer is a well
+/// pressed into the surface rather than an elevation under it, so it is never
+/// the halo around a card. Offsets are read by nothing here: every step of
+/// every mainstream elevation scale casts a y-offset, so a shadow lit from
+/// above is the common case rather than the exception.
+pub fn shadow_max_outer_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
     re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
     re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
     re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
@@ -522,7 +523,7 @@ pub fn shadow_max_offsetless_blur_px(box_shadow: Option<&str>, min_alpha: Option
             .find_iter(&cleaned)
             .map(|m| parse_float(m.as_str()))
             .collect();
-        if nums.len() >= 3 && nums[0] == 0.0 && nums[1] == 0.0 {
+        if nums.len() >= 3 {
             max_blur = math_max(max_blur, nums[2]);
         }
     }

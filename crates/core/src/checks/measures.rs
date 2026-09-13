@@ -194,6 +194,24 @@ pub const GPT_BORDER_SHADOW_MIN_BLUR_PX: f64 = 32.0;
 /// the same card.
 pub const GPT_BORDER_SHADOW_SIZE_TOLERANCE: f64 = 0.25;
 
+/// How many of an element's siblings a row walk reads at most. A row of
+/// cards is a handful of boxes; the bound keeps a list of thousands from
+/// paying for a style read per entry.
+pub const GPT_BORDER_SHADOW_MAX_SIBLINGS: usize = 200;
+
+/// The slice of `siblings` a row walk reads: a window of at most
+/// [`GPT_BORDER_SHADOW_MAX_SIBLINGS`] entries around the element's own
+/// position, so a card deep inside a long list still sees the ones beside it.
+pub fn gpt_border_shadow_sibling_window<T>(siblings: &[T], own_index: Option<usize>) -> &[T] {
+    let half = GPT_BORDER_SHADOW_MAX_SIBLINGS / 2;
+    let start = own_index
+        .unwrap_or(0)
+        .saturating_sub(half)
+        .min(siblings.len());
+    let end = (start + GPT_BORDER_SHADOW_MAX_SIBLINGS).min(siblings.len());
+    &siblings[start..end]
+}
+
 /// Whether two sibling boxes are close enough in size to be the same card.
 /// A box with no area matches nothing, so an element that paints nothing
 /// never joins a row.
@@ -205,9 +223,9 @@ pub fn gpt_border_shadow_sizes_match(a: &Rect, b: &Rect) -> bool {
     close(a.width, b.width) && close(a.height, b.height)
 }
 
-/// The hairline-and-halo pair on one element: the widest visible hairline and
-/// the widest offsetless blur, or `None` when only one of the two is there.
-pub fn gpt_thin_border_wide_shadow_pair(input: &GptBorderShadowInput) -> Option<(f64, f64)> {
+/// Every border side that reads as a hairline: at most 1.5px wide in a color
+/// solid enough to draw an edge.
+fn visible_hairline_widths(input: &GptBorderShadowInput) -> Vec<f64> {
     let mut visible_thin: Vec<f64> = Vec::new();
     for (index, &width) in input.border_widths.iter().enumerate() {
         let color = input
@@ -220,64 +238,79 @@ pub fn gpt_thin_border_wide_shadow_pair(input: &GptBorderShadowInput) -> Option<
             visible_thin.push(width);
         }
     }
-    if visible_thin.len() < 2 {
-        return None;
+    visible_thin
+}
+
+fn widest(widths: &[f64]) -> f64 {
+    let mut max = 0.0f64;
+    for &w in widths {
+        max = math_max(max, w);
     }
-    let mut max_border = 0.0f64;
-    for &w in &visible_thin {
-        max_border = math_max(max_border, w);
-    }
-    let blur = shadow_max_offsetless_blur_px(input.box_shadow, Some(0.12));
+    max
+}
+
+/// The blur of the halo an element carries, or `None` when its widest outer
+/// shadow is too tight to be one. One string parse and no per-side work, so
+/// the engines run it first when they walk a row of siblings.
+pub fn gpt_border_shadow_halo_blur_px(box_shadow: Option<&str>) -> Option<f64> {
+    let blur = shadow_max_outer_blur_px(box_shadow, Some(0.12));
     if blur < GPT_BORDER_SHADOW_MIN_BLUR_PX {
         return None;
     }
-    Some((max_border, blur))
+    Some(blur)
 }
 
-/// The rule as the engines report it: [`gpt_thin_border_wide_shadow_pair`]
-/// repeated across a row of cards. `row_size` is how many boxes of the
-/// element's own sibling row carry the pair at a comparable size, counting
-/// the element itself.
-pub fn check_gpt_thin_border_wide_shadow_row(
-    input: &GptBorderShadowInput,
-    row_size: usize,
-) -> Vec<Finding> {
+/// The hairline-and-halo pair on one element: the widest visible hairline and
+/// the widest blur drawn outside the box, or `None` when only one of the two
+/// is there.
+pub fn gpt_thin_border_wide_shadow_pair(input: &GptBorderShadowInput) -> Option<(f64, f64)> {
+    let blur = gpt_border_shadow_halo_blur_px(input.box_shadow)?;
+    let visible_thin = visible_hairline_widths(input);
+    if visible_thin.len() < 2 {
+        return None;
+    }
+    Some((widest(&visible_thin), blur))
+}
+
+/// The finding the engines report for a pair that repeats: a
+/// [`gpt_thin_border_wide_shadow_pair`] on at least
+/// [`GPT_BORDER_SHADOW_MIN_ROW`] boxes of one sibling row. `row_size` counts
+/// the element itself. Callers that already hold the pair report through
+/// this; [`check_gpt_thin_border_wide_shadow_row`] is the form that reads it
+/// off the input.
+pub fn gpt_border_shadow_row_finding(pair: (f64, f64), row_size: usize) -> Vec<Finding> {
     if row_size < GPT_BORDER_SHADOW_MIN_ROW {
         return vec![];
     }
-    let Some((max_border, blur)) = gpt_thin_border_wide_shadow_pair(input) else {
-        return vec![];
-    };
+    let (max_border, blur) = pair;
     vec![Finding::new(
         "gpt-thin-border-wide-shadow",
         format!(
-            "{}px border + {}px shadow blur",
+            "{}px border + {}px shadow blur, repeated across the row",
             number_to_string(max_border),
             number_to_string(math_round(blur))
         ),
     )]
 }
 
+/// The rule as the engines report it: [`gpt_thin_border_wide_shadow_pair`]
+/// repeated across a row of cards.
+pub fn check_gpt_thin_border_wide_shadow_row(
+    input: &GptBorderShadowInput,
+    row_size: usize,
+) -> Vec<Finding> {
+    match gpt_thin_border_wide_shadow_pair(input) {
+        Some(pair) => gpt_border_shadow_row_finding(pair, row_size),
+        None => vec![],
+    }
+}
+
 /// JS: checks.mjs#checkGptThinBorderWideShadow. The recorded call vectors pin
 /// this signature-on-one-element form; the engines report the narrowed
 /// [`check_gpt_thin_border_wide_shadow_row`].
 pub fn check_gpt_thin_border_wide_shadow(input: &GptBorderShadowInput) -> Vec<Finding> {
-    let mut visible_thin: Vec<f64> = Vec::new();
-    for (index, &width) in input.border_widths.iter().enumerate() {
-        let color = input
-            .border_colors
-            .and_then(|cs| cs.get(index))
-            .and_then(|c| c.as_deref())
-            .filter(|c| !c.is_empty());
-        let alpha = css_color_alpha(color);
-        if width > 0.0 && width <= 1.5 && alpha >= 0.28 {
-            visible_thin.push(width);
-        }
-    }
-    let mut max_border = 0.0f64;
-    for &w in &visible_thin {
-        max_border = math_max(max_border, w);
-    }
+    let visible_thin = visible_hairline_widths(input);
+    let max_border = widest(&visible_thin);
     let blur = shadow_max_blur_px(input.box_shadow, Some(0.12));
     if visible_thin.len() >= 2 && blur >= 16.0 {
         return vec![Finding::new(
@@ -498,23 +531,28 @@ mod tests {
     }
 
     #[test]
-    fn shadow_max_offsetless_blur_px_cases() {
-        let px = |s: &str| shadow_max_offsetless_blur_px(Some(s), Some(0.12));
-        assert_eq!(shadow_max_offsetless_blur_px(None, None), 0.0);
+    fn shadow_max_outer_blur_px_cases() {
+        let px = |s: &str| shadow_max_outer_blur_px(Some(s), Some(0.12));
+        assert_eq!(shadow_max_outer_blur_px(None, None), 0.0);
         assert_eq!(px("none"), 0.0);
         assert_eq!(px("0 0 40px rgba(15,23,42,0.18)"), 40.0);
         assert_eq!(px("rgba(15, 23, 42, 0.18) 0px 0px 40px 0px"), 40.0);
-        // A direction of light, not a halo.
-        assert_eq!(px("0 8px 40px rgba(15,23,42,0.22)"), 0.0);
-        assert_eq!(px("-12px 0 36px -16px rgba(0,0,0,0.7)"), 0.0);
+        // Lit from above is still a shadow drawn outside the box.
+        assert_eq!(px("0 8px 40px rgba(15,23,42,0.22)"), 40.0);
+        assert_eq!(px("-12px 0 36px -16px rgba(0,0,0,0.7)"), 36.0);
         // Drawn inside the box.
         assert_eq!(px("inset 0 0 40px rgba(15,23,42,0.18)"), 0.0);
         assert_eq!(px("rgba(15, 23, 42, 0.18) 0px 0px 40px 0px inset"), 0.0);
         // Too faint to paint.
         assert_eq!(px("0 0 40px rgba(0,0,0,0.05)"), 0.0);
-        // The offsetless layer of a stack still counts.
+        // The widest layer of a stack is the one reported; an inset layer
+        // beside it is skipped.
         assert_eq!(
             px("0 8px 60px rgba(0,0,0,0.3), 0 0 36px rgba(0,0,0,0.2)"),
+            60.0
+        );
+        assert_eq!(
+            px("inset 0 0 80px rgba(0,0,0,0.3), 0 0 36px rgba(0,0,0,0.2)"),
             36.0
         );
     }

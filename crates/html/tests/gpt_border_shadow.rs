@@ -41,20 +41,36 @@ fn a_row_of_three_flags_and_a_pair_does_not() {
     assert_eq!(
         snippets(&row(3, halo)),
         vec![
-            "1px border + 40px shadow blur",
-            "1px border + 40px shadow blur",
-            "1px border + 40px shadow blur"
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row"
         ]
     );
 }
 
 #[test]
-fn offset_tight_and_inset_shadows_stay_silent() {
+fn a_row_lit_from_above_counts() {
+    // Every step of every mainstream elevation scale casts a y-offset, so a
+    // repeated drop shadow is the population the rule is named for.
     for shadow in [
         "0 8px 40px rgba(15,23,42,0.22)",
         "0 30px 60px -40px rgba(15,23,42,0.35)",
+    ] {
+        assert_eq!(
+            snippets(&row(3, shadow)).len(),
+            3,
+            "{shadow} is a wide shadow on every card of the row"
+        );
+    }
+}
+
+#[test]
+fn tight_and_inset_shadows_stay_silent() {
+    for shadow in [
         "0 0 24px rgba(15,23,42,0.18)",
+        "0 8px 24px rgba(15,23,42,0.22)",
         "inset 0 0 40px rgba(15,23,42,0.18)",
+        "inset 0 8px 40px rgba(15,23,42,0.18)",
     ] {
         assert!(
             snippets(&row(4, shadow)).is_empty(),
@@ -74,6 +90,17 @@ fn a_row_of_cards_with_different_tags_is_not_a_row() {
 }
 
 #[test]
+fn a_card_deep_in_a_long_list_still_finds_its_row_mates() {
+    let filler = "<div class=\"filler\">Filler</div>".repeat(400);
+    let card = "<div class=\"card\" style=\"border:1px solid #e5e7eb;box-shadow:0 0 40px rgba(15,23,42,0.18)\">Card</div>";
+    let html = format!(
+        "<!DOCTYPE html><html><body><div class=\"row\">{filler}{}</div></body></html>",
+        card.repeat(3)
+    );
+    assert_eq!(snippets(&html).len(), 3);
+}
+
+#[test]
 fn fixture_flag_and_pass_columns() {
     let fixture = repo_root().join("tests/fixtures/antipatterns/gpt-thin-border-wide-shadow.html");
     let html = std::fs::read_to_string(&fixture).unwrap();
@@ -82,16 +109,19 @@ fn fixture_flag_and_pass_columns() {
         .filter(|f| f.antipattern == "gpt-thin-border-wide-shadow")
         .map(|f| f.snippet)
         .collect();
-    // The two flag rows and nothing from the pass column.
+    // The three flag rows and nothing from the pass column.
     assert_eq!(
         found,
         vec![
-            "1px border + 40px shadow blur",
-            "1px border + 40px shadow blur",
-            "1px border + 40px shadow blur",
-            "1px border + 48px shadow blur",
-            "1px border + 48px shadow blur",
-            "1px border + 48px shadow blur",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 48px shadow blur, repeated across the row",
+            "1px border + 48px shadow blur, repeated across the row",
+            "1px border + 48px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
         ],
         "fixture columns moved"
     );

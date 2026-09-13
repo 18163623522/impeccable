@@ -210,3 +210,25 @@ fn em_and_rem_radii_resolve_to_px() {
         vec!["border-left: 4px + border-radius: 8px".to_string()]
     );
 }
+
+#[test]
+fn a_var_built_radius_reads_each_corner_once_it_resolves() {
+    // Rounded away from the stripe through a custom property: reports.
+    assert_eq!(
+        side_tab_snippets(
+            "--r:0 12px 12px 0;border-left:4px solid #6366f1;border-radius:var(--r);"
+        ),
+        vec!["border-left: 4px".to_string()]
+    );
+    // Rounded only under the stripe: square where it counts.
+    assert!(side_tab_snippets(
+        "--r:12px 0 0 12px;border-left:4px solid #6366f1;border-radius:var(--r);"
+    )
+    .is_empty());
+    // A later longhand still wins its corner over the var-built shorthand.
+    assert!(side_tab_snippets(
+        "--r:12px;border-left:4px solid #6366f1;border-radius:var(--r);\
+border-top-right-radius:0;border-bottom-right-radius:0;"
+    )
+    .is_empty());
+}

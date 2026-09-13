@@ -1,0 +1,109 @@
+/*
+ * Side accents written with nesting, the way SCSS, Less and CSS-in-JS
+ * author them. A left or right accent reports only on a card rounded away
+ * from the stripe, and a nested rule that names its parent with an
+ * ampersand reads the parent's corners. Every case carries a unique stripe
+ * width so each finding attributes to one case.
+ */
+
+/* ── FLAG: nested ::before bar on a rounded card ── */
+.flag-nested-pseudo {
+  position: relative;
+  border-radius: 12px;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+    background: #0f766e;
+  }
+}
+
+/* ── FLAG: nested ::after bar inside a media query on a rounded card ── */
+.flag-nested-media {
+  position: relative;
+  border-radius: 12px;
+  @media (min-width: 600px) {
+    &::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 5px;
+      background: #0f766e;
+    }
+  }
+}
+
+/* ── FLAG: a state class on a rounded card ── */
+.flag-nested-state {
+  border-radius: 12px;
+  &.is-accent {
+    border-left: 6px solid #0f766e;
+  }
+}
+
+/* ── FLAG: a BEM modifier on a rounded card ── */
+.flag-nested-modifier {
+  border-radius: 12px;
+  &--accent {
+    box-shadow: inset 7px 0 0 #0f766e;
+  }
+}
+
+/* ── FLAG: a hover-revealed bar on a rounded card ── */
+.flag-hover-reveal {
+  position: relative;
+  border-radius: 12px;
+}
+.flag-hover-reveal:hover::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  background: #0f766e;
+}
+
+/* ── PASS: nested ::before bar on a square box ── */
+.pass-nested-pseudo {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: #0f766e;
+  }
+}
+
+/* ── PASS: bars on the children of a rounded card ── */
+.pass-nested-child {
+  border-radius: 12px;
+  & .row::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 9px;
+    background: #0f766e;
+  }
+  .note {
+    border-left: 10px solid #0f766e;
+  }
+}
+
+/* ── PASS: a BEM element of a rounded card ── */
+.pass-nested-element {
+  border-radius: 12px;
+  &__part {
+    border-left: 11px solid #0f766e;
+  }
+}

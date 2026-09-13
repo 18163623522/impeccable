@@ -7,8 +7,8 @@
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
 use impeccable_core::checks::measures::{
-    parse_color_resolved, parse_radius_corner_px_em, parse_radius_to_px, parse_radius_token_px,
-    CustomProps, ROOT_FONT_SIZE_PX,
+    parse_color_resolved, parse_radius_corner_px_em, parse_radius_corners_em, parse_radius_to_px,
+    parse_radius_token_px, CustomProps, ROOT_FONT_SIZE_PX,
 };
 use impeccable_core::checks::rules::Corners;
 use impeccable_core::color::{
@@ -366,13 +366,29 @@ pub fn resolve_border_radius_scalar_px(style: &StyleValues, width_px: f64) -> f6
 /// longhand resets it, the way the browser resolves them. `None` when a
 /// corner carries a value the parser cannot resolve, so the caller keeps
 /// reporting instead of reading the box as square.
+///
+/// A shorthand built from `var()` cannot be split before it resolves, so the
+/// cascade hands every corner the whole value. A corner still carrying the
+/// resolved shorthand (its value equals `borderRadius`) reads its own
+/// position of it: `--r: 0 12px 12px 0` rounds the right corners only. The
+/// one case this misreads is a two-value longhand spelled exactly like the
+/// shorthand before it.
 pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Option<Corners> {
     let em = em_px(style);
-    let corner = |prop: &str| parse_radius_corner_px_em(sv_opt(style, prop), width_px, em);
+    let shorthand = sv_opt(style, "borderRadius");
+    let whole = || parse_radius_corners_em(shorthand, width_px, em);
+    let corner = |prop: &str, pick: fn(&Corners) -> f64| {
+        let value = sv_opt(style, prop);
+        if value.is_some() && value == shorthand {
+            whole().map(|c| pick(&c))
+        } else {
+            parse_radius_corner_px_em(value, width_px, em)
+        }
+    };
     Some(Corners {
-        top_left: corner("borderTopLeftRadius")?,
-        top_right: corner("borderTopRightRadius")?,
-        bottom_right: corner("borderBottomRightRadius")?,
-        bottom_left: corner("borderBottomLeftRadius")?,
+        top_left: corner("borderTopLeftRadius", |c| c.top_left)?,
+        top_right: corner("borderTopRightRadius", |c| c.top_right)?,
+        bottom_right: corner("borderBottomRightRadius", |c| c.bottom_right)?,
+        bottom_left: corner("borderBottomLeftRadius", |c| c.bottom_left)?,
     })
 }

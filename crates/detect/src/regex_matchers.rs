@@ -2,7 +2,8 @@
 //! analyzers from `cli/engine/engines/regex/detect-text.mjs`.
 
 use impeccable_core::checks::css_scan::{
-    scan_css_text_for_glow, scan_css_text_for_marquee, scan_css_text_for_radial_halo,
+    names_same_element, scan_css_text_for_glow, scan_css_text_for_marquee,
+    scan_css_text_for_radial_halo,
 };
 use impeccable_core::checks::measures::parse_radius_corner_px;
 use impeccable_core::checks::rules::{
@@ -368,49 +369,48 @@ pub fn tailwind_declared_corners(scope: &str) -> DeclaredCorners {
     declared
 }
 
-/// The declarations that style the element a CSS or style-object match sits
-/// in: the enclosing `style="..."` value, else the innermost `{ ... }` block
-/// or template literal around the match with nested blocks dropped, else (in
-/// indentation-syntax Sass) the lines at the match's own indentation.
-fn declaration_scope(lines: &[&str], i: usize, index: usize, sass: bool) -> String {
-    let line = lines[i];
-    for c in STYLE_ATTR_VALUE_RE.captures_iter(line) {
-        if let Some(value) = c.get(1).or_else(|| c.get(2)) {
-            if value.start() <= index && index <= value.end() {
-                return value.as_str().to_string();
-            }
+/// A matcher run's lines joined once, with the byte offset each line starts
+/// at: what the side accent scope reader walks, built once per file rather
+/// than once per match.
+pub struct SourceText {
+    text: String,
+    line_starts: Vec<usize>,
+}
+
+impl SourceText {
+    pub fn new(lines: &[&str]) -> Self {
+        let mut line_starts = Vec::with_capacity(lines.len());
+        let mut pos = 0usize;
+        for l in lines {
+            line_starts.push(pos);
+            pos += l.len() + 1;
+        }
+        SourceText {
+            text: lines.join("\n"),
+            line_starts,
         }
     }
-    if sass {
-        let indent = |l: &str| l.len() - l.trim_start().len();
-        let base = indent(line);
-        let mut out = vec![line];
-        for l in lines[..i].iter().rev() {
-            if l.trim().is_empty() {
-                continue;
-            }
-            match indent(l) {
-                d if d < base => break,
-                d if d == base => out.push(l),
-                _ => {}
-            }
-        }
-        for l in &lines[i + 1..] {
-            if l.trim().is_empty() {
-                continue;
-            }
-            match indent(l) {
-                d if d < base => break,
-                d if d == base => out.push(l),
-                _ => {}
-            }
-        }
-        return out.join("\n");
+
+    fn line(&self, i: usize) -> &str {
+        let start = self.line_starts[i];
+        let end = self
+            .line_starts
+            .get(i + 1)
+            .map_or(self.text.len(), |next| next - 1);
+        &self.text[start..end]
     }
-    let text = lines.join("\n");
-    let offset: usize = lines[..i].iter().map(|l| l.len() + 1).sum::<usize>() + index;
-    let b = text.as_bytes();
+
+    fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+}
+
+/// The innermost `{ ... }` block or template literal around `offset`:
+/// `(start, end, open)`, where `open` is the block's `{` and `None` for a
+/// template literal or the whole text.
+fn block_bounds(b: &[u8], offset: usize) -> (usize, usize, Option<usize>) {
     let mut start = 0;
+    let mut open = None;
     let mut depth = 0usize;
     let mut p = offset.min(b.len());
     while p > 0 {
@@ -419,6 +419,7 @@ fn declaration_scope(lines: &[&str], i: usize, index: usize, sass: bool) -> Stri
             b'}' => depth += 1,
             b'{' if depth == 0 => {
                 start = p + 1;
+                open = Some(p);
                 break;
             }
             b'{' => depth -= 1,
@@ -448,9 +449,14 @@ fn declaration_scope(lines: &[&str], i: usize, index: usize, sass: bool) -> Stri
         }
         p += 1;
     }
-    let mut out = String::with_capacity(end.saturating_sub(start));
+    (start, end, open)
+}
+
+/// A block's own text with its nested blocks dropped.
+fn direct_block_text(block: &str) -> String {
+    let mut out = String::with_capacity(block.len());
     let mut nested = 0usize;
-    for ch in text[start..end].chars() {
+    for ch in block.chars() {
         match ch {
             '{' => nested += 1,
             '}' => nested = nested.saturating_sub(1),
@@ -461,18 +467,83 @@ fn declaration_scope(lines: &[&str], i: usize, index: usize, sass: bool) -> Stri
     out
 }
 
+/// The declarations that style the element a CSS or style-object match sits
+/// in: the enclosing `style="..."` value, else the innermost `{ ... }` block
+/// or template literal around the match with nested blocks dropped, else (in
+/// indentation-syntax Sass) the lines at the match's own indentation. A
+/// nested block that names its parent's element (`&.is-accent`, `&:hover`,
+/// `&--accent`) reads the parent's declarations first.
+fn declaration_scope(source: &SourceText, i: usize, index: usize, sass: bool) -> String {
+    let line = source.line(i);
+    for c in STYLE_ATTR_VALUE_RE.captures_iter(line) {
+        if let Some(value) = c.get(1).or_else(|| c.get(2)) {
+            if value.start() <= index && index <= value.end() {
+                return value.as_str().to_string();
+            }
+        }
+    }
+    if sass {
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let base = indent(line);
+        let mut out = vec![line];
+        for l in (0..i).rev().map(|j| source.line(j)) {
+            if l.trim().is_empty() {
+                continue;
+            }
+            match indent(l) {
+                d if d < base => break,
+                d if d == base => out.push(l),
+                _ => {}
+            }
+        }
+        for l in (i + 1..source.line_count()).map(|j| source.line(j)) {
+            if l.trim().is_empty() {
+                continue;
+            }
+            match indent(l) {
+                d if d < base => break,
+                d if d == base => out.push(l),
+                _ => {}
+            }
+        }
+        return out.join("\n");
+    }
+    let text = source.text.as_str();
+    let b = text.as_bytes();
+    let (start, end, mut open) = block_bounds(b, source.line_starts[i] + index);
+    let mut scope = direct_block_text(&text[start..end]);
+    while let Some(o) = open {
+        let sel_begin = b[..o]
+            .iter()
+            .rposition(|c| matches!(c, b';' | b'{' | b'}' | b'`'))
+            .map_or(0, |p| p + 1);
+        if !names_same_element(&text[sel_begin..o]) {
+            break;
+        }
+        let (parent_start, parent_end, parent_open) = block_bounds(b, sel_begin);
+        scope = format!(
+            "{}\n{}",
+            direct_block_text(&text[parent_start..parent_end]),
+            scope
+        );
+        open = parent_open;
+    }
+    scope
+}
+
 /// Whether a `side-tab` match sits on a card rounded away from its stripe.
 /// A utility class reads the `rounded-*` classes in the same markup tag; a
 /// CSS declaration or style-object property reads the radius declarations in
-/// its own block. No radius in scope is a square box, which stays silent; a
-/// radius this cannot resolve (`$radius`, `var()`, `theme.radius`) keeps the
-/// finding. A radius declared somewhere else entirely (another class, another
-/// line of a multi-line `cn()` call) is out of reach, and the box reads square.
-pub fn side_tab_rounded_in_scope(m: &MatchCtx, lines: &[&str], i: usize, sass: bool) -> bool {
+/// its own block, and in the blocks around it that it names with `&`. No
+/// radius in scope is a square box, which stays silent; a radius this cannot
+/// resolve (`$radius`, `var()`, `theme.radius`) keeps the finding. A radius
+/// declared somewhere else entirely (another class, another line of a
+/// multi-line `cn()` call) is out of reach, and the box reads square.
+pub fn side_tab_rounded_in_scope(m: &MatchCtx, source: &SourceText, i: usize, sass: bool) -> bool {
     let whole = m.whole();
     if let Some(c) = TW_SIDE_TAB_WHOLE_RE.captures(whole) {
         let side = if matches!(&c[1], "l" | "s") { 3 } else { 1 };
-        let scope = containing_markup_tag(lines[i])(m.index);
+        let scope = containing_markup_tag(source.line(i))(m.index);
         return tailwind_declared_corners(&scope).is_rounded_away_from_side(side);
     }
     let lower = js::to_lower_case(whole);
@@ -481,7 +552,7 @@ pub fn side_tab_rounded_in_scope(m: &MatchCtx, lines: &[&str], i: usize, sass: b
     } else {
         1
     };
-    let scope = declaration_scope(lines, i, m.index, sass);
+    let scope = declaration_scope(source, i, m.index, sass);
     let mut corners = DeclaredCorners::default();
     for c in SCOPE_RADIUS_DECL_RE.captures_iter(&scope) {
         corners.apply(&c[1], &c[2], NOMINAL_CARD_WIDTH_PX);
@@ -1684,7 +1755,7 @@ mod tests {
                 groups: vec![Some(needle.to_string())],
                 index,
             };
-            side_tab_rounded_in_scope(&m, &lines, i, sass)
+            side_tab_rounded_in_scope(&m, &SourceText::new(&lines), i, sass)
         };
         let accent = "border-left: 4px solid #6366f1";
         assert!(!rounded(
@@ -1744,6 +1815,57 @@ mod tests {
             ".card\n  border-left: 4px solid #6366f1\n  .inner\n    border-radius: 12px",
             accent,
             true
+        ));
+    }
+
+    #[test]
+    fn side_tab_scope_follows_same_element_nesting() {
+        let rounded = |text: &str| {
+            let needle = "border-left: 4px solid #6366f1";
+            let lines: Vec<&str> = text.split('\n').collect();
+            let i = lines.iter().position(|l| l.contains(needle)).unwrap();
+            let index = lines[i].find(needle).unwrap();
+            let m = MatchCtx {
+                groups: vec![Some(needle.to_string())],
+                index,
+            };
+            side_tab_rounded_in_scope(&m, &SourceText::new(&lines), i, false)
+        };
+        // `&.x`, `&:hover` and a BEM modifier style the rule's own element.
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  &.is-accent { border-left: 4px solid #6366f1; }\n}"
+        ));
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  &:hover { border-left: 4px solid #6366f1; }\n}"
+        ));
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  &--accent { border-left: 4px solid #6366f1; }\n}"
+        ));
+        // Two levels deep.
+        assert!(rounded(
+            ".c {\n  border-radius: 12px;\n  &.a {\n    &:hover { border-left: 4px solid #6366f1; }\n  }\n}"
+        ));
+        // A template literal's own declarations style `&`.
+        assert!(rounded(
+            "const A = styled.div`\n  border-radius: 12px;\n  &.active { border-left: 4px solid #6366f1; }\n`;"
+        ));
+        // A square parent stays square; a descendant and a BEM element are
+        // other boxes.
+        assert!(!rounded(
+            ".c {\n  padding: 8px;\n  &.is-accent { border-left: 4px solid #6366f1; }\n}"
+        ));
+        assert!(!rounded(
+            ".c {\n  border-radius: 12px;\n  & .child { border-left: 4px solid #6366f1; }\n}"
+        ));
+        assert!(!rounded(
+            ".c {\n  border-radius: 12px;\n  &__part { border-left: 4px solid #6366f1; }\n}"
+        ));
+        assert!(!rounded(
+            ".c {\n  border-radius: 12px;\n  .child { border-left: 4px solid #6366f1; }\n}"
+        ));
+        // The nested rule's own longhand still wins over the parent's shorthand.
+        assert!(!rounded(
+            ".c {\n  border-radius: 12px;\n  &.flat { border-left: 4px solid #6366f1; border-top-right-radius: 0; }\n}"
         ));
     }
 

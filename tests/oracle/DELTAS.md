@@ -200,12 +200,25 @@ cascade order, so `border-radius: 12px; border-top-right-radius: 0` (what
 `rounded-lg rounded-r-none` compiles to) is square at that corner, and a later
 shorthand resets an earlier longhand. The text readers apply declarations in
 source order, and utility classes in the order the framework emits them. `em`
-reads against the element's font size. A radius the reader cannot resolve (a
+reads against the element's font size, and a `border-radius` built from `var()`
+reads each corner's own position once the value resolves, as the browser does.
+A radius the reader cannot resolve (a
 `calc()`, an unresolved `var()`, `$radius`, a theme key) is unknown rather than
-zero, and an unknown card keeps its finding. What text cannot see stays out of
-reach: a radius declared on a different selector than the stripe rule, or on
-another line of a multi-line class list, reads as square in the text engine.
-The static and browser engines read the cascade and see it.
+zero, and an unknown card keeps its finding.
+
+Nesting resolves the way a preprocessor compiles it. A nested `&::before` bar,
+an `&.is-accent` or `&:hover` rule and a BEM `&--modifier` read the corners of
+the rule they sit in; a CSS-in-JS template's own declarations style `&`; a media
+query passes through. A stripe revealed on `.card:hover::after` reads `.card`,
+the host the static engine looks up, and a rule whose selector is one compound
+(`.card`) styles every host that carries its classes (`.card.accent`). The
+style-text pseudo-element scan no longer dedupes a nested selector on its text,
+so a square card's `&::before` cannot hide a rounded card's `&::before` later
+in the same file. The text engine reads each stylesheet's blocks once, whatever
+the stripe count. What text still cannot see stays out of reach: a radius
+declared on a selector the stripe rule does not name, or on another line of a
+multi-line class list, reads as square in the text engine. The static and
+browser engines read the cascade and see it.
 
 The static border snippet now prints the radius in px, the way the browser's
 computed style does: `border-radius: 0.375rem` reports `6px` where it used to
@@ -218,6 +231,7 @@ the two intended output changes, not lost findings.
 - `detect-fixture-json-pseudo-stripe-css`, `detect-fixture-text-pseudo-stripe-css`, `detect-fixture-json-pseudo-stripe-vue`, `detect-fixture-text-pseudo-stripe-vue`: the left and right flag cases gained host rules with a radius and each file gained square-host pass cases; the findings are the same and move down by the inserted lines. `pseudo-stripe.html` rounds `.row-stripe` and adds a square host and a rounded-under-the-stripe host as pass cases, so its goldens do not move. `astro-inset-shadow-stripe.astro` rounds its left and right flag cases and adds a square pass rule after the others, so its goldens do not move either.
 - `detect-fixture-json-should-flag-html`, `detect-fixture-text-should-flag-html`: the four side accents on the `0.375rem` card print `border-radius: 6px`.
 - `detect-fixture-json-framework-next-modules`, `detect-fixture-text-framework-next-modules`, `detect-framework-next-modules-text`: `Sidebar.module.css` is a square sidebar with `border-right: 3px solid #4f46e5` and no radius, the convention the premise retired; its finding is gone (6 to 5 findings).
-- `detect-fixture-json-side-accent-producers-html`, `detect-fixture-text-side-accent-producers-html`, `detect-fixture-json-side-accent-producers-css`, `detect-fixture-text-side-accent-producers-css`, `detect-fixture-json-side-accent-producers-jsx`, `detect-fixture-text-side-accent-producers-jsx`: new fixtures that draw the same accent through every producer, square and rounded. Each reports only its flag column: five findings for the HTML page, five for the stylesheet, three for the components.
-- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 421 to 433 findings.
+- `detect-fixture-json-side-accent-producers-html`, `detect-fixture-text-side-accent-producers-html`, `detect-fixture-json-side-accent-producers-css`, `detect-fixture-text-side-accent-producers-css`, `detect-fixture-json-side-accent-producers-jsx`, `detect-fixture-text-side-accent-producers-jsx`: new fixtures that draw the same accent through every producer, square and rounded. Each reports only its flag column: six findings for the HTML page (one a border whose radius is `var(--r)` = `0 12px 12px 0`), six for the stylesheet (one a `:hover::after` bar), three for the components.
+- `detect-fixture-json-side-accent-nested-scss`, `detect-fixture-text-side-accent-nested-scss`, `detect-fixture-json-side-accent-nested-tsx`, `detect-fixture-text-side-accent-nested-tsx`: new fixtures for nested accents, rounded and square, in SCSS and in styled-components templates. Each reports only its flag column: five findings for the stylesheet, two for the components.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sum of the above, 421 to 442 findings.
 - `detect-unreadable-file-in-dir`: the case's readable `a.html` carries `border-radius: 10px`, so it still produces the finding the case exists to show next to the unreadable file's error; the snippet gains `+ border-radius: 10px`.

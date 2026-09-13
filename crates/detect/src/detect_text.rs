@@ -4,8 +4,8 @@
 //! line matchers, page analyzers, dedupe, and inline ignores.
 
 use impeccable_core::checks::css_scan::{
-    css_text_host_corners, css_text_side_stripe_on_rounded_host, scan_css_text_for_grid_background,
-    scan_css_text_for_pseudo_stripe,
+    scan_css_text_for_grid_background, scan_css_text_for_pseudo_stripe, side_stripe_index,
+    CssHostIndex,
 };
 use impeccable_core::findings::{finding, Finding};
 use impeccable_core::inline_ignores::apply_inline_ignores;
@@ -16,7 +16,7 @@ use impeccable_core::rule_pack::RulePack;
 use crate::design_system::{check_source_design_system, DesignSystem};
 use crate::profiler::{profile_findings, profile_step, DetectorProfile, ProfileMeta};
 use crate::regex_matchers::{
-    analyzer_rule_id, is_neutral_authored_color, side_tab_rounded_in_scope, MatchCtx,
+    analyzer_rule_id, is_neutral_authored_color, side_tab_rounded_in_scope, MatchCtx, SourceText,
     REGEX_ANALYZERS, REGEX_MATCHERS, TEXT_CONTENT_ANALYZER_IDS,
 };
 use crate::util::{line_of_offset, re, ANY, B, D, W, WS, WS_CHARS};
@@ -900,6 +900,9 @@ pub fn scan_inset_stripe_css(
 ) -> Vec<Finding> {
     let content = strip_css_comments(raw_content);
     let mut findings = Vec::new();
+    // Read the stylesheet's rule blocks once, and only when a side stripe
+    // needs its host's corners.
+    let host_index = once_cell::unsync::OnceCell::new();
     for m in RULE_RE.captures_iter(&content) {
         let g1 = m.get(1).unwrap();
         let sel_raw = g1.as_str();
@@ -997,7 +1000,10 @@ pub fn scan_inset_stripe_css(
                 _ => None,
             };
             if let Some(side) = side {
-                if !css_text_host_corners(&content, &selector).is_rounded_away_from_side(side) {
+                if !host_index
+                    .get_or_init(|| CssHostIndex::new(&content))
+                    .is_rule_rounded_away_from_side(selector_start, &selector, side)
+                {
                     continue;
                 }
             }
@@ -1326,6 +1332,8 @@ pub fn run_regex_matchers(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let sass = file_path.to_ascii_lowercase().ends_with(".sass");
+    // The joined text the side-tab scope reader walks, built once per file.
+    let source = once_cell::unsync::OnceCell::new();
     for matcher in REGEX_MATCHERS.iter() {
         let run = || {
             let mut matches = Vec::new();
@@ -1346,7 +1354,12 @@ pub fn run_regex_matchers(
                     // the stripe, read from the declarations around the match.
                     if (matcher.test)(&m, &context)
                         && (matcher.id != "side-tab"
-                            || side_tab_rounded_in_scope(&m, lines, i, sass))
+                            || side_tab_rounded_in_scope(
+                                &m,
+                                source.get_or_init(|| SourceText::new(lines)),
+                                i,
+                                sass,
+                            ))
                     {
                         matches.push(finding(
                             matcher.id,
@@ -1407,10 +1420,16 @@ pub fn run_text_content_analyzers(
 }
 
 fn pseudo_stripe_findings(text: &str, file_path: &str, line_offset: usize) -> Vec<Finding> {
+    let host_index = once_cell::unsync::OnceCell::new();
     scan_css_text_for_pseudo_stripe(text)
         .into_iter()
         // A left or right stripe reports only on a host rounded away from it.
-        .filter(|hit| css_text_side_stripe_on_rounded_host(text, hit))
+        .filter(|hit| {
+            side_stripe_index(hit).is_none()
+                || host_index
+                    .get_or_init(|| CssHostIndex::new(text))
+                    .side_stripe_on_rounded_host(hit)
+        })
         .map(|hit| {
             let line = line_offset + line_of_offset(text, hit.index.unwrap_or(0));
             finding(&hit.id, file_path, &hit.snippet, line as f64)
@@ -1684,6 +1703,41 @@ export const B = () => <div style={{ borderLeft: '4px solid #6366f1', borderRadi
             vec![
                 "border-l-4".to_string(),
                 "borderLeft: '4px solid".to_string()
+            ]
+        );
+    }
+
+    /// A nested bar or accent reads the corners of the rule it names with
+    /// `&`, in a stylesheet and in a CSS-in-JS template.
+    #[test]
+    fn nested_side_accents_read_the_enclosing_rule() {
+        let side_tabs = |src: &str, path: &str| -> Vec<String> {
+            let mut out: Vec<String> = detect_text(src, path, &TextOptions::default())
+                .into_iter()
+                .filter(|f| f.antipattern == "side-tab")
+                .map(|f| f.snippet)
+                .collect();
+            out.sort();
+            out
+        };
+        let scss = ".sq {\n  position: relative;\n  &::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #6366f1; }\n}\n\
+.card {\n  position: relative;\n  border-radius: 12px;\n  &::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: #6366f1; }\n  &.is-accent { box-shadow: inset 6px 0 0 #6366f1; }\n  &--accent { border-left: 7px solid #6366f1; }\n  & .child { border-left: 8px solid #6366f1; }\n}\n";
+        assert_eq!(
+            side_tabs(scss, "/x/nested.scss"),
+            vec![
+                "&.is-accent — inset box-shadow 6px stripe (left)".to_string(),
+                "&::before — absolute 5px pseudo-element stripe (left: 0)".to_string(),
+                "border-left: 7px solid #6366f1".to_string(),
+            ]
+        );
+        let tsx = "import styled from 'styled-components';\n\
+export const Square = styled.div`\n  position: relative;\n  &::before { content: \"\"; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #6366f1; }\n  &.active { border-left: 9px solid #6366f1; }\n`;\n\
+export const Card = styled.div`\n  position: relative;\n  border-radius: 12px;\n  &::after { content: \"\"; position: absolute; right: 0; top: 0; bottom: 0; width: 5px; background: #6366f1; }\n  &.active { border-left: 6px solid #6366f1; }\n`;\n";
+        assert_eq!(
+            side_tabs(tsx, "/x/nested.tsx"),
+            vec![
+                "&::after — absolute 5px pseudo-element stripe (right: 0)".to_string(),
+                "border-left: 6px solid #6366f1".to_string(),
             ]
         );
     }

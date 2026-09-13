@@ -207,7 +207,8 @@ pub fn apply_static_declaration<K: Hash + Eq>(
 /// cascade metadata onto each corner is what lets a later
 /// `border-top-right-radius: 0` win that corner and a later shorthand reset
 /// it. A value built from `var()` cannot be split before it resolves, so each
-/// corner carries the whole value and reads its first radius.
+/// corner carries the whole value, and `resolve_border_radius_corners` picks
+/// the corner's own position once the value has resolved.
 fn expand_border_radius_corners(prop: &str, value: &str) -> Vec<(String, String)> {
     const CORNERS: [&str; 4] = [
         "borderTopLeftRadius",

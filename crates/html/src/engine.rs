@@ -28,7 +28,7 @@ use crate::page::{
 };
 use crate::profile::{self, Meta, ProfileSink};
 use crate::quality::{check_element_quality, check_page_quality_from_doc, pf0};
-use impeccable_core::checks::css_scan::{css_text_side_stripe_on_rounded_host, side_stripe_index};
+use impeccable_core::checks::css_scan::{side_stripe_index, CssHostIndex};
 use impeccable_core::checks::html_patterns::{check_html_patterns, HtmlPatternCorpora};
 use impeccable_core::checks::rules::{is_rounded_away_from_side, RuleHit};
 use impeccable_core::findings::{try_finding, Finding};
@@ -318,6 +318,9 @@ pub fn detect_html_source(
                     .collect()
             },
         );
+        // The style text's rule blocks, read once for every stripe no element
+        // on the page matches.
+        let host_index = once_cell::unsync::OnceCell::new();
         for f in pattern_hits {
             let mut hosts = Vec::new();
             if let Some(selector) = f.selector.as_deref() {
@@ -342,7 +345,9 @@ pub fn detect_html_source(
             // declarations when no element on the page matches.
             if let Some(side) = side_stripe_index(&f) {
                 let rounded = if hosts.is_empty() {
-                    css_text_side_stripe_on_rounded_host(&corpora.style_text, &f)
+                    host_index
+                        .get_or_init(|| CssHostIndex::new(&corpora.style_text))
+                        .side_stripe_on_rounded_host(&f)
                 } else {
                     hosts.iter().any(|el| {
                         let style = el.style();

@@ -45,6 +45,21 @@
   box-shadow: inset 8px 0 0 #0f766e;
 }
 
+/* ── FLAG: hover-revealed ::after bar on a rounded card ── */
+.flag-hover-rounded {
+  position: relative;
+  border-radius: 12px;
+}
+.flag-hover-rounded:hover::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  background: #0f766e;
+}
+
 /* ── PASS: border shorthand on a square box ── */
 .pass-border-square {
   border-left: 4px solid #0f766e;

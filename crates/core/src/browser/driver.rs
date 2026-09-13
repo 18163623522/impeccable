@@ -819,6 +819,20 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
             if !matches.iter().any(|el| !scoped_ignore_active(dom, *el, &f.id)) {
                 continue;
             }
+            // A left or right stripe from the style-text scans reports only
+            // on a card rounded away from it, read off the elements it paints.
+            if let Some(side) = crate::checks::css_scan::side_stripe_index(&f) {
+                let rounded = matches.iter().any(|&el| {
+                    let corners = crate::checks::measures::parse_radius_corners(
+                        Some(&dom.style(el, "borderRadius")),
+                        dom.rect(el).width,
+                    );
+                    crate::checks::rules::is_rounded_away_from_side(corners.as_ref(), side)
+                });
+                if !rounded {
+                    continue;
+                }
+            }
         }
         let mut item = BrowserFinding::new(f.id.clone(), f.snippet.clone());
         if let Some(sev) = f.severity.as_ref().filter(|s| !s.is_empty()) {
@@ -1564,6 +1578,45 @@ mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
     use serde_json::json;
+
+    /// The style-text stripe scans run in the browser too; a left or right
+    /// stripe reports only on an element rounded away from it.
+    #[test]
+    fn style_text_side_stripes_need_a_rounded_host() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        for (selector, radius) in [
+            (".sq", "0px"),
+            (".rd", "12px"),
+            (".sh", "0px"),
+            (".rs", "12px"),
+        ] {
+            let el = d.add(Some(body), "div");
+            d.add_selector(el, selector);
+            d.set_rect(el, 0.0, 0.0, 300.0, 120.0);
+            d.set_styles(el, &[("borderRadius", radius)]);
+        }
+        d.html_for_patterns = "<html><head><style>\
+.sq::before{position:absolute;width:4px;left:0;top:0;bottom:0;background:#3b82f6}\
+.rd::before{position:absolute;width:5px;left:0;top:0;bottom:0;background:#3b82f6}\
+.sh{box-shadow:inset 6px 0 0 #6366f1}\
+.rs{box-shadow:inset 7px 0 0 #6366f1}\
+</style></head><body><div class=\"sq\"></div><div class=\"rd\"></div><div class=\"sh\"></div><div class=\"rs\"></div></body></html>"
+            .to_string();
+        let mut details: Vec<String> = scoped_html_pattern_findings(&d)
+            .into_iter()
+            .filter(|f| f.type_ == "side-tab")
+            .map(|f| f.detail)
+            .collect();
+        details.sort();
+        assert_eq!(
+            details,
+            vec![
+                ".rd::before — absolute 5px pseudo-element stripe (left: 0)".to_string(),
+                ".rs — inset box-shadow 7px stripe (left)".to_string(),
+            ]
+        );
+    }
 
     fn ds_config(v: serde_json::Value) -> BrowserConfig {
         BrowserConfig {

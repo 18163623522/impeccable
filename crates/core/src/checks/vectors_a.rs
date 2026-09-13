@@ -156,6 +156,19 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 badge_like: truthy(f(4, "badgeLike")),
                 status_context: truthy(f(4, "statusContext")),
                 tab_context: truthy(f(4, "tabContext")),
+                // The recorded JS read no corners: it judged a side accent on
+                // the shorthand radius alone, which is what a vector carrying
+                // no `corners` key replays. A live caller of the pure export
+                // can pass one and reach the rounded-card gate.
+                corners: match f(4, "corners") {
+                    Some(c @ Js::Obj(_)) => Some(rules::Corners {
+                        top_left: to_number(field(c, "topLeft")),
+                        top_right: to_number(field(c, "topRight")),
+                        bottom_right: to_number(field(c, "bottomRight")),
+                        bottom_left: to_number(field(c, "bottomLeft")),
+                    }),
+                    _ => None,
+                },
             };
             hits_to_js(&rules::check_borders(
                 &str_or_empty(arg(0)),

@@ -7,8 +7,8 @@
 
 use crate::background::{
     a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
-    resolve_background_info, resolve_background_info_skipping_images,
-    resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
+    resolve_background_info, resolve_background_info_skipping_images, resolve_border_radius_px,
+    resolve_gradient_stops, resolve_side_accent_corners, sv, sv_opt, CustomPropMap,
 };
 use crate::cascade::StyleValues;
 use crate::layer::picture_under_text;
@@ -557,6 +557,12 @@ pub fn check_element_borders(
         left: Some(sv(style, "borderLeftColor")),
     };
     let own_bg = parse_any_color(sv_opt(style, "backgroundColor"));
+    // Only a left or right accent is gated on the corners.
+    let corners = if widths.right > 0.0 || widths.left > 0.0 {
+        resolve_side_accent_corners(el, style, pf0(sv(style, "width")))
+    } else {
+        None
+    };
     check_borders(
         tag,
         &widths,
@@ -566,6 +572,7 @@ pub fn check_element_borders(
             tab_context: is_tab_context_element(el),
             status_context: is_status_context_element(el),
             badge_like: own_bg.is_some_and(|c| c.alpha_or_one() > 0.1),
+            corners,
         },
     )
 }

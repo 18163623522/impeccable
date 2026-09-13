@@ -17,7 +17,9 @@ use crate::adapters::{
     check_element_radial_spotlight, check_kicker_above_heading_from_doc,
     check_numbered_section_labels_from_doc, scoped_ignore_active,
 };
-use crate::background::{resolve_background, resolve_border_radius_px, sv};
+use crate::background::{
+    resolve_background, resolve_border_radius_scalar_px, resolve_side_accent_corners, sv,
+};
 use crate::cascade::{build_static_style_map, collect_static_css_text};
 use crate::dom::{StaticDocument, StaticElement};
 use crate::page::{
@@ -26,8 +28,9 @@ use crate::page::{
 };
 use crate::profile::{self, Meta, ProfileSink};
 use crate::quality::{check_element_quality, check_page_quality_from_doc, pf0};
+use impeccable_core::checks::css_scan::{side_stripe_index, CssHostIndex};
 use impeccable_core::checks::html_patterns::{check_html_patterns, HtmlPatternCorpora};
-use impeccable_core::checks::rules::{RuleHit, SafeTagTextSeen};
+use impeccable_core::checks::rules::{is_rounded_away_from_side, RuleHit, SafeTagTextSeen};
 use impeccable_core::findings::{try_finding, Finding};
 use impeccable_core::inline_ignores::apply_inline_ignores;
 use impeccable_core::page::is_full_page;
@@ -128,7 +131,7 @@ fn run_rule(
     let style = el.style();
     match rule_id {
         "border-rules" => {
-            let radius = resolve_border_radius_px(style, pf0(sv(style, "width")));
+            let radius = resolve_border_radius_scalar_px(style, pf0(sv(style, "width")));
             check_element_borders(tag, style, radius, el)
         }
         "color-rules" => check_element_colors(el, style, tag, None, color_seen),
@@ -214,6 +217,11 @@ pub fn detect_html_source(
     );
     let css_text = collect_static_css_text(&doc, &file_dir, profile, fp, options.warn);
     build_static_style_map(&mut doc, css_text.as_str(), profile, fp);
+    // A stylesheet the engine could not read may round any card it never saw
+    // a radius for; the side-accent gate keeps those findings.
+    if crate::cascade::has_unread_stylesheet(&doc, &file_dir) {
+        doc.set_unread_stylesheet();
+    }
     let doc = doc;
 
     let mut findings: Vec<Finding> = Vec::new();
@@ -322,7 +330,11 @@ pub fn detect_html_source(
                     .collect()
             },
         );
+        // The style text's rule blocks, read once for every stripe no element
+        // on the page matches.
+        let host_index = once_cell::unsync::OnceCell::new();
         for f in pattern_hits {
+            let mut hosts = Vec::new();
             if let Some(selector) = f.selector.as_deref() {
                 let stripped = PSEUDO_STRIP_RE.replace_all(selector, "");
                 let stripped = impeccable_core::js::trim(&stripped);
@@ -336,6 +348,28 @@ pub fn detect_html_source(
                     {
                         continue;
                     }
+                    hosts = matches;
+                }
+            }
+            // A left or right stripe from the style-text scans reports only
+            // on a card rounded away from it: read off the cascade for the
+            // elements the rule paints, else off the host rule's own
+            // declarations when no element on the page matches.
+            if let Some(side) = side_stripe_index(&f) {
+                let rounded = if hosts.is_empty() {
+                    host_index
+                        .get_or_init(|| CssHostIndex::new(&corpora.style_text))
+                        .side_stripe_on_rounded_host(&f)
+                } else {
+                    hosts.iter().any(|el| {
+                        let style = el.style();
+                        let corners =
+                            resolve_side_accent_corners(el, style, pf0(sv(style, "width")));
+                        is_rounded_away_from_side(corners.as_ref(), side)
+                    })
+                };
+                if !rounded {
+                    continue;
                 }
             }
             if let Some(mut item) = mk(&f.id, &f.snippet) {

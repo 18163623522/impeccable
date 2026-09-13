@@ -76,12 +76,41 @@ impl<T: Copy> Sides<T> {
     }
 }
 
+/// The four corner radii in px, in the order the `border-radius` shorthand
+/// lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Corners {
+    pub top_left: f64,
+    pub top_right: f64,
+    pub bottom_right: f64,
+    pub bottom_left: f64,
+}
+
+impl Corners {
+    /// The two corners at the far end of the side at `[Top, Right, Bottom,
+    /// Left][i]`: the pair a stripe on that side does not touch.
+    pub fn away_from(&self, i: usize) -> (f64, f64) {
+        match i {
+            0 => (self.bottom_left, self.bottom_right),
+            1 => (self.top_left, self.bottom_left),
+            2 => (self.top_left, self.top_right),
+            _ => (self.top_right, self.bottom_right),
+        }
+    }
+}
+
 /// JS `checkBorders` opts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BorderOpts {
     pub badge_like: bool,
     pub status_context: bool,
     pub tab_context: bool,
+    /// The element's four corner radii, when the caller could read them.
+    /// `None` means unknown, not square: a radius the engine cannot resolve
+    /// (a `calc()`, a snapshot missing the column) leaves a side accent
+    /// reported. The recorded call vectors predate the corner read and leave
+    /// this `None`, which replays the behavior they pin.
+    pub corners: Option<Corners>,
 }
 
 // ─── isEmojiOnlyText ────────────────────────────────────────────────────────

@@ -64,16 +64,14 @@ pub const TEXT_EDGE_TAGS: &[&str] = &[
     "TH",
 ];
 
-/// `all-caps-body`: the length past which an uppercase run reads as a
-/// sentence even when it was given enough width to stay on one line. Shorter
-/// single-line runs are labels, buttons and eyebrows, where uppercase is a
-/// convention and the lost word shapes cost nothing.
+/// `all-caps-body`: the length from which an uppercase run reads as a
+/// sentence rather than as a label. Shorter runs are buttons, nav items,
+/// kickers and eyebrows, where uppercase is a convention and the lost word
+/// shapes cost nothing; judged against real sites those labels reach into the
+/// seventies. Counted over the element's own text and never its subtree, so a
+/// bar, a nav or a form control that holds several short caps labels is not
+/// charged for their sum.
 pub const ALL_CAPS_LONG_RUN: usize = 80;
-
-/// `all-caps-body`: the rendered-line count at which a run counts as wrapped.
-/// One line box measures one line height and a wrapped run measures two, so
-/// the midpoint absorbs the slop between the text rect and the line box.
-pub const ALL_CAPS_MIN_LINES: f64 = 1.5;
 
 /// JS: checks.mjs#SR_ONLY_SELECTOR.
 pub const SR_ONLY_SELECTOR: &str = ".sr-only, .visually-hidden, .visuallyhidden, .screen-reader, .screen-reader-only, .screenreader, .a11y-hidden, .hidden-visually, [class*=\"sr-only\" i], [class*=\"visually-hidden\" i], [class*=\"visuallyhidden\" i], [class*=\"screen-reader\" i], [class*=\"screenreader\" i]";

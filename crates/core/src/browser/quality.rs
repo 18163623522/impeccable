@@ -14,8 +14,7 @@ use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
-    ALL_CAPS_LONG_RUN, ALL_CAPS_MIN_LINES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
-    TEXT_EDGE_TAGS,
+    ALL_CAPS_LONG_RUN, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
 use crate::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -91,28 +90,6 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
 /// JS: checks.mjs#hasMeaningfulDirectText(node)
 pub fn has_meaningful_direct_text(dom: &dyn Dom, el: ElId) -> bool {
     has_direct_text_longer_than(dom, el, 4)
-}
-
-/// Rendered lines the element's own text runs to, from the rect of its direct
-/// text nodes over the resolved line height. `None` when neither is
-/// measurable, which leaves the caller on its length test alone.
-fn direct_text_lines(
-    dom: &dyn Dom,
-    el: ElId,
-    line_height_px: Option<f64>,
-    font_size: f64,
-) -> Option<f64> {
-    let height = dom.direct_text_rect(el)?.height;
-    if !(height > 0.0) {
-        return None;
-    }
-    // `line-height: normal` resolves to no length; browsers land near 1.2x.
-    let line_height = match line_height_px {
-        Some(lh) if lh > 0.0 => lh,
-        _ if font_size > 0.0 => font_size * 1.2,
-        _ => return None,
-    };
-    Some(height / line_height)
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
@@ -638,18 +615,18 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- All-caps body text ---
-    // Uppercase on a short single-line run is a convention, not a defect: a
-    // button, a nav item, a kicker or an eyebrow is taken in as a shape, so
-    // losing word shapes costs nothing. The cost lands when the run is read
-    // as a sentence, which means it either wrapped or it is long enough that
-    // wrapping was only avoided by the width it was given.
-    if has_direct_text && text_len > 30 && st("textTransform") == "uppercase" && !is_heading {
-        let wrapped = direct_text_lines(dom, el, q.line_height_px, font_size)
-            .is_some_and(|lines| lines >= ALL_CAPS_MIN_LINES);
-        if wrapped || text_len >= ALL_CAPS_LONG_RUN {
+    // Uppercase on a short run is a convention, not a defect: a button, a nav
+    // item, a kicker or an eyebrow is taken in as a shape, so losing word
+    // shapes costs nothing. The cost lands when the run is long enough to be
+    // read as a sentence. The run is the element's own text: a bar or a form
+    // control whose children hold the labels is not one long run, however its
+    // subtree adds up.
+    if has_direct_text && st("textTransform") == "uppercase" && !is_heading {
+        let own_len = utf16_len(js::trim(&collapse_ws(&direct_text(dom, el))));
+        if own_len >= ALL_CAPS_LONG_RUN {
             findings.push(RuleHit::new(
                 "all-caps-body",
-                format!("text-transform: uppercase on {} chars of body text", text_len),
+                format!("text-transform: uppercase on {} chars of body text", own_len),
             ));
         }
     }
@@ -883,7 +860,7 @@ mod tests {
     fn typography_rules() {
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
-        let text = "a".repeat(60);
+        let text = "a".repeat(90);
         let p = text_el(&mut d, body, "p", &text, "16px");
         d.set_rect(p, 40.0, 100.0, 300.0, 40.0);
         d.set_styles(p, &[("lineHeight", "16px"), ("textAlign", "justify"), ("hyphens", "manual"), ("letterSpacing", "2px")]);
@@ -893,60 +870,71 @@ mod tests {
         assert_eq!(hits[0].snippet, "line-height 1.00x (need >=1.3)");
         assert_eq!(hits[2].snippet, "letter-spacing: 0.13em on body text");
         d.set_styles(p, &[("lineHeight", "24px"), ("textAlign", "left"), ("letterSpacing", "-1px"), ("textTransform", "uppercase")]);
-        // The 60-char run wrapped to two 24px lines, so it reads as a sentence.
-        d.set_direct_text_rect(p, 40.0, 100.0, 300.0, 48.0);
+        // 90 characters of uppercase: past the length where a run is read.
         let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
         assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
     }
 
-    /// Uppercase only costs reading when the run is read as a sentence: it
-    /// wrapped, or it is long enough that only its width kept it on one line.
+    /// Uppercase costs reading only when the run is long enough to be read as
+    /// a sentence. A label keeps its capitals however narrow the viewport is,
+    /// and however much text the element's children hold.
     #[test]
-    fn all_caps_body_needs_a_wrapped_or_long_run() {
-        let caps = |d: &mut FakeDom, text: &str, text_h: f64| -> Vec<String> {
+    fn all_caps_body_needs_a_long_run() {
+        let caps = |text: &str| -> Vec<RuleHit> {
+            let mut d = FakeDom::new();
             let (_h, body) = d.with_page();
-            let el = text_el(d, body, "span", text, "12px");
-            d.set_rect(el, 40.0, 100.0, 300.0, text_h);
-            d.set_direct_text_rect(el, 40.0, 100.0, 300.0, text_h);
+            let el = text_el(&mut d, body, "span", text, "12px");
+            d.set_rect(el, 40.0, 100.0, 300.0, 18.0);
             d.set_styles(el, &[("lineHeight", "18px"), ("textTransform", "uppercase")]);
-            check_element_quality_dom(d, el, &BrowserConfig::default())
-                .into_iter()
-                .map(|h| h.id)
-                .collect()
+            check_element_quality_dom(&d, el, &BrowserConfig::default())
         };
+        let flagged = |hits: &[RuleHit]| hits.iter().any(|h| h.id == "all-caps-body");
 
-        // A one-line CTA or eyebrow past the old 30-char floor: conventional.
-        let mut d = FakeDom::new();
+        // A card CTA or an eyebrow: conventional at any width, so silent.
         let label = "How Mintlify is scaling sales-led GTM";
-        assert!(!caps(&mut d, label, 18.0).iter().any(|id| id == "all-caps-body"));
+        assert!(!flagged(&caps(label)), "37-char label");
 
-        // The same label, wrapped to a second line.
-        let mut d = FakeDom::new();
-        assert!(caps(&mut d, label, 36.0).iter().any(|id| id == "all-caps-body"));
-
-        // One line, but 80 characters of it.
-        let mut d = FakeDom::new();
+        // Real sites run labels into the seventies; a sentence starts at 80.
         let long = "Every order placed before noon ships the same day from our warehouse today";
         assert_eq!(utf16_len(long), 74);
-        assert!(!caps(&mut d, long, 18.0).iter().any(|id| id == "all-caps-body"));
-        let mut d = FakeDom::new();
+        assert!(!flagged(&caps(long)), "74-char label");
         let longer = format!("{long} or later");
         assert_eq!(utf16_len(&longer), 83);
-        assert!(caps(&mut d, &longer, 18.0).iter().any(|id| id == "all-caps-body"));
+        let hits = caps(&longer);
+        assert!(flagged(&hits), "83-char run: {hits:?}");
+        assert_eq!(
+            hits.iter().find(|h| h.id == "all-caps-body").unwrap().snippet,
+            "text-transform: uppercase on 83 chars of body text"
+        );
 
-        // With no measurable text rect the length test carries the rule alone.
+        // The run is measured as rendered: markup whitespace collapses.
+        let spaced = format!("\n      {longer}\n    ");
+        let hits = caps(&spaced);
+        assert_eq!(
+            hits.iter().find(|h| h.id == "all-caps-body").unwrap().snippet,
+            "text-transform: uppercase on 83 chars of body text"
+        );
+
+        // A bar whose own label is short and whose child holds a second one:
+        // neither run is a sentence, so neither element is charged for both.
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
-        let el = text_el(&mut d, body, "span", label, "12px");
-        d.set_rect(el, 40.0, 100.0, 300.0, 36.0);
-        d.set_styles(el, &[("lineHeight", "18px"), ("textTransform", "uppercase")]);
-        let ids: Vec<String> = check_element_quality_dom(&d, el, &BrowserConfig::default())
-            .into_iter()
-            .map(|h| h.id)
-            .collect();
-        assert!(!ids.iter().any(|id| id == "all-caps-body"), "{ids:?}");
+        let bar = text_el(&mut d, body, "div", "Audit trail complete ", "13px");
+        d.set_rect(bar, 40.0, 100.0, 300.0, 20.0);
+        d.set_styles(bar, &[("lineHeight", "20px"), ("textTransform", "uppercase")]);
+        let badge_text = "immutable log of every configuration change your team makes";
+        let badge = text_el(&mut d, bar, "span", badge_text, "13px");
+        d.set_rect(badge, 40.0, 100.0, 300.0, 20.0);
+        d.set_styles(badge, &[("lineHeight", "20px"), ("textTransform", "uppercase")]);
+        // The subtree reaches the sentence length; neither run in it does.
+        assert_eq!(utf16_len(&d.text_content(bar)), 80);
+        assert_eq!(utf16_len(badge_text), 59);
+        for el in [bar, badge] {
+            let hits = check_element_quality_dom(&d, el, &BrowserConfig::default());
+            assert!(!flagged(&hits), "{hits:?}");
+        }
     }
 
     #[test]

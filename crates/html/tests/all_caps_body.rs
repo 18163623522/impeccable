@@ -1,6 +1,8 @@
-//! `all-caps-body` only fires on an uppercase run that reads as a sentence.
-//! Short single-line labels, CTAs, kickers and footer legal lines set in caps
-//! are a convention; the corpus judged every one of them harmless.
+//! `all-caps-body` only fires on an uppercase run long enough to be read as a
+//! sentence. Short labels, CTAs, kickers and footer legal lines set in caps
+//! are a convention; the corpus judged every one of them harmless. The run is
+//! the element's own text, so a bar or a form control is not charged for the
+//! labels its children hold.
 
 use impeccable_html::{detect_html_source, DetectHtmlOptions};
 use std::path::{Path, PathBuf};
@@ -48,7 +50,7 @@ fn fixture_columns_split_on_run_length() {
 }
 
 #[test]
-fn short_single_line_caps_label_passes() {
+fn short_caps_label_passes() {
     let html = r#"<!DOCTYPE html>
 <html><head><style>
 .cta { text-transform: uppercase; font-size: 12px; line-height: 18px; }
@@ -58,7 +60,7 @@ fn short_single_line_caps_label_passes() {
     let findings = detect_html_source(html, Path::new("/tmp/caps.html"), &DetectHtmlOptions::default());
     assert!(
         !findings.iter().any(|f| f.antipattern == "all-caps-body"),
-        "37-char single-line CTA should stay silent, got {findings:?}"
+        "37-char CTA should stay silent, got {findings:?}"
     );
 }
 
@@ -71,8 +73,27 @@ fn long_caps_run_flags() {
 <body><p class="blurb">Every plan includes unlimited seats, priority support and a full audit trail for your whole team.</p></body></html>
 "#;
     let findings = detect_html_source(html, Path::new("/tmp/caps.html"), &DetectHtmlOptions::default());
+    let hit = findings
+        .iter()
+        .find(|f| f.antipattern == "all-caps-body")
+        .unwrap_or_else(|| panic!("97-char caps paragraph should flag, got {findings:?}"));
+    assert_eq!(hit.snippet, "text-transform: uppercase on 97 chars of body text");
+}
+
+/// The length that matters is the element's own run. A wrapper whose children
+/// carry the text is not one long uppercase passage, and the subtree's
+/// character count describes a run that is nowhere on the page.
+#[test]
+fn subtree_text_does_not_make_a_run() {
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+.bar { text-transform: uppercase; font-size: 13px; line-height: 20px; width: 1100px; }
+</style></head>
+<body><div class="bar">Audit trail <span>immutable log of every configuration change your team makes</span> <em>verified</em></div></body></html>
+"#;
+    let findings = detect_html_source(html, Path::new("/tmp/caps.html"), &DetectHtmlOptions::default());
     assert!(
-        findings.iter().any(|f| f.antipattern == "all-caps-body"),
-        "96-char caps paragraph should flag, got {findings:?}"
+        !findings.iter().any(|f| f.antipattern == "all-caps-body"),
+        "no run in the bar reaches 80 chars, got {findings:?}"
     );
 }

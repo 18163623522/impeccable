@@ -16,7 +16,9 @@
   /* --- should-pass styles --- */
   .cta-link       { text-transform: uppercase; font-size: 12px; line-height: 18px; letter-spacing: 0.08em; }
   .kicker         { text-transform: uppercase; font-size: 11px; line-height: 16px; letter-spacing: 0.2em; }
-  .bar-label      { text-transform: uppercase; font-size: 13px; line-height: 20px; }
+  .narrow-kicker  { text-transform: uppercase; font-size: 11px; line-height: 16px; width: 120px; }
+  .bar-label      { text-transform: uppercase; font-size: 13px; line-height: 20px; width: 440px; }
+  .field-label    { text-transform: uppercase; font-size: 12px; line-height: 18px; width: 240px; }
   .copyright      { text-transform: uppercase; font-size: 12px; line-height: 18px; letter-spacing: 0.2em; }
   .sentence-case  { font-size: 15px; line-height: 24px; width: 440px; }
 </style>
@@ -37,18 +39,32 @@
   <p class="caps-warranty">Flag Caps Warranty: the seller disclaims all implied warranties of merchantability and fitness for a particular purpose to the fullest extent permitted by law.</p>
 </div>
 
-<!-- ================= SHOULD PASS (short single-line uppercase, a convention) ================= -->
+<!-- ================= SHOULD PASS (short uppercase runs, a convention) ================= -->
 <div class="col" id="should-pass">
   <h2>Should pass</h2>
 
-  <!-- a one-line card CTA that only crossed 30 characters because the title is long -->
+  <!-- a one-line card CTA that runs long only because the article title does -->
   <a class="cta-link" href="/blog/scaling">Pass Cta Link How Teams Scale Sales</a>
 
   <!-- a section kicker with wide tracking, one line -->
   <p class="kicker">Pass Kicker On-Prem Data Residency</p>
 
-  <!-- a panel header bar whose length comes from a nested badge -->
-  <div class="bar-label">Pass Bar Label Audit Trail <span>Immutable Log</span></div>
+  <!-- the same kind of kicker in a column too narrow to hold it on one line:
+       a label is a label at every width, so wrapping changes nothing -->
+  <p class="narrow-kicker">Pass Narrow Kicker Data Residency And Regional Routing</p>
+
+  <!-- a panel header bar: its own label is short, the length is in the badge,
+       and neither run is a sentence -->
+  <div class="bar-label">Pass Bar Label Audit Trail Complete <span>Immutable Log Of Every Configuration Change Your Team Makes</span></div>
+
+  <!-- a form control whose length sits in the options it wraps, none of which
+       renders beside the label -->
+  <label class="field-label">Pass Field Label What Are You Asking For
+    <select>
+      <option>Take my picture off the site but keep citing my work</option>
+      <option>Take me out of the creator catalogue altogether</option>
+    </select>
+  </label>
 
   <!-- a footer copyright line: legal furniture, one line -->
   <footer>

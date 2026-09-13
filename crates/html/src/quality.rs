@@ -460,22 +460,19 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- All-caps body text ---
-    // Uppercase on a short single-line run is a convention, not a defect: a
-    // button, a nav item, a kicker or an eyebrow is taken in as a shape. The
-    // browser adapter also flags a run that wrapped to a second line; with no
-    // layout here, length is the whole test.
-    if q.has_direct_text
-        && text_len >= ALL_CAPS_LONG_RUN
-        && sv_opt(style, "textTransform") == Some("uppercase")
-        && !is_heading
-    {
-        findings.push(RuleHit::new(
-            "all-caps-body",
-            format!(
-                "text-transform: uppercase on {} chars of body text",
-                text_len
-            ),
-        ));
+    // Uppercase on a short run is a convention, not a defect: a button, a nav
+    // item, a kicker or an eyebrow is taken in as a shape. The cost lands when
+    // the run is long enough to be read as a sentence. The run is the
+    // element's own text, so a bar or a form control whose children hold the
+    // labels is not one long run, however its subtree adds up.
+    if q.has_direct_text && sv_opt(style, "textTransform") == Some("uppercase") && !is_heading {
+        let own_len = utf16_len(js::trim(&collapse_ws(&el.direct_text())));
+        if own_len >= ALL_CAPS_LONG_RUN {
+            findings.push(RuleHit::new(
+                "all-caps-body",
+                format!("text-transform: uppercase on {} chars of body text", own_len),
+            ));
+        }
     }
 
     // --- Wide letter spacing on body text ---

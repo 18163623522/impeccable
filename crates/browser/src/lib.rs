@@ -243,7 +243,7 @@ pub fn serialize_design_system_for_browser(ds: Option<&DesignSystem>) -> Value {
 
 /// The pass that produced a finding, as [`Evidence::origins`] names it.
 pub mod origin {
-    /// The deterministic rule pass over the first capture. Replayable.
+    /// The deterministic rule pass over the post-reveal capture. Replayable.
     pub const SCAN: &str = "scan";
     /// `content-hidden-at-rest`, over the post-reveal capture. Replayable.
     pub const CONTENT_HIDDEN: &str = "content-hidden";
@@ -287,13 +287,15 @@ pub struct Evidence {
     pub probe: Option<PageProbe>,
     /// The validity verdict. A blocked page has no captures and no findings.
     pub validity: Option<PageValidity>,
-    /// The first capture's JSON, which the rule pass ran over.
+    /// The post-reveal capture's JSON, which every deterministic pass ran over.
     pub scan_snapshot: Option<String>,
-    /// Every hit test answered for the first capture.
+    /// Every hit test answered for that capture, by all of its passes.
     pub scan_facts: Facts,
-    /// The post-reveal capture's JSON (`content-hidden-at-rest`).
+    /// Unset: the passes share one capture, so there is no second one to
+    /// record. A recording made before they shared it carries its separate
+    /// post-reveal capture here, and [`replay_url_scan`] still reads it.
     pub reveal_snapshot: Option<String>,
-    /// Every hit test answered for the post-reveal capture's hidden-text measure.
+    /// Every hit test answered for [`Evidence::reveal_snapshot`].
     pub reveal_facts: Facts,
     /// Parallel to the findings: which pass produced each (see [`origin`]).
     pub origins: Vec<&'static str>,
@@ -519,8 +521,14 @@ pub struct ReplayOutcome {
 }
 
 /// Re-run the deterministic passes over a recorded capture, with no browser.
-/// `scan_snapshot` and `scan_facts` come from [`Evidence::scan_snapshot`] and
-/// [`Evidence::scan_facts`]; the post-reveal pair is optional.
+/// Both passes read the post-reveal capture, as the live scan does: that is
+/// `reveal` when the recording kept it separately (a recording made before the
+/// passes shared one capture), otherwise `scan_snapshot` itself, which
+/// [`Evidence::scan_snapshot`] now records post-reveal.
+///
+/// Replaying a separate pair is an undercount: the recorded `reveal` facts
+/// answer only the hit tests the hidden-text measure asked for, so the rule
+/// pass's own points come back in [`ReplayOutcome::unanswered_hit_tests`].
 pub fn replay_url_scan(
     url: &str,
     scan_snapshot: &str,
@@ -532,23 +540,20 @@ pub fn replay_url_scan(
         serialize_design_system_for_browser(options.design_system.as_deref()),
         options.rule_pack,
     );
-    let dom = snapshot_engine::parse_snapshot(scan_snapshot).map_err(cdp_err)?;
-    dom.add_facts(scan_facts);
+    let (snapshot, facts) = reveal.unwrap_or((scan_snapshot, scan_facts));
+    let dom = snapshot_engine::parse_snapshot(snapshot).map_err(cdp_err)?;
+    dom.add_facts(facts);
     let collected = collect_browser_findings(&dom, &config);
     let mut unanswered = dom.take_needs().hit_tests.len();
     let groups = serialize_findings(&dom, &collected.groups);
     let mut results = results_from_groups(groups.as_array().map(Vec::as_slice).unwrap_or(&[]));
-    if let Some((json, facts)) = reveal {
-        let base = snapshot_engine::parse_snapshot(json).map_err(cdp_err)?;
-        base.add_facts(facts);
-        let measured = measure_hidden_text_dom(&base);
-        unanswered += base.take_needs().hit_tests.len();
-        results.extend(content_hidden_results(
-            measured.total_chars,
-            measured.hidden_chars,
-            measured.hidden_samples,
-        ));
-    }
+    let measured = measure_hidden_text_dom(&dom);
+    unanswered += dom.take_needs().hit_tests.len();
+    results.extend(content_hidden_results(
+        measured.total_chars,
+        measured.hidden_chars,
+        measured.hidden_samples,
+    ));
     let (findings, _) = results_to_findings(url, results)?;
     Ok(ReplayOutcome {
         findings,
@@ -763,46 +768,50 @@ fn scan_page_inner(
         options.rule_pack,
     );
 
-    // Deterministic pass: capture the page and run the rule core natively over
-    // the snapshot (hit-test misses answered to a fixpoint). serialize_findings
-    // reproduces the same per-finding fields (type/detail/ignoreValue/severity)
-    // and order the in-page bundle's `impeccableDetect({ serialize: true })`
-    // produced; the group selectors feed the visual pass below.
+    // Reveal sweep before anything is measured: scroll the page top to bottom
+    // and back, so scroll-reveal content is at the opacity a visitor sees it at
+    // rather than the 0 it sits at until its section is reached. The element
+    // checks skip an element at effective opacity <= 0.02, so a capture taken
+    // before the sweep hides whole pages of text from the rule pass.
+    step(profile, "scan", "reveal-sweep", url, || reveal_sweep(page)).map_err(cdp_err)?;
+
+    // The one capture every pass below reads: the rule pass, the hidden-text
+    // measure, and the visual pass share this DOM, so a hit test any of them
+    // answers is answered for all three. The sweep leaves the page revealed and
+    // scrolled to the top, which is the scroll-0 snapshot the in-page path
+    // measured and analyzed.
+    let base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
+    let base = snapshot_engine::parse_snapshot(&base_json).map_err(cdp_err)?;
+    if let Some((ev, _)) = evidence.as_mut() {
+        ev.scan_snapshot = Some(base_json);
+    }
+
+    // Deterministic pass: run the rule core natively over the snapshot
+    // (hit-test misses answered to a fixpoint). serialize_findings reproduces
+    // the same per-finding fields (type/detail/ignoreValue/severity) and order
+    // the in-page bundle's `impeccableDetect({ serialize: true })` produced; the
+    // group selectors feed the visual pass below.
     let mut serialized_groups: Vec<Value> = Vec::new();
     let mut results = step_findings(profile, "scan", "browser-scan", url, || {
-        let json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
-        let dom = snapshot_engine::parse_snapshot(&json).map_err(cdp_err)?;
-        let facts = evidence.as_mut().map(|(ev, _)| {
-            ev.scan_snapshot = Some(json);
-            &mut ev.scan_facts
-        });
+        let facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
         let collected = snapshot_engine::resolve_needs_recording(
-            &dom,
+            &base,
             page,
             |d| collect_browser_findings(d, &config),
             facts,
         )
         .map_err(cdp_err)?;
-        serialized_groups = serialize_findings(&dom, &collected.groups)
+        serialized_groups = serialize_findings(&base, &collected.groups)
             .as_array()
             .cloned()
             .unwrap_or_default();
         Ok::<_, EngineError>(results_from_groups(&serialized_groups))
     })?;
 
-    // content-hidden-at-rest: reveal sweep, then one post-reveal capture the
-    // hidden-text measure and the visual pass share (the reveal sweep leaves the
-    // page revealed and scrolled to the top — the scroll-0 snapshot the in-page
-    // path measured and analyzed).
-    step(profile, "scan", "reveal-sweep", url, || reveal_sweep(page)).map_err(cdp_err)?;
-    let base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
-    let base = snapshot_engine::parse_snapshot(&base_json).map_err(cdp_err)?;
-
+    // content-hidden-at-rest: what is still hidden once the reveal handlers
+    // have run, measured over the same post-reveal capture.
     let hidden = step_findings(profile, "scan", "content-hidden-at-rest", url, || {
-        let facts = evidence.as_mut().map(|(ev, _)| {
-            ev.reveal_snapshot = Some(base_json);
-            &mut ev.reveal_facts
-        });
+        let facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
         let measured = snapshot_engine::resolve_needs_recording(
             &base,
             page,

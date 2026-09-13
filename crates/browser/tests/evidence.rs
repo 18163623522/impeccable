@@ -27,6 +27,7 @@ const REPLAY_FIXTURES: &[&str] = &[
     "should-flag.html",
     "text-occlusion.html",
     "reveal-working.html",
+    "scroll-reveal.html",
     "typography-should-flag.html",
     "quality.html",
     "layout.html",
@@ -128,6 +129,59 @@ fn blocked_pages_are_refused_by_the_cli_path_and_recorded_by_evidence() {
     assert_eq!(evidence.response.as_ref().unwrap().status, 405);
     assert!(evidence.scan_snapshot.is_none());
     assert!(evidence.screenshot.is_some(), "{:?}", evidence.screenshot_error);
+}
+
+/// The rule pass reads the page after the reveal sweep, so a section that is
+/// still at opacity 0 when the page finishes loading is measured at the opacity
+/// a visitor sees it at: its real faults are found, and the fade-in it uses to
+/// get there is not itself reported as a fault.
+#[test]
+fn the_rule_pass_measures_the_revealed_page() {
+    let Some(engine) = engine() else { return };
+    if !fixtures_dir().join("scroll-reveal.html").exists() {
+        eprintln!("skip: scroll-reveal.html not present");
+        return;
+    }
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/scroll-reveal.html");
+    let findings = engine
+        .detect_url(&url, &ScanOptions::default())
+        .expect("scan");
+    let flagged: Vec<(&str, &str)> = findings
+        .iter()
+        .map(|f| {
+            (
+                f.antipattern.as_str(),
+                f.extras
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )
+        })
+        .collect();
+
+    // Inside the revealed column: faults only a post-reveal pass can measure.
+    for want in [
+        ("low-contrast", "#faint-copy"),
+        ("tight-leading", "#cramped-copy"),
+        ("undersized-ui-text", "#tiny-action"),
+        // A raster the reveal never unburies stays a finding.
+        ("buried-raster", "#buried-photo"),
+    ] {
+        assert!(flagged.contains(&want), "missing {want:?} in {flagged:?}");
+    }
+    // The fade-in the reveal runs on, and the column that is simply fine.
+    for unwanted in ["#fade-photo", "#clean-copy", "#roomy-copy", "#clean-action"] {
+        assert!(
+            !flagged.iter().any(|(_, s)| *s == unwanted),
+            "{unwanted} was flagged in {flagged:?}"
+        );
+    }
+    // Everything reveals, so nothing is hidden at rest.
+    assert!(
+        !flagged.iter().any(|(id, _)| *id == "content-hidden-at-rest"),
+        "{flagged:?}"
+    );
 }
 
 #[test]

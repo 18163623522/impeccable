@@ -164,3 +164,17 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: the URL scan reads the page after the reveal sweep
+
+`crates/browser` now runs the reveal sweep before it captures the page, and
+every deterministic pass reads that one post-reveal capture. The new fixture
+`tests/fixtures/antipatterns/scroll-reveal.html` is what holds that order: its
+left column carries faults a pre-reveal pass cannot see (a section at opacity 0
+skips the element checks), its right column carries the fade-in a pre-reveal
+pass reports as `buried-raster`. URL scans have no goldens, so the fixture is
+pinned by `crates/browser/tests/evidence.rs`; the goldens below move only
+because a file was added to the fixture directory the static engine walks.
+
+- `detect-fixture-json-scroll-reveal-html`, `detect-fixture-text-scroll-reveal-html`: new cases. The static engine has no reveal to run, so it reports the fade-in from the stylesheet; that is its correct reading of the source and the fixture says so in a comment.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the four new findings are appended and the total moves from 419 to 423. No existing fixture's findings changed.

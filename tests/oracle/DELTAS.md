@@ -195,7 +195,6 @@ have no goldens (browser output depends on the machine).
 
 - `detect-dir-text-all-fixtures`, `detect-dir-json-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text`, `detect-no-advisory-json`, and the two new per-fixture cases `detect-fixture-text-visual-contrast-sampling-html` / `detect-fixture-json-visual-contrast-sampling-html`.
 
-
 ## Recorded 2026-09-12: cramped-padding measures where the glyphs land
 
 Corpus judging (both judges, 88 of 111 representatives) found the rule reading
@@ -284,6 +283,7 @@ never scanned either.
 - `detect-scope-both`: same, over both scopes.
 - `detect-no-advisory-json`: same, with advisories off.
 - `detect-no-advisory-text`: same, in the text renderer.
+
 ## Recorded 2026-09-12: the tight-leading floor only measures body copy
 
 Reviewing the rule's findings on real pages showed the 1.3 leading floor being
@@ -298,6 +298,7 @@ needs layout, so it is browser-only.
 
 - `detect-fixture-json-tight-leading-html`, `detect-fixture-text-tight-leading-html`: new fixture, two columns of real cases reduced from the reviewed pages.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the directory sweep picks up the new fixture. The additions are its six findings and the total moves from 419 to 425; no existing fixture's findings changed.
+
 ## Recorded 2026-09-12: layout-transition and bounce-easing go advisory, image-hover-transform retires
 
 A corpus review of 50 real sites judged all three rules on their findings. Two
@@ -322,6 +323,7 @@ The frozen call vectors keep the retired rule's recorded hits, since
 `tests/oracle/vectors/calls/` can never be re-recorded. `crates/core/tests/vectors.rs`
 drops findings carrying a retired id from both sides of the comparison
 instead; every other hit on those lines still has to match.
+
 ## Recorded 2026-09-12: `extreme-negative-tracking` gets a size-scaled threshold and a CJK exemption
 
 Corpus run 2 judged 26 representatives of this rule and found no harm in any of
@@ -340,6 +342,7 @@ change in any case below.
 
 - `detect-fixture-json-extreme-negative-tracking-html`, `detect-fixture-text-extreme-negative-tracking-html`: the three flagged rows carry the new snippet form and the fixture's new values.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-both`: the same three lines inside the sweeps.
+
 ## Recorded 2026-09-12: `wide-tracking` spares short labels typed in capitals
 
 Corpus run 2 judged 70 `wide-tracking` findings across nine sites; the hits
@@ -356,6 +359,7 @@ No existing fixture's output moved. The new
 goldens re-record.
 
 - `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html` (new cases), `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+
 ## Recorded 2026-09-12: `all-caps-body` needs an 80-character run of its own
 
 Judged against real sites, every `all-caps-body` hit on the corpus was a short
@@ -377,6 +381,7 @@ on the viewport it was measured in.
 - `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: the 285-char and 159-char caps paragraphs still flag, with the same counts, since each is one element's own run; only the rule description moved.
 - `detect-fixture-json-all-caps-body-html`, `detect-fixture-text-all-caps-body-html`: new fixture, three caps paragraphs flagged (162, 140 and 159 chars) and seven short caps runs silent, including a bar and a form label whose subtrees pass 80 characters.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep loses those eighteen findings and gains the new fixture's three (436 to 421, `all-caps-body` 20 to 5).
+
 ## Recorded 2026-09-12: `justified-text` narrows to narrow columns in word-spaced scripts
 
 Judging the rule's findings on real sites found 947 of them on four sites,
@@ -406,6 +411,7 @@ declared it has no measure and does not fire.
   `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep picks up the
   new fixture's three findings (419 to 422) and the new description. Nothing
   else moved in any of them.
+
 ## Recorded 2026-09-12: dark-glow gains a perceptibility floor
 
 A glow layer now has to put out light a reader can see before it is reported:
@@ -432,3 +438,22 @@ eats its blur) are dropped by every engine and add no findings anywhere.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
   `detect-dir-quiet-all-fixtures` (419 to 423), `detect-no-advisory-json`,
   `detect-no-advisory-text`: the same four findings in the directory sweeps.
+
+## Recorded 2026-09-13: the integration of the branches above
+
+`corpus/integration` merges every branch whose entry appears above. Where two
+branches moved the same golden, neither side's recording describes the merged
+engine, so these cases were re-recorded from the integrated binary. Each was
+checked against the union of the entries above: the directory sweep equals the
+base findings plus every branch's additions minus every branch's removals, key
+for key, with nothing extra and nothing missing (436 findings to 452; 419
+counted to 409 with advisories off). Two findings moved only because one
+branch's registry text reached another branch's golden: the `all-caps-body`
+finding in `wide-tracking.html` carries the 80-character description, and the
+`justified-text` findings in `quality.html` and `typography.html` carry the
+narrow-column description.
+
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: clipped-overflow's named child plus all-caps-body's sixteen removed captions.
+- `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: both the all-caps-body and justified-text descriptions.
+- `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html`: the all-caps-body description.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the union of every sweep delta above.

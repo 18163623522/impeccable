@@ -198,6 +198,13 @@ pub fn resolve_length_px(value: Option<&str>, font_size_px: f64) -> Option<f64> 
     Some(num * font_size_px)
 }
 
+/// Characters that fit on one line at a given measure: an average glyph runs
+/// about half the font size wide. The estimate `line-length` reports and the
+/// one `justified-text` reads to tell a narrow column from a long measure.
+pub fn chars_per_line(width_px: f64, font_size_px: f64) -> f64 {
+    width_px / (font_size_px * 0.5)
+}
+
 /// JS: checks.mjs#cssColorIsTransparent.
 pub fn css_color_is_transparent(value: Option<&str>) -> bool {
     re!(

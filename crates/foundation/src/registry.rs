@@ -476,7 +476,7 @@ pub static ANTIPATTERNS: &[Antipattern] = &[
         scopes: Some(&["type"]),
         severity: None,
         name: "Justified text",
-        description: "Justified text without hyphenation creates uneven word spacing (\"rivers of white\"). Use text-align: left for body text, or enable hyphens: auto if you must justify.",
+        description: "In a column this narrow, justifying without hyphenation stretches the word spaces until vertical rivers of white run down the block. Use text-align: left, widen the measure, or enable hyphens: auto if you must justify. Scripts that justify on a character grid or by elongating glyphs, such as CJK, Thai and Arabic, are not affected and are not reported.",
         skill_section: None,
         skill_guideline: None,
     },

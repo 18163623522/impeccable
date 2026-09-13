@@ -11,10 +11,13 @@ use super::dom::{
     style_px, tag_lower, Dom, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
-use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
+use crate::checks::measures::{
+    chars_per_line, colors_nearly_match, css_color_is_transparent, resolve_length_px,
+};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
-    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
+    justifies_without_word_spaces_text, JUSTIFY_NARROW_CHARS_PER_LINE, NON_RENDERED_TAGS,
+    QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
 use crate::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -250,13 +253,13 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         && rect.width > 0.0
         && (text_len as f64) > line_max
     {
-        let chars_per_line = rect.width / (font_size * 0.5);
-        if chars_per_line > line_max + 5.0 {
+        let cpl = chars_per_line(rect.width, font_size);
+        if cpl > line_max + 5.0 {
             findings.push(RuleHit::new(
                 "line-length",
                 format!(
                     "~{} chars/line (aim for <{})",
-                    number_to_string(math_round(chars_per_line)),
+                    number_to_string(math_round(cpl)),
                     number_to_string(line_max)
                 ),
             ));
@@ -547,7 +550,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Justified text (without hyphens) ---
-    if has_direct_text && st("textAlign") == "justify" {
+    // Only a narrow column stretches word spaces far enough to open rivers,
+    // and only in a script that justifies on word spaces at all.
+    if has_direct_text && st("textAlign") == "justify" && rect.width > 0.0 && font_size > 0.0 {
         let hyphens = {
             let a = st("hyphens");
             if !a.is_empty() {
@@ -556,7 +561,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 st("webkitHyphens")
             }
         };
-        if hyphens != "auto" {
+        if hyphens != "auto"
+            && chars_per_line(rect.width, font_size) <= JUSTIFY_NARROW_CHARS_PER_LINE
+            && !justifies_without_word_spaces_text(&direct_text(dom, el))
+        {
             findings.push(RuleHit::new(
                 "justified-text",
                 "text-align: justify without hyphens: auto".to_string(),
@@ -865,6 +873,34 @@ mod tests {
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
         assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
+    }
+
+    #[test]
+    fn justified_text_narrows_to_rivers() {
+        let latin = "word ".repeat(24);
+        let chinese = "永慶房屋於一九八八年成立專注本業堅持創新秉持先誠實再成交的精神".to_string();
+        let arabic = "يعتمد ضبط النص في الخط العربي على استطالة الحروف على السطر".to_string();
+        let thai = "การจัดวางข้อความแบบชิดขอบทั้งสองด้านในภาษาไทยไม่ได้ดึงช่องว่าง".to_string();
+        let justified = |text: &str, width: f64, hyphens: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let p = text_el(&mut d, body, "p", text, "16px");
+            d.set_rect(p, 40.0, 100.0, width, 60.0);
+            d.set_styles(p, &[("lineHeight", "26px"), ("textAlign", "justify"), ("hyphens", hyphens)]);
+            let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
+            hits.iter().any(|h| h.id == "justified-text")
+        };
+
+        // 300px at 16px is ~37 chars/line; 800px is ~100.
+        assert!(justified(&latin, 300.0, "manual"));
+        assert!(!justified(&latin, 800.0, "manual"));
+        assert!(!justified(&latin, 300.0, "auto"));
+        // Scripts that justify without stretching word spaces.
+        assert!(!justified(&chinese, 300.0, "manual"));
+        assert!(!justified(&arabic, 300.0, "manual"));
+        assert!(!justified(&thai, 300.0, "manual"));
+        // A Latin paragraph carrying a few ideographs is still Latin.
+        assert!(justified(&format!("{latin} 永慶房屋"), 300.0, "manual"));
     }
 
     #[test]

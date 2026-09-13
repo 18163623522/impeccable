@@ -9,10 +9,13 @@ use crate::background::{sv, sv_opt};
 use crate::cascade::StyleValues;
 use crate::dom::{ChildNode, StaticElement};
 use impeccable_core::checks::measures::{
-    colors_nearly_match, css_color_is_transparent, resolve_length_px,
+    chars_per_line, colors_nearly_match, css_color_is_transparent, resolve_length_px,
 };
 use impeccable_core::checks::rules::RuleHit;
-use impeccable_core::checks::text_rules::{NON_RENDERED_TAGS, SR_ONLY_SELECTOR};
+use impeccable_core::checks::text_rules::{
+    justifies_without_word_spaces_text, JUSTIFY_NARROW_CHARS_PER_LINE, NON_RENDERED_TAGS,
+    SR_ONLY_SELECTOR,
+};
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -151,6 +154,35 @@ pub fn is_non_rendered_text(
         }
     }
     false
+}
+
+/// How far up the tree the measure lookup walks before giving up. A column
+/// width is declared on the text block or on the wrapper a few levels above
+/// it; past that the walk is paying for nothing.
+const MEASURE_ANCESTOR_LIMIT: usize = 12;
+
+/// The measure an element's lines can occupy, from the nearest declared
+/// `width` on the element or an ancestor. `None` when nothing on the chain
+/// declares one, and a caller that needs a measure then has none to judge:
+/// this engine has no layout, which is why `line-length` does not fire here
+/// either. The static cascade carries `width` and not `max-width`, and a
+/// percentage is relative to a containing block it cannot size, so both of
+/// those read as undeclared.
+fn declared_measure_px(el: &StaticElement<'_>, font_size: f64) -> Option<f64> {
+    let mut cur = Some(*el);
+    for _ in 0..MEASURE_ANCESTOR_LIMIT {
+        let e = cur?;
+        let raw = sv(e.style(), "width");
+        if !raw.ends_with('%') {
+            if let Some(px) = resolve_length_px(Some(raw), font_size) {
+                if px > 0.0 {
+                    return Some(px);
+                }
+            }
+        }
+        cur = e.parent_element();
+    }
+    None
 }
 
 /// Inputs of `checkQuality` as the static adapter builds them.
@@ -377,7 +409,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- Justified text (without hyphens) ---
-    if q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") {
+    // Only a narrow column stretches word spaces far enough to open rivers,
+    // and only in a script that justifies on word spaces at all.
+    if q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") && font_size > 0.0 {
         let hyphens = {
             let a = sv(style, "hyphens");
             if !a.is_empty() {
@@ -386,7 +420,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 sv(style, "webkitHyphens")
             }
         };
-        if hyphens != "auto" {
+        let narrow = declared_measure_px(el, font_size)
+            .is_some_and(|w| chars_per_line(w, font_size) <= JUSTIFY_NARROW_CHARS_PER_LINE);
+        if hyphens != "auto" && narrow && !justifies_without_word_spaces_text(&el.direct_text()) {
             findings.push(RuleHit::new(
                 "justified-text",
                 "text-align: justify without hyphens: auto".to_string(),

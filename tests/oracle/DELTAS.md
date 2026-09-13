@@ -164,3 +164,33 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: `justified-text` narrows to narrow columns in word-spaced scripts
+
+Judging the rule's findings on real sites found 947 of them on four sites,
+nearly all of them CJK news and marketing pages where justification is correct
+typography: characters are uniform width, there are no word spaces to stretch,
+and `hyphens: auto` is not the remedy the finding proposes. Both judges called
+every representative harmless. The rule now reads the element's own text and
+skips CJK, Thai and Arabic script, where justification sets on a character grid
+or elongates glyphs, and for the remaining scripts fires only in a column of
+45 characters per line or fewer (the estimate `line-length` reports). The
+registry description says so. The static engine reads that measure from the
+nearest declared `width`, the only width its cascade carries; with none
+declared it has no measure and does not fire.
+
+- `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`,
+  `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`:
+  the finding is unchanged; only the rule description moved. Both fixtures now
+  declare the flagged column's width in pixels so the case states the measure
+  it is about.
+- `detect-fixture-json-justified-text-html`,
+  `detect-fixture-text-justified-text-html`: new fixture. Three should-flag
+  cases (a 300px column, a 260px column with `hyphens: manual`, a 240px
+  sidebar) and five should-pass ones (a 760px measure, `hyphens: auto`, and
+  Chinese, Thai and Arabic paragraphs at 300px).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`,
+  `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep picks up the
+  new fixture's three findings (419 to 422) and the new description. Nothing
+  else moved in any of them.

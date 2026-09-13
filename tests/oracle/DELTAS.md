@@ -176,3 +176,9 @@ two-column fixture that documents them.
 
 - `detect-fixture-json-ai-color-palette-html`, `detect-fixture-text-ai-color-palette-html`: new cases for the new fixture.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the directory sweeps pick up the same two findings from the new file (the static engine's own heading-color match, plus `radial-halo` on the violet glow blob), and the count moves 419 to 421. No other fixture's output changed.
+
+A later revision added six more rows to that fixture (a same-color alpha fade,
+a `<picture>` around a letterboxed image, a scroll-reveal wrapper, a
+typewriter hero, a blurred wrapper, a `visibility: hidden` branch). They
+document browser-path gates the static engine never runs, so no golden moved
+and nothing was re-recorded.

@@ -61,6 +61,14 @@ pub struct FakeDom {
     pub html_for_patterns: String,
 }
 
+/// Tag names a real parser only ever puts in the SVG namespace, so a test
+/// that builds an icon out of them gets the namespace a browser would give
+/// it. Anything not listed here is XHTML.
+const SVG_ONLY_TAGS: [&str; 12] = [
+    "svg", "text", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "g", "defs",
+    "use",
+];
+
 impl FakeDom {
     pub fn new() -> Self {
         FakeDom {
@@ -86,7 +94,7 @@ impl FakeDom {
         self.els.push(FakeEl {
             styles,
             tag: tag.to_string(),
-            ns: if tag == "svg" || tag == "text" || tag == "path" || tag == "rect" {
+            ns: if SVG_ONLY_TAGS.contains(&tag) {
                 "http://www.w3.org/2000/svg".to_string()
             } else {
                 "http://www.w3.org/1999/xhtml".to_string()

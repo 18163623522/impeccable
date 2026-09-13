@@ -742,10 +742,13 @@ fn is_stock_violet(c: &crate::color::Rgba) -> bool {
 /// Whether any element a visitor can see wears one of the stock violet
 /// hexes. A palette that only exists in a stylesheet is a dead token, not a
 /// design decision, so the page-level accent finding asks for paint first.
+/// Visibility is the rule's own model, the same one the element path uses,
+/// so a violet that only appears inside a scroll-reveal wrapper still counts
+/// as painted here.
 fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
-    use super::element_checks::{element_rect, is_rendered_for_browser_rule};
+    use super::element_checks::{ai_palette_is_visible, element_rect};
     for el in dom.query_all(None, "*").unwrap_or_default() {
-        if element_rect(dom, el).is_none() || !is_rendered_for_browser_rule(dom, el) {
+        if element_rect(dom, el).is_none() || !ai_palette_is_visible(dom, el) {
             continue;
         }
         if super::dom::has_direct_text_longer_than(dom, el, 0) {
@@ -1705,6 +1708,72 @@ mod tests {
         assert!(is_likely_hashed_class("a1b2c3"));
         assert!(!is_likely_hashed_class("hero"));
         assert!(!is_likely_hashed_class("abcdefg"));
+    }
+
+    /// A page whose stylesheet declares a stock violet accent on `.accent`,
+    /// with one paragraph wearing that class inside a wrapper the test can
+    /// switch off. Returns `(dom, wrapper, paragraph)`.
+    fn stock_violet_page() -> (FakeDom, ElId, ElId) {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.html_for_patterns =
+            "<style>.accent { font-weight: 600; color: #8b5cf6; }</style>\
+             <p class=\"accent\">Start free</p>"
+                .to_string();
+        let wrapper = d.add(Some(body), "div");
+        d.set_rect(wrapper, 0.0, 0.0, 200.0, 24.0);
+        let p = d.add(Some(wrapper), "p");
+        d.set_attr(p, "class", "accent");
+        d.add_selector(p, ".accent");
+        d.add_text(p, "Start free");
+        d.set_rect(p, 0.0, 0.0, 200.0, 24.0);
+        d.set_style(p, "color", "rgb(17, 17, 17)");
+        (d, wrapper, p)
+    }
+
+    fn purple_accent_reported(d: &FakeDom) -> bool {
+        scoped_html_pattern_findings(d)
+            .iter()
+            .any(|f| f.type_ == "ai-color-palette" && f.detail == PURPLE_ACCENT_SNIPPET)
+    }
+
+    #[test]
+    fn purple_accent_needs_an_element_that_paints_it() {
+        // Declared in the stylesheet, worn by nothing: a dead token.
+        let (mut d, _wrapper, p) = stock_violet_page();
+        assert!(!purple_accent_reported(&d));
+
+        // The same page once the paragraph actually wears the hex.
+        d.set_style(p, "color", "rgb(139, 92, 246)");
+        assert!(purple_accent_reported(&d));
+
+        // A background or a gradient stop counts as paint too.
+        d.set_style(p, "color", "rgb(17, 17, 17)");
+        d.set_style(p, "backgroundColor", "rgb(124, 58, 237)");
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "backgroundColor", "rgba(0, 0, 0, 0)");
+        d.set_style(
+            p,
+            "backgroundImage",
+            "linear-gradient(90deg, rgb(102, 126, 234), rgb(255, 176, 5))",
+        );
+        assert!(purple_accent_reported(&d));
+    }
+
+    #[test]
+    fn purple_accent_uses_the_rules_own_visibility_model() {
+        let (mut d, reveal, p) = stock_violet_page();
+        d.set_style(p, "color", "rgb(139, 92, 246)");
+
+        // A scroll-reveal wrapper is captured at opacity 0 and its content is
+        // exactly what the visitor sees, so the accent still counts.
+        d.set_style(reveal, "opacity", "0");
+        assert!(purple_accent_reported(&d));
+
+        // `visibility: hidden` hides it for good.
+        d.set_style(reveal, "opacity", "1");
+        d.set_style(reveal, "visibility", "hidden");
+        assert!(!purple_accent_reported(&d));
     }
 
     #[test]

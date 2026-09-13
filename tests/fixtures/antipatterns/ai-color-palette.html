@@ -38,6 +38,27 @@
     }
     .neon-heading { font-size: 25px; margin: 0; color: rgb(130, 255, 247); }
     .neon-hero-word { font-size: 70px; line-height: 1.1; margin: 0; color: rgb(133, 38, 254); }
+    /* One color fading out is a ramp, not a flat fill: only the alpha differs. */
+    .glow-fade {
+      width: 158px; height: 158px; border-radius: 50%;
+      background-image: radial-gradient(circle, rgba(168, 85, 247, 0.8) 0%, rgba(168, 85, 247, 0) 100%);
+    }
+    /* `object-fit` belongs to the image, never to the <picture> around it, so
+       a letterboxed photo leaves the fill showing top and bottom. */
+    .letterbox-scene {
+      position: relative; width: 120px; height: 214px; overflow: hidden; border-radius: 12px;
+      background-image: linear-gradient(150deg, rgb(133, 38, 254), rgb(130, 255, 247));
+    }
+    .letterbox-scene img { position: absolute; inset: 0; width: 120px; height: 214px; object-fit: contain; }
+    /* A scroll-reveal wrapper is captured at opacity 0; the visitor sees the
+       ramp the moment it scrolls in. */
+    .reveal { opacity: 0; }
+    .reveal-ramp {
+      width: 480px; height: 120px; border-radius: 12px;
+      background-image: linear-gradient(90deg, rgb(133, 38, 254), rgb(130, 255, 247));
+    }
+    /* A typewriter hero paints one text node per glyph and still spells the word. */
+    .typed-word { font-size: 70px; line-height: 1.1; color: rgb(133, 38, 254); }
 
     /* ── PASS: declared but never painted ── */
     /* A placeholder fill under an image that covers the whole box. */
@@ -83,6 +104,25 @@
     .bit { display: block; width: 7px; height: 11px; font-size: 11px; line-height: 11px; color: rgb(88, 196, 200); }
     .spacer-span { color: rgb(130, 255, 247); }
     .body-copy { font-size: 13px; margin: 0; color: #cbd5e1; }
+    /* A blurred wrapper blurs everything it renders, including the child that
+       carries the ramp. */
+    .blur-wrap { width: 480px; height: 160px; filter: blur(120px); }
+    .blur-blob {
+      width: 480px; height: 160px; border-radius: 50%;
+      background-image: linear-gradient(90deg, rgb(133, 38, 254), rgb(130, 255, 247));
+    }
+    /* `visibility: hidden` switches a subtree off for good. */
+    .hidden-branch { visibility: hidden; width: 320px; height: 120px; }
+    .hidden-ramp {
+      width: 320px; height: 120px;
+      background-image: linear-gradient(90deg, rgb(0, 159, 219), rgb(130, 255, 247));
+    }
+    /* A cover image under a <picture> hides the fill behind it completely. */
+    .covered-scene {
+      position: relative; width: 120px; height: 214px; overflow: hidden; border-radius: 12px;
+      background-image: linear-gradient(150deg, rgb(133, 38, 254), rgb(130, 255, 247));
+    }
+    .covered-scene img { position: absolute; inset: 0; width: 120px; height: 214px; object-fit: cover; }
   </style>
 </head>
 <body>
@@ -103,6 +143,21 @@
       <div class="dark-context">
         <div class="violet-overlay"></div>
       </div>
+      <div class="dark-context">
+        <div class="glow-fade"></div>
+      </div>
+      <div class="dark-context">
+        <div class="letterbox-scene">
+          <picture>
+            <img alt="" width="120" height="214" src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='120'%20height='120'%3E%3Crect%20width='120'%20height='120'%20fill='%23334155'/%3E%3C/svg%3E">
+          </picture>
+        </div>
+      </div>
+      <div class="dark-context">
+        <div class="reveal">
+          <div class="reveal-ramp"></div>
+        </div>
+      </div>
 
       <h3>Neon text on dark</h3>
       <div class="dark-context">
@@ -111,6 +166,9 @@
       </div>
       <div class="dark-context">
         <p class="neon-hero-word">Design</p>
+      </div>
+      <div class="dark-context">
+        <p><span class="typed-word">I<!-- -->m<!-- -->a<!-- -->g<!-- -->e</span></p>
       </div>
     </div>
 
@@ -140,6 +198,19 @@
       </div>
       <div class="dark-context">
         <div class="closed-flyout"></div>
+      </div>
+      <div class="dark-context">
+        <div class="blur-wrap"><div class="blur-blob"></div></div>
+      </div>
+      <div class="dark-context">
+        <div class="hidden-branch"><div class="hidden-ramp"></div></div>
+      </div>
+      <div class="dark-context">
+        <div class="covered-scene">
+          <picture>
+            <img alt="" width="120" height="214" src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='120'%20height='214'%3E%3Crect%20width='120'%20height='214'%20fill='%23334155'/%3E%3C/svg%3E">
+          </picture>
+        </div>
       </div>
 
       <h3>Color without painted glyphs</h3>

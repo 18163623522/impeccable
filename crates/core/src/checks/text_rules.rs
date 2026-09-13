@@ -273,6 +273,69 @@ pub fn check_numbered_section_labels(
         .collect()
 }
 
+// ─── Letter spacing ─────────────────────────────────────────────────────────
+
+/// Size at which type is read as display rather than as reading copy.
+pub const DISPLAY_FONT_SIZE_PX: f64 = 40.0;
+/// Tracking (letter-spacing over font-size) past which reading copy starts
+/// losing its letterforms.
+pub const CRUSHED_TRACKING_EM: f64 = -0.07;
+/// Display type conventionally tightens further, and several display faces
+/// ship values in the -0.05em range in their own tracking tables, so it takes
+/// more before the letterforms are actually damaged.
+pub const CRUSHED_TRACKING_EM_DISPLAY: f64 = -0.09;
+
+/// The `extreme-negative-tracking` gate: how tight is too tight at this size.
+pub fn tracking_is_crushed(tracking_em: f64, font_size_px: f64) -> bool {
+    let limit = if font_size_px >= DISPLAY_FONT_SIZE_PX {
+        CRUSHED_TRACKING_EM_DISPLAY
+    } else {
+        CRUSHED_TRACKING_EM
+    };
+    tracking_em < limit
+}
+
+/// How many leading characters the script test reads. Tracking is one authored
+/// value for the whole element, so a prefix settles which script it is set in
+/// and the test stays cheap on long text.
+const SCRIPT_SAMPLE_CHARS: usize = 256;
+
+fn is_cjk_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x11FF        // Hangul Jamo
+        | 0x3040..=0x30FF      // Hiragana and Katakana
+        | 0x3130..=0x318F      // Hangul compatibility Jamo
+        | 0x31F0..=0x31FF      // Katakana phonetic extensions
+        | 0x3400..=0x4DBF      // CJK unified ideographs extension A
+        | 0x4E00..=0x9FFF      // CJK unified ideographs
+        | 0xA960..=0xA97F      // Hangul Jamo extended-A
+        | 0xAC00..=0xD7FF      // Hangul syllables and Jamo extended-B
+        | 0xF900..=0xFAFF      // CJK compatibility ideographs
+        | 0xFF66..=0xFF9F      // halfwidth Katakana
+        | 0x20000..=0x3FFFF // CJK extensions B and later
+    )
+}
+
+/// True when the text is written mostly in Han, Hiragana, Katakana or Hangul.
+/// Letter-spacing on those scripts trims the gap between full-width glyphs
+/// instead of pulling letterforms into each other, so the Latin tracking
+/// thresholds do not describe them. Read from the text itself: a `lang`
+/// attribute says what the page is, not what this element renders.
+pub fn is_cjk_text(text: &str) -> bool {
+    let mut cjk = 0usize;
+    let mut scripted = 0usize;
+    for c in text.chars().take(SCRIPT_SAMPLE_CHARS) {
+        if is_cjk_char(c) {
+            cjk += 1;
+            scripted += 1;
+        } else if c.is_alphabetic() {
+            scripted += 1;
+        }
+    }
+    cjk > 0 && cjk * 2 >= scripted
+}
+
 /// JS `/[—]|--(?=\S)/g` match count over `body`.
 fn count_em_dashes(body: &str) -> usize {
     let chars: Vec<char> = body.chars().collect();
@@ -392,6 +455,32 @@ mod tests {
         assert_eq!(count_em_dashes("----x"), 2);
         assert_eq!(count_em_dashes("---x"), 1);
         assert_eq!(count_em_dashes("--"), 0);
+    }
+
+    #[test]
+    fn tracking_is_crushed_cases() {
+        // Reading sizes: Tailwind's tracking-tighter and vendor display tables pass.
+        assert!(!tracking_is_crushed(-0.05, 16.0));
+        assert!(!tracking_is_crushed(-0.06, 16.0));
+        assert!(tracking_is_crushed(-0.08, 16.0));
+        // Display sizes take the looser line.
+        assert!(!tracking_is_crushed(-0.08, 40.0));
+        assert!(!tracking_is_crushed(-0.08, 104.8));
+        assert!(tracking_is_crushed(-0.1, 40.0));
+        // Just under display size the reading-copy line still applies.
+        assert!(tracking_is_crushed(-0.08, 39.0));
+    }
+
+    #[test]
+    fn is_cjk_text_cases() {
+        assert!(is_cjk_text("赓续长征精神 奋进复兴征程|福建守护"));
+        assert!(is_cjk_text("この段落は日本語の文字組みです"));
+        assert!(is_cjk_text("한국어 문장은 자간을 줄여도 글자 모양이 남습니다"));
+        assert!(!is_cjk_text("The APIs powering your next feature"));
+        assert!(!is_cjk_text(""));
+        assert!(!is_cjk_text("משרד ההגנה של דרום קוריאה מסר"));
+        // A lone ideograph in a Latin line is not CJK typesetting.
+        assert!(!is_cjk_text("Download the 中 glyph sample sheet today"));
     }
 
     #[test]

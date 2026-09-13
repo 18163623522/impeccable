@@ -13,8 +13,8 @@ use impeccable_core::checks::measures::{
 };
 use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
-    LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT, LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS,
-    SR_ONLY_SELECTOR,
+    is_cjk_text, tracking_is_crushed, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
+    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, SR_ONLY_SELECTOR,
 };
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
@@ -555,17 +555,19 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         if let Some(ls) = q.letter_spacing_px {
             if ls < 0.0 {
                 let tracking_em = ls / font_size;
-                if tracking_em <= -0.05 {
-                    let excerpt =
-                        slice_utf16_prefix(&collapse_ws(js::trim(&el.text_content())), 40);
-                    findings.push(RuleHit::new(
-                        "extreme-negative-tracking",
-                        format!(
-                            "letter-spacing: {}em — \"{}\"",
-                            to_fixed(tracking_em, 2),
-                            excerpt
-                        ),
-                    ));
+                if tracking_is_crushed(tracking_em, font_size) {
+                    let text = collapse_ws(js::trim(&el.text_content()));
+                    if !is_cjk_text(&text) {
+                        findings.push(RuleHit::new(
+                            "extreme-negative-tracking",
+                            format!(
+                                "letter-spacing: {}em at {}px — \"{}\"",
+                                to_fixed(tracking_em, 2),
+                                number_to_string(font_size),
+                                slice_utf16_prefix(&text, 40)
+                            ),
+                        ));
+                    }
                 }
             }
         }

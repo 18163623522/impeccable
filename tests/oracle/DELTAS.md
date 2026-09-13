@@ -322,3 +322,21 @@ The frozen call vectors keep the retired rule's recorded hits, since
 `tests/oracle/vectors/calls/` can never be re-recorded. `crates/core/tests/vectors.rs`
 drops findings carrying a retired id from both sides of the comparison
 instead; every other hit on those lines still has to match.
+## Recorded 2026-09-12: `extreme-negative-tracking` gets a size-scaled threshold and a CJK exemption
+
+Corpus run 2 judged 26 representatives of this rule and found no harm in any of
+them: -0.05em is exactly Tailwind's tracking-tighter and the tracking several
+display faces recommend, so the old `<= -0.05em` line fired on ordinary display
+type and on whole sites that set one utility class. The rule now flags below
+-0.07em, and below -0.09em for text at 40px or larger, and it skips text whose
+glyphs are CJK (Han, Hiragana, Katakana, Hangul), read from the element text
+rather than a lang attribute. The snippet gained the font size the em value was
+measured against.
+
+The fixture was rewritten around the new lines (px values, since the static
+engine resolves an `em` letter-spacing against the inherited font size), so the
+three flagged rows change text and the pass column grew. No finding counts
+change in any case below.
+
+- `detect-fixture-json-extreme-negative-tracking-html`, `detect-fixture-text-extreme-negative-tracking-html`: the three flagged rows carry the new snippet form and the fixture's new values.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-both`: the same three lines inside the sweeps.

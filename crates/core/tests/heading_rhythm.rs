@@ -486,6 +486,116 @@ fn a_heading_that_ends_a_box_with_a_visible_edge_has_nothing_below() {
 }
 
 #[test]
+fn a_box_framed_on_its_other_sides_above_is_content_not_a_rule() {
+    let block_above = |styles: &[(&str, &str)]| {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(240.0);
+        p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+        p.el(sec, "pre", (0.0, y + 48.0, W, 54.0), styles, "npx impeccable detect src/");
+        p.el(sec, "h2", (0.0, y + 114.0, W, 32.0), &[("fontSize", "24px")], "Heading Under A Framed Block");
+        p.el(sec, "p", (0.0, y + 182.0, W, 48.0), &[], LONG);
+        p
+    };
+    let framed = [
+        ("borderTopWidth", "1px"),
+        ("borderRightWidth", "1px"),
+        ("borderBottomWidth", "1px"),
+        ("borderLeftWidth", "1px"),
+        ("backgroundColor", "rgb(246, 248, 250)"),
+    ];
+    // A code block bordered on every side.
+    assert_flags(&block_above(&framed), "\"Heading Under A Framed Block\" has 12px above vs 36px below");
+    // A callout with a left border only.
+    assert_flags(
+        &block_above(&[("borderLeftWidth", "4px"), ("backgroundColor", "rgb(238, 246, 255)")]),
+        "\"Heading Under A Framed Block\" has 12px above vs 36px below",
+    );
+    // The same block drawing only its bottom edge is a rule.
+    assert_only_crowded(&block_above(&[("borderBottomWidth", "1px")]));
+
+    // A panel framed on every side whose last row draws a divider: the line
+    // sits inside the frame, and the frame is the edge.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let panel = p.el(sec, "div", (0.0, y + 48.0, W, 54.0), &framed, "");
+    p.el(panel, "div", (1.0, y + 49.0, W - 2.0, 52.0), &[("borderBottomWidth", "1px")], "Last settings row");
+    p.el(sec, "h2", (0.0, y + 114.0, W, 32.0), &[("fontSize", "24px")], "Heading Under A Panel");
+    p.el(sec, "p", (0.0, y + 182.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Heading Under A Panel\" has 12px above vs 36px below");
+}
+
+#[test]
+fn a_layout_row_that_shares_a_class_but_holds_other_content_does_not_repeat() {
+    // Bootstrap rows: the title alone in its own `.row > .col-12`, the next
+    // `.row` a row of feature columns headed by h3s.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(300.0);
+    let row = p.el(sec, "div", (0.0, y, W, 48.0), &[("display", "flex")], "");
+    p.d.set_attr(row, "class", "row");
+    let col = p.el(row, "div", (0.0, y, W, 48.0), &[], "");
+    p.d.set_attr(col, "class", "col-12");
+    p.el(col, "p", (0.0, y, W, 48.0), &[], LONG);
+    let row = p.el(sec, "div", (0.0, y + 48.0, W, 102.0), &[("display", "flex")], "");
+    p.d.set_attr(row, "class", "row");
+    let col = p.el(row, "div", (0.0, y + 48.0, W, 102.0), &[], "");
+    p.d.set_attr(col, "class", "col-12");
+    let title = p.el(col, "h2", (0.0, y + 64.0, W, 38.0), &[("fontSize", "32px")], "Title Alone In A Row");
+    p.d.set_attr(title, "class", "mt-3 mb-5");
+    let row = p.el(sec, "div", (0.0, y + 150.0, W, 100.0), &[("display", "flex")], "");
+    p.d.set_attr(row, "class", "row");
+    for i in 0..3 {
+        let x = i as f64 * 267.0;
+        let col = p.el(row, "div", (x, y + 150.0, 266.0, 100.0), &[], "");
+        p.d.set_attr(col, "class", "col-md-4");
+        p.el(col, "h3", (x, y + 150.0, 266.0, 29.0), &[("fontSize", "24px")], "Feature");
+        p.el(col, "p", (x, y + 179.0, 266.0, 71.0), &[], LONG);
+    }
+    assert_flags(&p, "\"Title Alone In A Row\" has 16px above vs 48px below");
+
+    // Block-editor groups: every block a `.wp-block-group`, the title alone in
+    // a padded group between groups that open with h3s.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(300.0);
+    let group = |p: &mut Page, top: f64, h: f64, styles: &[(&str, &str)]| {
+        let g = p.el(sec, "div", (0.0, top, W, h), styles, "");
+        p.d.set_attr(g, "class", "wp-block-group is-layout-constrained");
+        g
+    };
+    let above = group(&mut p, y, 76.0, &[]);
+    p.el(above, "h3", (0.0, y, W, 28.0), &[("fontSize", "20px")], "Sub");
+    p.el(above, "p", (0.0, y + 28.0, W, 48.0), &[], LONG);
+    let title = group(&mut p, y + 76.0, 102.0, &[("paddingTop", "16px"), ("paddingBottom", "48px")]);
+    p.el(title, "h2", (0.0, y + 92.0, W, 38.0), &[("fontSize", "30px")], "Group Title");
+    let below = group(&mut p, y + 178.0, 76.0, &[]);
+    p.el(below, "h3", (0.0, y + 178.0, W, 28.0), &[("fontSize", "20px")], "Detail");
+    p.el(below, "p", (0.0, y + 206.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Group Title\" has 16px above vs 48px below");
+}
+
+#[test]
+fn cards_that_repeat_the_headline_in_the_same_place_still_repeat() {
+    // Two cards in a row, each ending in its headline. One carries a label
+    // above the headline and the other does not, so the child paths differ;
+    // the class chain down to the headline is the same.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(320.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    let row = p.el(sec, "div", (0.0, y + 48.0, W, 156.0), &[], "");
+    let card = p.el(row, "div", (0.0, y + 48.0, 380.0, 156.0), &[], "");
+    p.d.set_attr(card, "class", "card");
+    p.el(card, "div", (0.0, y + 48.0, 380.0, 20.0), &[("fontSize", "12px")], "Culture");
+    let title = p.el(card, "h4", (0.0, y + 80.0, 380.0, 100.0), &[("fontSize", "18px"), ("marginBottom", "24px")], "Labelled Card Headline");
+    p.d.set_attr(title, "class", "card-title");
+    let card = p.el(row, "div", (420.0, y + 48.0, 380.0, 156.0), &[("paddingTop", "32px")], "");
+    p.d.set_attr(card, "class", "card");
+    let title = p.el(card, "h4", (420.0, y + 80.0, 380.0, 100.0), &[("fontSize", "18px"), ("marginBottom", "24px")], "Unlabelled Card Headline");
+    p.d.set_attr(title, "class", "card-title");
+    p.el(sec, "div", (0.0, y + 228.0, W, 60.0), &[], "Next section");
+    assert_only_crowded(&p);
+}
+
+#[test]
 fn a_date_set_smaller_than_the_body_text_folds_into_a_card_title() {
     // A news card: a thumbnail, a 12px date four pixels above the title, and
     // a tag row set as small as the date. The date is the title's label, and

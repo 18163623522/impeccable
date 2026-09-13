@@ -206,6 +206,12 @@
       .stack { display: flex; flex-direction: column; }
       .spacer-16 { height: 16px; }
       .spacer-48 { height: 48px; }
+      /* FLAG: a code block framed on every side is content, not a rule */
+      .code { border: 1px solid #d0d7de; background: #f6f8fa; padding: 16px; font: 14px/20px monospace; }
+      /* FLAG: a title alone in a layout row, then a row of feature columns with the same class */
+      .lrow { display: flex; gap: 24px; }
+      .lrow > div { flex: 1; }
+      .lrow h2 { margin: 16px 0 48px; }
     </style>
     <h1>Wrapper spacing</h1>
 
@@ -269,6 +275,23 @@
       <div><p class="above-24">Updated March 2026</p></div>
       <div><h2 class="above-10 below-48">Flag Plain Line Above</h2></div>
       <p class="blk">The date is content of its own, so the title sits ten pixels under it and forty-eight above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a code block framed on every side, twelve pixels above the next heading.</p>
+      <pre class="code">npm install impeccable
+npx impeccable detect src/</pre>
+      <h3 class="above-12 below-36">Flag Code Block Above</h3>
+      <p class="blk">The frame is the code block's own box, not a rule, so the heading still sits closer to it than to this.</p>
+    </section>
+
+    <section class="case">
+      <div class="lrow"><div><p class="blk">A builder puts every block in a layout row. This row closes the previous block's content.</p></div></div>
+      <div class="lrow"><div><h2>Flag Title Alone In A Row</h2></div></div>
+      <div class="lrow">
+        <div><h3>Feature One</h3><p class="blk">The first column of the row the title introduces.</p></div>
+        <div><h3>Feature Two</h3><p class="blk">The second column of the row the title introduces.</p></div>
+      </div>
     </section>
 
     <section class="case">

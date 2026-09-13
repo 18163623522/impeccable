@@ -470,9 +470,13 @@ is browser-only, so no static golden moves.
 
 What the check now treats as the end of a heading's box, and so as nothing below
 to measure: a box that draws a bottom edge (a border, a shadow, a background band
-that differs from its backdrop), or a box that repeats as a run of like siblings
-(same tag, holding a heading, sharing a class or structure: accordion rows, list
-items, cards in a grid). Any other wrapper is measured past, and its bottom
+that differs from its backdrop), or a box that repeats as a run of like siblings:
+the neighbour has the same tag, holds a heading of the same level in the same
+place (the same child path, or the same chain of tags and classes down to it),
+and has a similar outline (accordion rows, list items, cards in a grid). A layout
+wrapper that shares a generic class with its neighbour but holds other content (a
+heading alone in a `.row` before a `.row` of feature columns, a `w-container`, a
+`wp-block-group`) repeats nothing. Any other wrapper is measured past, and its bottom
 padding and margin count as space below, so a padded section header, a
 block-editor heading block, a title row stretched by an icon or a tall button,
 and a heading last in one grid column with content under the row all flag as
@@ -485,13 +489,16 @@ body copy stays content of its own.
 Policy kept deliberately: a heading set tight under a picture (a photo, a card
 thumbnail, a hero image) or under a block that ends in a rule (an hr, a divided
 list) is not flagged. The picture or rule already separates it, matching the
-rubric's `media-above` and `divider-above` codes and the judges' labels.
+rubric's `media-above` and `divider-above` codes and the judges' labels. A rule
+is a bottom edge drawn alone: a code block, a panel, a table cell or a callout
+bordered on another side is framed content, and a heading tight under it flags.
 
 `heading-rhythm.html` was rewritten into two columns (should flag, should pass)
 with a case per misread shape, and a third column after them holds the wrapper
 spacing cases (header padding, block padding, small padding, icon row, tall
-button row, grid column, spacer below, spacer stack, plain line above) plus a
-heading that ends a ruled box. `.tiles` gained a background so the tile row reads
+button row, grid column, spacer below, spacer stack, plain line above, a framed
+code block above, a title alone in a layout row before a row of feature columns)
+plus a heading that ends a ruled box. `.tiles` gained a background so the tile row reads
 as content rather than a spacer. The static engine's one finding on the fixture,
 cramped-padding on `.pass-band`, is kept byte for byte, so the fixture and
 directory goldens are unchanged. The browser behavior is pinned by

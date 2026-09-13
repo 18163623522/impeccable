@@ -88,6 +88,10 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         "\"Flag Stack Heading\" has 16px above vs 48px below",
         // A date line set like body copy is not folded in as a label.
         "\"Flag Plain Line Above\" has 10px above vs 48px below",
+        // A code block framed on every side is content, not a rule, and a
+        // layout row that shares a class with its neighbour repeats nothing.
+        "\"Flag Code Block Above\" has 12px above vs 36px below",
+        "\"Flag Title Alone In A Row\" has 16px above vs 48px below",
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(heading)),
@@ -96,5 +100,5 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
     }
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
-    assert_eq!(snippets.len(), 13, "{snippets:?}");
+    assert_eq!(snippets.len(), 15, "{snippets:?}");
 }

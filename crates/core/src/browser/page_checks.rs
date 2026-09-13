@@ -380,12 +380,22 @@ fn rhythm_flow_box(
 
 const RHYTHM_MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas", "svg", "iframe"];
 
+/// A box that draws a border on a side other than its bottom: a frame, not a
+/// rule.
+fn rhythm_frames(dom: &dyn Dom, el: ElId) -> bool {
+    ["borderTopWidth", "borderLeftWidth", "borderRightWidth"]
+        .iter()
+        .any(|side| style_px(dom, el, side) > 0.0)
+}
+
 /// The block measured above a heading already separates it from the heading:
-/// a rule (an `hr` or a line a few pixels tall), a painted bottom border on
-/// the block or on the descendants that form its bottom edge, or a picture
+/// a rule (an `hr` or a line a few pixels tall), a bottom border drawn alone
+/// on the block or on the descendants that form its bottom edge, or a picture
 /// that forms that edge. A heading tight under a photo is that photo's
 /// caption, and a heading tight under a rule starts the section the rule
-/// opens; neither reads as a caption for the content above.
+/// opens; neither reads as a caption for the content above. A box bordered on
+/// its other sides too (a code block, a panel, a table cell) is a framed block
+/// of content, and the heading tight under it still reads as its caption.
 fn rhythm_block_separates(dom: &dyn Dom, el: ElId) -> bool {
     let er = dom.rect(el);
     if tag_lower(dom, el) == "hr" || er.height <= 4.0 {
@@ -402,12 +412,16 @@ fn rhythm_block_separates(dom: &dyn Dom, el: ElId) -> bool {
         return true;
     }
     let mut cur = Some(el);
+    let mut framed = false;
     for _ in 0..8 {
         let Some(c) = cur else { break };
         let cr = dom.rect(c);
+        // Inside a frame, the frame is the edge a reader sees; a line drawn
+        // within it is part of the framed content.
+        framed = framed || rhythm_frames(dom, c);
         // A rule runs across the block; a bordered button or chip inside it
         // does not.
-        if style_px(dom, c, "borderBottomWidth") > 0.0 && cr.width >= er.width * 0.9 {
+        if !framed && style_px(dom, c, "borderBottomWidth") > 0.0 && cr.width >= er.width * 0.9 {
             return true;
         }
         let tag = tag_lower(dom, c);
@@ -491,8 +505,6 @@ fn rhythm_lowest_content(dom: &dyn Dom, el: ElId) -> f64 {
     }
     dom.rect(cur).bottom
 }
-
-const RHYTHM_HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 
 fn rhythm_font_size(dom: &dyn Dom, el: ElId) -> f64 {
     let n = parse_float(&dom.style(el, "fontSize"));
@@ -638,13 +650,82 @@ fn rhythm_shape_of(dom: &dyn Dom, el: ElId) -> String {
     out
 }
 
+/// How much two outlines share: the Dice coefficient of their tag multisets.
+fn rhythm_shape_similarity(a: &str, b: &str) -> f64 {
+    let tokens = |s: &str| -> Vec<String> {
+        s.split(|c: char| c == '(' || c == ')' || c == ' ')
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let ta = tokens(a);
+    let mut tb = tokens(b);
+    if ta.is_empty() && tb.is_empty() {
+        return 1.0;
+    }
+    let total = ta.len() + tb.len();
+    let mut shared = 0usize;
+    for t in &ta {
+        if let Some(i) = tb.iter().position(|u| u == t) {
+            tb.swap_remove(i);
+            shared += 1;
+        }
+    }
+    2.0 * shared as f64 / total as f64
+}
+
+/// The way down from `row` to `h`, heading first: each step's tag, class, and
+/// index among its parent's children.
+fn rhythm_heading_path(dom: &dyn Dom, row: ElId, h: ElId) -> Vec<(String, String, usize)> {
+    let mut path = Vec::new();
+    let mut cur = h;
+    while cur != row {
+        let Some(p) = dom.parent(cur) else { break };
+        let idx = dom.children(p).iter().position(|&k| k == cur).unwrap_or(0);
+        path.push((tag_lower(dom, cur), class_attr(dom, cur), idx));
+        cur = p;
+    }
+    path
+}
+
+/// `s` holds a heading of `h`'s level where `row` holds `h`: at the same child
+/// path (the same tags at the same indices), or under the same chain of tags
+/// and classes.
+fn rhythm_holds_heading_alike(dom: &dyn Dom, s: ElId, path: &[(String, String, usize)]) -> bool {
+    let Some((heading_tag, _, _)) = path.first() else { return false };
+    let mut cur = Some(s);
+    for (tag, _, idx) in path.iter().rev() {
+        cur = cur
+            .and_then(|c| dom.children(c).get(*idx).copied())
+            .filter(|&k| &tag_lower(dom, k) == tag);
+    }
+    if cur.is_some() {
+        return true;
+    }
+    rhythm_subtree(dom, s, 400).into_iter().skip(1).any(|e| {
+        &tag_lower(dom, e) == heading_tag
+            && rhythm_heading_path(dom, s, e)
+                .iter()
+                .map(|(t, c, _)| (t, c))
+                .eq(path.iter().map(|(t, c, _)| (t, c)))
+    })
+}
+
+/// Outlines at least this alike are one repeated component: an accordion row
+/// next to the open row, a card without the label its neighbour carries.
+const RHYTHM_REPEAT_SIMILARITY: f64 = 0.7;
+
 /// A box that is one of a run of like boxes: an accordion row, a list item, a
 /// card in a grid. The box laid out next to it on either side has the same
-/// tag, holds a heading too, and shares the box's class or its structure.
-fn rhythm_repeats(dom: &dyn Dom, el: ElId) -> bool {
+/// tag, holds a heading of the same level in the same place (the same child
+/// path, or the same chain of classes down to it), and has a similar outline.
+/// A layout wrapper that shares a generic class with its neighbour but holds
+/// other content (a heading alone in a `.row`, then a `.row` of feature
+/// columns) repeats nothing, and the heading is measured past it.
+fn rhythm_repeats(dom: &dyn Dom, el: ElId, h: ElId) -> bool {
     let tag = tag_lower(dom, el);
-    let class = class_attr(dom, el);
     let shape = rhythm_shape_of(dom, el);
+    let path = rhythm_heading_path(dom, el, h);
     let lays_out = |s: ElId| -> bool {
         let pos = dom.style(s, "position");
         let r = dom.rect(s);
@@ -657,10 +738,8 @@ fn rhythm_repeats(dom: &dyn Dom, el: ElId) -> bool {
     };
     let alike = |s: ElId| -> bool {
         tag_lower(dom, s) == tag
-            && rhythm_subtree(dom, s, 400)
-                .into_iter()
-                .any(|e| RHYTHM_HEADING_TAGS.contains(&tag_lower(dom, e).as_str()))
-            && ((!class.is_empty() && class_attr(dom, s) == class) || rhythm_shape_of(dom, s) == shape)
+            && rhythm_holds_heading_alike(dom, s, &path)
+            && rhythm_shape_similarity(&shape, &rhythm_shape_of(dom, s)) >= RHYTHM_REPEAT_SIMILARITY
     };
     let mut prev = dom.previous_element_sibling(el);
     while let Some(s) = prev {
@@ -854,7 +933,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             let p = dom.parent(n)?;
             if Some(p) != body
                 && !rhythm_is_contents(dom, p)
-                && (rhythm_draws_bottom_edge(dom, p) || rhythm_repeats(dom, p))
+                && (rhythm_draws_bottom_edge(dom, p) || rhythm_repeats(dom, p, h))
             {
                 return None;
             }

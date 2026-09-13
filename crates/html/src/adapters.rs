@@ -7,8 +7,8 @@
 
 use crate::background::{
     a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
-    resolve_background_info, resolve_background_info_skipping_images, resolve_border_radius_px,
-    resolve_gradient_stops, resolve_side_accent_corners, sv, sv_opt, CustomPropMap,
+    resolve_border_radius_px, resolve_side_accent_corners, resolve_text_gradient_stops,
+    resolve_text_surface, sv, sv_opt, CustomPropMap, TextSurface,
 };
 use crate::cascade::StyleValues;
 use crate::layer::picture_under_text;
@@ -703,6 +703,69 @@ fn icon_hosts(el: &StaticElement<'_>) -> Vec<ego_tree::NodeId> {
     hosts
 }
 
+/// The element's own declared `opacity`, `1` where it does not read.
+fn opacity_of(style: &StyleValues) -> f64 {
+    let raw = sv(style, "opacity");
+    let v = parse_float(raw);
+    if js::trim(raw).is_empty() || !v.is_finite() {
+        1.0
+    } else {
+        v.clamp(0.0, 1.0)
+    }
+}
+
+/// The ink a reader sees once the opacity of the boxes between the text and
+/// its surface is applied. The browser engine's fold (see
+/// `impeccable_core::browser::element_checks`) over the cascade's declared
+/// opacity: only boxes below the surface take part, a faded box with no fill
+/// inside it fades the glyphs alone, and one with a fill fades both.
+fn fold_surface_opacity(
+    el: &StaticElement<'_>,
+    ink: &Rgba,
+    surface: &TextSurface,
+    effective_bg: &mut Option<Rgba>,
+) -> Option<Rgba> {
+    const MAX_ANCESTORS: usize = 64;
+    let mut layers: Vec<(Option<Rgba>, f64)> = Vec::new();
+    let mut cur = Some(*el);
+    let mut reached = false;
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else {
+            reached = surface.host.is_none();
+            break;
+        };
+        if Some(c.id()) == surface.host {
+            reached = true;
+            break;
+        }
+        let fill = surface.overlays.iter().find(|(n, _)| *n == c.id()).map(|(_, f)| *f);
+        layers.push((fill, opacity_of(c.style())));
+        cur = c.parent_element();
+    }
+    if !reached {
+        return None;
+    }
+    let product: f64 = layers.iter().map(|(_, o)| *o).product();
+    if !(product < 0.999) {
+        return None;
+    }
+    let outermost_fade = layers.iter().rposition(|(_, o)| *o < 0.999)?;
+    let fill_inside_fade = layers[..=outermost_fade].iter().any(|(f, _)| f.is_some());
+    if !fill_inside_fade {
+        return Some(Rgba {
+            a: Some(ink.alpha_or_one() * product),
+            ..*ink
+        });
+    }
+    if effective_bg.is_none() {
+        return None;
+    }
+    let base = surface.base?;
+    let (fg, bg) = impeccable_core::checks::gradient_geometry::fold_opacity(ink, &layers, &base);
+    *effective_bg = Some(bg);
+    Some(fg)
+}
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
@@ -766,31 +829,64 @@ pub fn check_element_colors(
     } else {
         Vec::new()
     };
-    let bg_info = if icons.is_empty() {
-        resolve_background_info(el, custom_props)
-    } else {
-        resolve_background_info_skipping_images(el, custom_props, &|c| icons.contains(&c.id()))
+    let font_size = {
+        let n = parse_float(sv(style, "fontSize"));
+        if num_truthy(n) {
+            n
+        } else {
+            16.0
+        }
     };
-    let effective_bg = bg_info.color;
+    // The coverage test compares a tile's px height with the text's. A size
+    // in `em` or `rem` has no px value here, and the 9px floor below which
+    // nothing is scored is the smallest the text can be.
+    let coverage_font_px = if js::trim(sv(style, "fontSize")).ends_with("px") {
+        font_size
+    } else {
+        9.0
+    };
+    let surface = resolve_text_surface(el, custom_props, &|c| icons.contains(&c.id()), coverage_font_px);
+    let effective_bg = surface.info.color;
 
     let mut own_bg = custom_props
         .and_then(|m| measures::parse_color_resolved(sv_opt(style, "backgroundColor"), Some(m)))
         .or_else(|| read_own_background_color(el, style));
 
     let mut final_effective_bg = effective_bg;
-    let mut surface_unresolved = bg_info.unresolved;
+    let mut surface_unresolved = surface.info.unresolved;
+    let mut pseudo_surface_read = false;
     if own_bg.is_none() || own_bg.is_some_and(|c| c.alpha_or_one() <= 0.5) {
         if let Some(pseudo) = el.doc.get_pseudo_surface(el.id()) {
             own_bg = Some(pseudo);
             final_effective_bg = Some(pseudo);
             surface_unresolved = false;
+            pseudo_surface_read = true;
         }
     }
 
-    let effective_bg_stops = if surface_unresolved || final_effective_bg.is_some() {
-        None
+    let (effective_bg_stops, bg_source) = if surface_unresolved || final_effective_bg.is_some() {
+        (None, None)
     } else {
-        resolve_gradient_stops(el, custom_props)
+        let stops = resolve_text_gradient_stops(el, custom_props, &surface);
+        let source = stops
+            .as_ref()
+            .and(surface.gradient_label.as_ref())
+            .map(|label| format!("gradient on {label}"));
+        (stops, source)
+    };
+    let visible_text = match text_color {
+        Some(ink) if !pseudo_surface_read && !surface_unresolved => {
+            fold_surface_opacity(el, &ink, &surface, &mut final_effective_bg)
+        }
+        _ => None,
+    }
+    .or_else(|| text_color.filter(|c| c.a.is_some_and(|a| a < 1.0)));
+    // An element's own gradient whose tile cannot cover its text (a hover
+    // underline) does not make it a styled control.
+    let own_image = if surface.skipped_images.contains(&el.id()) {
+        "none"
+    } else {
+        sv(style, "backgroundImage")
     };
     let font_weight = {
         let n = parse_int(sv(style, "fontWeight"), 10);
@@ -798,14 +894,6 @@ pub fn check_element_colors(
             n
         } else {
             400.0
-        }
-    };
-    let font_size = {
-        let n = parse_float(sv(style, "fontSize"));
-        if num_truthy(n) {
-            n
-        } else {
-            16.0
         }
     };
     let bg_clip = {
@@ -832,9 +920,11 @@ pub fn check_element_colors(
         is_emoji_only: is_emoji_only_text(&direct_text),
         paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
-        bg_image: Some(sv(style, "backgroundImage").to_string()),
+        bg_image: Some(own_image.to_string()),
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
+        visible_text,
+        bg_source,
     };
     // The page's one report of a colour pair goes to an element that will
     // actually print it, so an inline ignore on the first of fifty links

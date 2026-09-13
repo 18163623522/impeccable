@@ -452,8 +452,19 @@ impl SafeTagTextSeen {
     /// yet: a duplicate the dedupe drops anyway costs no engine work, so an
     /// engine may put real work behind the callback.
     pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>, keep: &mut dyn FnMut(&RuleHit) -> bool) {
+        self.keep_first_keyed(hits, &|h: &RuleHit| h.snippet.clone(), keep);
+    }
+
+    /// [`Self::keep_first`] with the pair a hit claims named by `key_of`
+    /// instead of by its whole snippet.
+    pub fn keep_first_keyed(
+        &mut self,
+        hits: &mut Vec<RuleHit>,
+        key_of: &dyn Fn(&RuleHit) -> String,
+        keep: &mut dyn FnMut(&RuleHit) -> bool,
+    ) {
         hits.retain(|h| {
-            let key = (h.id.clone(), h.snippet.clone());
+            let key = (h.id.clone(), key_of(h));
             if self.reported.contains(&key) {
                 return false;
             }
@@ -555,7 +566,16 @@ pub fn check_colors_deduped(
 ) -> Vec<RuleHit> {
     let mut hits = check_colors(opts);
     if scores_safe_tag_text(opts) {
-        seen.keep_first(&mut hits, keep);
+        match (opts.bg_source.as_deref(), opts.text_color.as_ref()) {
+            // A gradient is sampled where each element's text sits, so fifty
+            // links across one gradient header name fifty slightly different
+            // colours. They are one text colour on one surface, reported once.
+            (Some(source), Some(text)) => {
+                let key = format!("text {} over {}", color_to_hex(Some(text)), source);
+                seen.keep_first_keyed(&mut hits, &|_| key.clone(), keep);
+            }
+            _ => seen.keep_first(&mut hits, keep),
+        }
     }
     hits
 }
@@ -634,11 +654,30 @@ fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
         .map_or(false, |stops| stops.iter().any(same))
 }
 
+/// The alpha at or below which an ink paints no glyph a reader could see.
+const TRANSPARENT_INK_FLOOR: f64 = 0.02;
+
 /// The contrast scoring `check_colors` and `check_placeholder_colors`
 /// share: gray-on-color, then WCAG AA against the worst background. The
-/// backgrounds are the composited `effective_bg`, or the gradient stops when
-/// no opaque surface resolved; with neither there is nothing to score.
+/// backgrounds are the composited `effective_bg`, or the gradient stops (or
+/// the gradient sampled under the text) when no opaque surface resolved;
+/// with neither there is nothing to score.
+///
+/// The ink scored is what a reader sees when the adapter says so:
+/// `visible_text`, composited over each background where it is translucent
+/// before it is scored and printed (`rgba(255, 255, 255, 0.7)` is not
+/// `#ffffff` on the page). Without it `text_color` is scored as declared,
+/// which is what the recorded call vectors pin.
 fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
+    // Glyphs inked at (nearly) zero alpha paint nothing: a `color:
+    // transparent` label over a sprite, a letter-by-letter reveal at its
+    // first frame. The paint gate's floor, for the same reason.
+    if opts
+        .visible_text
+        .is_some_and(|ink| ink.alpha_or_one() <= TRANSPARENT_INK_FLOOR)
+    {
+        return Vec::new();
+    }
     let bgs: Vec<Rgba> = if let Some(bg) = opts.effective_bg {
         vec![bg]
     } else {
@@ -667,7 +706,15 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
         ));
     }
 
-    let ratios: Vec<f64> = bgs.iter().map(|b| contrast_ratio(text_color, b)).collect();
+    let inks: Vec<Rgba> = bgs
+        .iter()
+        .map(|b| match opts.visible_text {
+            Some(ink) if ink.a.map_or(false, |a| a < 1.0) => composite_color_over(&ink, b),
+            Some(ink) => ink,
+            None => *text_color,
+        })
+        .collect();
+    let ratios: Vec<f64> = bgs.iter().zip(&inks).map(|(b, i)| contrast_ratio(i, b)).collect();
     let mut worst_idx = 0usize;
     for i in 1..ratios.len() {
         if ratios[i] < ratios[worst_idx] {
@@ -688,14 +735,20 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
             } else {
                 to_fixed(ratio, 1)
             };
+            let source = opts
+                .bg_source
+                .as_deref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
             findings.push(RuleHit::new(
                 "low-contrast",
                 format!(
-                    "{}:1 (need {}:1) — text {} on {}",
+                    "{}:1 (need {}:1) — text {} on {}{}",
                     ratio_label,
                     number_to_string(threshold),
-                    color_to_hex(Some(text_color)),
-                    color_to_hex(Some(&bgs[worst_idx]))
+                    color_to_hex(Some(&inks[worst_idx])),
+                    color_to_hex(Some(&bgs[worst_idx])),
+                    source
                 ),
             ));
         }
@@ -715,6 +768,17 @@ pub fn check_placeholder_colors(
     placeholder_text: &str,
     mut text_color: Rgba,
 ) -> Vec<RuleHit> {
+    // `visible_text` is the host's own ink; the placeholder paints its own.
+    let host_ink_cleared;
+    let opts = if opts.visible_text.is_some() {
+        host_ink_cleared = ColorOpts {
+            visible_text: None,
+            ..opts.clone()
+        };
+        &host_ink_cleared
+    } else {
+        opts
+    };
     let mut flat: Option<ColorOpts> = None;
     if text_color.a.map_or(false, |a| a < 1.0) {
         if let Some(bg) = opts.effective_bg {

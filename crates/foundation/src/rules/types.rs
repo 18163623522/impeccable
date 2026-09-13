@@ -183,6 +183,18 @@ pub struct ColorOpts {
     /// JS `DETECTOR_IS_BROWSER` (`typeof window !== 'undefined'`): the
     /// static engines pass false, the browser build true.
     pub detector_is_browser: bool,
+    /// The colour the glyphs read in over `effective_bg` (or each gradient
+    /// sample), when the adapter folded the opacity of the boxes between the
+    /// text and its surface into it. `None` scores `text_color`. Either way a
+    /// translucent colour is composited over each background before it is
+    /// scored and printed. The recorded call vectors predate the field.
+    #[serde(default)]
+    pub visible_text: Option<Rgba>,
+    /// What painted the surface when it was not a plain fill, printed after
+    /// the background colour (`gradient on a.primary`). One page reports a
+    /// text colour once per gradient source, not once per sampled colour.
+    #[serde(default)]
+    pub bg_source: Option<String>,
 }
 
 // ─── checkHoverContrast ─────────────────────────────────────────────────────

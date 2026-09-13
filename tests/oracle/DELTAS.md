@@ -1552,3 +1552,70 @@ retired square flag case, the reworded `6px` snippets, and findings that moved
 down by inserted fixture lines), nothing extra and nothing missing. The only
 text lines that differ from the branch are the summary counts, 453 to 500 here
 against 419 to 466 there (523 to 570 with advisories).
+
+## Recorded 2026-09-13: low-contrast reads the surface and the ink a reader sees
+
+`corpus/fix-gradient-surface` changes how low-contrast resolves the background
+and the text colour, in both engines where they share the logic
+(`crates/core/src/checks/gradient_geometry.rs`, the contrast walk in
+`crates/core/src/browser/background.rs` and `crates/html/src/background.rs`,
+and `contrast_findings` in `crates/core/src/checks/rules.rs`):
+
+- **A gradient is named as the surface.** The snippet appends the box that
+  painted it, `(gradient on a.cta)`, and the page's one report of a colour is
+  keyed on the text colour and that box.
+- **The URL engine reads a gradient where the text sits.** Linear and radial
+  layers are evaluated at a 3x3 grid of points inside the text box, from the
+  painting box's size, `background-size`, `-position`, `-repeat` and
+  `-origin`, composited over what sits behind the box. Anything it cannot
+  read (a `calc()` stop, a conic or repeating gradient, `fixed` attachment, a
+  four-value position, a translucent sample over an unreadable backdrop) keeps
+  the worst-stop verdict. The static engine has no layout and keeps it always.
+- **A gradient tile that paints under no glyph is not a background.** An
+  underline drawn as `linear-gradient(#000, #000) no-repeat 0 100% / 0% 2px`
+  and a radial glow that has faded out before the text are read past. The
+  static engine reads this from a `background` shorthand's size and repeat,
+  since its cascade carries no `background-size` longhand.
+- **Every translucent fill that paints is composited.** The contrast walk no
+  longer skips fills at or under an alpha of 0.1. The walk the glow, palette
+  and hover checks share is unchanged.
+- **The ink is blended before it is scored and printed.** The text colour's
+  own alpha, and the opacity of the boxes between the text and its surface,
+  fade the glyphs toward the surface; a faded box with a fill of its own fades
+  that fill too. Ink at an alpha of 0.02 or less paints nothing and is not
+  scored. The frozen call vectors pass no adapter ink and score as recorded.
+
+Goldens re-recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-color-html`, `detect-fixture-text-color-html` (4),
+  `detect-fixture-*-dark-gradient-ground-html` (3),
+  `detect-fixture-*-dark-theme-modern-color-html` (1),
+  `detect-fixture-*-linked-url-patterns-html` (3),
+  `detect-fixture-*-nav-cta-constructions-html` (1),
+  `detect-fixture-*-overlay-positioning-html` (1): each gradient-surface
+  finding gains its source suffix. Ratio, text and background are unchanged,
+  because the static engine keeps the worst stop.
+- `detect-fixture-*-buried-raster-html`: one finding added,
+  `1.1:1 (need 4.5:1) — text #f2f2f2 on #ffffff`, the `.faint-text` paragraph
+  at `opacity: 0.05` that used to be scored as solid black. It is a pass case
+  for buried-raster, which still passes it.
+- `detect-fixture-*-design-system-html`: one finding added,
+  `2.0:1 (need 4.5:1) — text #dfaaa1 on #ffffff`, the `.pass-alpha-color` case
+  in `rgba(184, 66, 46, 0.45)`, a design-system pass that was scored as the
+  opaque colour.
+- `detect-fixture-*-visual-contrast-sampling-html`: one finding added,
+  `2.2:1 (need 4.5:1) — text #b0b0b0 on #ffffff`, case 6, the collapsed
+  accordion trigger faded by `opacity: 0.34`, which the fixture describes as
+  pale grey a visitor is asked to click.
+- `detect-fixture-json-gradient-surface-contrast-html`,
+  `detect-fixture-text-gradient-surface-contrast-html`: new. The seven
+  should-flag cases flag. The three should-pass cases marked "URL engine" flag
+  here at their worst stop, as the fixture header says; the URL behavior is
+  pinned by `crates/browser/tests/gradient_surface.rs`.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: exactly the sum of the above. Thirteen suffix
+  rewrites and thirteen added findings (the three above plus the new
+  fixture's ten), nothing removed; 500 to 513 anti-patterns.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.

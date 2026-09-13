@@ -5,8 +5,10 @@
 #![allow(unused_imports)]
 
 use super::background::{
-    read_own_background_color, resolve_background_info, resolve_background_info_skipping_images, resolve_gradient_stops, BackgroundInfo,
+    read_own_background_color, resolve_background_info, resolve_text_gradient_stops, resolve_text_surface,
+    surface_label, BackgroundInfo, TextSurface,
 };
+use crate::checks::gradient_geometry::{self as geo, Box2};
 use super::dom::{
     class_attr, class_attr_or_prop, closest_or_none, direct_text, has_direct_text_longer_than,
     matches_or_false, pf0, safe_id, style_px, tag_lower, Dom, ElId, ElStyle, Rect,
@@ -562,6 +564,78 @@ fn safe_tag_text_hit_stands(
             || crate::browser::painted::painted_at_capture(dom, el))
 }
 
+/// The element's own computed `opacity`, `1` where it does not read.
+fn opacity_of(dom: &dyn Dom, el: ElId) -> f64 {
+    let raw = dom.style(el, "opacity");
+    let v = parse_float(&raw);
+    if js::trim(&raw).is_empty() || !v.is_finite() {
+        1.0
+    } else {
+        v.clamp(0.0, 1.0)
+    }
+}
+
+/// The ink a reader sees once the opacity of the boxes between the text and
+/// its surface is applied: `opacity: 0.5` on a span over a white footer
+/// fades its orange halfway to white, and the score has to be about that
+/// colour. `None` where nothing between the text and the surface is faded,
+/// or where the fold cannot be read (a faded box that paints a fill of its
+/// own over a gradient), which keeps the colour as declared.
+///
+/// Opacity on the surface's own box or above it fades the surface too, over
+/// something the walk never read, so only the boxes below the surface take
+/// part. With no fill inside a faded box the glyphs alone fade, which is the
+/// text colour at a lower alpha; with one, both the glyphs and that fill
+/// fade, and `effective_bg` is replaced by what the fold says the surface
+/// looks like.
+fn fold_surface_opacity(
+    dom: &dyn Dom,
+    el: ElId,
+    ink: &Rgba,
+    surface: &TextSurface,
+    effective_bg: &mut Option<Rgba>,
+) -> Option<Rgba> {
+    const MAX_ANCESTORS: usize = 64;
+    let mut layers: Vec<(Option<Rgba>, f64)> = Vec::new();
+    let mut cur = Some(el);
+    let mut reached = false;
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else {
+            reached = surface.host.is_none();
+            break;
+        };
+        if Some(c) == surface.host {
+            reached = true;
+            break;
+        }
+        let fill = surface.overlays.iter().find(|(n, _)| *n == c).map(|(_, f)| *f);
+        layers.push((fill, opacity_of(dom, c)));
+        cur = dom.parent(c);
+    }
+    if !reached {
+        return None;
+    }
+    let product: f64 = layers.iter().map(|(_, o)| *o).product();
+    if !(product < 0.999) {
+        return None;
+    }
+    let outermost_fade = layers.iter().rposition(|(_, o)| *o < 0.999)?;
+    let fill_inside_fade = layers[..=outermost_fade].iter().any(|(f, _)| f.is_some());
+    if !fill_inside_fade {
+        return Some(Rgba {
+            a: Some(ink.alpha_or_one() * product),
+            ..*ink
+        });
+    }
+    if surface.samples.is_some() || effective_bg.is_none() {
+        return None;
+    }
+    let base = surface.base?;
+    let (fg, bg) = geo::fold_opacity(ink, &layers, &base);
+    *effective_bg = Some(bg);
+    Some(fg)
+}
+
 /// JS: checks.mjs#checkElementColorsDOM(el)
 pub fn check_element_colors_dom(
     dom: &dyn Dom,
@@ -601,21 +675,6 @@ pub fn check_element_colors_dom(
     } else {
         Vec::new()
     };
-    let bg_info = if icons.is_empty() {
-        resolve_background_info(dom, el)
-    } else {
-        resolve_background_info_skipping_images(dom, el, &|n| icons.contains(&n))
-    };
-    let mut effective_bg = bg_info.color;
-    let mut surface_unresolved = bg_info.unresolved;
-    let mut own_bg = read_own_background_color(dom, el);
-    if own_bg.map_or(true, |c| c.alpha_or_one() <= 0.5) {
-        if let Some(pseudo_surface) = read_pseudo_surface_dom(dom, el, &rect) {
-            own_bg = Some(pseudo_surface);
-            effective_bg = Some(pseudo_surface);
-            surface_unresolved = false;
-        }
-    }
     let font_size = {
         let n = parse_float(&dom.style(el, "fontSize"));
         if num_truthy(n) {
@@ -624,6 +683,23 @@ pub fn check_element_colors_dom(
             16.0
         }
     };
+    let text_box = {
+        let r = dom.direct_text_rect(el).unwrap_or(rect);
+        Box2::new(r.left, r.top, r.width, r.height)
+    };
+    let surface = resolve_text_surface(dom, el, &|n| icons.contains(&n), text_box, font_size);
+    let mut effective_bg = surface.info.color;
+    let mut surface_unresolved = surface.info.unresolved;
+    let mut own_bg = read_own_background_color(dom, el);
+    let mut pseudo_surface_read = false;
+    if own_bg.map_or(true, |c| c.alpha_or_one() <= 0.5) {
+        if let Some(pseudo_surface) = read_pseudo_surface_dom(dom, el, &rect) {
+            own_bg = Some(pseudo_surface);
+            effective_bg = Some(pseudo_surface);
+            surface_unresolved = false;
+            pseudo_surface_read = true;
+        }
+    }
     let font_weight = {
         let n = parse_int(&dom.style(el, "fontWeight"), 10);
         if num_truthy(n) {
@@ -640,10 +716,32 @@ pub fn check_element_colors_dom(
             dom.style(el, "backgroundClip")
         }
     };
-    let effective_bg_stops = if surface_unresolved || effective_bg.is_some() {
-        None
+    let (effective_bg_stops, bg_source) = if surface_unresolved || effective_bg.is_some() {
+        (None, None)
     } else {
-        resolve_gradient_stops(dom, el)
+        let stops = surface
+            .samples
+            .clone()
+            .or_else(|| resolve_text_gradient_stops(dom, el, &surface));
+        let source = stops
+            .as_ref()
+            .and(surface.gradient_host)
+            .map(|host| format!("gradient on {}", surface_label(dom, host)));
+        (stops, source)
+    };
+    let visible_text = match text_color {
+        Some(ink) if !pseudo_surface_read && !surface_unresolved => {
+            fold_surface_opacity(dom, el, &ink, &surface, &mut effective_bg)
+        }
+        _ => None,
+    }
+    .or_else(|| text_color.filter(|c| c.a.map_or(false, |a| a < 1.0)));
+    // An element's own gradient that paints nowhere under its text (a hover
+    // underline) does not make it a styled control.
+    let own_image = if surface.skipped_images.contains(&el) {
+        String::from("none")
+    } else {
+        dom.style(el, "backgroundImage")
     };
     let color_opts = ColorOpts {
         tag: tag.clone(),
@@ -661,9 +759,11 @@ pub fn check_element_colors_dom(
         is_emoji_only: is_emoji_only_text(&direct),
         paints_own_text,
         bg_clip: Some(bg_clip),
-        bg_image: Some(dom.style(el, "backgroundImage")),
+        bg_image: Some(own_image),
         class_list: Some(class_attr(dom, el)),
         detector_is_browser: true,
+        visible_text,
+        bg_source,
     };
     let resolved = color_opts.effective_bg;
     let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {

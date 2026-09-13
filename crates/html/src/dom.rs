@@ -58,6 +58,7 @@ pub struct StaticDocument {
     placeholder_styles: HashMap<NodeId, StyleValues>,
     accent_dash: HashSet<NodeId>,
     pseudo_surface: HashMap<NodeId, Rgba>,
+    pseudo_picture: HashSet<NodeId>,
     selector_cache: RefCell<HashMap<String, Result<Selector, SelectorError>>>,
     unsupported_selectors: RefCell<Vec<String>>,
 }
@@ -178,6 +179,7 @@ impl StaticDocument {
             placeholder_styles: HashMap::new(),
             accent_dash: HashSet::new(),
             pseudo_surface: HashMap::new(),
+            pseudo_picture: HashSet::new(),
             selector_cache: RefCell::new(HashMap::new()),
             unsupported_selectors: RefCell::new(Vec::new()),
         }
@@ -338,6 +340,14 @@ impl StaticDocument {
     }
     pub fn get_pseudo_surface(&self, node: NodeId) -> Option<Rgba> {
         self.pseudo_surface.get(&node).copied()
+    }
+    /// Mark a node whose `::before` or `::after` is stretched over it and
+    /// paints a raster image: a hero photo drawn by a pseudo-element.
+    pub fn set_pseudo_picture(&mut self, node: NodeId) {
+        self.pseudo_picture.insert(node);
+    }
+    pub fn has_pseudo_picture(&self, node: NodeId) -> bool {
+        self.pseudo_picture.contains(&node)
     }
 }
 

@@ -243,6 +243,23 @@ fn mark_pseudo_rule(
                 .all(|side| zero_len(get(side)))
             || (js::trim(get("width").unwrap_or("")) == "100%"
                 && js::trim(get("height").unwrap_or("")) == "100%");
+        // A pseudo stretched over its element and painting a raster image is a
+        // picture under that element's content: the hero photo written as
+        // `.hero::before { position: absolute; inset: 0; background: url() }`.
+        // The contrast pass stands down over it, as it does over an `<img>`.
+        if covers_box
+            && decls.contains_key("content")
+            && js::to_lower_case(&first_of("background-image", "background")).contains("url(")
+        {
+            let ids: Vec<NodeId> = doc
+                .query_selector_all(base_selector)
+                .iter()
+                .map(|e| e.id())
+                .collect();
+            for id in ids {
+                doc.set_pseudo_picture(id);
+            }
+        }
         if covers_box && decls.contains_key("content") {
             let surf_raw = resolve_root(
                 &first_of("background-color", "background"),

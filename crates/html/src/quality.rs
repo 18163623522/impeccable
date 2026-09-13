@@ -207,6 +207,85 @@ fn declared_measure_px(el: &StaticElement<'_>, font_size: f64) -> Option<f64> {
     None
 }
 
+/// Whether the `hidden` attribute takes an element out of layout. The static
+/// cascade carries author CSS and no UA stylesheet, so it cannot turn
+/// `hidden` into `display: none` on its own, and this reads the attribute.
+///
+/// The UA's `[hidden] { display: none }` is the weakest rule on the page, so
+/// any author `display` beats it: `<div hidden class="reveal">` with
+/// `.reveal { display: block }` renders, and is scored. `hidden="until-found"`
+/// is different. That content is laid out with `content-visibility: hidden`
+/// until find-in-page or a fragment link reveals it, which no author
+/// `display` undoes, so a browser measures a zero-size rect there and a
+/// browser scan reports nothing.
+fn hidden_by_attribute(el: &StaticElement<'_>) -> bool {
+    let Some(value) = el.get_attribute("hidden") else {
+        return false;
+    };
+    if value.trim().eq_ignore_ascii_case("until-found") {
+        return true;
+    }
+    let display = sv_opt(el.style(), "display").map_or("", str::trim);
+    display.is_empty() || display == "none"
+}
+
+/// Whether a closed `<details>` hides `child`. Until the element opens,
+/// everything in it but its first `<summary>` is slotted out of sight, so a
+/// link in the disclosed panel is markup a reader cannot see.
+fn hidden_by_closed_details(details: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
+    if details.tag_lower() != "details" || details.get_attribute("open").is_some() {
+        return false;
+    }
+    let summary = details
+        .children()
+        .into_iter()
+        .find(|c| c.tag_lower() == "summary");
+    summary.map_or(true, |s| s.id() != child.id())
+}
+
+/// Markup a browser lays out nowhere, at any viewport: a `<template>`'s
+/// content, a `<noscript>` (inert whenever scripting is on, which is what a
+/// scanning browser does), anything under `<head>`, a `[hidden]` subtree no
+/// author `display` reveals, and the panel of a closed `<details>`. The
+/// static tree carries all of it (html5ever hands template fragments back as
+/// ordinary descendants of the template element), so a `*` element rule
+/// walks the markup of every unmounted component on the page and scores it
+/// as though it were on screen. A browser scan cannot produce those
+/// findings, and a rule that judges what a reader reads should not either.
+///
+/// Every fact read here is a fact about markup, and so the walk goes to the
+/// root: a `<template>` twenty levels up hides this element as surely as its
+/// parent does. The only style it reads is an author `display` on a
+/// `hidden` element, and only to let it reveal the element. The static
+/// cascade descends `@media` blocks unconditionally, so a winning
+/// `display: none` is some narrow viewport's answer and not the one a reader
+/// sees: gating on it would delete the coverage this engine has always had
+/// of the `.desktop-only` sections a `max-width` query collapses on phones.
+/// `display: none` therefore stays out of this, and so does `visibility`,
+/// which `check_element_colors` reads on the element itself the way it
+/// always has.
+pub fn is_in_non_rendered_markup(el: &StaticElement<'_>, tag: &str) -> bool {
+    let tag = js::to_lower_case(tag);
+    if NON_RENDERED_TAGS.contains(&tag.as_str()) || hidden_by_attribute(el) {
+        return true;
+    }
+    // A closed `<details>`'s own direct text sits in the hidden panel too.
+    if tag == "details" && el.get_attribute("open").is_none() {
+        return true;
+    }
+    let mut child = *el;
+    while let Some(p) = child.parent_element() {
+        if NON_RENDERED_TAGS.contains(&p.tag_lower().as_str())
+            || hidden_by_attribute(&p)
+            || hidden_by_closed_details(&p, &child)
+        {
+            return true;
+        }
+        child = p;
+    }
+    false
+}
+
 /// Inputs of `checkQuality` as the static adapter builds them.
 pub struct QualityInput<'a, 'b> {
     pub el: &'b StaticElement<'a>,

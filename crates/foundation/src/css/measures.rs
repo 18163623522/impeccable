@@ -838,9 +838,162 @@ pub struct ContentHiddenInput {
     pub hidden_samples: Vec<String>,
 }
 
+// ─── Background images drawn as icons ───────────────────────────────────────
+
+/// The largest an icon is drawn, per axis: an external-link mark, an arrow
+/// bullet, a chevron. A background image no larger than this sits beside the
+/// text it decorates and cannot be the picture that text is read against.
+pub const ICON_MAX_PX: f64 = 32.0;
+
+/// Decodes `%XX` escapes, leaving anything malformed as it was.
+fn percent_decode(s: &str) -> String {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolves CSS escapes: `\\` and a hex code point (with its optional
+/// trailing space), or `\\` and any other character, which stands for itself.
+/// A serializer writes an unquoted `url()` this way, `width=\\'10\\'`.
+fn css_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 && chars.peek().map_or(false, |h| h.is_ascii_hexdigit()) {
+            hex.push(chars.next().unwrap_or_default());
+        }
+        if hex.is_empty() {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if chars.peek().map_or(false, |w| *w == ' ') {
+            chars.next();
+        }
+        out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or('\u{fffd}'));
+    }
+    out
+}
+
+/// The payload of the single `url()` in a background-image value, quotes
+/// stripped and CSS escapes resolved; `None` where the value holds no `url()`
+/// or more than one.
+fn single_url(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.matches("url(").count() != 1 {
+        return None;
+    }
+    let start = lower.find("url(")? + 4;
+    let rest = value[start..].trim_start();
+    let quote = rest.chars().next()?;
+    let (body, close) = if quote == '"' || quote == '\'' {
+        (&rest[1..], quote)
+    } else {
+        (rest, ')')
+    };
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == close {
+            return Some(css_unescape(body[..i].trim_end()));
+        }
+    }
+    None
+}
+
+re!(SVG_OPEN_TAG_RE, r"(?i)<svg(?:\s[^>]*)?>");
+re!(
+    SVG_DIMENSION_RE,
+    r#"(?i)\s(width|height)\s*=\s*["']?\s*([0-9]*\.?[0-9]+)\s*(?:px)?\s*["']?"#
+);
+re!(
+    SVG_VIEWBOX_RE,
+    r#"(?i)\sviewbox\s*=\s*["']\s*-?[0-9.]+[\s,]+-?[0-9.]+[\s,]+([0-9.]+)[\s,]+([0-9.]+)"#
+);
+
+/// The intrinsic size of a background image written as an inline SVG data
+/// URI, read off its root `<svg>` element's `width` and `height` (or, lacking
+/// those, its `viewBox`). A value with no `url()`, more than one, a remote
+/// file, or a base64 payload has no size this can read, because the pixels
+/// are not in the computed style, and answers `None`.
+pub fn data_svg_intrinsic_size(background_image: &str) -> Option<(f64, f64)> {
+    let url = single_url(background_image)?;
+    let (header, payload) = url.split_once(',')?;
+    let header = header.to_ascii_lowercase();
+    if !header.starts_with("data:image/svg+xml") || header.contains(";base64") {
+        return None;
+    }
+    let svg = percent_decode(payload);
+    let tag = SVG_OPEN_TAG_RE.find(&svg)?.as_str();
+    let mut width = None;
+    let mut height = None;
+    for caps in SVG_DIMENSION_RE.captures_iter(tag) {
+        let v = parse_float(&caps[2]);
+        if caps[1].eq_ignore_ascii_case("width") {
+            width = width.or(Some(v));
+        } else {
+            height = height.or(Some(v));
+        }
+    }
+    if let (Some(w), Some(h)) = (width, height) {
+        if w > 0.0 && h > 0.0 {
+            return Some((w, h));
+        }
+    }
+    let caps = SVG_VIEWBOX_RE.captures(tag)?;
+    let (w, h) = (parse_float(&caps[1]), parse_float(&caps[2]));
+    (w > 0.0 && h > 0.0).then_some((w, h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_svg_intrinsic_size_reads_the_root_svg() {
+        let icon = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='12'%3E%3Crect width='100' height='100'/%3E%3C/svg%3E\")";
+        assert_eq!(data_svg_intrinsic_size(icon), Some((10.0, 12.0)));
+        let viewbox = "url('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><path stroke-width=\"900\"/></svg>')";
+        assert_eq!(data_svg_intrinsic_size(viewbox), Some((16.0, 16.0)));
+        // The static cascade serializes an unquoted `url()` with escapes.
+        let escaped = "url(data:image/svg+xml,%3Csvg\\ xmlns=\\'http://www.w3.org/2000/svg\\'\\ width=\\'10\\'\\ height=\\'8\\'%3E%3Cpath\\ d=\\'M0\\ 0h10v10\\'/%3E%3C/svg%3E)no-repeat right center";
+        assert_eq!(data_svg_intrinsic_size(escaped), Some((10.0, 8.0)));
+        assert_eq!(data_svg_intrinsic_size("url(\"/img/external.png\")"), None);
+        assert_eq!(
+            data_svg_intrinsic_size("url(\"data:image/svg+xml;base64,PHN2Zz4=\")"),
+            None
+        );
+        assert_eq!(data_svg_intrinsic_size("none"), None);
+        assert_eq!(
+            data_svg_intrinsic_size(
+                "url(\"data:image/svg+xml,%3Csvg width='8' height='8'%3E%3C/svg%3E\"), url(\"hero.jpg\")"
+            ),
+            None,
+            "two layers are not one icon"
+        );
+    }
 
     // Expected values below were produced by running the JS functions in Node.
 

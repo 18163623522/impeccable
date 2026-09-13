@@ -160,11 +160,28 @@ pub fn resolve_background_info(
     el: &StaticElement<'_>,
     custom_props: CustomPropMap<'_>,
 ) -> BackgroundInfo {
+    resolve_background_info_skipping_images(el, custom_props, &|_| false)
+}
+
+/// [`resolve_background_info`] with the background images of the boxes
+/// `skip_image` names read as `none`. The SAFE_TAGS text path uses it for an
+/// icon on the link or its list item: the walk gives up on any raster image,
+/// and an external-link mark or an arrow bullet is not the surface the words
+/// are read against.
+pub fn resolve_background_info_skipping_images(
+    el: &StaticElement<'_>,
+    custom_props: CustomPropMap<'_>,
+    skip_image: &dyn Fn(&StaticElement<'_>) -> bool,
+) -> BackgroundInfo {
     let mut current = Some(*el);
     let mut overlays: Vec<Rgba> = Vec::new();
     while let Some(cur) = current {
         let style = cur.style();
-        let bg_image = sv(style, "backgroundImage");
+        let bg_image = if skip_image(&cur) {
+            "none"
+        } else {
+            sv(style, "backgroundImage")
+        };
         let has_gradient_or_url = !bg_image.is_empty()
             && bg_image != "none"
             && (GRADIENT_RE.is_match(bg_image) || URL_CALL_RE.is_match(bg_image));

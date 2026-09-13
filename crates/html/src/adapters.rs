@@ -7,25 +7,29 @@
 
 use crate::background::{
     a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
-    resolve_background_info,
+    resolve_background_info, resolve_background_info_skipping_images,
     resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
 };
 use crate::cascade::StyleValues;
+use crate::layer::picture_under_text;
 use crate::dom::{StaticDocument, StaticElement};
-use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
+use crate::quality::{
+    collapse_ws, is_in_non_rendered_markup, is_visually_hidden, pf0, resolve_font_size_px,
+};
 use impeccable_core::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
-    gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close, gpt_border_shadow_row_finding,
-    gpt_border_shadow_row_size, gpt_thin_border_wide_shadow_pair,
+    data_svg_intrinsic_size, gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close,
+    gpt_border_shadow_row_finding, gpt_border_shadow_row_size, gpt_thin_border_wide_shadow_pair,
     positioned_style_implies_escape_axis, resolve_length_px, GptBorderShadowInput,
-    GptBorderShadowRowTree, OversizedH1Input, StyleMap,
+    GptBorderShadowRowTree, OversizedH1Input, StyleMap, ICON_MAX_PX,
 };
 use impeccable_core::checks::rules::{
-    check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
+    check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
-    check_placeholder_colors, is_emoji_only_text, is_heading_tag, resolve_hero_heading_size_px,
-    BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts, HoverContrastOpts, IconTileOpts,
-    ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit, Sides,
+    check_placeholder_colors, is_emoji_only_text, is_glyph_only_text, is_heading_tag,
+    resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
+    HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit,
+    SafeTagTextSeen, Sides,
 };
 use impeccable_core::checks::text_rules::{
     check_numbered_section_labels, is_kicker_candidate, is_numbered_section_label_candidate,
@@ -36,6 +40,7 @@ use impeccable_core::checks::text_rules::{
 use impeccable_core::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_rgb, Rgba,
 };
+use impeccable_core::constants::SAFE_TAGS;
 use impeccable_core::js::{self, parse_float, parse_int};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::slice_utf16_prefix;
@@ -565,14 +570,149 @@ pub fn check_element_borders(
     )
 }
 
+/// The element's `color`, custom properties resolved first as the colour
+/// checks read it.
+fn resolved_text_color(style: &StyleValues, custom_props: CustomPropMap<'_>) -> Option<Rgba> {
+    custom_props
+        .and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)))
+        .or_else(|| parse_rgb(sv_opt(style, "color")))
+}
+
+/// Whether an ancestor carrying direct text is one the contrast pass
+/// actually scores, so a descendant sharing its colour can stand down. A
+/// SAFE_TAG ancestor is only scored under the same predicate its
+/// descendant is, and an ancestor whose own text is an arrow or an icon
+/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
+/// report the span, because nothing reports the anchor.
+fn ancestor_scores_its_text(el: &StaticElement<'_>, direct: &str) -> bool {
+    if is_emoji_only_text(direct) {
+        return false;
+    }
+    if !SAFE_TAGS.contains(&el.tag_lower().as_str()) {
+        return true;
+    }
+    !is_glyph_only_text(direct) && !is_visually_hidden(el, el.style())
+}
+
+/// Whether this element's `color` comes from an ancestor the contrast pass
+/// scores on its own, so repeating it here would report one washed-out
+/// colour twice. The walk stops at the first ancestor painting a different
+/// colour (nothing above it can be the source of this one), at the first
+/// one painting a surface of its own without text on it (above that the
+/// colour is judged against a different background, which is a different
+/// verdict), and at a fixed depth, so it costs a handful of parent hops.
+fn inherits_scored_text_color(
+    el: &StaticElement<'_>,
+    text_color: Option<Rgba>,
+    custom_props: CustomPropMap<'_>,
+) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if resolved_text_color(c.style(), custom_props) != text_color {
+            return false;
+        }
+        let direct = c.direct_text();
+        if !js::trim(&direct).is_empty() {
+            return ancestor_scores_its_text(&c, &direct);
+        }
+        if read_own_background_color(&c, c.style()).map_or(false, |b| a_gt(&b, 0.0)) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
+/// An inactive control. WCAG 1.4.3 exempts them, and a ghost or transparent
+/// disabled button is exactly the shape the SAFE_TAGS text path would
+/// otherwise start reporting.
+const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
+
+/// Whether an ancestor clips its background to text, which makes this run's
+/// glyphs part of that ancestor's fill: `<p class="gradient"><span>Split</span>
+/// <span>word</span></p>`. What a reader sees there is the gradient, and the
+/// span's declared `color` is either painted over nothing (a transparent
+/// `-webkit-text-fill-color`, which the static cascade drops, so this engine
+/// cannot see it) or painted over the gradient's own glyph shapes. Either way
+/// the walk hands the check the gradient's stops as the surface, and the
+/// verdict is about a surface nobody reads the text against.
+///
+/// The static cascade does carry `background-clip`, so the ancestor is
+/// visible where the fill colour is not. The walk stops at an ancestor with
+/// an opaque background of its own, because a box painted normally inside
+/// the clipped one is a real surface again, and at a fixed depth.
+fn text_clipped_by_an_ancestor(el: &StaticElement<'_>) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        let style = c.style();
+        if js::trim(sv(style, "webkitBackgroundClip")) == "text"
+            || js::trim(sv(style, "backgroundClip")) == "text"
+        {
+            return true;
+        }
+        if read_own_background_color(&c, style).map_or(false, |b| b.alpha_or_one() >= 0.95) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
+/// Whether an element's background image is an icon beside its text: one
+/// inline SVG at most `ICON_MAX_PX` on both axes. The static cascade carries
+/// neither `background-size` nor `background-repeat`, so only a data URI,
+/// whose root `<svg>` states its size, can be read as one. A remote file has
+/// no size this engine can read and stays a picture.
+fn background_is_icon(el: &StaticElement<'_>) -> bool {
+    let image = sv(el.style(), "backgroundImage");
+    !js::to_lower_case(image).contains("gradient")
+        && data_svg_intrinsic_size(image).map_or(false, |(w, h)| w <= ICON_MAX_PX && h <= ICON_MAX_PX)
+}
+
+/// The boxes whose background image is an icon beside this element's text:
+/// the element itself (an external-link mark) and its nearest `li` (an arrow
+/// bullet).
+fn icon_hosts(el: &StaticElement<'_>) -> Vec<ego_tree::NodeId> {
+    const MAX_ANCESTORS: usize = 12;
+    let mut hosts = Vec::new();
+    if background_is_icon(el) {
+        hosts.push(el.id());
+    }
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { break };
+        if c.tag_lower() == "li" {
+            if background_is_icon(&c) {
+                hosts.push(c.id());
+            }
+            break;
+        }
+        cur = c.parent_element();
+    }
+    hosts
+}
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
     style: &StyleValues,
     tag: &str,
     custom_props: CustomPropMap<'_>,
+    seen: &mut SafeTagTextSeen,
 ) -> Vec<RuleHit> {
     if sv_opt(style, "visibility") == Some("hidden") {
+        return Vec::new();
+    }
+    // Markup the browser never lays out: a `<template>`'s content, a
+    // `[hidden]` subtree, a `<noscript>`, anything under `<head>`. The static
+    // tree carries it and a browser scan cannot see it, so scoring it here is
+    // a false positive only this engine can produce. Nothing viewport-shaped
+    // belongs in that gate; see `is_in_non_rendered_markup`.
+    if is_in_non_rendered_markup(el, tag) {
         return Vec::new();
     }
     let mut eff_opacity = 1.0f64;
@@ -591,15 +731,40 @@ pub fn check_element_colors(
     }
     let direct_text = el.direct_text();
     let has_direct_text = !js::trim(&direct_text).is_empty();
-
-    let bg_info = resolve_background_info(el, custom_props);
-    let effective_bg = bg_info.color;
-    let mut text_color =
-        custom_props.and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)));
-    if text_color.is_none() {
-        text_color = parse_rgb(sv_opt(style, "color"));
-    }
+    let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
+
+    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
+    // walk and the hidden-text selector run only for those tags.
+    let paints_own_text = has_direct_text
+        && SAFE_TAGS.contains(&tag)
+        && !is_emoji_only_text(&direct_text)
+        && !is_glyph_only_text(&direct_text)
+        && !is_visually_hidden(el, style)
+        // The browser path also stands down where `-webkit-text-fill-color`
+        // paints the glyphs in nothing. This engine cannot: the static
+        // cascade drops that property, and a recorded call vector pins it
+        // dropping it. The clip that property travels with is carried, so
+        // a run inside a gradient-clipped parent is caught by the clip.
+        && !text_clipped_by_an_ancestor(el)
+        && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
+        && !inherits_scored_text_color(el, text_color, custom_props);
+
+    // The walk gives up on any raster image, so a link with an external-link
+    // mark, or one in a list item with an arrow bullet, reads as unresolved
+    // and goes unscored. On the SAFE_TAGS text path an icon is read as
+    // absent; everywhere else the walk is what it always was.
+    let icons = if paints_own_text {
+        icon_hosts(el)
+    } else {
+        Vec::new()
+    };
+    let bg_info = if icons.is_empty() {
+        resolve_background_info(el, custom_props)
+    } else {
+        resolve_background_info_skipping_images(el, custom_props, &|c| icons.contains(&c.id()))
+    };
+    let effective_bg = bg_info.color;
 
     let mut own_bg = custom_props
         .and_then(|m| measures::parse_color_resolved(sv_opt(style, "backgroundColor"), Some(m)))
@@ -658,12 +823,21 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
+        paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
         bg_image: Some(sv(style, "backgroundImage").to_string()),
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
     };
-    let mut findings = check_colors(&color_opts);
+    // The page's one report of a colour pair goes to an element that will
+    // actually print it, so an inline ignore on the first of fifty links
+    // waives that link and not the other forty-nine. A background photo laid
+    // under the text waives it too: this engine has no layout, so it reads
+    // the stretched, out-of-flow shape such a photo is written in
+    // (`picture_under_text`), where the browser path measures the layers.
+    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
+        !scoped_ignore_active(el, &h.id) && !picture_under_text(el)
+    });
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();
         if !placeholder.is_empty() {

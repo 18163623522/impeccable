@@ -3,6 +3,7 @@
 //! opts objects become structs whose `Option` fields mirror the JS
 //! `undefined` / `null` distinctions the source relies on.
 
+use crate::checks::text_rules::NON_RENDERED_TAGS;
 use crate::color::{
     color_to_hex, composite_color_over, contrast_ratio, get_hue, has_chroma, is_neutral_color,
     relative_luminance, Rgba,
@@ -136,21 +137,70 @@ fn is_heading_123(tag: &str) -> bool {
     matches!(tag, "h1" | "h2" | "h3")
 }
 
+/// Whether a SAFE_TAGS element paints a surface of its own and so earns the
+/// full `check_colors` pass: the filled pill, the solid button, the gradient
+/// chip. Everything else in those tags is bare text.
+fn is_styled_control(opts: &ColorOpts, bg_image: &str) -> bool {
+    let own_bg = opts
+        .bg_color
+        .map_or(false, |c| c.a.map_or(false, |a| a > 0.5));
+    let own_gradient = !bg_image.is_empty() && GRADIENT_CI.is_match(bg_image);
+    opts.has_direct_text && (own_bg || own_gradient) && opts.font_size >= 9.0
+}
+
+/// Whether `check_colors` answers from `safe_tag_text_contrast` rather than
+/// from the full pass, which is the set of findings the per-page dedupe
+/// owns.
+fn scores_safe_tag_text(opts: &ColorOpts) -> bool {
+    set_has(SAFE_TAGS, opts.tag.as_str())
+        && !is_styled_control(opts, opts.bg_image.as_deref().unwrap_or(""))
+}
+
+/// The colour pairs a page has already reported from the SAFE_TAGS text
+/// path, threaded through one document's element loop the way `DesignSeen`
+/// is. One washed-out link colour used on fifty links is one finding, not
+/// fifty; the first element carrying it is the one that reports.
+#[derive(Debug, Default)]
+pub struct SafeTagTextSeen {
+    reported: Vec<(String, String)>,
+}
+
+impl SafeTagTextSeen {
+    /// Drops every hit whose rule and snippet this page has already
+    /// reported from this path, and every hit `keep` rejects.
+    ///
+    /// A hit the caller rejects never claims the page's one report of its
+    /// colour pair. That ordering is the point of the callback: the engines
+    /// waive findings after the rule runs — an inline
+    /// `data-impeccable-ignore` on one link, a text layer the background
+    /// walk cannot read under another — and registering the pair before
+    /// those verdicts would let a single waived element silence every other
+    /// element on the page wearing the same colour. `keep` is called at most
+    /// once per hit, and only for a hit whose pair the page has not reported
+    /// yet: a duplicate the dedupe drops anyway costs no engine work, so an
+    /// engine may put real work behind the callback.
+    pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>, keep: &mut dyn FnMut(&RuleHit) -> bool) {
+        hits.retain(|h| {
+            let key = (h.id.clone(), h.snippet.clone());
+            if self.reported.contains(&key) {
+                return false;
+            }
+            if !keep(h) {
+                return false;
+            }
+            self.reported.push(key);
+            true
+        });
+    }
+}
+
 /// JS: checks.mjs#checkColors
 pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     let tag = opts.tag.as_str();
     let bg_image = opts.bg_image.as_deref().unwrap_or("");
     let bg_clip = opts.bg_clip.as_deref().unwrap_or("");
-    if set_has(SAFE_TAGS, tag) {
-        let own_bg = opts
-            .bg_color
-            .map_or(false, |c| c.a.map_or(false, |a| a > 0.5));
-        let own_gradient = !bg_image.is_empty() && GRADIENT_CI.is_match(bg_image);
-        let is_styled_control =
-            opts.has_direct_text && (own_bg || own_gradient) && opts.font_size >= 9.0;
-        if !is_styled_control {
-            return Vec::new();
-        }
+    if set_has(SAFE_TAGS, tag) && !is_styled_control(opts, bg_image) {
+        return safe_tag_text_contrast(opts);
     }
     let mut findings = Vec::new();
 
@@ -215,6 +265,101 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     }
 
     findings
+}
+
+/// `check_colors` with the per-page dedupe the SAFE_TAGS text path owes.
+/// Each document's element loop threads one `SafeTagTextSeen` through this
+/// so a colour the page repeats on every link is reported where it first
+/// appears and nowhere else.
+///
+/// `keep` is the engine's own verdict on a hit this path produced, asked
+/// before the pair is registered: the inline-ignore filter, and whatever
+/// else the engine knows that the rule does not. It is never called for the
+/// findings of the full `check_colors` pass, which the dedupe does not own.
+pub fn check_colors_deduped(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
+    let mut hits = check_colors(opts);
+    if scores_safe_tag_text(opts) {
+        seen.keep_first(&mut hits, keep);
+    }
+    hits
+}
+
+/// Contrast for a SAFE_TAGS element that paints its own text without
+/// painting its own surface: a link, a nav label, a table cell, a span of
+/// small print. The tag gate above exists to keep surface-shaped rules off
+/// elements that carry no surface, but the glyphs are still glyphs, and
+/// these tags hold most of a page's small text — skipping them reports the
+/// heading and passes the fifty links below it set in the same washed-out
+/// colour. Only the WCAG verdict travels. `gray-on-color` is a text-vs-
+/// surface verdict too, but its precision on bare text has never been
+/// measured, and the class-list heuristics beside it (gradient, palette)
+/// read the surface rather than the text, so both stay behind the gate
+/// until someone measures them.
+fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
+    if !opts.paints_own_text || !opts.has_direct_text || opts.is_emoji_only {
+        return Vec::new();
+    }
+    // The same floor the styled-control gate uses: under 9px the text is a
+    // decorative mark, and `undersized-ui-text` owns it.
+    if opts.font_size < 9.0 {
+        return Vec::new();
+    }
+    if set_has(NON_RENDERED_TAGS, opts.tag.as_str()) {
+        return Vec::new();
+    }
+    // Gradient-clipped text paints the gradient, not `color`.
+    if opts.bg_clip.as_deref() == Some("text") {
+        return Vec::new();
+    }
+    let Some(text_color) = opts.text_color else {
+        return Vec::new();
+    };
+    if resolved_bg_matches_text(opts, &text_color) {
+        return Vec::new();
+    }
+    contrast_findings(opts, &text_color)
+        .into_iter()
+        .filter(|h| h.id == "low-contrast")
+        .collect()
+}
+
+/// Whether the surface the text would be scored against is the text colour
+/// itself. Nothing is painted in exactly its own background, so this is the
+/// background walk landing on the page's own fill through an image, a video
+/// or a positioned shape it cannot see — white label over a hero photo
+/// reported as `1.0:1 — text #ffffff on #ffffff`. The walk's blind spots
+/// are their own problem; a report that is self-evidently wrong to anyone
+/// who opens the page is not worth printing while they are fixed.
+///
+/// What it hides, stated plainly: text that really is painted in its own
+/// background colour, which is invisible and a genuine 1:1 failure. That
+/// shape is rare, and when an author writes it deliberately it is usually
+/// `<p>` or `<div>` markup, which never reaches here: this guard covers
+/// only the SAFE_TAGS text path, and every other tag still reports the
+/// `1.0:1`. It is exact equality on the resolved hex, not a near-match, so
+/// a link one shade off its surface still reports.
+///
+/// Narrowing it means knowing whether the walk resolved a surface or gave
+/// up and fell through to the page fill, which the check cannot see from
+/// `ColorOpts` alone. That is why this guard is written as a hex
+/// coincidence rather than as a verdict about the walk: the browser engine
+/// asks the real question one layer out, where it has layout, and drops a
+/// hit from this path whose text reads over a picture
+/// (`resolved_surface_is_under_text`). Here the coincidence is all there is to go
+/// on, and it covers the static engine, which has no layout to test.
+fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
+    let text_hex = color_to_hex(Some(text_color));
+    let same = |bg: &Rgba| color_to_hex(Some(bg)) == text_hex;
+    if let Some(bg) = opts.effective_bg.as_ref() {
+        return same(bg);
+    }
+    opts.effective_bg_stops
+        .as_deref()
+        .map_or(false, |stops| stops.iter().any(same))
 }
 
 /// The contrast scoring `check_colors` and `check_placeholder_colors`

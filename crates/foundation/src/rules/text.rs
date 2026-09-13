@@ -108,10 +108,12 @@ pub const ALL_CAPS_LONG_RUN: usize = 80;
 /// JS: checks.mjs#SR_ONLY_SELECTOR.
 pub const SR_ONLY_SELECTOR: &str = ".sr-only, .visually-hidden, .visuallyhidden, .screen-reader, .screen-reader-only, .screenreader, .a11y-hidden, .hidden-visually, [class*=\"sr-only\" i], [class*=\"visually-hidden\" i], [class*=\"visuallyhidden\" i], [class*=\"screen-reader\" i], [class*=\"screenreader\" i]";
 
-/// JS: checks.mjs#NON_RENDERED_TAGS.
+/// JS: checks.mjs#NON_RENDERED_TAGS, less `map`. A `<map>` is an inline box
+/// in every UA stylesheet and its flow content renders: the links an image
+/// map repeats as text sit in it. Only its `<area>` children paint nothing.
 pub const NON_RENDERED_TAGS: &[&str] = &[
     "script", "style", "title", "noscript", "template", "head", "meta", "link", "base", "param",
-    "source", "track", "datalist", "col", "colgroup", "map", "area",
+    "source", "track", "datalist", "col", "colgroup", "area",
 ];
 
 /// JS: checks.mjs#TEXT_OVERFLOW_SKIP_TAGS.

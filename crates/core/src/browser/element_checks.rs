@@ -13,10 +13,11 @@ use super::dom::{
 };
 use super::BrowserFinding;
 use crate::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, is_screen_reader_only_text_style,
-    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input,
-    RadialSpotlightInput, SrOnlyMetrics,
+    self, border_colors_from_style, border_widths_from_style,
+    check_gpt_thin_border_wide_shadow_row, check_oversized_h1, check_radial_spotlight,
+    gpt_border_shadow_sizes_match, gpt_thin_border_wide_shadow_pair,
+    is_screen_reader_only_text_style, positioned_style_implies_escape, GptBorderShadowInput,
+    OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics, GPT_BORDER_SHADOW_MIN_ROW,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
@@ -889,8 +890,8 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     }))
 }
 
-/// JS: checks.mjs#checkElementGptBorderShadowDOM(el)
-pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+/// The hairline-and-halo pair of one element, read off its computed style.
+fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     let style = ElStyle { dom, el };
     let widths = border_widths_from_style(&style);
     let colors: Vec<Option<String>> = border_colors_from_style(&style)
@@ -898,11 +899,71 @@ pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleH
         .map(Some)
         .collect();
     let box_shadow = dom.style(el, "boxShadow");
-    finding_hits(check_gpt_thin_border_wide_shadow(&GptBorderShadowInput {
+    gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
         box_shadow: Some(&box_shadow),
-    }))
+    })
+}
+
+/// How many boxes of `el`'s sibling row carry the same pair at a comparable
+/// size, `el` included. Counting stops at the threshold and at a bounded
+/// number of siblings, so a long list costs no more than a row of cards.
+fn gpt_border_shadow_row_size(dom: &dyn Dom, el: ElId) -> usize {
+    const MAX_SIBLINGS_SCANNED: usize = 200;
+    let Some(parent) = dom.parent(el) else {
+        return 1;
+    };
+    let own = dom.rect(el);
+    let own = measures::Rect {
+        width: own.width,
+        height: own.height,
+    };
+    let mut row = 1usize;
+    for sibling in dom.children(parent).into_iter().take(MAX_SIBLINGS_SCANNED) {
+        if row >= GPT_BORDER_SHADOW_MIN_ROW {
+            break;
+        }
+        if sibling == el {
+            continue;
+        }
+        let r = dom.rect(sibling);
+        let r = measures::Rect {
+            width: r.width,
+            height: r.height,
+        };
+        if !gpt_border_shadow_sizes_match(&own, &r) {
+            continue;
+        }
+        if gpt_border_shadow_pair_dom(dom, sibling).is_some() {
+            row += 1;
+        }
+    }
+    row
+}
+
+/// JS: checks.mjs#checkElementGptBorderShadowDOM(el)
+pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+    // The sibling walk is worth paying for only once this element carries the
+    // pair itself.
+    if gpt_border_shadow_pair_dom(dom, el).is_none() {
+        return Vec::new();
+    }
+    let style = ElStyle { dom, el };
+    let widths = border_widths_from_style(&style);
+    let colors: Vec<Option<String>> = border_colors_from_style(&style)
+        .into_iter()
+        .map(Some)
+        .collect();
+    let box_shadow = dom.style(el, "boxShadow");
+    finding_hits(check_gpt_thin_border_wide_shadow_row(
+        &GptBorderShadowInput {
+            border_widths: &widths,
+            border_colors: Some(&colors),
+            box_shadow: Some(&box_shadow),
+        },
+        gpt_border_shadow_row_size(dom, el),
+    ))
 }
 
 // ── clipped overflow container ────────────────────────────────────────────
@@ -1632,5 +1693,103 @@ mod tests {
             }],
         );
         assert_eq!(check_element_blinking_cursor_dom(&d, cur).len(), 1);
+    }
+
+    /// One card carrying a hairline on every side plus `shadow`, sized `w`x`h`.
+    fn hairline_card(d: &mut FakeDom, parent: ElId, w: f64, h: f64, shadow: &str) -> ElId {
+        let card = d.add(Some(parent), "div");
+        visible(d, card);
+        d.set_rect(card, 0.0, 0.0, w, h);
+        d.set_styles(
+            card,
+            &[
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(229, 231, 235)"),
+                ("borderRightColor", "rgb(229, 231, 235)"),
+                ("borderBottomColor", "rgb(229, 231, 235)"),
+                ("borderLeftColor", "rgb(229, 231, 235)"),
+                ("boxShadow", shadow),
+            ],
+        );
+        card
+    }
+
+    /// A row of `n` identical cards under one parent; returns the first.
+    fn hairline_row(d: &mut FakeDom, parent: ElId, n: usize, shadow: &str) -> ElId {
+        let mut first = None;
+        for _ in 0..n {
+            let card = hairline_card(d, parent, 180.0, 140.0, shadow);
+            first.get_or_insert(card);
+        }
+        first.expect("row")
+    }
+
+    #[test]
+    fn gpt_border_shadow_needs_a_row_of_three() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 2, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        hairline_card(&mut d, row, 180.0, 140.0, halo);
+        let hits = check_element_gpt_border_shadow_dom(&d, first);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "gpt-thin-border-wide-shadow");
+        assert_eq!(hits[0].snippet, "1px border + 40px shadow blur");
+    }
+
+    #[test]
+    fn gpt_border_shadow_ignores_offset_tight_and_inset_shadows() {
+        for shadow in [
+            // lit from above: ordinary elevation
+            "rgba(15, 23, 42, 0.22) 0px 8px 40px 0px",
+            // a halo, but a tight one
+            "rgba(15, 23, 42, 0.18) 0px 0px 24px 0px",
+            // drawn inside the box
+            "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px inset",
+        ] {
+            let (mut d, body) = page();
+            let row = d.add(Some(body), "div");
+            let first = hairline_row(&mut d, row, 4, shadow);
+            assert!(
+                check_element_gpt_border_shadow_dom(&d, first).is_empty(),
+                "{shadow} should not read as the repeated signature"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_border_shadow_row_needs_comparable_sizes() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        hairline_card(&mut d, row, 600.0, 90.0, halo);
+        hairline_card(&mut d, row, 64.0, 400.0, halo);
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
+
+        // Within tolerance on both axes, the same three read as one row.
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let first = hairline_card(&mut d, row, 180.0, 140.0, halo);
+        hairline_card(&mut d, row, 168.0, 132.0, halo);
+        hairline_card(&mut d, row, 192.0, 148.0, halo);
+        assert_eq!(check_element_gpt_border_shadow_dom(&d, first).len(), 1);
+    }
+
+    #[test]
+    fn gpt_border_shadow_skips_a_row_that_paints_nothing() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let halo = "rgba(15, 23, 42, 0.18) 0px 0px 40px 0px";
+        let first = hairline_row(&mut d, row, 4, halo);
+        for card in d.children(row) {
+            d.set_rect(card, 0.0, 0.0, 0.0, 0.0);
+        }
+        assert!(check_element_gpt_border_shadow_dom(&d, first).is_empty());
     }
 }

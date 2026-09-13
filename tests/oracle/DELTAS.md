@@ -164,3 +164,37 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+
+## Recorded 2026-09-12: the hairline-and-halo pair has to repeat across a row
+
+Corpus judging put `gpt-thin-border-wide-shadow` at 0.70 pattern precision
+with no harm found on 19 representatives: a hairline border beside a soft
+shadow is the resting card and popover style of most mature design systems.
+The rule now reports it only where a row repeats it, and only for the shape
+that is actually a generated-UI tell. Three gates, all measured on what the
+element already declares:
+
+* the shadow blur reaches 32px (was 16px),
+* the widest layer casts no offset and is not drawn inside the box, so an
+  ordinary drop shadow lit from above no longer counts, and
+* at least three boxes of the element's own sibling row carry the same pair at
+  a comparable size. A browser scan compares rects, which also silences a
+  closed dropdown that paints nothing; a file scan has no layout and reads
+  same-tag siblings instead.
+
+Every golden below was re-recorded from the binary and reviewed by hand.
+
+* `detect-fixture-json-gpt-tells-html`, `detect-fixture-text-gpt-tells-html`:
+  4 findings to 3. The fixture's lone hairline card, a 24px halo on one box,
+  now sits in the pass column; the rule's own cases moved to the new
+  `gpt-thin-border-wide-shadow.html`.
+* `detect-fixture-json-gpt-thin-border-wide-shadow-html`,
+  `detect-fixture-text-gpt-thin-border-wide-shadow-html`: new cases for that
+  fixture. Six findings, one per card of the two flag rows; its seven pass
+  rows (a lone popover, a pair of cards, an offset shadow, a tight halo, an
+  inset halo, a border too faint to read, a heavy border) report nothing.
+* `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`: the sweep carries both files, 436 findings
+  to 441 and 17 advisory notes to 22. The counted total stays at 419; no other
+  rule's output moves.

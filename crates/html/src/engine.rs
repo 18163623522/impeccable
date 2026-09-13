@@ -140,7 +140,7 @@ fn run_rule(rule_id: &str, el: &StaticElement<'_>, tag: &str) -> Vec<RuleHit> {
         "quality-rules" => check_element_quality(el, style, tag),
         "oversized-h1" => check_element_oversized_h1(el, tag),
         "clipped-overflow-container" => check_element_clipped_overflow(el, style),
-        "gpt-thin-border-wide-shadow" => check_element_gpt_border_shadow(style),
+        "gpt-thin-border-wide-shadow" => check_element_gpt_border_shadow(el, style),
         "radial-spotlight-glow" => check_element_radial_spotlight(el, style),
         _ => Vec::new(),
     }

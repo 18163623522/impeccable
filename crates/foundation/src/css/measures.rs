@@ -492,6 +492,43 @@ pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f
     max_blur
 }
 
+/// Largest blur radius across the layers that cast no direction: both
+/// offsets zero, not `inset`, and a color alpha of at least `min_alpha`.
+/// An offset shadow reads as light coming from somewhere, which is how
+/// ordinary elevation is drawn; an offsetless one is a halo sitting evenly
+/// around the box.
+pub fn shadow_max_offsetless_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
+    re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
+    let min_alpha = min_alpha.unwrap_or(0.0);
+    let Some(box_shadow) = box_shadow else {
+        return 0.0;
+    };
+    if box_shadow.is_empty() || box_shadow == "none" {
+        return 0.0;
+    }
+    let mut max_blur = 0.0f64;
+    for layer in split_shadow_layers(box_shadow) {
+        if shadow_layer_alpha(layer) < min_alpha {
+            continue;
+        }
+        let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        if INSET_RE.is_match(&cleaned) {
+            continue;
+        }
+        let cleaned = WORD_RE.replace_all(&cleaned, " ");
+        let nums: Vec<f64> = NUM_RE
+            .find_iter(&cleaned)
+            .map(|m| parse_float(m.as_str()))
+            .collect();
+        if nums.len() >= 3 && nums[0] == 0.0 && nums[1] == 0.0 {
+            max_blur = math_max(max_blur, nums[2]);
+        }
+    }
+    max_blur
+}
+
 /// JS: checks.mjs#cssColorAlpha.
 pub fn css_color_alpha(value: Option<&str>) -> f64 {
     if css_color_is_transparent(value) {

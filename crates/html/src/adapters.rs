@@ -13,9 +13,11 @@ use crate::cascade::StyleValues;
 use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
 use impeccable_core::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
+    self, border_colors_from_style, border_widths_from_style,
+    check_gpt_thin_border_wide_shadow_row, check_oversized_h1, check_radial_spotlight,
+    gpt_thin_border_wide_shadow_pair, positioned_style_implies_escape, resolve_length_px,
     GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
+    GPT_BORDER_SHADOW_MIN_ROW,
 };
 use impeccable_core::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
@@ -837,19 +839,70 @@ pub fn check_element_oversized_h1(el: &StaticElement<'_>, tag: &str) -> Vec<Rule
     }))
 }
 
-/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
-pub fn check_element_gpt_border_shadow(style: &StyleValues) -> Vec<RuleHit> {
+/// The hairline-and-halo pair of one element, read off its resolved style.
+fn gpt_border_shadow_pair(style: &StyleValues) -> Option<(f64, f64)> {
     let s = StyleRef(style);
     let widths = border_widths_from_style(&s);
     let colors: Vec<Option<String>> = border_colors_from_style(&s)
         .into_iter()
         .map(|c| if c.is_empty() { None } else { Some(c) })
         .collect();
-    hits(check_gpt_thin_border_wide_shadow(&GptBorderShadowInput {
+    gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
         box_shadow: Some(sv(style, "boxShadow")),
-    }))
+    })
+}
+
+/// How many boxes of `el`'s sibling row carry the same pair, `el` included.
+/// A file scan has no layout to compare sizes with, so same-tag siblings
+/// stand in for cards of one row. Counting stops at the threshold and at a
+/// bounded number of siblings.
+fn gpt_border_shadow_row_size(el: &StaticElement<'_>) -> usize {
+    const MAX_SIBLINGS_SCANNED: usize = 200;
+    let Some(parent) = el.parent_element() else {
+        return 1;
+    };
+    let tag = el.tag_lower();
+    let mut row = 1usize;
+    for sibling in parent.children().into_iter().take(MAX_SIBLINGS_SCANNED) {
+        if row >= GPT_BORDER_SHADOW_MIN_ROW {
+            break;
+        }
+        if sibling == *el || sibling.tag_lower() != tag {
+            continue;
+        }
+        if gpt_border_shadow_pair(sibling.style()).is_some() {
+            row += 1;
+        }
+    }
+    row
+}
+
+/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
+pub fn check_element_gpt_border_shadow(
+    el: &StaticElement<'_>,
+    style: &StyleValues,
+) -> Vec<RuleHit> {
+    // The sibling walk is worth paying for only once this element carries the
+    // pair itself.
+    if gpt_border_shadow_pair(style).is_none() {
+        return Vec::new();
+    }
+    let s = StyleRef(style);
+    let widths = border_widths_from_style(&s);
+    let colors: Vec<Option<String>> = border_colors_from_style(&s)
+        .into_iter()
+        .map(|c| if c.is_empty() { None } else { Some(c) })
+        .collect();
+    hits(check_gpt_thin_border_wide_shadow_row(
+        &GptBorderShadowInput {
+            border_widths: &widths,
+            border_colors: Some(&colors),
+            box_shadow: Some(sv(style, "boxShadow")),
+        },
+        gpt_border_shadow_row_size(el),
+    ))
 }
 
 // ─── Clipped overflow container ─────────────────────────────────────────────

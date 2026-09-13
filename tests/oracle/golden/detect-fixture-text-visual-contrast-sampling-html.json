@@ -1,0 +1,7 @@
+{
+  "stdout": "",
+  "stderr": "\n<REPO>/tests/fixtures/antipatterns/visual-contrast-sampling.html\n  [gradient-text] background-clip: text + gradient\n    → Gradient text is decorative rather than meaningful — a common AI tell, especially on headings and metrics. Use solid colors for text.\n  [gradient-text] background-clip: text + gradient\n    → Gradient text is decorative rather than meaningful — a common AI tell, especially on headings and metrics. Use solid colors for text.\n\n2 anti-patterns found.\n",
+  "exit": 2,
+  "signal": null,
+  "files": {}
+}

@@ -1022,6 +1022,17 @@ fn run_visual_contrast_fallback(
                 && !browser_resolved.iter().any(|s| Some(s.as_str()) == sel)
         })
         .collect();
+    if !filtered.is_empty() {
+        // The pixel pass reads one box twice, once with the text painted and
+        // once without. A frame that advances between the two shots turns
+        // every pixel in the box into a difference, and the pass would rather
+        // say nothing than measure that. Playing media is the one moving thing
+        // a scan can hold still without changing what the page shows: a paused
+        // video still paints the frame the visitor is looking at.
+        let _ = page.evaluate(
+            "document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} })",
+        );
+    }
     for candidate in filtered {
         let result = step_findings(profile, "visual-contrast", "pixel-diff", target, || {
             let f = screenshot_contrast::capture_visual_contrast_candidate(

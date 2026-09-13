@@ -340,6 +340,45 @@ pub fn blend_rgba(fg: Option<&Rgba>, bg: Option<&Rgba>) -> Option<Rgba> {
     })
 }
 
+/// A background-color this translucent paints nothing worth reading; the
+/// walk keeps going for what is under it (`sampleCssBackground`'s own cut-off).
+const MIN_PAINTED_ALPHA: f64 = 0.05;
+/// How far two opaque stops of one gradient may sit apart before the answer
+/// depends on where in the box the text is.
+const GRADIENT_STOP_SPREAD: f64 = 2.0;
+
+/// What the analytic pass can say about a gradient it cannot position.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradientVerdict {
+    /// Every stop agrees: the worst of them stands for the surface.
+    Color(Rgba),
+    /// The stops disagree, so which one is behind the glyphs decides the
+    /// answer and nothing here knows which. Rendered pixels have to say.
+    Unresolved,
+}
+
+/// JS: the gradient branch of `sampleCssBackground`, made answerable. A
+/// translucent stop (`rgba(171, 171, 171, 0)` is how a browser serializes the
+/// transparent end of a glow, and `from-primary/10` is a wash, not a slab)
+/// composites differently at every point of the box, and two opaque stops far
+/// apart pick out different verdicts at each end. `None` when the value
+/// carries no stop at all.
+pub fn analytic_gradient_verdict(text_color: &Rgba, colors: &[Rgba]) -> Option<GradientVerdict> {
+    if colors.is_empty() {
+        return None;
+    }
+    if colors.iter().any(|c| c.a.unwrap_or(1.0) < 0.95) {
+        return Some(GradientVerdict::Unresolved);
+    }
+    let ratios: Vec<f64> = colors.iter().map(|c| contrast_ratio(text_color, c)).collect();
+    let lo = ratios.iter().copied().fold(f64::INFINITY, math_min);
+    let hi = ratios.iter().copied().fold(0.0, math_max);
+    if lo > 0.0 && hi >= lo * GRADIENT_STOP_SPREAD {
+        return Some(GradientVerdict::Unresolved);
+    }
+    pick_worst_contrast_color(text_color, colors).map(GradientVerdict::Color)
+}
+
 /// JS: index.mjs#pickWorstContrastColor(textColor, colors)
 pub fn pick_worst_contrast_color(text_color: &Rgba, colors: &[Rgba]) -> Option<Rgba> {
     if colors.is_empty() {
@@ -675,6 +714,12 @@ pub fn stack_nodes(dom: &dyn Dom, el: ElId, x: f64, y: f64, depth: f64) -> Resul
                 "img"
             } else if tag == "canvas" || tag == "video" {
                 "raster"
+            } else if tag == "svg" {
+                // Vector paint (an avatar circle, an inline illustration) is
+                // opaque to this walk: its fills live on children no CSS
+                // background read can see. Reading through it would report the
+                // surface behind the artwork as the text's background.
+                "unreadable"
             } else {
                 "css"
             };
@@ -684,6 +729,30 @@ pub fn stack_nodes(dom: &dyn Dom, el: ElId, x: f64, y: f64, depth: f64) -> Resul
             }
         })
         .collect())
+}
+
+/// The walk's stop when it reaches paint it cannot read (`unreadable` stack
+/// nodes). `stop` ends the walk: what is under this node is not what the text
+/// sits on, so the nodes below it must not answer for it.
+pub fn unreadable_stack_sample(dom: &dyn Dom, node: ElId) -> Value {
+    json!({ "status": "unresolved", "reason": format!("{} paint", tag_lower(dom, node)), "stop": true })
+}
+
+/// An unresolved sample that ends the walk rather than passing it down.
+pub fn sample_ends_walk(sample: &Value) -> bool {
+    sample.get("stop").and_then(Value::as_bool) == Some(true)
+}
+
+/// The walk's compositing fold: `pending` is the translucent surfaces it
+/// passed through, topmost first, and `ground` the opaque sample under them.
+/// Each is blended into the one below, so the topmost surface names the
+/// method (`...+alpha`), as the old pairwise recursion did.
+pub fn composite_stack(pending: &[Value], ground: &Value) -> Value {
+    let mut out = ground.clone();
+    for sample in pending.iter().rev() {
+        out = alpha_composite(sample.clone(), &out);
+    }
+    out
 }
 
 /// JS: index.mjs#sampleImageElement — painted rect + source point for the
@@ -773,10 +842,18 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
         if GRADIENT_RE.is_match(&bg_image) {
             if let Some(tc) = text_color {
                 let colors = parse_gradient_colors(Some(&bg_image));
-                if let Some(color) = pick_worst_contrast_color(tc, &colors) {
-                    return CssPlan::Sample {
-                        sample: json!({ "status": "sampled", "color": color, "method": "analytic-gradient" }),
-                    };
+                match analytic_gradient_verdict(tc, &colors) {
+                    Some(GradientVerdict::Color(color)) => {
+                        return CssPlan::Sample {
+                            sample: json!({ "status": "sampled", "color": color, "method": "analytic-gradient" }),
+                        };
+                    }
+                    Some(GradientVerdict::Unresolved) => {
+                        return CssPlan::Sample {
+                            sample: json!({ "status": "unresolved", "reason": "gradient stops disagree", "stop": true }),
+                        };
+                    }
+                    None => {}
                 }
             } else {
                 // JS-PARITY: contrastRatio(null, c) throws in the JS when
@@ -802,7 +879,7 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
     }
     let bg = parse_rgb_or_any(&dom.style(node, "backgroundColor"));
     if let Some(bg) = bg {
-        if bg.a.unwrap_or(f64::NAN) > 0.05 {
+        if bg.a.unwrap_or(f64::NAN) > MIN_PAINTED_ALPHA {
             return CssPlan::Sample {
                 sample: json!({ "status": "sampled", "color": bg, "method": "solid-background" }),
             };
@@ -1046,6 +1123,167 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
     )
 }
 
+// ─── the screenshot pixel pass ──────────────────────────────────────────────
+//
+// `screenshot-contrast` diffs two clipped screenshots of the same box, one
+// with the text painted and one with it transparent, and measures every pixel
+// the text changed. The decisions below say which of those pixels describe the
+// text's own background and when the set is too unlike text to answer at all.
+
+/// One pixel the text paints on: `delta` is the summed channel change between
+/// the two frames (how much of the pixel the glyph covers), `ratio` the WCAG
+/// ratio measured there, `ground` the luminance left when the text is hidden,
+/// `darkened` says the text made that pixel darker than that ground, and
+/// `off_color` that what the text painted there is not the color the text
+/// declares.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphPixel {
+    pub delta: f64,
+    pub ratio: f64,
+    pub ground: f64,
+    pub darkened: bool,
+    pub off_color: bool,
+}
+
+/// How far a well covered pixel may drift from the declared text color,
+/// relative to the distance between that color and the ground: a pixel two
+/// thirds covered by the glyph sits a third of the way back toward the ground.
+const PAINTED_COLOR_DRIFT: f64 = 0.5;
+
+/// Whether the pixel the text painted looks like the color the text declares.
+/// It should, wherever the glyph covers most of the pixel: `painted` is that
+/// pixel in the frame with the text, `ground` the same pixel in the frame
+/// without it. Only worth asking where the pass claims the CSS color as the
+/// foreground — `preferRenderedForeground` makes the painted value the
+/// foreground, and then there is nothing to check.
+pub fn painted_is_text_color(painted: [f64; 3], text: [f64; 3], ground: [f64; 3]) -> bool {
+    let drift: f64 = (0..3).map(|i| (painted[i] - text[i]).abs()).sum();
+    let span: f64 = (0..3).map(|i| (text[i] - ground[i]).abs()).sum();
+    drift <= span * PAINTED_COLOR_DRIFT
+}
+
+/// What the pixel pass concluded: a ratio it stands behind, or the reason it
+/// could not read the text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PixelContrastOutcome {
+    Verdict {
+        measured: f64,
+        median: f64,
+        core_pixels: usize,
+    },
+    Unresolved(&'static str),
+}
+
+/// Below this many pixels the diff is noise, not a glyph.
+pub const GLYPH_MIN_PIXELS: usize = 8;
+/// A pixel counts as fully painted at this share of the strongest change in
+/// the box. Anything below it is an antialiased edge: mostly background, so
+/// its ratio tends to 1:1 no matter how legible the text is.
+const GLYPH_CORE_COVERAGE: f64 = 0.75;
+/// Text covers a fraction of its own box. When most of the clip changed, the
+/// page repainted between the two screenshots (a video, a carousel, a reveal
+/// animation) and no pixel pair is a glyph over its background.
+const GLYPH_CHURN_SHARE: f64 = 0.55;
+/// Hiding text moves every pixel it painted the same way: toward the surface
+/// under it. A box where a large minority moved the other way holds something
+/// that arrived or left between the captures — text mid-animation leaves its
+/// old position and its new one in the same diff — so no pair is a glyph over
+/// its background.
+const GLYPH_DIRECTION_MINORITY: f64 = 0.25;
+/// How far the verdict may sit below the median of every measured pixel
+/// before the sample is judged bimodal rather than a reading of one surface.
+const VERDICT_MEDIAN_DIVERGENCE: f64 = 3.0;
+/// How far the surface the glyphs sit on may stand apart from the surface
+/// beside them in the same box. A page that paints its own text twice (a
+/// duplicate layer behind it for a glow) leaves the second copy where the
+/// glyphs were, and the pass would read that copy as the background.
+const GROUND_DISAGREEMENT: f64 = 2.0;
+
+/// WCAG ratio between two luminances.
+fn luminance_ratio(a: f64, b: f64) -> f64 {
+    (math_max(a, b) + 0.05) / (math_min(a, b) + 0.05)
+}
+
+/// The sorted-array percentile the visual pass uses everywhere.
+fn percentile(sorted: &[f64], pct: f64) -> f64 {
+    let n = sorted.len();
+    let idx = ((pct / 100.0) * n as f64).floor();
+    sorted[math_min((n - 1) as f64, math_max(0.0, idx)) as usize]
+}
+
+/// Reasons whose rendered pixels do not say what the text sits on. A filter or
+/// backdrop-filter paints the surface from something the diff cannot attribute
+/// (the video or image under a glass panel reads as the panel's own ground),
+/// and `background-clip: text` paints the glyphs from the background the
+/// pass would score them against. Both resolve to unresolved, never to a
+/// failure.
+pub fn pixel_contrast_blocked(reasons: &[String]) -> Option<String> {
+    reasons
+        .iter()
+        .find(|r| {
+            matches!(
+                r.as_str(),
+                "background-clip text" | "filter" | "backdrop filter"
+            )
+        })
+        .cloned()
+}
+
+/// The verdict over the pixels the text painted on. `clip_pixels` is the size
+/// of the compared box and `surround_ground` the mean luminance of the pixels
+/// in it the text did not touch, when there are enough of them to mean
+/// anything.
+pub fn pixel_contrast_verdict(
+    pixels: &[GlyphPixel],
+    clip_pixels: usize,
+    surround_ground: Option<f64>,
+) -> PixelContrastOutcome {
+    if pixels.len() < GLYPH_MIN_PIXELS {
+        return PixelContrastOutcome::Unresolved("too few glyph pixels");
+    }
+    if clip_pixels > 0 && pixels.len() as f64 > clip_pixels as f64 * GLYPH_CHURN_SHARE {
+        return PixelContrastOutcome::Unresolved("box repainted between captures");
+    }
+    let darkened = pixels.iter().filter(|p| p.darkened).count();
+    let minority = darkened.min(pixels.len() - darkened);
+    if minority as f64 > pixels.len() as f64 * GLYPH_DIRECTION_MINORITY {
+        return PixelContrastOutcome::Unresolved("text moved between captures");
+    }
+    let strongest = pixels.iter().fold(0.0f64, |m, p| math_max(m, p.delta));
+    let core_floor = strongest * GLYPH_CORE_COVERAGE;
+    let core_pixels: Vec<&GlyphPixel> = pixels.iter().filter(|p| p.delta >= core_floor).collect();
+    if core_pixels.len() < GLYPH_MIN_PIXELS {
+        return PixelContrastOutcome::Unresolved("too few fully painted glyph pixels");
+    }
+    if core_pixels.iter().filter(|p| p.off_color).count() * 2 > core_pixels.len() {
+        return PixelContrastOutcome::Unresolved("the text is painted by something else");
+    }
+    if let Some(surround) = surround_ground {
+        let under: f64 =
+            core_pixels.iter().map(|p| p.ground).sum::<f64>() / core_pixels.len() as f64;
+        if luminance_ratio(under, surround) >= GROUND_DISAGREEMENT {
+            return PixelContrastOutcome::Unresolved("the hidden text is still painted");
+        }
+    }
+    let mut core: Vec<f64> = core_pixels.iter().map(|p| p.ratio).collect();
+    let mut all: Vec<f64> = pixels.iter().map(|p| p.ratio).collect();
+    core.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let measured = percentile(&core, 50.0);
+    let median = percentile(&all, 50.0);
+    if !measured.is_finite() || measured <= 0.0 {
+        return PixelContrastOutcome::Unresolved("no readable glyph pixels");
+    }
+    if median > measured * VERDICT_MEDIAN_DIVERGENCE {
+        return PixelContrastOutcome::Unresolved("verdict disagrees with its own median");
+    }
+    PixelContrastOutcome::Verdict {
+        measured,
+        median,
+        core_pixels: core.len(),
+    }
+}
+
 /// JS: analyzeVisualContrast — retry a candidate after scrolling it into view
 /// only when the first pass failed for being outside the viewport.
 pub fn needs_scroll_retry(result: &Value) -> bool {
@@ -1142,6 +1380,170 @@ mod tests {
         let nodes = stack_nodes(&d, p, 10.0, 10.0, 0.0).unwrap();
         assert_eq!(nodes[0].el, p);
         assert_eq!(nodes[0].kind, "css");
+    }
+
+    /// `n` pixels at one coverage / ratio pair, all darkening their ground.
+    fn px(n: usize, delta: f64, ratio: f64) -> Vec<GlyphPixel> {
+        vec![GlyphPixel { delta, ratio, ground: 1.0, darkened: true, off_color: false }; n]
+    }
+
+    #[test]
+    fn pixel_verdict_reads_the_painted_glyph_not_its_edges() {
+        // kraflio.com "LinkedIn": white bold 16px on a near-black card. The
+        // painted pixels read 18:1; the antialiased edges read near 1:1 and
+        // outnumber them, which is how the old tenth percentile reported 1.3:1
+        // under a 10.2:1 median.
+        let mut pixels = px(40, 705.0, 18.4);
+        pixels.extend(px(120, 70.0, 1.1));
+        match pixel_contrast_verdict(&pixels, 4000, None) {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 40);
+                assert!((measured - 18.4).abs() < 1e-9);
+                assert!((median - 1.1).abs() < 1e-9);
+            }
+            other => panic!("{other:?}"),
+        }
+        // aisupply.framer.website collapsed accordion trigger: pale grey on
+        // white through an opacity stack. Painted pixels really are 2.2:1.
+        let mut faint = px(40, 240.0, 2.2);
+        faint.extend(px(90, 60.0, 1.3));
+        match pixel_contrast_verdict(&faint, 4000, None) {
+            PixelContrastOutcome::Verdict { measured, .. } => assert!((measured - 2.2).abs() < 1e-9),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixel_verdict_refuses_what_it_cannot_read() {
+        assert_eq!(
+            pixel_contrast_verdict(&px(4, 700.0, 1.2), 4000, None),
+            PixelContrastOutcome::Unresolved("too few glyph pixels")
+        );
+        // adant.ai "60%": a video band inside the clip changes between the two
+        // captures harder than the glyphs do, so the fully painted set is the
+        // churn and the median of everything measured disagrees with it.
+        let mut churn = px(30, 700.0, 1.4);
+        churn.extend(px(200, 300.0, 16.2));
+        assert_eq!(
+            pixel_contrast_verdict(&churn, 4000, None),
+            PixelContrastOutcome::Unresolved("verdict disagrees with its own median")
+        );
+        // A scroll-reveal mid-fade repaints the whole box, not a glyph.
+        assert_eq!(
+            pixel_contrast_verdict(&px(900, 120.0, 2.0), 1000, None),
+            PixelContrastOutcome::Unresolved("box repainted between captures")
+        );
+        // Text mid-animation leaves its old position and its new one in the
+        // same diff, so half the changed pixels moved the other way.
+        let mut moved = px(60, 700.0, 1.2);
+        moved.extend(px(60, 700.0, 16.0).into_iter().map(|p| GlyphPixel { darkened: false, ..p }));
+        assert_eq!(
+            pixel_contrast_verdict(&moved, 4000, None),
+            PixelContrastOutcome::Unresolved("text moved between captures")
+        );
+        // paymentkit.com's hero: the frame without the text still paints it
+        // (an animation left a copy behind), so what the glyphs painted is not
+        // the color they declare and the diff is text over text.
+        let mut ghost = px(40, 120.0, 1.1).into_iter().map(|p| GlyphPixel { off_color: true, ..p }).collect::<Vec<_>>();
+        ghost.extend(px(90, 30.0, 1.4));
+        assert_eq!(
+            pixel_contrast_verdict(&ghost, 4000, None),
+            PixelContrastOutcome::Unresolved("the text is painted by something else")
+        );
+        // paymentkit.com's headline: the frame without the text still holds a
+        // dim copy of it, so the surface under the glyphs is nothing like the
+        // surface beside them in the same box.
+        assert_eq!(
+            pixel_contrast_verdict(&px(40, 700.0, 2.6), 4000, Some(0.02)),
+            PixelContrastOutcome::Unresolved("the hidden text is still painted")
+        );
+        // The surface under the glyphs matching the one beside them answers.
+        assert!(matches!(
+            pixel_contrast_verdict(&px(40, 700.0, 2.6), 4000, Some(0.9)),
+            PixelContrastOutcome::Verdict { .. }
+        ));
+        // The same reading from a glyph that really is its declared color.
+        assert!(painted_is_text_color([252.0, 252.0, 252.0], [255.0, 255.0, 255.0], [20.0, 22.0, 28.0]));
+        assert!(!painted_is_text_color([52.0, 211.0, 153.0], [205.0, 205.0, 205.0], [160.0, 160.0, 160.0]));
+        // One stray full-coverage pixel over a wash of edges: nothing to stand
+        // behind.
+        let mut sparse = px(1, 700.0, 1.2);
+        sparse.extend(px(60, 60.0, 1.1));
+        assert_eq!(
+            pixel_contrast_verdict(&sparse, 4000, None),
+            PixelContrastOutcome::Unresolved("too few fully painted glyph pixels")
+        );
+    }
+
+    #[test]
+    fn blocked_reasons_and_gradient_verdicts() {
+        let blocked = ["opacity stack".to_string(), "backdrop filter".to_string()];
+        assert_eq!(pixel_contrast_blocked(&blocked).as_deref(), Some("backdrop filter"));
+        assert_eq!(
+            pixel_contrast_blocked(&["background-clip text".to_string()]).as_deref(),
+            Some("background-clip text")
+        );
+        assert_eq!(pixel_contrast_blocked(&["opacity stack".to_string()]), None);
+        let white = rgba(255.0, 255.0, 255.0, 1.0);
+        // framai.framer.website glow: the transparent end of the radial
+        // gradient is the stop with the worst contrast, and it is not a light
+        // grey surface. Nothing here knows where in the box the text sits.
+        let glow = [
+            rgba(133.0, 38.0, 254.0, 0.82),
+            rgba(171.0, 171.0, 171.0, 0.0),
+        ];
+        assert_eq!(pick_worst_contrast_color(&white, &glow).unwrap(), glow[1]);
+        assert_eq!(
+            analytic_gradient_verdict(&white, &glow),
+            Some(GradientVerdict::Unresolved)
+        );
+        // overdrive.health `from-primary/10`: a wash of the text's own color
+        // over the card, not a slab of it.
+        let wash = [rgba(55.0, 65.0, 81.0, 0.1), rgba(55.0, 65.0, 81.0, 0.1)];
+        assert_eq!(
+            analytic_gradient_verdict(&rgba(55.0, 65.0, 81.0, 1.0), &wash),
+            Some(GradientVerdict::Unresolved)
+        );
+        // A solid color written as a gradient still answers.
+        let solid = [rgba(62.0, 69.0, 204.0, 1.0), rgba(62.0, 69.0, 204.0, 1.0)];
+        assert_eq!(
+            analytic_gradient_verdict(&white, &solid),
+            Some(GradientVerdict::Color(solid[0]))
+        );
+        // Opaque ends far apart: which one is behind the glyphs decides.
+        let sweep = [rgba(20.0, 20.0, 24.0, 1.0), rgba(240.0, 240.0, 244.0, 1.0)];
+        assert_eq!(
+            analytic_gradient_verdict(&white, &sweep),
+            Some(GradientVerdict::Unresolved)
+        );
+        assert_eq!(analytic_gradient_verdict(&white, &[]), None);
+    }
+
+    #[test]
+    fn the_walk_composites_down_the_stack() {
+        let glass = json!({ "status": "sampled", "color": { "r": 255, "g": 255, "b": 255, "a": 0.1 }, "method": "solid-background" });
+        let scrim = json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 0.5 }, "method": "analytic-gradient" });
+        let ground = json!({ "status": "sampled", "color": { "r": 200, "g": 200, "b": 200, "a": 1 }, "method": "canvas-video-underlay" });
+        let out = composite_stack(&[glass.clone(), scrim], &ground);
+        // 200 under a half-black scrim is 100, and a tenth of white over that
+        // is 116 — not the 255 the old self-compositing walk converged on.
+        assert_eq!(out["color"]["r"].as_f64(), Some(116.0));
+        assert_eq!(out["method"], "solid-background+alpha");
+        // Nothing translucent above it leaves the ground as it was.
+        assert_eq!(composite_stack(&[], &ground), ground);
+        assert!(sample_ends_walk(&json!({ "status": "unresolved", "stop": true })));
+        assert!(!sample_ends_walk(&json!({ "status": "unresolved" })));
+    }
+
+    #[test]
+    fn vector_paint_stops_the_walk() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let avatar = d.add(Some(body), "svg");
+        d.set_rect(avatar, 0.0, 0.0, 40.0, 40.0);
+        let nodes = stack_nodes(&d, avatar, 10.0, 10.0, 0.0).unwrap();
+        assert_eq!(nodes[0].kind, "unreadable");
+        assert_eq!(unreadable_stack_sample(&d, avatar)["reason"], "svg paint");
     }
 
     #[test]

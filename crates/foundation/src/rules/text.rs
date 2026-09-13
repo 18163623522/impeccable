@@ -42,6 +42,38 @@ pub const REPEATED_TEXT_CONTAINER_TAGS: &[&str] = &[
 /// JS: checks.mjs#QUALITY_TEXT_TAGS.
 pub const QUALITY_TEXT_TAGS: &[&str] = &["p", "li", "td", "th", "dd", "blockquote", "figcaption"];
 
+/// Where display type starts, for the tight-leading floor: 1.5x the 16px
+/// default body size. Type at or above it sets its own leading, and a ratio
+/// under 1.3 there is craft rather than crowding. Calibrated on the review
+/// corpus: every reading block reviewers confirmed as harmfully crowded
+/// measured 22px or smaller, while the display-type false positives (section
+/// statements and card headlines set on `p` / `div` / `span` by page
+/// builders) started at 24px and ran to 51px.
+pub const LEADING_DISPLAY_TYPE_PX: f64 = 24.0;
+
+/// How much of a second line box the tight-leading floor needs to see before
+/// it judges leading. Text that renders as one line has no gap between lines
+/// to crowd; wrapped text is two line boxes or more, so the midpoint
+/// separates them.
+pub const LEADING_MIN_LINE_BOXES: f64 = 1.5;
+
+/// Heading context for the tight-leading floor. Headings carry their own
+/// leading scale, and their text sits in a child `<a>` or `<span>` as often
+/// as in the heading element, so the exemption is an ancestor test rather
+/// than a tag test, and it honors the ARIA role a card title uses in place of
+/// a heading tag.
+pub const LEADING_HEADING_CONTEXT: &str = "h1, h2, h3, h4, h5, h6, [role=\"heading\"]";
+
+/// The tags that carry a heading's own text when it is not in the heading
+/// element itself. The ancestor exemption is limited to these, because a
+/// heading can also contain a block of body copy: a page builder that nests a
+/// card's description paragraph inside the card's `h3` is still setting
+/// reading copy, and that block keeps the floor.
+pub const LEADING_HEADING_TEXT_TAGS: &[&str] = &[
+    "a", "span", "b", "i", "em", "strong", "small", "mark", "u", "abbr", "cite", "q", "time",
+    "label", "font", "bdi", "bdo", "ins", "del",
+];
+
 /// JS: checks.mjs#TEXT_EDGE_TAGS (upper-case tag names, as the JS set).
 pub const TEXT_EDGE_TAGS: &[&str] = &[
     "A",

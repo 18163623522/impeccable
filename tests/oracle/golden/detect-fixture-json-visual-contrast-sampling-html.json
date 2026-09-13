@@ -1,0 +1,7 @@
+{
+  "stdout": "[\n  {\n    \"antipattern\": \"gradient-text\",\n    \"name\": \"Gradient text\",\n    \"description\": \"Gradient text is decorative rather than meaningful — a common AI tell, especially on headings and metrics. Use solid colors for text.\",\n    \"severity\": \"warning\",\n    \"category\": \"slop\",\n    \"file\": \"<REPO>/tests/fixtures/antipatterns/visual-contrast-sampling.html\",\n    \"line\": 0,\n    \"snippet\": \"background-clip: text + gradient\"\n  },\n  {\n    \"antipattern\": \"gradient-text\",\n    \"name\": \"Gradient text\",\n    \"description\": \"Gradient text is decorative rather than meaningful — a common AI tell, especially on headings and metrics. Use solid colors for text.\",\n    \"severity\": \"warning\",\n    \"category\": \"slop\",\n    \"file\": \"<REPO>/tests/fixtures/antipatterns/visual-contrast-sampling.html\",\n    \"line\": 0,\n    \"snippet\": \"background-clip: text + gradient\"\n  }\n]\n",
+  "stderr": "",
+  "exit": 2,
+  "signal": null,
+  "files": {}
+}

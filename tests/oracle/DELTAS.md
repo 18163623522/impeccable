@@ -164,3 +164,19 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: a fixture for the visual-contrast sampling decisions
+
+`tests/fixtures/antipatterns/visual-contrast-sampling.html` is new: the
+reduced false positives and protected true positives behind the visual pass's
+sampling fix (glass panel, filtered wrapper, transparent gradient stop, a
+ten-percent tint of the text's own color, vector avatar paint, gradient-clipped
+heading, faded accordion trigger, translucent pill on a pale photo). The static
+text scan reads the file like any other fixture; the only rule with an opinion
+about it is `gradient-text`, which fires twice on the one `background-clip:
+text` heading (the existing duplicate the CSS-text and element forms produce).
+The dir-wide goldens gain those two findings and their count moves 419 → 421.
+Nothing else in any golden changed: the fix is in the browser passes, which
+have no goldens (browser output depends on the machine).
+
+- `detect-dir-text-all-fixtures`, `detect-dir-json-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text`, `detect-no-advisory-json`, and the two new per-fixture cases `detect-fixture-text-visual-contrast-sampling-html` / `detect-fixture-json-visual-contrast-sampling-html`.

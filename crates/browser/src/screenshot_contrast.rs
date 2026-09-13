@@ -2,10 +2,14 @@
 //! fallback for text over visual backgrounds. Two clipped screenshots (text
 //! visible, text hidden) are diffed; the JS does the diff on an in-page
 //! canvas, this port decodes the PNGs with the `png` crate and runs the same
-//! arithmetic (channel-delta gate ≥ 10, ≥ 8 glyph pixels, p10 / median over
-//! sorted WCAG ratios, `toFixed(1)` in the snippet).
+//! arithmetic (channel-delta gate ≥ 10, `toFixed(1)` in the snippet). Which of
+//! the changed pixels answer for the text, and when the set answers nothing,
+//! are decisions in `impeccable_core::browser::visual`.
 
 use base64::Engine as _;
+use impeccable_core::browser::visual::{
+    self, GlyphPixel, PixelContrastOutcome, GLYPH_MIN_PIXELS,
+};
 use impeccable_core::js::{math_max, number_to_string, to_fixed};
 use serde_json::{json, Value};
 
@@ -70,9 +74,7 @@ pub fn sanitize_screenshot_clip(clip: Option<&Value>, viewport_width: Option<f64
 pub struct ContrastMetrics {
     pub glyph_pixels: usize,
     pub strongest_delta: f64,
-    pub worst_ratio: Option<f64>,
-    pub p10_ratio: Option<f64>,
-    pub median_ratio: Option<f64>,
+    pub outcome: PixelContrastOutcome,
 }
 
 fn decode_png_rgba(base64_data: &str) -> Option<(u32, u32, Vec<u8>)> {
@@ -165,9 +167,12 @@ pub fn compare_screenshot_contrast(
             _ => None,
         }
     };
-    let mut ratios: Vec<f64> = Vec::new();
-    let mut glyph_pixels = 0usize;
+    let mut pixels: Vec<GlyphPixel> = Vec::new();
     let mut strongest_delta = 0.0f64;
+    // The box the text did not touch: the surface beside the glyphs, which is
+    // what the surface under them should look like.
+    let mut surround_sum = 0.0f64;
+    let mut surround_count = 0usize;
     for y in 0..height {
         for x in 0..width {
             let bi = (y * bw + x) * 4;
@@ -180,33 +185,39 @@ pub fn compare_screenshot_contrast(
                 + (bp[3] as f64 - ap[3] as f64).abs();
             strongest_delta = f64::max(strongest_delta, delta);
             if delta < 10.0 {
+                // Every sixteenth of them is plenty for a mean, and the box
+                // can be half a million pixels.
+                if x % 4 == 0 && y % 4 == 0 {
+                    surround_sum += luminance(ap[0] as f64, ap[1] as f64, ap[2] as f64);
+                    surround_count += 1;
+                }
                 continue;
             }
-            glyph_pixels += 1;
-            let fg = css_text_color.unwrap_or((bp[0] as f64, bp[1] as f64, bp[2] as f64));
+            let painted = (bp[0] as f64, bp[1] as f64, bp[2] as f64);
+            let fg = css_text_color.unwrap_or(painted);
             let bg = (ap[0] as f64, ap[1] as f64, ap[2] as f64);
-            ratios.push(ratio(fg, bg));
+            let ground = luminance(bg.0, bg.1, bg.2);
+            pixels.push(GlyphPixel {
+                delta,
+                ratio: ratio(fg, bg),
+                ground,
+                darkened: luminance(painted.0, painted.1, painted.2) < ground,
+                off_color: css_text_color.is_some_and(|css| {
+                    !visual::painted_is_text_color(
+                        [painted.0, painted.1, painted.2],
+                        [css.0, css.1, css.2],
+                        [bg.0, bg.1, bg.2],
+                    )
+                }),
+            });
         }
     }
-    if ratios.len() < 8 {
-        return Ok(Some(ContrastMetrics {
-            glyph_pixels,
-            strongest_delta,
-            worst_ratio: None,
-            p10_ratio: None,
-            median_ratio: None,
-        }));
-    }
-    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = ratios.len();
-    let pick =
-        |pct: f64| ratios[usize::min(n - 1, ((pct / 100.0) * n as f64).floor().max(0.0) as usize)];
+    let surround = (surround_count >= GLYPH_MIN_PIXELS)
+        .then(|| surround_sum / surround_count as f64);
     Ok(Some(ContrastMetrics {
-        glyph_pixels,
+        glyph_pixels: pixels.len(),
         strongest_delta,
-        worst_ratio: Some(ratios[0]),
-        p10_ratio: Some(pick(10.0)),
-        median_ratio: Some(pick(50.0)),
+        outcome: visual::pixel_contrast_verdict(&pixels, width * height, surround),
     }))
 }
 
@@ -233,6 +244,16 @@ pub fn capture_visual_contrast_candidate(
     candidate: &Value,
     viewport_width: f64,
 ) -> CdpResult<Option<RawFinding>> {
+    let reasons: Vec<String> = candidate
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().map(js_string).collect())
+        .unwrap_or_default();
+    // Refused before the screenshots: the pixels would not answer for this
+    // text, and a clipped capture pair is the expensive part of the pass.
+    if visual::pixel_contrast_blocked(&reasons).is_some() {
+        return Ok(None);
+    }
     let Some(clip) = sanitize_screenshot_clip(candidate.get("clip"), Some(viewport_width)) else {
         return Ok(None);
     };
@@ -311,14 +332,16 @@ pub fn capture_visual_contrast_candidate(
     let Some(metrics) = metrics else {
         return Ok(None);
     };
-    let Some(p10) = metrics.p10_ratio else {
+    let PixelContrastOutcome::Verdict {
+        measured, median, ..
+    } = metrics.outcome
+    else {
         return Ok(None);
     };
-    if !p10.is_finite() || metrics.glyph_pixels < 8 {
+    if !measured.is_finite() || metrics.glyph_pixels < GLYPH_MIN_PIXELS {
         return Ok(None);
     }
     let threshold = num(candidate.get("threshold"));
-    let measured = p10;
     if measured >= threshold {
         return Ok(None);
     }
@@ -329,18 +352,17 @@ pub fn capture_visual_contrast_candidate(
         }
         _ => String::new(),
     };
-    let reasons: Vec<String> = candidate
-        .get("reasons")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().take(3).map(js_string).collect())
-        .unwrap_or_default();
-    let joined = reasons.join(", ");
+    let joined = reasons
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     let reason_label = if joined.is_empty() {
         "visual background".to_string()
     } else {
         joined
     };
-    let median = metrics.median_ratio.unwrap_or(f64::NAN);
     Ok(Some(RawFinding {
         id: "low-contrast",
         snippet: format!(
@@ -417,34 +439,75 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    fn measured(m: &ContrastMetrics) -> Option<f64> {
+        match m.outcome {
+            PixelContrastOutcome::Verdict { measured, .. } => Some(measured),
+            PixelContrastOutcome::Unresolved(_) => None,
+        }
+    }
+
     #[test]
     fn compare_counts_glyph_pixels_and_ratios() {
-        // 4x4: before has 10 dark pixels on white; after is all white.
-        let mut before = vec![255u8; 4 * 4 * 4];
+        // 8x8: before has 10 dark pixels on white; after is all white.
+        let mut before = vec![255u8; 8 * 8 * 4];
         for i in 0..10 {
             before[i * 4] = 20;
             before[i * 4 + 1] = 20;
             before[i * 4 + 2] = 20;
         }
-        let after = vec![255u8; 4 * 4 * 4];
+        let after = vec![255u8; 8 * 8 * 4];
         let cand = json!({ "textColor": { "r": 20, "g": 20, "b": 20 }, "preferRenderedForeground": false });
         let m = compare_screenshot_contrast(
-            &png_base64(4, 4, &before),
-            &png_base64(4, 4, &after),
+            &png_base64(8, 8, &before),
+            &png_base64(8, 8, &after),
             &cand,
         )
         .unwrap()
         .unwrap();
         assert_eq!(m.glyph_pixels, 10);
-        assert!(m.p10_ratio.unwrap() > 15.0);
-        // Fewer than 8 glyph pixels → null ratios.
-        let mut few = vec![255u8; 4 * 4 * 4];
+        assert!(measured(&m).unwrap() > 15.0);
+        // Fewer than 8 glyph pixels → no verdict.
+        let mut few = vec![255u8; 8 * 8 * 4];
         few[0] = 0;
         let m =
-            compare_screenshot_contrast(&png_base64(4, 4, &few), &png_base64(4, 4, &after), &cand)
+            compare_screenshot_contrast(&png_base64(8, 8, &few), &png_base64(8, 8, &after), &cand)
                 .unwrap()
                 .unwrap();
         assert_eq!(m.glyph_pixels, 1);
-        assert!(m.p10_ratio.is_none());
+        assert_eq!(
+            m.outcome,
+            PixelContrastOutcome::Unresolved("too few glyph pixels")
+        );
+    }
+
+    #[test]
+    fn antialiased_edges_do_not_set_the_verdict() {
+        // A dark glyph on white: 12 fully painted pixels and 20 edge pixels at
+        // a tenth of the coverage. The edges read near 1:1; the verdict must
+        // come from the painted ones.
+        let mut before = vec![255u8; 16 * 16 * 4];
+        for i in 0..12 {
+            for c in 0..3 {
+                before[i * 4 + c] = 20;
+            }
+        }
+        for i in 12..32 {
+            for c in 0..3 {
+                before[i * 4 + c] = 232;
+            }
+        }
+        let after = vec![255u8; 16 * 16 * 4];
+        // preferRenderedForeground: the painted pixel is the foreground, which
+        // is what makes an edge pixel measure as background over background.
+        let cand = json!({ "preferRenderedForeground": true, "textColor": Value::Null });
+        let m = compare_screenshot_contrast(
+            &png_base64(16, 16, &before),
+            &png_base64(16, 16, &after),
+            &cand,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(m.glyph_pixels, 32);
+        assert!(measured(&m).unwrap() > 15.0, "{:?}", m.outcome);
     }
 }

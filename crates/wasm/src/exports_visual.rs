@@ -187,6 +187,20 @@ pub fn vc_alpha_composite(sample_json: &str, under_json: &str) -> String {
     out(&vc::alpha_composite(parse(sample_json), &parse(under_json)))
 }
 
+/// The walk's stop at paint it cannot read (an `unreadable` stack node).
+#[wasm_bindgen]
+pub fn vc_unreadable_stack_sample(node: u32) -> String {
+    out(&with_dom(|dom| vc::unreadable_stack_sample(dom, node)))
+}
+
+/// The walk's compositing fold: the translucent samples it passed through
+/// (topmost first) over the opaque sample beneath them.
+#[wasm_bindgen]
+pub fn vc_composite_stack(pending_json: &str, ground_json: &str) -> String {
+    let pending: Vec<Value> = serde_json::from_str(pending_json).unwrap_or_default();
+    out(&vc::composite_stack(&pending, &parse(ground_json)))
+}
+
 /// The walk's final unresolved sample from the collected reasons (`[string]`).
 #[wasm_bindgen]
 pub fn vc_unresolved_from_reasons(reasons_json: &str) -> String {

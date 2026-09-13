@@ -90,6 +90,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "clipPath",
     "color",
     "colorScheme",
+    "contain",
     "content",
     "contentVisibility",
     "cssFloat",
@@ -140,9 +141,12 @@ pub const STYLE_PROPS: &[&str] = &[
     "paddingLeft",
     "paddingRight",
     "paddingTop",
+    "perspective",
     "pointerEvents",
     "position",
     "right",
+    "rotate",
+    "scale",
     "textAlign",
     "textDecoration",
     "textDecorationLine",
@@ -155,6 +159,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "transitionDuration",
     "transitionProperty",
     "transitionTimingFunction",
+    "translate",
     "unicodeBidi",
     "verticalAlign",
     "visibility",
@@ -164,6 +169,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "webkitTextFillColor",
     "whiteSpace",
     "width",
+    "willChange",
     "wordBreak",
     "zIndex",
 ];
@@ -267,8 +273,9 @@ pub struct SnapNode {
     #[serde(rename = "r", default)]
     pub rect: Option<[f64; 4]>,
     /// `[clientWidth, clientHeight, clientLeft, scrollWidth, scrollLeft,
-    /// offsetWidth, offsetHeight]` (`null` → NaN, as `undefined` crosses
-    /// into a wasm f64).
+    /// offsetWidth, offsetHeight, scrollHeight]` (`null` → NaN, as
+    /// `undefined` crosses into a wasm f64). Captures older than
+    /// `scrollHeight` carry seven columns, and it reads as NaN.
     #[serde(rename = "m", default)]
     pub metrics: Vec<Option<f64>>,
     /// `checkVisibility`: 1 / 0, `-1` when the method is missing.
@@ -899,6 +906,9 @@ impl Dom for SnapshotDom {
     fn scroll_left(&self, el: ElId) -> f64 {
         metric(&self.snap.node(el).metrics, 4)
     }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        metric(&self.snap.node(el).metrics, 7)
+    }
     fn offset_width(&self, el: ElId) -> f64 {
         metric(&self.snap.node(el).metrics, 5)
     }
@@ -1089,6 +1099,31 @@ mod tests {
                 "aspectRatio".to_string()
             ]
         );
+    }
+
+    /// The containing-block properties and `scrollHeight` joined the capture
+    /// later: a recording without them reads the properties as empty and the
+    /// metric as NaN, which the paint gate takes as undecided.
+    #[test]
+    fn older_capture_without_containing_block_props_or_scroll_height() {
+        let d = snap(SMALL);
+        for prop in ["willChange", "contain", "translate", "scale", "rotate", "perspective"] {
+            assert_eq!(d.style(4, prop), "", "{prop}");
+            assert!(STYLE_PROPS.contains(&prop), "{prop} missing from STYLE_PROPS");
+        }
+        assert!(d.scroll_height(4).is_nan());
+        let json = r#"{
+          "v": 1, "hostname": "example.test", "innerWidth": 1280, "innerHeight": 800,
+          "styleProps": ["display"], "pseudoProps": ["content"], "strings": ["block"],
+          "documentElement": 1, "body": 2,
+          "els": [
+            {"t":"HTML","c":[2],"s":[0],"m":[1280,800,0,1280,0,1280,800,800]},
+            {"t":"BODY","p":1,"c":[],"s":[0],"m":[1280,2400,0,1280,0,1280,2400]}
+          ]
+        }"#;
+        let d = snap(json);
+        assert_eq!(d.scroll_height(1), 800.0);
+        assert!(d.scroll_height(2).is_nan());
     }
 
     #[test]

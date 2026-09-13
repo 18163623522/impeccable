@@ -472,23 +472,52 @@ rest. An element is not painted at capture when:
   x axis (`hidden`, `clip`, `auto`, `scroll`: carousel tracks, scrolled table
   columns) or on the y axis (`hidden` and `clip` only). Which ancestors clip
   follows the containing block: every ancestor for an in-flow box, the
-  containing block and up for an absolute box, a transformed ancestor and up
+  containing block and up for an absolute box, a containing ancestor and up
   for a fixed box. `html` and `body` never count as clips, and neither does a
   vertical scroll container or a full-viewport fixed layer on the y axis, so an
-  app shell or a smooth-scroll viewport keeps the content below its fold;
+  app shell or a smooth-scroll viewport keeps the content below its fold.
+  Once the walk passes a scroll container that has content to scroll to
+  (`scrollWidth` or `scrollHeight` past the client size, or not recorded), the
+  ancestors above it are tested against the scroller's box on that axis, not
+  the element's: scrolling brings the element into the scroller's box, so a
+  Tailwind shell (`h-screen overflow-hidden` around `main { overflow-y: auto }`)
+  keeps everything main scrolls to, while a column with nothing to scroll
+  inside a frame that hides overflow still loses what the frame hides. Cells
+  past a horizontal scroller's own edge are dropped as before;
 - its box lies wholly outside the scrollable document (before the start, or
   past the root's scroll width, right to left aware), or it sits in a fixed
   layer whose own box lies outside the viewport.
 
+A fixed box is contained, not a viewport layer, under an ancestor with
+`transform`, `translate`, `scale`, `rotate`, `perspective`, `filter` or
+`backdrop-filter` other than `none`, a `will-change` naming one of them,
+or `contain: paint | layout | strict | content` (`container-type` applies
+only size and style containment and holds nothing). The snapshot now records
+`willChange`, `contain`, `translate`, `scale`, `rotate` and `perspective`, and
+`scrollHeight` as an eighth metric. A recording without them still loads (the
+properties read as empty, the metric as NaN), and the gate reads an unrecorded
+property as undecided: a fixed box under an undecided ancestor is kept, and an
+undecided ancestor never makes a box clip sooner.
+
 Covered: `all-caps-body`, `body-text-viewport-edge`, `cramped-padding`,
 `extreme-negative-tracking`, `gray-on-color`, `justified-text`, `line-length`,
 `low-contrast` (the computed and placeholder forms of the element pass),
-`text-overflow`, `tight-leading`, `tiny-text`, `undersized-ui-text`, and
-`buried-raster`. `buried-raster` measures the element's own opacity, so for it
-only ancestors count toward transparency, and a raster under 0.15 opacity that
-declares an opacity transition (`opacity` or `all` with a non-zero duration) or
-an animation whose keyframes move opacity (or cannot be read) is a state layer
-between two states (a crossfade, a slideshow, a lazy-load fade) and is skipped.
+`text-overflow`, `tight-leading`, `tiny-text`, `undersized-ui-text`,
+`wide-tracking`, and `buried-raster`. `buried-raster` measures the element's
+own opacity, so for it only ancestors count toward transparency, and a raster
+under 0.15 opacity is a state layer and skipped when an animation moves its
+opacity (or its keyframes cannot be read), or when it declares an opacity
+transition (`opacity` or `all` with a non-zero duration) and carries a second
+marker: any animation, `loading="lazy"` or a lazy-loading library's attribute
+(`data-src`, `data-srcset`, `data-lazy*`, `data-original`, `data-bg`,
+`data-loaded`, `data-ll-status`), a class on it or its parent naming `lazy`,
+`loading` or `preload`, a `<video>` parent, or a sibling that is or holds a
+video or a raster over at least half of its box (a crossfade stack, a poster
+over a video). A declared transition alone is not enough, because Tailwind's
+`transition` utility lists `opacity` on everything it animates. A capture
+records no transition in progress, so a script-driven crossfade over layers
+that are not siblings is still reported, and an image genuinely held buried
+that also carries `loading="lazy"` or sits over a sibling image is skipped.
 
 Not covered: the visual-contrast pixel pass, the page passes (`heading-rhythm`,
 `text-occlusion`, `first-viewport-column-overflow`, `kicker-above-heading`,
@@ -502,16 +531,30 @@ and the static HTML and text engines, which measure no boxes.
 
 The new fixture `painted-at-capture.html` pairs each hidden case (a collapsed
 submenu, the third cell of a horizontal scroller, a wrapper with no size, a
-faded crossfade layer, an off-canvas panel) with a visible twin carrying the
-same measurement, plus a popover that escapes a clip below its containing
-block. The file scan has no boxes and reports all fifteen; the browser test
-`the_rule_pass_skips_what_is_not_painted` (crates/browser/tests/evidence.rs)
-pins that the URL engine reports only the twins, and fails with the gate off.
+faded crossfade layer, an off-canvas panel, a column below a frame with
+nothing to scroll, a lazy image fading in, a poster over a video, a fixed
+drawer past the viewport) with a visible twin carrying the same measurement,
+plus a popover that escapes a clip below its containing block, text below an
+inner scroller's fold, a buried image with Tailwind's transition list, and a
+fixed badge inside each containing-block trigger (`will-change`, `contain`,
+`translate`, `scale`, `rotate`, `perspective`, `backdrop-filter`). The file
+scan has no boxes and reports all twenty-eight; the
+browser test `the_rule_pass_skips_what_is_not_painted`
+(crates/browser/tests/evidence.rs) pins that the URL engine reports only the
+twins, and fails with the gate off.
 
-On the run 9 recordings the gate removes 3,816 of 15,609 findings and adds none.
-Every harmful cluster it touches keeps a painted finding in the same capture
-except the yna.co.kr weather carousel, whose green and orange status words are
-only off-screen slides at capture.
+On the run 9 recordings the gate removes 3,789 of 15,609 findings and adds
+none: `body-text-viewport-edge` 139, `buried-raster` 1,217, `cramped-padding`
+8, `extreme-negative-tracking` 12, `justified-text` 55, `line-length` 49,
+`low-contrast` 1,041, `text-overflow` 13, `tight-leading` 102, `tiny-text` 135,
+`undersized-ui-text` 986, `wide-tracking` 32. Every harmful cluster it touches
+(470 confirmed-harmful removals, as before) keeps a painted finding in the
+same capture except the yna.co.kr
+weather carousel, whose green and orange status words are only off-screen
+slides at capture. The recordings predate the new containing-block properties,
+so the 23 fixed-layer removals of the first cut (a parked mobile menu, a side
+nav, a newsflash popup) are kept as undecided, and 4 swiper arrow buttons at
+opacity 0 with only a declared transition are reported again.
 
-- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: new cases, the static engine's fifteen findings.
-- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` (409 to 424), `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same fifteen findings in the sweeps; every changed line adds a finding on the new fixture or moves the count.
+- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: new cases, the static engine's twenty-eight findings.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` (409 to 437), `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same twenty-eight findings in the sweeps; every changed line adds a finding on the new fixture or moves the count.

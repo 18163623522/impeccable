@@ -222,6 +222,20 @@ fn the_rule_pass_skips_what_is_not_painted() {
         ("buried-raster", "#flag-buried-photo"),
         // An absolute popover escapes a clip below its containing block.
         ("undersized-ui-text", "#flag-popover-link"),
+        // Reached by scrolling the shell's main, under a wrapper that hides
+        // overflow.
+        ("low-contrast", "#flag-shell-below-fold"),
+        // A transition utility alone does not make a buried image a state.
+        ("buried-raster", "#flag-tw-buried-photo"),
+        // A fixed badge inside a containing block sits against it, not
+        // against the viewport.
+        ("undersized-ui-text", "#flag-cb-will-link"),
+        ("undersized-ui-text", "#flag-cb-contain-link"),
+        ("undersized-ui-text", "#flag-cb-translate-link"),
+        ("undersized-ui-text", "#flag-cb-scale-link"),
+        ("undersized-ui-text", "#flag-cb-rotate-link"),
+        ("undersized-ui-text", "#flag-cb-perspective-link"),
+        ("undersized-ui-text", "#flag-cb-backdrop-link"),
     ] {
         assert!(flagged.contains(&want), "missing {want:?} in {flagged:?}");
     }
@@ -234,6 +248,10 @@ fn the_rule_pass_skips_what_is_not_painted() {
         "#pass-crossfade-poster",
         "#pass-crossfade-copy",
         "#pass-offcanvas-link",
+        "#pass-frame-below",
+        "#pass-lazy-photo",
+        "#pass-video-poster",
+        "#pass-parked-link",
     ] {
         assert!(
             !flagged.iter().any(|(_, s)| *s == unwanted),

@@ -1292,6 +1292,31 @@ fn browser_value_ignored(f: &BrowserFinding, entries: &[(String, String)]) -> bo
     })
 }
 
+/// The elements the element-level scan visits. `document.body` and the
+/// document element hold the page rather than any component in it, and the
+/// overlay, live-mode and host-extension subtrees are not the page's own
+/// markup. Nothing outside this set can ever produce a finding, so a check
+/// that hands a finding to an ancestor has to ask this first.
+pub fn element_is_scanned(dom: &dyn Dom, el: ElId) -> bool {
+    if Some(el) == dom.body() || Some(el) == dom.document_element() {
+        return false;
+    }
+    if super::dom::closest_or_none(
+        dom,
+        el,
+        ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip",
+    )
+    .is_some()
+    {
+        return false;
+    }
+    let el_id = super::dom::safe_id(dom, el);
+    if el_id.starts_with("claude-") || el_id.starts_with("cic-") {
+        return false;
+    }
+    super::dom::closest_or_none(dom, el, "[id^=\"impeccable-live-\"]").is_none()
+}
+
 /// JS: index.mjs#collectBrowserFindings()
 pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> CollectResult {
     use super::element_checks as ec;
@@ -1319,7 +1344,6 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     let design_system = browser_design_system_config(config);
     let mut design_seen = DesignSeen::default();
     let body = dom.body();
-    let root = dom.document_element();
     // JS `document.body` may be null on a bare document; every
     // `addBrowserFindings(groupMap, document.body, ...)` then keys on null.
     // Elements never equal null, so the page-level groups collapse under
@@ -1327,23 +1351,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     let body_key = body.unwrap_or(0);
 
     for el in dom.query_all(None, "*").unwrap_or_default() {
-        if super::dom::closest_or_none(
-            dom,
-            el,
-            ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip",
-        )
-        .is_some()
-        {
-            continue;
-        }
-        let el_id = super::dom::safe_id(dom, el);
-        if el_id.starts_with("claude-") || el_id.starts_with("cic-") {
-            continue;
-        }
-        if super::dom::closest_or_none(dom, el, "[id^=\"impeccable-live-\"]").is_some() {
-            continue;
-        }
-        if Some(el) == body || Some(el) == root {
+        if !element_is_scanned(dom, el) {
             continue;
         }
 

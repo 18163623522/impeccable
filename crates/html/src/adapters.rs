@@ -920,9 +920,18 @@ fn positioned_child_is_decorative(child: &StaticElement<'_>) -> bool {
     false
 }
 
-/// A layer the clip would really trap, whatever else it looks like.
+/// JS `el.matches(selector)`: `closest` stops at the element itself, so a
+/// self match is the one it returns.
+fn element_matches(el: &StaticElement<'_>, selector: &str) -> bool {
+    el.closest(selector).is_some_and(|m| m.id() == el.id())
+}
+
+/// A layer the clip would really trap, whatever else it looks like. The layer
+/// itself counts, not only a descendant of it: an empty `role="menu"` is a
+/// menu.
 fn positioned_child_is_popover_layer(child: &StaticElement<'_>) -> bool {
-    child.query_selector(POPOVER_LAYER_SELECTOR).is_some()
+    element_matches(child, POPOVER_LAYER_SELECTOR)
+        || child.query_selector(POPOVER_LAYER_SELECTOR).is_some()
 }
 
 /// A positioned child that only paints: nothing to read, nothing to click,
@@ -936,8 +945,10 @@ fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
     if sv(style, "pointerEvents") == "none" {
         return true;
     }
-    let opacity = sv(style, "opacity");
-    if !opacity.is_empty() && parse_float(opacity) <= 0.05 {
+    // The child's own `opacity`, not the chain's, and a value that does not
+    // parse is not a transparent layer.
+    let opacity = parse_float(sv(style, "opacity"));
+    if opacity.is_finite() && opacity <= 0.05 {
         return true;
     }
     if child.children().is_empty() {
@@ -991,19 +1002,34 @@ fn clipped_axes(style: &StyleValues) -> Option<(bool, bool)> {
     Some((clip_x, clip_y))
 }
 
-/// Nested clips repeat one decision, so the outermost container the child
-/// escapes is the one that owns it.
-fn ancestor_clip_traps_child(el: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
-    let mut current = el.parent_element();
-    while let Some(ancestor) = current {
-        if let Some((clip_x, clip_y)) = clipped_axes(ancestor.style()) {
-            if !clipping_container_is_intentional_viewport(&ancestor)
+/// Whether `el` may report a clipped child, its own or one it takes off a
+/// descendant container. `html` and `body` hold the page rather than any
+/// component in it: `overflow: hidden` there is the standard guard against
+/// sideways scrolling, and the browser engine never scans either, so a
+/// finding handed to one of them would not exist there at all.
+fn clip_container_can_own_finding(el: &StaticElement<'_>) -> bool {
+    let tag = el.tag_lower();
+    tag != "html" && tag != "body" && !clipping_container_is_intentional_viewport(el)
+}
+
+/// Nested clips repeat one decision about the same layer. The clip nearest
+/// the child is the one that cuts it first and the one whose component the
+/// layer belongs to, so an outer container defers to any clipping container
+/// between it and the child that traps the same layer.
+fn nearer_clip_traps_child(el: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
+    let mut current = child.parent_element();
+    while let Some(inner) = current {
+        if inner.id() == el.id() {
+            return false;
+        }
+        if let Some((clip_x, clip_y)) = clipped_axes(inner.style()) {
+            if clip_container_can_own_finding(&inner)
                 && positioned_style_implies_escape_axis(&StyleRef(child.style()), clip_x, clip_y)
             {
                 return true;
             }
         }
-        current = ancestor.parent_element();
+        current = inner.parent_element();
     }
     false
 }
@@ -1013,36 +1039,37 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
     let Some((clip_x, clip_y)) = clipped_axes(style) else {
         return Vec::new();
     };
-    if clipping_container_is_intentional_viewport(el) {
+    if !clip_container_can_own_finding(el) {
         return Vec::new();
     }
     for child in el.query_selector_all("*") {
         let child_style = child.style();
         let pos = sv(child_style, "position");
-        if pos == "absolute" || pos == "fixed" {
-            if positioned_child_is_decorative(&child)
-                || (!positioned_child_is_popover_layer(&child)
-                    && positioned_child_is_ornament(&child))
-            {
-                continue;
-            }
-            // No layout statically: `positionedChildEscapesClip` is null, and
-            // so is the transform offset of a masked reveal.
-            if !positioned_style_implies_escape_axis(&StyleRef(child_style), clip_x, clip_y) {
-                continue;
-            }
-            if ancestor_clip_traps_child(el, &child) {
-                continue;
-            }
-            return vec![RuleHit::new(
-                "clipped-overflow-container",
-                format!(
-                    "{} clips positioned {}",
-                    class_selector(el),
-                    class_selector(&child)
-                ),
-            )];
+        if pos != "absolute" && pos != "fixed" {
+            continue;
         }
+        if positioned_child_is_decorative(&child) {
+            continue;
+        }
+        // No layout statically: `positionedChildEscapesClip` is null, and
+        // so is the transform offset of a masked reveal.
+        if !positioned_style_implies_escape_axis(&StyleRef(child_style), clip_x, clip_y) {
+            continue;
+        }
+        if !positioned_child_is_popover_layer(&child) && positioned_child_is_ornament(&child) {
+            continue;
+        }
+        if nearer_clip_traps_child(el, &child) {
+            continue;
+        }
+        return vec![RuleHit::new(
+            "clipped-overflow-container",
+            format!(
+                "{} clips positioned {}",
+                class_selector(el),
+                class_selector(&child)
+            ),
+        )];
     }
     Vec::new()
 }

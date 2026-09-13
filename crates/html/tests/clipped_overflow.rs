@@ -33,8 +33,13 @@ fn flag_column_containers_are_reported_with_the_child_they_cut() {
         ("flag-overlay-surface", "div.pop.modal-overlay"),
         ("flag-ribbon-notch", "span.ribbon"),
         ("flag-rail-tooltip", "span.rail-tooltip"),
-        ("flag-outer-clip", "span.tip-negative"),
+        // Nested clips: the row nearest each layer owns it, and the second
+        // row is its own finding rather than one the shell absorbs.
+        ("flag-nested-row", "span.tip-negative"),
+        ("flag-nested-note", "span.tip-second"),
         ("flag-translated-menu", "div.translated-menu"),
+        // An empty menu layer is still a menu, not an ornament.
+        ("flag-empty-menu", "div.empty-menu"),
     ] {
         let want = format!("clips positioned {child}");
         assert!(
@@ -68,8 +73,8 @@ fn pass_column_containers_are_not_reported() {
         "pass-x-clip",
         "pass-swiper-rail",
         "pass-swap-reveal",
-        // The inner of two nested clips: the outermost one owns the finding.
-        "inner-clip",
+        // The shell around two nested clips: the nearer clip owns each layer.
+        "nested-outer-clip",
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(container)),

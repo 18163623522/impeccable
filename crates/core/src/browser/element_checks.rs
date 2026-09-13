@@ -15,8 +15,7 @@ use super::BrowserFinding;
 use crate::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, is_screen_reader_only_text_style,
-    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input,
-    RadialSpotlightInput, SrOnlyMetrics,
+    GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
@@ -985,8 +984,11 @@ pub fn positioned_child_is_ornament(dom: &dyn Dom, child: ElId) -> bool {
     if dom.style(child, "pointerEvents") == "none" {
         return true;
     }
-    let opacity = dom.style(child, "opacity");
-    if !opacity.is_empty() && pf0(&opacity) <= 0.05 {
+    // The child's own `opacity`, not the chain's: an ancestor that fades the
+    // whole component fades the container too, and says nothing about this
+    // layer. A value that does not parse is not a transparent layer.
+    let opacity = parse_float(&dom.style(child, "opacity"));
+    if opacity.is_finite() && opacity <= 0.05 {
         return true;
     }
     if dom.children(child).is_empty() {
@@ -1199,20 +1201,35 @@ fn clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: 
         || positioned_child_is_popover_layer(dom, child)
 }
 
-/// Nested clips repeat one decision, so the outermost container the child
-/// escapes is the one that owns it.
-fn ancestor_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
-    let mut current = dom.parent(el);
-    while let Some(ancestor) = current {
-        if let Some((clip_x, clip_y)) = clipped_axes(dom, ancestor) {
-            if !clipping_container_is_intentional_viewport(dom, ancestor)
-                && !clipping_container_is_page_shell(dom, ancestor)
-                && clip_traps_child(dom, ancestor, child, clip_x, clip_y)
+/// Whether `el` may report a clipped child. The scan only visits the elements
+/// in [`super::driver::element_is_scanned`], so a container outside that set
+/// can never report anything and nothing may be handed to it: `body {
+/// overflow: hidden }` is the common shape, and it is how a page stops
+/// sideways scrolling rather than a component cutting a layer.
+fn clip_container_can_own_finding(dom: &dyn Dom, el: ElId) -> bool {
+    super::driver::element_is_scanned(dom, el)
+        && !clipping_container_is_intentional_viewport(dom, el)
+        && !clipping_container_is_page_shell(dom, el)
+}
+
+/// Nested clips repeat one decision about the same layer. The clip nearest
+/// the child is the one that cuts it first and the one whose component the
+/// layer belongs to, so an outer container defers to any clipping container
+/// between it and the child that traps the same layer.
+fn nearer_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
+    let mut current = dom.parent(child);
+    while let Some(inner) = current {
+        if inner == el {
+            return false;
+        }
+        if let Some((clip_x, clip_y)) = clipped_axes(dom, inner) {
+            if clip_container_can_own_finding(dom, inner)
+                && clip_traps_child(dom, inner, child, clip_x, clip_y)
             {
                 return true;
             }
         }
-        current = dom.parent(ancestor);
+        current = dom.parent(inner);
     }
     false
 }
@@ -1222,36 +1239,36 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let Some((clip_x, clip_y)) = clipped_axes(dom, el) else {
         return Vec::new();
     };
-    if clipping_container_is_intentional_viewport(dom, el) || clipping_container_is_page_shell(dom, el)
-    {
+    if !clip_container_can_own_finding(dom, el) {
         return Vec::new();
     }
     for child in dom.query_all(Some(el), "*").unwrap_or_default() {
         let pos = dom.style(child, "position");
-        if pos == "absolute" || pos == "fixed" {
-            if positioned_child_is_decorative(dom, child) {
-                continue;
-            }
-            if positioned_child_is_ornament(dom, child)
-                && !positioned_child_is_popover_layer(dom, child)
-            {
-                continue;
-            }
-            if !clip_traps_child(dom, el, child, clip_x, clip_y) {
-                continue;
-            }
-            if ancestor_clip_traps_child(dom, el, child) {
-                continue;
-            }
-            return vec![RuleHit::new(
-                "clipped-overflow-container",
-                format!(
-                    "{} clips positioned {}",
-                    class_selector(dom, el),
-                    class_selector(dom, child)
-                ),
-            )];
+        if pos != "absolute" && pos != "fixed" {
+            continue;
         }
+        if positioned_child_is_decorative(dom, child) {
+            continue;
+        }
+        // Cheapest test first: most positioned children are inside the box.
+        if !clip_traps_child(dom, el, child, clip_x, clip_y) {
+            continue;
+        }
+        if positioned_child_is_ornament(dom, child) && !positioned_child_is_popover_layer(dom, child)
+        {
+            continue;
+        }
+        if nearer_clip_traps_child(dom, el, child) {
+            continue;
+        }
+        return vec![RuleHit::new(
+            "clipped-overflow-container",
+            format!(
+                "{} clips positioned {}",
+                class_selector(dom, el),
+                class_selector(dom, child)
+            ),
+        )];
     }
     Vec::new()
 }
@@ -1897,7 +1914,8 @@ mod tests {
         d.set_attr(track, "class", "band-track");
         assert_eq!(check_element_clipped_overflow_dom(&d, band).len(), 1);
 
-        // Nested clips repeat one decision: only the outermost reports it.
+        // Nested clips repeat one decision: the clip nearest the layer owns
+        // it, and the shell around it says nothing.
         let outer = clipping_box(&mut d, body, 0.0, 0.0, 200.0, 100.0);
         let inner = clipping_box(&mut d, outer, 0.0, 0.0, 180.0, 90.0);
         d.set_attr(outer, "class", "outer");
@@ -1905,10 +1923,53 @@ mod tests {
         let menu = positioned_child(&mut d, inner, 0.0, -40.0, 160.0, 30.0);
         d.set_attr(menu, "class", "menu");
         d.add_text(menu, "Row actions");
-        assert!(check_element_clipped_overflow_dom(&d, inner).is_empty());
-        let hits = check_element_clipped_overflow_dom(&d, outer);
+        let hits = check_element_clipped_overflow_dom(&d, inner);
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].snippet, "div.outer clips positioned div.menu");
+        assert_eq!(hits[0].snippet, "div.inner clips positioned div.menu");
+        assert!(check_element_clipped_overflow_dom(&d, outer).is_empty());
+
+        // A second inner container is a second component with its own
+        // finding, not one the shell absorbs.
+        let inner_two = clipping_box(&mut d, outer, 0.0, 0.0, 180.0, 90.0);
+        d.set_attr(inner_two, "class", "inner-two");
+        let tip = positioned_child(&mut d, inner_two, 0.0, -50.0, 140.0, 26.0);
+        d.set_attr(tip, "class", "tip");
+        d.add_text(tip, "Delivered on Tuesday");
+        let hits = check_element_clipped_overflow_dom(&d, inner_two);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "div.inner-two clips positioned div.tip");
+        assert!(check_element_clipped_overflow_dom(&d, outer).is_empty());
+    }
+
+    #[test]
+    fn clipped_overflow_keeps_findings_the_scan_never_visits_an_ancestor_for() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 1280.0, 800.0);
+        for e in [html, body] {
+            d.set_styles(e, &[("display", "block"), ("opacity", "1")]);
+        }
+        // A centred column with `overflow: hidden` on `body`: a common guard
+        // against sideways scrolling, and not page-shell shaped.
+        d.set_rect(body, 240.0, 0.0, 800.0, 800.0);
+        d.set_styles(
+            body,
+            &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")],
+        );
+
+        let card = clipping_box(&mut d, body, 240.0, 0.0, 300.0, 120.0);
+        d.set_attr(card, "class", "card");
+        let tip = positioned_child(&mut d, card, 250.0, -30.0, 160.0, 30.0);
+        d.set_attr(tip, "class", "tip");
+        d.add_text(tip, "Free for the first month");
+
+        // The tip escapes `body` as well, and `body` clips. But `body` is
+        // never scanned, so it can never report this child: the card keeps
+        // its own finding rather than handing it to nobody.
+        assert!(!super::super::driver::element_is_scanned(&d, body));
+        let hits = check_element_clipped_overflow_dom(&d, card);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "div.card clips positioned div.tip");
     }
 
     #[test]

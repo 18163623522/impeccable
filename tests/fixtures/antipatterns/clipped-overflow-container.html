@@ -34,6 +34,8 @@
     .rail-card { width: 160px; height: 88px; padding: 16px; border: 1px solid #ddd; }
     .inner-clip { position: relative; overflow: hidden; width: 168px; height: 88px; padding: 16px; border: 1px solid #ddd; }
     .translated-menu { position: absolute; top: 100%; left: 0; width: 180px; background: #222; color: #fff; padding: 8px; transform: translateY(6px); }
+    .tip-second { position: absolute; top: -30px; left: 16px; width: 150px; height: 24px; background: #222; color: #fff; }
+    .empty-menu { position: absolute; top: 100%; left: 0; width: 160px; height: 120px; background: #222; }
     .contents-shell { display: contents; overflow: hidden; }
     .media-bleed { position: absolute; inset: -24px; }
     .corner-tick { position: absolute; top: -6px; left: -6px; width: 11px; height: 11px; pointer-events: none; background: #486aa3; }
@@ -84,15 +86,25 @@
         <div class="rail-card">Review card in a horizontal rail.</div>
         <span class="rail-tooltip">Posted on the web</span>
       </div>
-      <div class="box flag-outer-clip" style="overflow: hidden">
-        <div class="inner-clip">
+      <!-- Two nested clips cut the same layer. The nearer one owns it, and a
+           second row is its own finding rather than one the shell absorbs. -->
+      <div class="box nested-outer-clip" style="overflow: hidden">
+        <div class="inner-clip flag-nested-row">
           <button>Row actions</button>
           <span class="tip-negative">Tooltip clipped by both nested containers</span>
+        </div>
+        <div class="inner-clip flag-nested-note">
+          <button>Row notes</button>
+          <span class="tip-second">Second row tooltip, cut by its own row</span>
         </div>
       </div>
       <div class="box flag-translated-menu" style="overflow: hidden">
         <button>Account</button>
         <div class="translated-menu" role="menu">A menu parked by a transform is still a menu.</div>
+      </div>
+      <div class="box flag-empty-menu" style="overflow: hidden">
+        <button>Sort</button>
+        <div class="empty-menu" role="menu"></div>
       </div>
     </section>
 
@@ -157,6 +169,9 @@
           <span class="marquee-item">Ticker copy sliding through the band.</span>
         </div>
       </div>
+      <!-- The axis test is what exempts this in the static engine. A browser
+           computes the other axis to `auto` when one is `clip`, so there the
+           box is a scroll region and exempt one step earlier. -->
       <div class="x-clip-box pass-x-clip">
         <p>Only the horizontal axis is clipped here.</p>
         <span class="below-the-box">Layer above the box, unclipped.</span>

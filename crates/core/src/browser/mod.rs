@@ -40,6 +40,9 @@
 //!   `hasMeaningfulDirectText`, `textDescendantsFlushSides`,
 //!   `isVisuallyHidden`, `isNonRenderedText`, `checkPageQualityFromDoc`,
 //!   `checkPageQualityDOM`.
+//! - `painted`: whether an element is painted at capture (visibility,
+//!   effective opacity, clipping ancestors, document bounds), the gate the
+//!   driver applies to the text and raster rules of the element pass.
 //! - `page_checks`: Section 6 browser page-level checks — `checkTypography`,
 //!   `isCardLikeDOM`, `checkLayout`, `checkHeadingRhythmDOM`,
 //!   `checkCreamPalette` (browser path), `measureHiddenTextDOM`,
@@ -80,6 +83,7 @@ pub mod background;
 pub mod driver;
 pub mod element_checks;
 pub mod page_checks;
+pub mod painted;
 pub mod quality;
 pub mod snapshot;
 pub mod text_collectors;

@@ -165,6 +165,11 @@ pub trait Dom {
     fn client_left(&self, el: ElId) -> f64;
     fn scroll_width(&self, el: ElId) -> f64;
     fn scroll_left(&self, el: ElId) -> f64;
+    /// `el.scrollHeight`; NaN when the probe cannot answer it (a snapshot
+    /// recorded before the capture measured it).
+    fn scroll_height(&self, _el: ElId) -> f64 {
+        f64::NAN
+    }
     fn offset_width(&self, el: ElId) -> f64;
     fn offset_height(&self, el: ElId) -> f64;
     /// `el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })`;

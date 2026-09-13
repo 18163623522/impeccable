@@ -184,6 +184,89 @@ fn the_rule_pass_measures_the_revealed_page() {
     );
 }
 
+/// Text and raster rules score only what is painted at capture: a collapsed
+/// submenu, a scroller cell past its edge, a wrapper with no size, a faded
+/// crossfade layer and an off-canvas panel carry the same measurements as
+/// their visible twins and report nothing, while the twins report.
+#[test]
+fn the_rule_pass_skips_what_is_not_painted() {
+    let Some(engine) = engine() else { return };
+    if !fixtures_dir().join("painted-at-capture.html").exists() {
+        eprintln!("skip: painted-at-capture.html not present");
+        return;
+    }
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/painted-at-capture.html");
+    let findings = engine
+        .detect_url(&url, &ScanOptions::default())
+        .expect("scan");
+    let flagged: Vec<(&str, &str)> = findings
+        .iter()
+        .map(|f| {
+            (
+                f.antipattern.as_str(),
+                f.extras
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            )
+        })
+        .collect();
+
+    for want in [
+        ("undersized-ui-text", "#flag-submenu-link"),
+        ("tight-leading", "#flag-submenu-copy"),
+        ("low-contrast", "#flag-scroller-first"),
+        ("tight-leading", "#flag-roomy-copy"),
+        ("low-contrast", "#flag-crossfade-copy"),
+        ("buried-raster", "#flag-buried-photo"),
+        // An absolute popover escapes a clip below its containing block.
+        ("undersized-ui-text", "#flag-popover-link"),
+        // Reached by scrolling the shell's main, under a wrapper that hides
+        // overflow.
+        ("low-contrast", "#flag-shell-below-fold"),
+        // A transition utility alone does not make a buried image a state.
+        ("buried-raster", "#flag-tw-buried-photo"),
+        // Nor does a lazy-load marker on an image held at a faint value
+        // other than 0: a fade starts from 0.
+        ("buried-raster", "#flag-lazy-tw-buried-photo"),
+        ("buried-raster", "#flag-lazy-fade-buried-photo"),
+        // A viewport-tall frame that hides overflow is how a smooth-scroll
+        // library scrolls the page, so the content below its fold is kept.
+        ("low-contrast", "#flag-smooth-below-fold"),
+        // A fixed badge inside a containing block sits against it, not
+        // against the viewport.
+        ("undersized-ui-text", "#flag-cb-will-link"),
+        ("undersized-ui-text", "#flag-cb-contain-link"),
+        ("undersized-ui-text", "#flag-cb-translate-link"),
+        ("undersized-ui-text", "#flag-cb-scale-link"),
+        ("undersized-ui-text", "#flag-cb-rotate-link"),
+        ("undersized-ui-text", "#flag-cb-perspective-link"),
+        ("undersized-ui-text", "#flag-cb-backdrop-link"),
+    ] {
+        assert!(flagged.contains(&want), "missing {want:?} in {flagged:?}");
+    }
+    for unwanted in [
+        "#pass-submenu-link",
+        "#pass-submenu-copy",
+        "#pass-scroller-third",
+        "#pass-zero-link",
+        "#pass-zero-copy",
+        "#pass-crossfade-poster",
+        "#pass-crossfade-copy",
+        "#pass-offcanvas-link",
+        "#pass-frame-below",
+        "#pass-lazy-photo",
+        "#pass-video-poster",
+        "#pass-parked-link",
+    ] {
+        assert!(
+            !flagged.iter().any(|(_, s)| *s == unwanted),
+            "{unwanted} was flagged in {flagged:?}"
+        );
+    }
+}
+
 #[test]
 fn evidence_matches_the_cli_path_and_replay_matches_live() {
     let Some(engine) = engine() else { return };

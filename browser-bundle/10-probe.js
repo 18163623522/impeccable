@@ -171,6 +171,7 @@ const __impeccableDom = {
   client_left(el) { return __el(el).clientLeft; },
   scroll_width(el) { return __el(el).scrollWidth; },
   scroll_left(el) { return __el(el).scrollLeft; },
+  scroll_height(el) { return __el(el).scrollHeight; },
   offset_width(el) { return __el(el).offsetWidth; },
   offset_height(el) { return __el(el).offsetHeight; },
   check_visibility(el) {

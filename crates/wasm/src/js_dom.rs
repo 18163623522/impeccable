@@ -54,6 +54,7 @@ extern "C" {
     fn client_left(el: u32) -> f64;
     fn scroll_width(el: u32) -> f64;
     fn scroll_left(el: u32) -> f64;
+    fn scroll_height(el: u32) -> f64;
     fn offset_width(el: u32) -> f64;
     fn offset_height(el: u32) -> f64;
     fn check_visibility(el: u32) -> i32;
@@ -329,6 +330,9 @@ impl Dom for JsDom {
     }
     fn scroll_left(&self, el: ElId) -> f64 {
         scroll_left(el)
+    }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        scroll_height(el)
     }
     fn offset_width(&self, el: ElId) -> f64 {
         offset_width(el)

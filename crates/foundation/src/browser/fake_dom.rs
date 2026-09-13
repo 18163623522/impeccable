@@ -29,6 +29,8 @@ pub struct FakeEl {
     pub client_left: f64,
     pub scroll_width: f64,
     pub scroll_left: f64,
+    /// `scrollHeight`; `None` reads as NaN, a probe that did not measure it.
+    pub scroll_height: Option<f64>,
     pub offset_width: f64,
     pub offset_height: f64,
     pub is_content_editable: bool,
@@ -513,6 +515,9 @@ impl Dom for FakeDom {
     }
     fn scroll_left(&self, el: ElId) -> f64 {
         self.els[el as usize].scroll_left
+    }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        self.els[el as usize].scroll_height.unwrap_or(f64::NAN)
     }
     fn offset_width(&self, el: ElId) -> f64 {
         self.els[el as usize].offset_width

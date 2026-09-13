@@ -498,8 +498,8 @@ fn text_clipped_by_an_ancestor(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// Whether a hit from the SAFE_TAGS text path is one this page should
-/// print. Two things waive it, both of them the engine's knowledge rather
-/// than the rule's, and both asked here: late, only for an element the rule
+/// print. Three things waive it, all of them the engine's knowledge rather
+/// than the rule's, and all asked here: late, only for an element the rule
 /// actually failed, and before the colour pair is registered as this page's
 /// one report of itself.
 ///
@@ -521,6 +521,12 @@ fn text_clipped_by_an_ancestor(dom: &dyn Dom, el: ElId) -> bool {
 /// magnitude, so admitting them would spend a pixel-reading budget on the
 /// smallest text on the page. Widening that pass is its own change, with
 /// its own measurement.
+///
+/// The third is an element not painted at capture (`painted.rs`): a link in
+/// a collapsed submenu, an off-screen carousel slide. The driver's paint gate
+/// drops its finding after the element pass, but by then the pair would
+/// already be claimed, and the visible links wearing the same colour would go
+/// unreported.
 fn safe_tag_text_hit_stands(
     dom: &dyn Dom,
     el: ElId,
@@ -529,6 +535,8 @@ fn safe_tag_text_hit_stands(
 ) -> bool {
     !crate::browser::driver::scoped_ignore_active(dom, el, &hit.id)
         && crate::browser::visual::resolved_surface_is_under_text(dom, el, resolved)
+        && (crate::browser::painted::paint_gate(&hit.id).is_none()
+            || crate::browser::painted::painted_at_capture(dom, el))
 }
 
 /// JS: checks.mjs#checkElementColorsDOM(el)

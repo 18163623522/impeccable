@@ -804,7 +804,67 @@ pub fn check_motion(opts: &MotionOpts) -> Vec<RuleHit> {
     findings
 }
 
-fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHit> {
+/// The light a glow layer has to put out before it is worth reporting: the
+/// blur radius scaled by how much of the shadow's ink lands (its color alpha
+/// times the element's own opacity), in px.
+///
+/// Measured on the site corpus: every glow both judges could find in the
+/// screenshot scores 3.0 or more, and every one they called invisible tops
+/// out at 2.1 (a 3x23px typing caret at 38% alpha on a half-faded element;
+/// 20px blurs at 6 to 10% alpha on cards).
+pub const GLOW_MIN_STRENGTH_PX: f64 = 3.0;
+
+/// How far out of scale with its element a glow may be. A halo covering more
+/// than twice the element's own area is the light of an indicator (a 6px
+/// status dot, a 5x8px pulse travelling a connector, a typing caret), not a
+/// glow treatment on a surface. In the same corpus the glows judges read as a
+/// treatment reach 1.8x; the ones they read as an indicator start at 2.2x.
+pub const GLOW_MAX_AREA_RATIO: f64 = 2.0;
+
+/// How far one shadow layer's light reaches outside its element's box: a CSS
+/// blur fades over roughly half its radius to each side, and the spread grows
+/// the box the blur is applied to (or, when negative, eats into the blur).
+fn glow_extent_px(blur: f64, spread: f64) -> f64 {
+    blur / 2.0 + spread
+}
+
+/// Whether one qualifying shadow layer renders as a glow a reader can see.
+/// `element_opacity` and `element_size` are `None` on the engines with no
+/// layout, which leaves the blur and the alpha to carry the decision.
+pub(crate) fn glow_is_perceptible(
+    blur: f64,
+    spread: f64,
+    alpha: f64,
+    element_opacity: Option<f64>,
+    element_size: Option<(f64, f64)>,
+) -> bool {
+    let extent = glow_extent_px(blur, spread);
+    if extent <= 0.0 {
+        // A negative spread that swallows the blur keeps the light in the box.
+        return false;
+    }
+    if blur * alpha * element_opacity.unwrap_or(1.0) < GLOW_MIN_STRENGTH_PX {
+        return false;
+    }
+    let Some((width, height)) = element_size else {
+        return true;
+    };
+    let element_area = width * height;
+    if element_area <= 0.0 {
+        // Nothing is painted, so nothing glows.
+        return false;
+    }
+    let lit_area = (width + 2.0 * extent) * (height + 2.0 * extent) - element_area;
+    lit_area <= element_area * GLOW_MAX_AREA_RATIO
+}
+
+fn glow_scan(
+    value: Option<&str>,
+    prop: &str,
+    on_dark_bg: bool,
+    element_opacity: Option<f64>,
+    element_size: Option<(f64, f64)>,
+) -> Option<RuleHit> {
     let value = match value {
         None | Some("") | Some("none") => return None,
         Some(v) => v,
@@ -823,6 +883,15 @@ fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHi
         }
         let vals = extract_shadow_lengths(layer, Some((info.start, info.end)));
         if vals.len() < 3 || vals[2] <= 4.0 {
+            continue;
+        }
+        if !glow_is_perceptible(
+            vals[2],
+            vals.get(3).copied().unwrap_or(0.0),
+            color.alpha_or_one(),
+            element_opacity,
+            element_size,
+        ) {
             continue;
         }
         if vals[0] == 0.0 && vals[1] == 0.0 {
@@ -845,13 +914,30 @@ fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHi
     None
 }
 
-/// JS: checks.mjs#checkGlow
+/// JS: checks.mjs#checkGlow, plus the perceptibility floor (a layer under
+/// `GLOW_MIN_STRENGTH_PX`, or out of scale with its element, is passed over).
 pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
     let on_dark_bg = opts
         .effective_bg
         .map_or(false, |bg| relative_luminance(&bg) < 0.1);
-    let found = glow_scan(opts.box_shadow.as_deref(), "box-shadow", on_dark_bg)
-        .or_else(|| glow_scan(opts.text_shadow.as_deref(), "text-shadow", on_dark_bg));
+    let opacity = opts.element_opacity;
+    let size = opts.element_size;
+    let found = glow_scan(
+        opts.box_shadow.as_deref(),
+        "box-shadow",
+        on_dark_bg,
+        opacity,
+        size,
+    )
+    .or_else(|| {
+        glow_scan(
+            opts.text_shadow.as_deref(),
+            "text-shadow",
+            on_dark_bg,
+            opacity,
+            size,
+        )
+    });
     match found {
         Some(f) => vec![f],
         None => Vec::new(),
@@ -1016,6 +1102,63 @@ mod tests {
             large[0].snippet,
             ":hover state 2.6:1 (need 3:1) — text #a0a0a0 on #ffffff"
         );
+    }
+
+    #[test]
+    fn glow_needs_to_be_perceptible() {
+        let glow = |shadow: &str, opacity: f64, size: Option<(f64, f64)>| {
+            check_glow(&GlowOpts {
+                box_shadow: Some(shadow.to_string()),
+                text_shadow: None,
+                effective_bg: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
+                element_opacity: Some(opacity),
+                element_size: size,
+            })
+        };
+        // A 24px halo at 60% alpha around a 197x40 button: the treatment the
+        // rule is for.
+        assert_eq!(
+            glow("rgba(0, 169, 255, 0.6) 0px 0px 24px 0px", 1.0, Some((197.0, 40.0))).len(),
+            1
+        );
+        // 10% alpha over 20px of blur is 2.0px of light on a 393x42 card.
+        assert!(glow("rgba(149, 100, 255, 0.1) 0px 4px 20px 0px", 1.0, Some((393.0, 42.0)))
+            .is_empty());
+        // A 3x23px typing caret, caught mid-blink at 56% opacity.
+        assert!(glow(
+            "rgba(155, 123, 232, 0.38) 0px 0px 9.9px 1.5px",
+            0.56,
+            Some((3.0, 23.0))
+        )
+        .is_empty());
+        // The same caret at full opacity clears the strength floor, but its
+        // halo covers seven times the caret: an indicator, not a treatment.
+        assert!(glow(
+            "rgba(155, 123, 232, 0.38) 0px 0px 9.9px 1.5px",
+            1.0,
+            Some((3.0, 23.0))
+        )
+        .is_empty());
+        // A 6px status LED with an 8px halo.
+        assert!(glow("rgba(92, 189, 104, 0.5) 0px 0px 8px 0px", 1.0, Some((6.0, 6.0))).is_empty());
+        // A negative spread that swallows the blur: no light leaves the box.
+        assert!(
+            glow("rgba(52, 211, 153, 0.4) 0px 0px 40px -22px", 1.0, Some((280.0, 147.0)))
+                .is_empty()
+        );
+        // An element with nothing painted.
+        assert!(glow("rgba(0, 169, 255, 0.6) 0px 0px 24px 0px", 1.0, Some((0.0, 0.0))).is_empty());
+        // Without layout the blur and the alpha decide on their own.
+        assert_eq!(
+            glow("rgba(92, 189, 104, 0.5) 0px 0px 8px 0px", 1.0, None).len(),
+            1
+        );
+        // A stacked elevation ramp reports the layer that carries the light,
+        // not the faint one it happens to reach first.
+        let ramp = "rgba(64, 120, 168, 0.37) 0px 0.7px 0.7px -0.67px, \
+                    rgba(64, 120, 168, 0.31) 0px 6.87px 6.87px -2.67px, \
+                    rgba(64, 120, 168, 0.247) 0px 13.65px 13.65px -3.33px";
+        assert_eq!(glow(ramp, 1.0, Some((96.0, 96.0))).len(), 1);
     }
 
     #[test]

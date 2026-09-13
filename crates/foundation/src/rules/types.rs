@@ -307,9 +307,19 @@ pub fn extract_shadow_lengths(layer: &str, color_span: Option<(usize, usize)>) -
 }
 
 /// JS `checkGlow` opts.
+///
+/// `element_opacity` and `element_size` feed the perceptibility floor. Both
+/// are `None` on engines with no layout (the CSS-text scan, static HTML),
+/// where the floor falls back to what the declaration alone can say.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GlowOpts {
     pub box_shadow: Option<String>,
     pub text_shadow: Option<String>,
     pub effective_bg: Option<Rgba>,
+    /// The element's own computed `opacity`; `None` when it is unknown.
+    #[serde(default)]
+    pub element_opacity: Option<f64>,
+    /// The element's border-box size in CSS px; `None` without layout.
+    #[serde(default)]
+    pub element_size: Option<(f64, f64)>,
 }

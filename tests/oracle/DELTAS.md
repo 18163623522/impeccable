@@ -164,3 +164,30 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: dark-glow gains a perceptibility floor
+
+A glow layer now has to put out light a reader can see before it is reported:
+its blur radius times the shadow's alpha times the element's own opacity must
+reach 3px, a negative spread that swallows the blur suppresses it, and where
+layout is known the lit ring may not cover more than twice the element's own
+area. The floors come from the site corpus: every glow both judges could find
+in the screenshot scores 3.0 or more and stays within 1.8x its element, while
+the ones they called invisible top out at 2.1 and the indicator lights (a 3px
+typing caret, a 6px status LED, a pulse travelling a connector) start at 2.2x.
+A layer under the floor is passed over rather than ending the scan, so a
+stacked elevation ramp is still reported from the layer that carries the light.
+
+The glow fixture grew four cases: two flag cases above the floor (a 197x40 CTA
+with a 24px halo, a 96x96 tile under a six-layer ramp) and two pass cases whose
+halo is out of scale with a tiny element (a 6x6px status LED, a 5x8px pulse).
+The file scan has no layout, so it keeps reporting those last two; the browser
+engine, which does, drops them. The three pass cases that turn on alpha,
+spread, and opacity (a half-faded typing caret, a 10%-alpha wash, a spread that
+eats its blur) are dropped by every engine and add no findings anywhere.
+
+- `detect-fixture-json-glow-html`, `detect-fixture-text-glow-html`: the four
+  new fixture findings; nothing the old fixture reported was lost.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures` (419 to 423), `detect-no-advisory-json`,
+  `detect-no-advisory-text`: the same four findings in the directory sweeps.

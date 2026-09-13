@@ -3,7 +3,9 @@
 //! carry a source `index` (a byte offset here; JS reports UTF-16 units, see
 //! `crate::js_ext_a::utf16_index`) and/or a `selector`.
 
-use crate::checks::rules::{extract_shadow_lengths, find_shadow_color, ANY, B, D};
+use crate::checks::rules::{
+    extract_shadow_lengths, find_shadow_color, glow_is_perceptible, ANY, B, D,
+};
 use crate::color::{
     color_to_hex, has_chroma, parse_any_color, relative_luminance, split_top_level_commas, Rgba,
 };
@@ -159,6 +161,17 @@ pub fn scan_css_text_for_glow(content: &str) -> Vec<IndexedHit> {
             }
             let vals = extract_shadow_lengths(layer, Some((info.start, info.end)));
             if vals.len() < 3 || vals[2] <= 4.0 {
+                continue;
+            }
+            // Stylesheet text carries no layout, so the floor is what the
+            // declaration itself says: blur, spread and alpha.
+            if !glow_is_perceptible(
+                vals[2],
+                vals.get(3).copied().unwrap_or(0.0),
+                color.alpha_or_one(),
+                None,
+                None,
+            ) {
                 continue;
             }
             let zero_offset = vals[0] == 0.0 && vals[1] == 0.0;
@@ -1463,6 +1476,28 @@ mod tests {
                 "{text:?} @ {idx}"
             );
         }
+    }
+
+    #[test]
+    fn glow_scan_skips_imperceptible_layers() {
+        let hits = scan_css_text_for_glow(".cta{box-shadow:0 0 24px rgba(0,169,255,0.6)}");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "Zero-offset box-shadow glow (#00a9ff)");
+        // 10% alpha over 20px of blur, and a spread that swallows its blur.
+        assert!(scan_css_text_for_glow(".a{box-shadow:0 4px 20px rgba(149,100,255,0.1)}").is_empty());
+        assert!(
+            scan_css_text_for_glow(".b{box-shadow:0 0 40px -22px rgba(52,211,153,0.4)}").is_empty()
+        );
+        // The reported layer is the one that carries the light.
+        let ramp = scan_css_text_for_glow(
+            ".c{box-shadow:0 0.7px 0.7px -0.67px rgba(64,120,168,0.37),\
+             0 13.65px 13.65px -3.33px rgba(64,120,168,0.247)}body{background:#0b0b0f}",
+        );
+        assert_eq!(ramp.len(), 1);
+        assert_eq!(
+            ramp[0].snippet,
+            "Colored box-shadow glow (#4078a8) on dark page"
+        );
     }
 
     #[test]

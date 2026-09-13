@@ -15,14 +15,14 @@ use super::BrowserFinding;
 use crate::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
     check_oversized_h1, check_radial_spotlight, is_screen_reader_only_text_style,
-    positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input,
+    parse_radius_corners, positioned_style_implies_escape, GptBorderShadowInput, OversizedH1Input,
     RadialSpotlightInput, SrOnlyMetrics,
 };
 use crate::checks::rules::{
     check_borders, check_colors, check_glow, check_hero_eyebrow, check_icon_tile,
-    check_italic_serif, check_motion, check_placeholder_colors, is_emoji_only_text, BorderOpts,
-    ColorOpts, GlowOpts, HeroEyebrowOpts, IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit,
-    Sides, HEADING_TAGS,
+    check_italic_serif, check_motion, check_placeholder_colors, is_emoji_only_text,
+    is_rounded_away_from_side, BorderOpts, ColorOpts, Corners, GlowOpts, HeroEyebrowOpts,
+    IconTileOpts, ItalicSerifOpts, MotionOpts, RuleHit, Sides, HEADING_TAGS,
 };
 use crate::checks::text_rules::{
     CURSOR_FIRST_VIEWPORT_PX, CURSOR_GLYPH_RE, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
@@ -139,8 +139,15 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             badge_like,
             status_context: is_status_context_element(dom, el),
             tab_context: is_tab_context_element(dom, el),
+            corners: Some(corner_radii(dom, el, &rect)),
         },
     )
+}
+
+/// The element's four corner radii in px, read from the computed
+/// `border-radius` shorthand the snapshot carries.
+fn corner_radii(dom: &dyn Dom, el: ElId, rect: &Rect) -> Corners {
+    parse_radius_corners(Some(&dom.style(el, "borderRadius")), rect.width)
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────
@@ -345,6 +352,19 @@ pub fn check_element_pseudo_stripe_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             }
         }
         let Some(edge) = edge else { continue };
+        // A stripe painted down one side is the card tell only on a rounded
+        // card, the same gate the border path applies. Read the corners only
+        // once a side stripe is in hand.
+        let side_index = match edge {
+            "right" => Some(1),
+            "left" => Some(3),
+            _ => None,
+        };
+        if let Some(i) = side_index {
+            if !is_rounded_away_from_side(Some(&corner_radii(dom, el, &rect)), i) {
+                continue;
+            }
+        }
         let Some(bg) = parse_rgb_or_any(&pseudo_str(dom, el, which, "backgroundColor")) else {
             continue;
         };
@@ -1383,6 +1403,7 @@ mod tests {
         visible(&mut d, card);
         d.set_attr(card, "class", "card feature");
         d.set_rect(card, 0.0, 0.0, 300.0, 120.0);
+        d.set_styles(card, &[("borderRadius", "12px")]);
         for (p, v) in [
             ("content", "\"\""),
             ("position", "absolute"),
@@ -1406,6 +1427,82 @@ mod tests {
         );
         d.set_pseudo_style(card, "::before", "backgroundColor", "rgb(120, 120, 120)");
         assert!(check_element_pseudo_stripe_dom(&d, card).is_empty());
+    }
+
+    #[test]
+    fn pseudo_stripe_skips_a_square_host() {
+        let (mut d, body) = page();
+        let quote = d.add(Some(body), "div");
+        visible(&mut d, quote);
+        d.set_attr(quote, "class", "pullquote");
+        d.set_rect(quote, 0.0, 0.0, 300.0, 120.0);
+        d.set_styles(quote, &[("borderRadius", "0px")]);
+        for (p, v) in [
+            ("content", "\"\""),
+            ("position", "absolute"),
+            ("opacity", "1"),
+            ("display", "block"),
+            ("width", "4px"),
+            ("height", "120px"),
+            ("left", "0px"),
+            ("right", "296px"),
+            ("top", "0px"),
+            ("bottom", "0px"),
+            ("backgroundColor", "rgb(59, 130, 246)"),
+        ] {
+            d.set_pseudo_style(quote, "::before", p, v);
+        }
+        assert!(check_element_pseudo_stripe_dom(&d, quote).is_empty());
+    }
+
+    /// The side accent is the tell only on a rounded card, and the corners
+    /// that decide it are the two the stripe does not touch.
+    #[test]
+    fn side_border_needs_a_radius_away_from_the_stripe() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let card = d.add(Some(body), "div");
+        d.set_rect(card, 0.0, 0.0, 300.0, 100.0);
+        let with_radius = |d: &mut FakeDom, radius: &str| {
+            d.set_styles(
+                card,
+                &[
+                    ("borderTopWidth", "0px"),
+                    ("borderRightWidth", "0px"),
+                    ("borderBottomWidth", "0px"),
+                    ("borderLeftWidth", "4px"),
+                    ("borderTopColor", "rgb(0, 0, 0)"),
+                    ("borderRightColor", "rgb(0, 0, 0)"),
+                    ("borderBottomColor", "rgb(0, 0, 0)"),
+                    ("borderLeftColor", "rgb(59, 130, 246)"),
+                    ("borderRadius", radius),
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ],
+            );
+        };
+
+        with_radius(&mut d, "0px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+
+        with_radius(&mut d, "2px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+
+        with_radius(&mut d, "10px");
+        let hits = check_element_borders_dom(&d, card);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "side-tab");
+        assert_eq!(hits[0].snippet, "border-left: 4px + border-radius: 10px");
+
+        // Rounded only along the left stripe: the card still reads square.
+        with_radius(&mut d, "10px 0px 0px 10px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+
+        // Rounded away from the stripe, square where it runs: the tab shape.
+        with_radius(&mut d, "0px 10px 10px 0px");
+        let hits = check_element_borders_dom(&d, card);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "side-tab");
+        assert_eq!(hits[0].snippet, "border-left: 4px");
     }
 
     #[test]

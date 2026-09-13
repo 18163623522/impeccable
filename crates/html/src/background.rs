@@ -6,11 +6,14 @@
 
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
-use impeccable_core::checks::measures::{parse_color_resolved, parse_radius_to_px, CustomProps};
+use impeccable_core::checks::measures::{
+    parse_color_resolved, parse_radius_corners, parse_radius_to_px, CustomProps,
+};
 use impeccable_core::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_gradient_colors,
     parse_rgb, split_top_level_commas, Rgba,
 };
+use impeccable_core::checks::rules::Corners;
 use impeccable_core::js;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -330,4 +333,10 @@ pub fn composite_gradient_stops(
 /// JS: checks.mjs#resolveBorderRadiusPx(el, style, widthPx, win)
 pub fn resolve_border_radius_px(style: &StyleValues, width_px: f64) -> f64 {
     parse_radius_to_px(sv_opt(style, "borderRadius"), width_px).unwrap_or(0.0)
+}
+
+/// The four corner radii in px, read from the same declaration
+/// `resolve_border_radius_px` reads.
+pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Corners {
+    parse_radius_corners(sv_opt(style, "borderRadius"), width_px)
 }

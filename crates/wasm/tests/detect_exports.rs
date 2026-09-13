@@ -38,7 +38,7 @@ impl RulePack for TestPack {
 }
 
 const SOURCE: &str = ".card { border-left: 4px solid #6366f1; }\n";
-const PAGE: &str = "<!DOCTYPE html>\n<html><head><title>t</title><style>\n.card { border-left: 4px solid #6366f1; }\n</style></head>\n<body><div class=\"card\">A card</div></body></html>\n";
+const PAGE: &str = "<!DOCTYPE html>\n<html><head><title>t</title><style>\n.card { border-left: 4px solid #6366f1; border-radius: 10px; }\n</style></head>\n<body><div class=\"card\">A card</div></body></html>\n";
 
 fn ids(json: &str) -> Vec<String> {
     serde_json::from_str::<Vec<Value>>(json)

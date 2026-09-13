@@ -7,7 +7,8 @@
 
 use crate::background::{
     a_ge, a_gt, read_own_background_color, resolve_background, resolve_background_info,
-    resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
+    resolve_border_radius_corners, resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt,
+    CustomPropMap,
 };
 use crate::cascade::StyleValues;
 use crate::dom::{StaticDocument, StaticElement};
@@ -456,6 +457,7 @@ pub fn check_element_borders(
             tab_context: is_tab_context_element(el),
             status_context: is_status_context_element(el),
             badge_like: own_bg.is_some_and(|c| c.alpha_or_one() > 0.1),
+            corners: Some(resolve_border_radius_corners(style, pf0(sv(style, "width")))),
         },
     )
 }

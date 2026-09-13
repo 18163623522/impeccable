@@ -164,3 +164,22 @@ installed. The binary's `CLI_VERSION` moves from `3.6.0` to `4.0.0` with the
 CLI 4.0.0 release; it is what the binary prints when run directly.
 
 - `cli-version`.
+
+## Recorded 2026-09-12: a side accent reports only on a rounded card
+
+The corpus judging pass found `side-tab` firing on square boxes with a colored
+left rule: a themed notification banner, a bespoke timeline entry, a table-row
+marker. The maintainer's call on those crops is that the square version is an
+older convention and the rounded card is the tell. `check_borders` now reads
+the element's four corner radii and reports a left or right accent only when
+the two corners away from the stripe are at least 4px, so a box rounded only
+along the stripe still reads as square. The browser pseudo-element stripe path
+applies the same gate to a left or right stripe. Top and bottom accents are
+unchanged: `border-accent-on-rounded` already owns the rounded half of that
+scope.
+
+The fixtures moved with the rule, so the goldens below carry a fixture edit,
+not a lost finding. Case counts are identical.
+
+- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: `border-baseline.html` retired its square `border-left: 4px` flag case (it now sits in the should-pass column as a square callout) and added `border-left: 6px` on a card rounded away from the stripe, so one snippet changes.
+- `detect-unreadable-file-in-dir`: the case's readable `a.html` carries `border-radius: 10px`, so it still produces the finding the case exists to show next to the unreadable file's error; the snippet gains `+ border-radius: 10px`.

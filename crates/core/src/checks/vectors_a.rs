@@ -156,6 +156,9 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 badge_like: truthy(f(4, "badgeLike")),
                 status_context: truthy(f(4, "statusContext")),
                 tab_context: truthy(f(4, "tabContext")),
+                // The recorded JS read no corners: it judged a side accent on
+                // the shorthand radius alone, which is what `None` replays.
+                corners: None,
             };
             hits_to_js(&rules::check_borders(
                 &str_or_empty(arg(0)),

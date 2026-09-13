@@ -53,10 +53,12 @@
       border-top: 4px solid crimson;
     }
 
-    /* 4: named teal, 3px, no radius — the bare w >= 3 arm */
+    /* 4: named teal, 3px, rounded only away from the stripe — the bare
+          w >= 3 arm, whose snippet carries no radius */
     #flag-named-teal {
       width: 400px;
       background: #ffffff;
+      border-radius: 0 6px 6px 0;
       border-left: 3px solid teal;
     }
 
@@ -119,9 +121,9 @@
       <div class="case" id="flag-named-purple"><h3>named purple</h3><p>border-left 4px solid purple + radius</p></div>
       <div class="case" id="flag-named-rebecca"><h3>rebeccapurple</h3><p>border-left 4px + radius</p></div>
       <div class="case" id="flag-named-crimson-top"><h3>crimson top stripe</h3><p>border-top 4px, horizontal variant</p></div>
-      <div class="case" id="flag-named-teal"><h3>named teal</h3><p>border-left 3px, no radius</p></div>
+      <div class="case" id="flag-named-teal"><h3>named teal</h3><p>border-left 3px, rounded away from the stripe</p></div>
       <div class="case" id="flag-named-var"><h3>var() to named</h3><p>border-left 4px solid var(--accent)</p></div>
-      <div class="case" style="width: 400px; background: #ffffff; border-left: 7px solid purple">
+      <div class="case" style="width: 400px; background: #ffffff; border-radius: 0 6px 6px 0; border-left: 7px solid purple">
         <h3>inline named purple</h3><p>style attribute, issue #359 case (a); width 7px keeps the snippet unique</p>
       </div>
     </div>

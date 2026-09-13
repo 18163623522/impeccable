@@ -31,6 +31,26 @@ macro_rules! re {
 
 const SIDE_NAMES: [&str; 4] = ["Top", "Right", "Bottom", "Left"];
 
+/// How much corner radius a box needs before it reads as a rounded card.
+/// Under this the corners look square at reading distance.
+pub const SIDE_ACCENT_MIN_RADIUS_PX: f64 = 4.0;
+
+/// Whether a stripe on side `[Top, Right, Bottom, Left][i]` sits on a rounded
+/// box. A side accent is the AI card tell only on a rounded card; the square
+/// version is an older convention (a callout's severity rule, a pull quote, a
+/// table row marker) and says nothing. The corners that decide it are the two
+/// the stripe does not touch, so a box rounded only along the stripe
+/// (`border-radius: 8px 0 0 8px` under a left rule) still reads as square.
+/// A caller that read no corners (the recorded call vectors) gets the answer
+/// those vectors pin, which is "rounded".
+pub fn is_rounded_away_from_side(corners: Option<&Corners>, i: usize) -> bool {
+    let Some(corners) = corners else {
+        return true;
+    };
+    let (a, b) = corners.away_from(i);
+    a >= SIDE_ACCENT_MIN_RADIUS_PX && b >= SIDE_ACCENT_MIN_RADIUS_PX
+}
+
 /// JS: checks.mjs#checkBorders
 pub fn check_borders(
     tag: &str,
@@ -67,6 +87,9 @@ pub fn check_borders(
         let r_s = number_to_string(radius);
         if is_side {
             if span_badge {
+                continue;
+            }
+            if !is_rounded_away_from_side(opts.corners.as_ref(), i) {
                 continue;
             }
             if radius > 0.0 {

@@ -250,3 +250,37 @@ a `<picture>` around a letterboxed image, a scroll-reveal wrapper, a
 typewriter hero, a blurred wrapper, a `visibility: hidden` branch). They
 document browser-path gates the static engine never runs, so no golden moved
 and nothing was re-recorded.
+
+## Recorded 2026-09-12: `clipped-overflow-container` names the child and drops the clips that do their job
+
+Judging the rule over real sites put its precision at 0.36: most findings were
+`overflow: hidden` working as intended (masked reveals, marquee and rail
+tracks, image bleeds, ornament layers, boxless wrappers, page shells), and the
+snippet never said which child was cut, so a finding could not be checked
+without opening the page. The check now names the escaping child, skips
+containers that generate no box or that hold the whole page, reads the
+carousel and marquee words on the immediate scrolling child, treats a
+transform-parked copy that fits the box as a masked reveal, only counts an
+inset escape on an axis the container actually clips, and reports one
+container per escaping layer instead of every clip in the chain. Menus,
+dialogs, tooltips and popovers keep their findings.
+
+The container it reports is the clip nearest the layer, which is the one that
+cuts the layer first and the one whose component the layer belongs to.
+Measured over real pages, the outermost clip is usually a page or app wrapper
+that would absorb every layer beneath it and name none of the components that
+own them. `html` and `body` report nothing at all: `overflow: hidden` there is
+the standard guard against sideways scrolling, and the browser engine has
+never scanned either.
+
+- `detect-fixture-json-clipped-overflow-container-html`: the six existing findings now name their child; six cases added to the fixture flag column are reported (a ribbon above a card, a tooltip in a rail, two rows inside one clipping shell that each keep their own finding, a transform-parked menu, an empty menu layer); the pass column grew by the new exemptions, the shell around the two rows among them, and reports none of them.
+- `detect-fixture-text-clipped-overflow-container-html`: same, in the text renderer.
+- `detect-fixture-json-overlay-positioning-html`: the one finding there now names its child (`div clips positioned div`).
+- `detect-fixture-text-overlay-positioning-html`: same, in the text renderer.
+- `detect-dir-json-all-fixtures`: the directory sweep carries the same snippet change and the six new fixture findings (419 -> 425).
+- `detect-dir-text-all-fixtures`: same, in the text renderer.
+- `detect-dir-quiet-all-fixtures`: same, as the count line only.
+- `detect-scope-layout-text`: same, scoped to the layout rules.
+- `detect-scope-both`: same, over both scopes.
+- `detect-no-advisory-json`: same, with advisories off.
+- `detect-no-advisory-text`: same, in the text renderer.

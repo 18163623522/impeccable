@@ -29,6 +29,25 @@
     .carousel-slide-next { position: absolute; top: 100%; left: 0; width: 100%; height: 100%; padding: 16px; background: #f5f5f5; }
     .fisheye-next-item { position: absolute; top: 100%; left: 0; width: 100%; padding: 8px; background: none; border: 0; text-align: left; }
     .split-after-panel { position: absolute; top: 0; left: 50%; width: 100%; height: 100%; background: #f5f5f5; }
+    .ribbon { position: absolute; top: -12px; left: 16px; width: 120px; height: 24px; background: #2d5bd7; color: #fff; }
+    .rail-tooltip { position: absolute; top: -40px; left: 24px; width: 150px; height: 28px; background: #222; color: #fff; }
+    .rail-card { width: 160px; height: 88px; padding: 16px; border: 1px solid #ddd; }
+    .inner-clip { position: relative; overflow: hidden; width: 168px; height: 88px; padding: 16px; border: 1px solid #ddd; }
+    .translated-menu { position: absolute; top: 100%; left: 0; width: 180px; background: #222; color: #fff; padding: 8px; transform: translateY(6px); }
+    .tip-second { position: absolute; top: -30px; left: 16px; width: 150px; height: 24px; background: #222; color: #fff; }
+    .empty-menu { position: absolute; top: 100%; left: 0; width: 160px; height: 120px; background: #222; }
+    .contents-shell { display: contents; overflow: hidden; }
+    .media-bleed { position: absolute; inset: -24px; }
+    .corner-tick { position: absolute; top: -6px; left: -6px; width: 11px; height: 11px; pointer-events: none; background: #486aa3; }
+    .hover-sheen { position: absolute; bottom: -12px; left: 0; width: 160px; height: 32px; opacity: 0; }
+    .hover-sheen-fill { width: 160px; height: 32px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent); }
+    .marquee-track { position: relative; width: 400px; height: 40px; }
+    .marquee-item { position: absolute; top: 8px; left: -100%; width: 200px; height: 24px; }
+    .x-clip-box { position: relative; overflow-x: clip; overflow-y: visible; width: 200px; height: 120px; margin: 0 0 24px; padding: 16px; border: 1px solid #ddd; }
+    .below-the-box { position: absolute; top: -30px; left: 16px; width: 160px; height: 24px; background: #eef3ff; }
+    .swiper { position: relative; overflow: hidden; width: 200px; height: 120px; margin: 0 0 24px; padding: 16px; border: 1px solid #ddd; }
+    .swiper-slide-next { position: absolute; top: 0; left: 100%; width: 200px; height: 120px; padding: 16px; background: #f5f5f5; }
+    .swap-copy { position: absolute; inset: 0; background: #f0f4ff; transform: translateY(100%); }
   </style>
 </head>
 <body>
@@ -58,6 +77,34 @@
       <div class="box flag-overlay-surface" style="overflow: clip">
         <button>Dialog</button>
         <div class="pop modal-overlay">Overlay-style dialog content still needs to escape.</div>
+      </div>
+      <div class="box flag-ribbon-notch" style="overflow: hidden">
+        <p>Pricing card with a ribbon pinned above its top edge.</p>
+        <span class="ribbon">Most popular</span>
+      </div>
+      <div class="box flag-rail-tooltip" style="overflow: hidden">
+        <div class="rail-card">Review card in a horizontal rail.</div>
+        <span class="rail-tooltip">Posted on the web</span>
+      </div>
+      <!-- Two nested clips cut the same layer. The nearer one owns it, and a
+           second row is its own finding rather than one the shell absorbs. -->
+      <div class="box nested-outer-clip" style="overflow: hidden">
+        <div class="inner-clip flag-nested-row">
+          <button>Row actions</button>
+          <span class="tip-negative">Tooltip clipped by both nested containers</span>
+        </div>
+        <div class="inner-clip flag-nested-note">
+          <button>Row notes</button>
+          <span class="tip-second">Second row tooltip, cut by its own row</span>
+        </div>
+      </div>
+      <div class="box flag-translated-menu" style="overflow: hidden">
+        <button>Account</button>
+        <div class="translated-menu" role="menu">A menu parked by a transform is still a menu.</div>
+      </div>
+      <div class="box flag-empty-menu" style="overflow: hidden">
+        <button>Sort</button>
+        <div class="empty-menu" role="menu"></div>
       </div>
     </section>
 
@@ -97,6 +144,44 @@
       </div>
       <div class="pass-split-container">
         <div class="split-after-panel">Before/after comparison panel clipped by the split frame.</div>
+      </div>
+      <div class="contents-shell pass-contents-shell">
+        <div class="box pass-contents-child" style="overflow: visible">
+          <p>A display contents wrapper has no box to clip with.</p>
+          <span class="tip-negative">Tooltip above a boxless wrapper.</span>
+        </div>
+      </div>
+      <div class="box pass-media-bleed" style="overflow: hidden">
+        <span class="media-bleed" style="width: 248px; height: 168px">
+          <img src="data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22248%22%20height%3D%22168%22%3E%3Crect%20width%3D%22248%22%20height%3D%22168%22%20fill%3D%22%23486aa3%22%2F%3E%3C%2Fsvg%3E" alt="" width="248" height="168" />
+        </span>
+      </div>
+      <div class="box pass-corner-ticks" style="overflow: hidden">
+        <p>Product frame with ornamental corner ticks.</p>
+        <i class="corner-tick"></i>
+      </div>
+      <button type="button" class="pass-hidden-button pass-hover-sheen">
+        Upgrade
+        <span class="hover-sheen"><span class="hover-sheen-fill"></span></span>
+      </button>
+      <div class="box pass-news-band" style="overflow: hidden">
+        <div class="marquee-track">
+          <span class="marquee-item">Ticker copy sliding through the band.</span>
+        </div>
+      </div>
+      <!-- The axis test is what exempts this in the static engine. A browser
+           computes the other axis to `auto` when one is `clip`, so there the
+           box is a scroll region and exempt one step earlier. -->
+      <div class="x-clip-box pass-x-clip">
+        <p>Only the horizontal axis is clipped here.</p>
+        <span class="below-the-box">Layer above the box, unclipped.</span>
+      </div>
+      <div class="swiper pass-swiper-rail">
+        <div class="swiper-slide-next">The next slide waits outside the swiper viewport.</div>
+      </div>
+      <div class="box pass-swap-reveal" style="overflow: hidden">
+        <p>Label swap masked by the box.</p>
+        <span class="swap-copy">Swapped label parked below by a transform.</span>
       </div>
     </section>
   </div>

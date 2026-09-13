@@ -356,3 +356,24 @@ No existing fixture's output moved. The new
 goldens re-record.
 
 - `detect-fixture-json-wide-tracking-html`, `detect-fixture-text-wide-tracking-html` (new cases), `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+## Recorded 2026-09-12: `all-caps-body` needs an 80-character run of its own
+
+Judged against real sites, every `all-caps-body` hit on the corpus was a short
+label: a card CTA, a section kicker, an eyebrow, a diagram legend, a footer
+copyright line. Both judges called all 26 representatives harmless, and none
+of the 109 findings across 14 sites was a caps paragraph. Uppercase on a run
+the reader takes in as a shape costs nothing, so the rule now fires only from
+80 characters, where a run is read as a sentence. Those labels reach 71
+characters on the corpus, which is where the floor comes from.
+
+The length is the element's own text rather than its subtree, so a bar or a
+form control whose children hold the labels is no longer charged for their
+sum; both engines apply the same test, and a run's verdict no longer depends
+on the viewport it was measured in.
+
+- `detect-fixture-json-hero-eyebrow-chip-html`, `detect-fixture-text-hero-eyebrow-chip-html`: the 46-char uppercase table-of-contents label no longer flags. Its `hero-eyebrow-chip` finding is unchanged.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: sixteen overlay captions of 31-52 characters no longer flag.
+- `detect-fixture-json-text-occlusion-html`, `detect-fixture-text-text-occlusion-html`: the 32-char kicker no longer flags; `kicker-above-heading` still owns it.
+- `detect-fixture-json-quality-html`, `detect-fixture-text-quality-html`, `detect-fixture-json-typography-html`, `detect-fixture-text-typography-html`: the 285-char and 159-char caps paragraphs still flag, with the same counts, since each is one element's own run; only the rule description moved.
+- `detect-fixture-json-all-caps-body-html`, `detect-fixture-text-all-caps-body-html`: new fixture, three caps paragraphs flagged (162, 140 and 159 chars) and seven short caps runs silent, including a bar and a form label whose subtrees pass 80 characters.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the sweep loses those eighteen findings and gains the new fixture's three (436 to 421, `all-caps-body` 20 to 5).

@@ -52,6 +52,12 @@
   <div class="escape">
     <p class="flag-inline-prose"><b>An intro set in bold,</b> <i>and the rest of it set in italic, running to the left edge of the viewport with no gutter to hold it in.</i></p>
   </div>
+  <!-- A wrapper that only hides sideways overflow (Tailwind's
+       overflow-x-hidden) cuts the words off at the screen edge. Nothing
+       scrolls them into view: the cut is the bleed, not a carousel track. -->
+  <div class="escape" style="overflow-x: hidden">
+    <p class="flag-cut-by-wrapper" style="width: 1400px; margin: 0 0 0 40px">A paragraph given a fixed width wider than the window, inside a page wrapper that hides whatever runs past the right edge, so the end of every line is cut off mid-word where the screen stops and no visitor can ever read it, however far they scroll.</p>
+  </div>
 
   <!-- ════════════════════════════════════════════════════════════
        PASS CASES — body text with adequate container padding.
@@ -100,10 +106,12 @@
   <div class="escape">
     <p class="pass-padded-text" style="padding: 0 40px">This paragraph's box spans the viewport, and its own 40px of side padding keeps every line of the text well away from both edges of the window.</p>
   </div>
-  <!-- A slide in a carousel track: the track's clip at the viewport edge cuts
-       the text, which is not a missing page gutter. -->
+  <!-- A slide in a carousel track the visitor swipes: the track scrolls on x
+       and has the slide to scroll to, so its clip at the viewport edge is not
+       a missing page gutter. A box that only hides overflow proves no track
+       (flag-cut-by-wrapper above). -->
   <div class="escape">
-    <div style="overflow: hidden; margin-left: 700px; width: 580px">
+    <div style="overflow-x: auto; margin-left: 700px; width: 580px">
       <p class="pass-clipped-slide" style="width: 700px; margin: 0">The second slide of a carousel whose track clips it at the right edge of the viewport while it waits to scroll into view.</p>
     </div>
   </div>

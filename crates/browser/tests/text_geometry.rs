@@ -102,7 +102,7 @@ fn the_text_geometry_rules_measure_the_text() {
     let Some(engine) = engine() else { return };
     let port = serve();
 
-    // The generated selectors name the two wide paragraphs by position; the
+    // The generated selectors name the wide paragraphs by position; the
     // one-line note, the centred lines, the 16px CJK column and the narrow
     // measure are absent.
     let mut lines = findings(&engine, port, "line-length.html", "line-length");
@@ -113,18 +113,29 @@ fn the_text_geometry_rules_measure_the_text() {
             ("~101 chars/line (aim for <80)".to_string(), "p.copy.cjk-wide".to_string()),
             ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(1)".to_string()),
             ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(2)".to_string()),
+            ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(3)".to_string()),
         ],
-        "the wide column, its inline-prose twin and the 12px CJK column"
+        "the wide column, its inline-prose twin, its 2.4 line-height twin and the 12px CJK column"
     );
 
     let edges = findings(&engine, port, "body-text-viewport-edge.html", "body-text-viewport-edge");
     assert_cases(
         &edges,
-        &["div.escape:nth-of-type(1) > p", "div.escape:nth-of-type(2) > p", "li", "flag-inline-prose"],
+        &[
+            "div.escape:nth-of-type(1) > p",
+            "div.escape:nth-of-type(2) > p",
+            "li",
+            "flag-inline-prose",
+            "flag-cut-by-wrapper",
+        ],
         &["pass-centred-text", "pass-padded-text", "pass-clipped-slide"],
         "body-text-viewport-edge",
     );
-    assert_eq!(edges.len(), 4, "two paragraphs, the list item and the inline prose: {edges:?}");
+    assert_eq!(
+        edges.len(),
+        5,
+        "two paragraphs, the list item, the inline prose and the paragraph an overflow-x-hidden wrapper cuts: {edges:?}"
+    );
 
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
     assert_cases(&leading, &["card-blurb", "nested-desc"], &["teaser-copy", "link-run"], "tight-leading");
@@ -142,7 +153,7 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
     let overflow = findings(&engine, port, "text-overflow.html", "text-overflow");
     assert_cases(
         &overflow,
-        &["flag-nowrap", "flag-in-x-hidden-wrapper"],
+        &["flag-nowrap", "flag-in-x-hidden-wrapper", "flag-pseudo-suffix"],
         &["pass-ripple", "pass-image-replacement", "pass-reserve"],
         "text-overflow",
     );

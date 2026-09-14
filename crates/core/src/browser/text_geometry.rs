@@ -128,12 +128,20 @@ pub fn line_pitch_px(dom: &dyn Dom, el: ElId, own: f64) -> f64 {
     own
 }
 
-/// Whether a box that clips on the x axis, between `el` and the page root,
-/// cuts `text` at one of its sides: a slide in a carousel track, a paragraph
-/// in a horizontal scroller. What shows near the viewport edge there is the
-/// track's clip, not the page's gutter. The root and body stand for the
-/// viewport and are not counted.
-pub fn clipping_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
+/// Whether a horizontal scroller between `el` and the page root cuts `text`
+/// at one of its sides: a slide in a track the visitor swipes, a paragraph in
+/// a scrolled table. Scrolling brings that text into view, so what shows near
+/// the viewport edge there is the track's clip, not the page's gutter.
+///
+/// Only a box that really scrolls on x counts: `overflow-x: auto` or `scroll`
+/// with a `scrollWidth` past its `clientWidth`, the scroller the painted
+/// predicate lets bring content into its box. A box that only hides its
+/// overflow (a Tailwind `overflow-x-hidden` page wrapper, a section or card at
+/// `overflow: hidden`) cannot tell a carousel track from text cut off by a
+/// layout bug, and the text stays reported. A metric the capture did not
+/// record proves no scroller either. The root and body stand for the viewport
+/// and are not counted.
+pub fn scrolling_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
     let root = dom.document_element();
     let body = dom.body();
     let mut cur = dom.parent(el);
@@ -141,7 +149,7 @@ pub fn clipping_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         if Some(p) == root || Some(p) == body {
             break;
         }
-        if clips_x(dom, p) {
+        if scrolls_x(dom, p) {
             let cr = dom.rect(p);
             if cr.all_finite() && (text.left < cr.left - 1.0 || text.right > cr.right + 1.0) {
                 return true;
@@ -150,6 +158,53 @@ pub fn clipping_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         cur = dom.parent(p);
     }
     false
+}
+
+/// Whether `el` scrolls on the x axis and has content to scroll to.
+fn scrolls_x(dom: &dyn Dom, el: ElId) -> bool {
+    if !matches!(overflow_x(dom, el).as_str(), "auto" | "scroll") {
+        return false;
+    }
+    let (scroll, client) = (dom.scroll_width(el), dom.client_width(el));
+    scroll.is_finite() && client.is_finite() && scroll > client + 1.0
+}
+
+/// The height of one line's content area in ems: the font's ascent plus
+/// descent, what a Range client rect spans for one line whatever the
+/// line-height. About 1.2em for most text faces (1.1 to 1.5 across them).
+const CONTENT_AREA_EM: f64 = 1.2;
+
+/// How many line boxes a text rect `text_height` tall spans, for text set at
+/// `font_size` on lines `pitch` apart. The union of a block's Range client
+/// rects runs from the top of its first line's content area to the bottom of
+/// its last's: one pitch per line after the first, plus one content area.
+/// Dividing the height by the pitch alone reads two lines at
+/// `line-height: 2.4` as one, since that height is short of 1.5 pitches.
+pub fn text_line_count(text_height: f64, pitch: f64, font_size: f64) -> f64 {
+    if !(text_height.is_finite() && pitch.is_finite() && pitch > 0.0) {
+        return 1.0;
+    }
+    let content = if font_size.is_finite() && font_size > 0.0 {
+        font_size * CONTENT_AREA_EM
+    } else {
+        0.0
+    };
+    let after_first = js::math_round((text_height - content) / pitch);
+    1.0 + if after_first > 0.0 { after_first } else { 0.0 }
+}
+
+fn holds_break_in(dom: &dyn Dom, el: ElId) -> bool {
+    dom.children(el).into_iter().any(|c| {
+        !paints_nothing(dom, c)
+            && is_inline_phrasing(dom, c)
+            && (tag_lower(dom, c) == "br" || holds_break_in(dom, c))
+    })
+}
+
+/// Whether a `<br>` ends a line among the text `el` sets in its own line
+/// boxes, so its lines stop short of the box where the author broke them.
+pub fn phrasing_holds_break(dom: &dyn Dom, el: ElId) -> bool {
+    holds_break_in(dom, el)
 }
 
 #[cfg(test)]
@@ -189,6 +244,89 @@ mod tests {
         let s = d.add(Some(bare), "span");
         d.add_text(s, "unmeasured");
         assert!(phrasing_text_extent(&d, bare).is_none());
+    }
+
+    /// review of observations-20 row 31: v0-optimus-delta.vercel.app's
+    /// `section.overflow-hidden` and simplybudget.framer.ai's card cut text at
+    /// the viewport edge, and hid it from body-text-viewport-edge. Only a box
+    /// that really scrolls on x is a track.
+    #[test]
+    fn only_a_real_x_scroller_cuts_text_off_the_page() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let section = d.add(Some(body), "section");
+        d.set_styles(section, &[("overflow", "hidden"), ("overflowX", "hidden")]);
+        d.set_rect(section, 0.0, 0.0, 390.0, 400.0);
+        d.el_mut(section).client_width = 390.0;
+        d.el_mut(section).scroll_width = 451.0;
+        let p = d.add(Some(section), "p");
+        let cut = Rect::from_xywh(56.0, 20.0, 353.0, 48.0);
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut), "a box that only hides overflow");
+        d.set_styles(section, &[("overflow", "hidden auto"), ("overflowX", "hidden")]);
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut), "overflow-x-hidden");
+
+        // nike.com's `ul.slider`: auto on x, with slides to scroll to.
+        d.set_styles(section, &[("overflow", "auto"), ("overflowX", "auto")]);
+        assert!(scrolling_ancestor_cuts(&d, p, &cut), "a swiped track");
+        // With nothing to scroll to, it is no track.
+        d.el_mut(section).scroll_width = 390.0;
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        // Nor with an unrecorded metric.
+        d.el_mut(section).scroll_width = f64::NAN;
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        // A scroller the text sits inside does not cut it.
+        d.el_mut(section).scroll_width = 948.0;
+        let inside = Rect::from_xywh(24.0, 20.0, 300.0, 48.0);
+        assert!(!scrolling_ancestor_cuts(&d, p, &inside));
+        // The root scrolls the page, and stands for the viewport.
+        d.set_styles(section, &[("overflow", "visible"), ("overflowX", "visible")]);
+        let html = d.document_element().expect("root");
+        d.set_styles(html, &[("overflow", "auto"), ("overflowX", "auto")]);
+        d.set_rect(html, 0.0, 0.0, 390.0, 900.0);
+        d.el_mut(html).client_width = 390.0;
+        d.el_mut(html).scroll_width = 600.0;
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+    }
+
+    /// A Range rect spans one content area plus a pitch per extra line.
+    #[test]
+    fn line_count_reads_the_content_area_and_the_pitch() {
+        // 16px text on 24px lines: one line is a ~19px rect, two ~43px.
+        assert_eq!(text_line_count(19.0, 24.0, 16.0), 1.0);
+        assert_eq!(text_line_count(43.0, 24.0, 16.0), 2.0);
+        assert_eq!(text_line_count(91.0, 24.0, 16.0), 4.0);
+        // prose.html `pl-lh`: Georgia at 16px on 38.4px lines. Two lines are
+        // 38.4 + 18.2 = 56.6px, under 1.5 pitches (57.6px).
+        assert_eq!(text_line_count(18.2, 38.4, 16.0), 1.0);
+        assert_eq!(text_line_count(56.6, 38.4, 16.0), 2.0);
+        // A tall face (a 1.5em content area) on tight 16px lines is one line.
+        assert_eq!(text_line_count(24.0, 16.0, 16.0), 1.0);
+        // veeza.ai 106327: DM Sans at 16px on 26px lines, a 47px rect.
+        assert_eq!(text_line_count(47.0, 26.0, 16.0), 2.0);
+        // Nothing to divide by.
+        assert_eq!(text_line_count(47.0, 0.0, 16.0), 1.0);
+        assert_eq!(text_line_count(f64::NAN, 26.0, 16.0), 1.0);
+    }
+
+    #[test]
+    fn a_break_among_the_phrasing_ends_a_line() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "A closing statement,");
+        assert!(!phrasing_holds_break(&d, p));
+        let strong = d.add(Some(p), "strong");
+        d.set_style(strong, "display", "inline");
+        let br = d.add(Some(strong), "br");
+        d.set_style(br, "display", "inline");
+        assert!(phrasing_holds_break(&d, p), "a break inside a bold run");
+        // A break inside a block child ends that block's line, not these.
+        let q = d.add(Some(body), "p");
+        let card = d.add(Some(q), "div");
+        d.set_style(card, "display", "block");
+        let inner = d.add(Some(card), "br");
+        d.set_style(inner, "display", "inline");
+        assert!(!phrasing_holds_break(&d, q));
     }
 
     #[test]

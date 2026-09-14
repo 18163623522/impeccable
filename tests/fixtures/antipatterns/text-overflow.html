@@ -41,6 +41,7 @@
     .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .truncate { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .flag-pseudo-suffix::after { content: " and a long generated suffix that runs past the box"; }
   </style>
 </head>
 <body>
@@ -61,6 +62,9 @@
            computes the shorthand to `hidden auto`: it scrolls only on y and
            exempts nothing on x. -->
       <div style="overflow-x: hidden"><div class="box flag-in-x-hidden-wrapper" style="white-space: nowrap">A long unwrapped line inside a page wrapper that only hides sideways overflow.</div></div>
+      <!-- Generated content past the box. No text rect covers a pseudo-element,
+           so the engine cannot measure it and the spill stands. -->
+      <div class="box flag-pseudo-suffix" style="white-space: nowrap">Tag</div>
     </section>
 
     <!-- PASS column: real scroll regions, preformatted code, wrapping text, scroll ancestors -->

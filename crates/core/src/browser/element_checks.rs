@@ -2202,16 +2202,71 @@ fn paints_own_box(dom: &dyn Dom, el: ElId) -> bool {
         .any(|s| style_px(dom, el, &format!("border{s}Width")) > 0.0)
 }
 
+/// Whether a computed `content` value generates text: a non-empty string, a
+/// counter or an attribute. `url()` images and `""` generate none.
+fn generated_content_has_text(content: &str) -> bool {
+    let mut rest = content;
+    let mut images_removed = String::new();
+    while let Some(start) = rest.find("url(") {
+        images_removed.push_str(&rest[..start]);
+        match rest[start..].find(')') {
+            Some(end) => rest = &rest[start + end + 1..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    images_removed.push_str(rest);
+    let text = images_removed.as_str();
+    if text.contains("counter(") || text.contains("counters(") || text.contains("attr(") {
+        return true;
+    }
+    text.split(['"', '\''])
+        .enumerate()
+        .any(|(i, part)| i % 2 == 1 && !part.is_empty())
+}
+
+/// Whether `el` carries a `::before` or `::after` whose extent the engine
+/// cannot measure and that may reach past the box. A Range rect never covers
+/// generated content, so a spill it causes can only be taken as read:
+/// generated text wherever it sits, and in flow an image or an empty box
+/// given a width. An absolutely or fixed positioned one with no text (an
+/// arrow icon parked past a link, a decoration layer) adds nothing, as an
+/// absolutely positioned child with no text adds nothing.
+fn generated_content_unmeasured(dom: &dyn Dom, el: ElId) -> bool {
+    PSEUDOS.iter().any(|which| {
+        if !pseudo_present(dom, el, which) {
+            return false;
+        }
+        let content = pseudo_str(dom, el, which, "content");
+        if content == "normal" || pseudo_str(dom, el, which, "display") == "none" {
+            return false;
+        }
+        if generated_content_has_text(&content) {
+            return true;
+        }
+        let position = pseudo_str(dom, el, which, "position");
+        if position == "absolute" || position == "fixed" {
+            return false;
+        }
+        content.contains("url(") || pseudo_px(dom, el, which, "width") > 0.0
+    })
+}
+
 /// The rects of what `el`'s descendants paint, for deciding whether its
 /// overflow is seen: text by its text rect, replaced elements and painted
 /// boxes by their border boxes. A descendant with no text that is absolutely
 /// or fixed positioned (a ripple layer), or that paints nothing (an empty
 /// wrapper, a `min-width` reserve), adds nothing of its own. A descendant that
-/// clips on the x axis keeps its content inside its own box.
-fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>) {
+/// clips on the x axis keeps its content inside its own box. `unmeasured` is
+/// set when a descendant carries generated content no rect covers.
+fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, unmeasured: &mut bool) {
     for child in dom.children(el) {
         if dom.style(child, "display") == "none" {
             continue;
+        }
+        if generated_content_unmeasured(dom, child) {
+            *unmeasured = true;
         }
         let has_text = !js::trim(&dom.text_content(child)).is_empty();
         let position = dom.style(child, "position");
@@ -2244,7 +2299,7 @@ fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>) {
             }
             continue;
         }
-        painted_descendant_extents(dom, child, out);
+        painted_descendant_extents(dom, child, out, unmeasured);
     }
 }
 
@@ -2253,8 +2308,9 @@ fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>) {
 /// nothing there: the empty, absolutely positioned ripple span a Material
 /// button carries, a `min-width` reserve held for a rotating word, text an
 /// overflow-hidden box pushes wholly outside itself (`text-indent: -9999px`
-/// image replacement). When the element's own text cannot be measured the
-/// overflow is taken as read, as before.
+/// image replacement). When the element's own text cannot be measured, or
+/// the element or a descendant carries generated content (a `::before` or
+/// `::after` no text rect covers), the overflow is taken as read, as before.
 fn overflow_is_painted(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
     let Some(own) = dom.direct_text_rect(el) else {
         return true;
@@ -2270,8 +2326,9 @@ fn overflow_is_painted(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
     if own.width > 0.0 && own.height > 0.0 {
         extents.push(own);
     }
-    painted_descendant_extents(dom, el, &mut extents);
-    extents.iter().any(|r| {
+    let mut unmeasured = generated_content_unmeasured(dom, el);
+    painted_descendant_extents(dom, el, &mut extents, &mut unmeasured);
+    unmeasured || extents.iter().any(|r| {
         // A box that clips paints none of what lies wholly outside it.
         if clips && (r.right <= left || r.left >= right) {
             return false;
@@ -4913,6 +4970,74 @@ mod tests {
         let hits = check_element_text_overflow_dom(&d, btn);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "a.nds-btn overflows its box by 118px");
+    }
+
+    /// Review of observations-20 row 33: no text rect covers a `::before` or
+    /// `::after`, so a spill that comes from generated content cannot be
+    /// measured and stands as the scroll metrics read it.
+    #[test]
+    fn text_overflow_keeps_a_spill_generated_content_may_cause() {
+        let (mut d, body) = page();
+        let tag = d.add(Some(body), "div");
+        visible(&mut d, tag);
+        d.set_attr(tag, "class", "box");
+        d.add_text(tag, "Tag");
+        d.set_rect(tag, 24.0, 24.0, 178.0, 40.0);
+        d.el_mut(tag).client_width = 176.0;
+        d.el_mut(tag).client_height = 38.0;
+        d.el_mut(tag).scroll_width = 373.0;
+        d.set_styles(tag, &[("display", "block"), ("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "16px"), ("whiteSpace", "nowrap")]);
+        d.set_text_rect(tag, 33.0, 33.0, 28.0, 19.0);
+        // Nothing the engine measures reaches past the box.
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "no generated content");
+
+        // overflow.html `ov-pseudo`: a generated suffix.
+        d.set_pseudo_style(tag, "::after", "content", "\" and a very long generated suffix past the box\"");
+        let hits = check_element_text_overflow_dom(&d, tag);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "div.box overflows its box by 197px");
+        // An image or a counter is as unmeasured as text.
+        d.set_pseudo_style(tag, "::after", "content", "url(\"badge.svg\")");
+        assert_eq!(check_element_text_overflow_dom(&d, tag).len(), 1, "an image");
+        // Not displayed, it paints nothing.
+        d.set_pseudo_style(tag, "::after", "display", "none");
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "display: none");
+        d.set_pseudo_style(tag, "::after", "display", "inline");
+        // An empty decoration layer out of flow adds nothing, as an absolutely
+        // positioned child with no text adds nothing.
+        d.set_pseudo_style(tag, "::after", "content", "\"\"");
+        d.set_pseudo_style(tag, "::after", "position", "absolute");
+        d.set_pseudo_style(tag, "::after", "width", "340px");
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "an absolute layer");
+        // In flow and given a width, an empty box may reach past the edge.
+        d.set_pseudo_style(tag, "::after", "position", "static");
+        assert_eq!(check_element_text_overflow_dom(&d, tag).len(), 1, "an in-flow box");
+        // A clearfix, in flow at no width, reaches nowhere.
+        d.set_pseudo_style(tag, "::after", "width", "0px");
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "a clearfix");
+        d.set_pseudo_style(tag, "::after", "content", "none");
+
+        // thecignagroup.com's action links park a 40px arrow, an absolutely
+        // positioned `::after` image, past the end of the label: an icon with
+        // no text out of flow adds nothing, as an absolute child with none.
+        d.set_pseudo_style(tag, "::after", "content", "url(\"data:image/svg+xml,%3Csvg%3E%3C/svg%3E\")");
+        d.set_pseudo_style(tag, "::after", "position", "absolute");
+        d.set_pseudo_style(tag, "::after", "width", "40px");
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "an arrow parked past the link");
+        // Generated text out of flow is still unmeasured.
+        d.set_pseudo_style(tag, "::after", "content", "\"New\"");
+        assert_eq!(check_element_text_overflow_dom(&d, tag).len(), 1, "an absolute text badge");
+        d.set_pseudo_style(tag, "::after", "content", "none");
+
+        // The same generated text on an icon child, even one positioned out of
+        // flow with no text of its own.
+        let icon = d.add(Some(tag), "i");
+        visible(&mut d, icon);
+        d.set_styles(icon, &[("display", "inline-block"), ("position", "absolute")]);
+        d.set_rect(icon, 180.0, 30.0, 16.0, 16.0);
+        assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "an empty icon box");
+        d.set_pseudo_style(icon, "::before", "content", "\"Featured this week\"");
+        assert_eq!(check_element_text_overflow_dom(&d, tag).len(), 1, "an icon glyph string");
     }
 
     /// so-net.ne.jp's sprite tabs push their label 9,999px out of an

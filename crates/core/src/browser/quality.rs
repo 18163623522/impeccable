@@ -17,7 +17,8 @@ use crate::checks::measures::{
 };
 use crate::checks::rules::RuleHit;
 use super::text_geometry::{
-    clipping_ancestor_cuts, holds_only_phrasing, line_pitch_px, phrasing_text_extent,
+    holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent,
+    scrolling_ancestor_cuts, text_line_count,
 };
 use crate::checks::text_rules::{
     average_glyph_advance_em, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
@@ -327,10 +328,17 @@ const LINE_PROSE_TAGS: &[&str] = &["p", "li", "dd", "blockquote"];
 /// one line tall is at most about 1.5em, two lines at least about 2.3em.
 const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
 
-/// How much of its box a block's widest line fills before the box is taken
-/// as the measure. A wrapped paragraph's ragged right is under a word short
-/// of its column, and the box is what an author sets.
+/// How much of its content box a block's widest line fills before
+/// `body-text-viewport-edge` takes the box's edges as the text's. A wrapped
+/// paragraph's ragged right is under a word short of its column, and the box
+/// is what an author sets.
 const TEXT_FILLS_MEASURE: f64 = 0.9;
+
+/// How much of its box a block's widest line fills before `line-length`
+/// takes the box as the measure. The widest line's count is estimated at half
+/// an em a glyph, which runs 10 to 20% over a narrow sans, so a line within
+/// that of its box may hold as many characters as the box estimate says.
+const LINE_FILLS_MEASURE: f64 = 0.8;
 
 /// Characters on a line `width_px` wide at `font_size_px`, with glyphs
 /// `advance_em` wide on average.
@@ -342,7 +350,13 @@ fn chars_per_line_at(width_px: f64, font_size_px: f64, advance_em: f64) -> f64 {
 /// wraps reports the union of its fragments, two 21px highlight lines as one
 /// 43px box, while each fragment a reader sees is one line tall. Blocks, and
 /// an inline box whose lines cannot be counted, keep their box height.
-fn own_line_box_height(dom: &dyn Dom, el: ElId, rect: &Rect, own_line_height: Option<f64>) -> f64 {
+fn own_line_box_height(
+    dom: &dyn Dom,
+    el: ElId,
+    rect: &Rect,
+    own_line_height: Option<f64>,
+    font_size: f64,
+) -> f64 {
     if dom.style(el, "display") != "inline" {
         return rect.height;
     }
@@ -352,7 +366,7 @@ fn own_line_box_height(dom: &dyn Dom, el: ElId, rect: &Rect, own_line_height: Op
     if !(own > 0.0) || !t.all_finite() || t.height <= 0.0 {
         return rect.height;
     }
-    let lines = js::math_max(1.0, math_round(t.height / line_pitch_px(dom, el, own)));
+    let lines = text_line_count(t.height, line_pitch_px(dom, el, own), font_size);
     rect.height / lines
 }
 
@@ -464,9 +478,22 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     .line_height_px
                     .filter(|lh| *lh > 0.0)
                     .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-                if text_wraps_to_multiple_lines(t.height, Some(pitch)) {
+                let lines = text_line_count(t.height, pitch, font_size);
+                if lines >= 2.0 {
                     let chars = utf16_len(&text) as f64;
-                    let estimate = if t.width >= rect.width * TEXT_FILLS_MEASURE {
+                    // The half-em advance runs 10 to 20% wide of a real face,
+                    // so a line within that of its box cannot be told from
+                    // one that fills it in a narrow sans (veeza.ai's lines
+                    // at 88%), and the box estimate stands. Lines broken by
+                    // a `<br>` are short where the author ended them, and
+                    // keep the widest line up to the 90% a wrapped column
+                    // fills.
+                    let fill = if phrasing_holds_break(dom, el) {
+                        TEXT_FILLS_MEASURE
+                    } else {
+                        LINE_FILLS_MEASURE
+                    };
+                    let estimate = if t.width >= rect.width * fill {
                         chars_per_line_at(rect.width, font_size, advance)
                     } else {
                         // The widest line from its glyphs. However narrow the
@@ -474,7 +501,6 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                         // when all of the block's text sits in these lines.
                         let from_width = chars_per_line_at(t.width, font_size, advance);
                         if holds_only_phrasing(dom, el) {
-                            let lines = js::math_max(2.0, math_round(t.height / pitch));
                             js::math_max(from_width, chars / lines)
                         } else {
                             from_width
@@ -506,7 +532,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         && has_direct_text
         && text_len > 20
         && rect.width > 100.0
-        && own_line_box_height(dom, el, rect, q.line_height_px) > 30.0
+        && own_line_box_height(dom, el, rect, q.line_height_px, font_size) > 30.0
     {
         let borders = [
             spx("borderTopWidth"),
@@ -764,10 +790,11 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     // --- Body text touching viewport edge ---
     // Measured on the text where it can be: a centred or padded paragraph
     // spans the viewport with its box while its glyphs keep a gutter, and a
-    // paragraph a clipping track cuts (a carousel slide, a horizontal
-    // scroller) meets that track's clip rather than the page edge. Prose
-    // whose words sit wholly in inline children is measured the same way.
-    // Where the text cannot be measured the box stands in, as before.
+    // paragraph a horizontal scroller cuts (a slide in a swiped track) meets
+    // that track's clip rather than the page edge. A box that only hides its
+    // overflow proves no track, so text it cuts at the screen edge reports.
+    // Prose whose words sit wholly in inline children is measured the same
+    // way. Where the text cannot be measured the box stands in, as before.
     let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
     let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
     if (has_direct_text || edge_prose) && text_len > 40 && is_edge_tag && viewport_width > 0.0 {
@@ -782,7 +809,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             None
         } else {
             match phrasing_text_extent(dom, el) {
-                Some(t) if clipping_ancestor_cuts(dom, el, &t) => None,
+                Some(t) if scrolling_ancestor_cuts(dom, el, &t) => None,
                 Some(t) => {
                     let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
                     let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
@@ -790,7 +817,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                         .line_height_px
                         .filter(|lh| *lh > 0.0)
                         .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-                    if text_wraps_to_multiple_lines(t.height, Some(pitch))
+                    if text_line_count(t.height, pitch, font_size) >= 2.0
                         && t.width >= (content_right - content_left) * TEXT_FILLS_MEASURE
                     {
                         // Wrapped lines that fill the column reach its edges;
@@ -1694,18 +1721,73 @@ mod tests {
         assert_eq!(snippets(&d, short, "line-length"), vec!["~94 chars/line (aim for <80)"]);
 
         // hnmatchmaker.com: 175 characters on two lines of a narrow 12px face.
-        // The widest line is 486px, ~81 half-em glyphs, but some line holds
-        // at least the average of 88.
+        // The widest line is 486px, 89% of its box, within what the half-em
+        // advance runs wide of a narrow face: the box estimate stands, as
+        // base printed it.
         let teaser = text_el(&mut d, body, "p", &"word ".repeat(35), "12px");
         d.set_style(teaser, "lineHeight", "16px");
         d.set_rect(teaser, 73.0, 500.0, 544.0, 32.0);
         d.set_text_rect(teaser, 73.0, 500.0, 486.0, 32.0);
+        assert_eq!(snippets(&d, teaser, "line-length"), vec!["~91 chars/line (aim for <80)"]);
+        // Lines well short of the box (beside a float) are read from the
+        // widest line, ~67 half-em glyphs here; but some line holds at least
+        // the average of 87 when all of the block's text sits in these lines.
+        d.set_text_rect(teaser, 73.0, 500.0, 400.0, 32.0);
         assert_eq!(snippets(&d, teaser, "line-length"), vec!["~87 chars/line (aim for <80)"]);
         // A block holding a component: its text is not all in these lines,
         // so only the widest line counts.
         let card = d.add(Some(teaser), "div");
         d.set_style(card, "display", "block");
         assert!(snippets(&d, teaser, "line-length").is_empty());
+
+        // simplybudget.framer.ai: 94 characters on two lines ended by a
+        // `<br>`, 660px of glyphs in a 760px box. The author broke them, so
+        // the widest line decides however much of the box it fills.
+        let broken = text_el(&mut d, body, "p", &"word ".repeat(19), "16px");
+        d.set_style(broken, "lineHeight", "28.8px");
+        d.set_rect(broken, 260.0, 900.0, 760.0, 57.6);
+        d.set_text_rect(broken, 260.0, 904.0, 660.0, 49.0);
+        assert_eq!(snippets(&d, broken, "line-length"), vec!["~94 chars/line (aim for <80)"], "no break");
+        let br = d.add(Some(broken), "br");
+        d.set_style(br, "display", "inline");
+        assert!(snippets(&d, broken, "line-length").is_empty(), "~83 on the line the break ends");
+        // A broken block whose lines fill 90% of the box is a column the
+        // breaks never shortened, and the box estimate stands.
+        d.set_text_rect(broken, 260.0, 904.0, 700.0, 49.0);
+        assert_eq!(snippets(&d, broken, "line-length"), vec!["~94 chars/line (aim for <80)"], "a full column");
+    }
+
+    /// Review of observations-20 row 8. A Range rect spans one content area
+    /// plus a pitch per extra line, so two lines at `line-height: 2.4` are
+    /// shorter than 1.5 pitches and read as one. And a narrow sans fills 80
+    /// to 90% of its box with as many characters as the box estimate says.
+    #[test]
+    fn line_length_counts_lines_by_the_line_height_and_keeps_nearly_full_lines() {
+        let copy = "A long reading paragraph set with a very airy line-height of 2.4, set across a very wide column with no max-width at all, so the lines run far past a comfortable measure and the eye has a long way to travel back to the start of the next line every single time it reaches the end of one of them.";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        // prose.html `pl-lh`: Georgia at 16px on 38.4px lines, 1,100px wide.
+        let airy = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(airy, "lineHeight", "38.4px");
+        d.set_rect(airy, 24.0, 100.0, 1100.0, 76.8);
+        d.set_text_rect(airy, 24.0, 110.0, 1090.0, 56.6);
+        assert_eq!(snippets(&d, airy, "line-length"), vec!["~138 chars/line (aim for <80)"], "two lines");
+        d.set_text_rect(airy, 24.0, 110.0, 1090.0, 18.2);
+        assert!(snippets(&d, airy, "line-length").is_empty(), "one line at the same pitch");
+
+        // veeza.ai 106327: DM Sans at 16px on 26px lines, 621.6px of glyphs
+        // (88% of a 704px box) that really hold about 86 characters.
+        let item = text_el(
+            &mut d,
+            body,
+            "li",
+            "Our AI fills the official application and prepares your supporting documents. You book your own appointment.",
+            "16px",
+        );
+        d.set_style(item, "lineHeight", "26px");
+        d.set_rect(item, 288.0, 670.5, 704.0, 52.0);
+        d.set_text_rect(item, 288.0, 672.5, 621.578125, 47.0);
+        assert_eq!(snippets(&d, item, "line-length"), vec!["~88 chars/line (aim for <80)"]);
     }
 
     /// observations-20 row 29: a full-width CJK glyph is an em wide, so the
@@ -1808,23 +1890,31 @@ mod tests {
             vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px / right 0px)")]
         );
 
-        // A slide whose text the track clips at 1,270px.
+        // Text a box that only hides overflow cuts at 1,270px: an
+        // `overflow-hidden` section (v0-optimus-delta.vercel.app) cannot be
+        // told from a carousel track, and the text reports as base did. Its
+        // two lines fill the paragraph, so the paragraph's edge is the one
+        // printed.
         let track = d.add(Some(body), "div");
         d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden")]);
         d.set_rect(track, 10.0, 300.0, 1260.0, 200.0);
+        d.el_mut(track).client_width = 1260.0;
+        d.el_mut(track).scroll_width = 1590.0;
         let slide = text_el(&mut d, track, "p", copy, "16px");
         d.set_style(slide, "lineHeight", "24px");
         d.set_rect(slide, 900.0, 320.0, 700.0, 48.0);
         d.set_text_rect(slide, 900.0, 322.0, 690.0, 44.0);
-        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "cut by its track");
-        // Out of the track, the same text runs off the page and reports. Its
-        // two lines fill the paragraph, so the paragraph's edge is the one
-        // printed.
+        let cut = vec![format!("<p> with {len}-char body bleeds to viewport edge (right -320px)")];
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow: hidden");
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden auto")]);
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow-x-hidden");
+        // A track that scrolls on x, with the slide to scroll to, brings the
+        // text into view: its clip is the track's, not the page's gutter.
+        d.set_styles(track, &[("overflowX", "auto"), ("overflow", "auto")]);
+        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "a swiped track");
+        // Out of the track, the same text runs off the page and reports.
         d.set_styles(track, &[("overflowX", "visible"), ("overflow", "visible")]);
-        assert_eq!(
-            snippets(&d, slide, "body-text-viewport-edge"),
-            vec![format!("<p> with {len}-char body bleeds to viewport edge (right -320px)")]
-        );
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut);
 
         // Wrapped lines that fill a padded paragraph sit on its content box.
         let padded = text_el(&mut d, body, "p", copy, "16px");

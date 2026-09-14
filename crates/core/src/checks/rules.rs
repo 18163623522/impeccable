@@ -750,11 +750,7 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
             && opts.effective_bg.is_none()
             && text_color.a.map_or(false, |a| a < 1.0);
         if !is_alpha_fallback_fp {
-            let ratio_label = if to_fixed(ratio, 1) == to_fixed(threshold, 1) {
-                to_fixed(ratio, 2)
-            } else {
-                to_fixed(ratio, 1)
-            };
+            let ratio_label = crate::color::ratio_label(ratio, threshold);
             let source = opts
                 .bg_source
                 .as_deref()
@@ -853,7 +849,7 @@ pub fn check_hover_contrast(opts: &HoverContrastOpts) -> Vec<RuleHit> {
         "low-contrast",
         format!(
             ":hover state {}:1 (need {}:1) — text {} on {}",
-            to_fixed(ratio, 1),
+            crate::color::ratio_label(ratio, threshold),
             number_to_string(threshold),
             color_to_hex(Some(&text_color)),
             color_to_hex(Some(&bg))
@@ -1669,6 +1665,42 @@ mod tests {
         assert_eq!(
             large[0].snippet,
             ":hover state 2.6:1 (need 3:1) — text #a0a0a0 on #ffffff"
+        );
+    }
+
+    #[test]
+    fn a_ratio_just_under_the_bar_never_prints_as_the_bar() {
+        let hover = |text: Rgba, bg: Rgba, font_size: f64| {
+            check_hover_contrast(&HoverContrastOpts {
+                tag: "div".into(),
+                text_color: Some(text),
+                bg: Some(bg),
+                own_bg_alpha: Some(1.0),
+                font_size,
+                font_weight: 400.0,
+                has_direct_text: true,
+                is_emoji_only: false,
+            })
+        };
+        // #747474 on black is 4.49:1, which one decimal rounded to the bar.
+        let grey = Rgba::new(116.0, 116.0, 116.0, 1.0);
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(
+            hover(grey, black, 16.0)[0].snippet,
+            ":hover state 4.49:1 (need 4.5:1) — text #747474 on #000000"
+        );
+        // #595959 on black is 2.998:1: two decimals round to 3.00, so they are cut.
+        let dim = Rgba::new(89.0, 89.0, 89.0, 1.0);
+        assert_eq!(
+            hover(dim, black, 24.0)[0].snippet,
+            ":hover state 2.99:1 (need 3:1) — text #595959 on #000000"
+        );
+        // Far under the bar, one decimal as before.
+        let pale = Rgba::new(160.0, 160.0, 160.0, 1.0);
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        assert_eq!(
+            hover(pale, white, 16.0)[0].snippet,
+            ":hover state 2.6:1 (need 4.5:1) — text #a0a0a0 on #ffffff"
         );
     }
 

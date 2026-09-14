@@ -1697,8 +1697,8 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
     let text_label = if text.is_empty() { String::new() } else { format!(" \"{text}\"") };
     let detail = format!(
         "browser contrast {}:1 median {}:1 (need {}:1) via {}{}",
-        to_fixed(measured, 1),
-        to_fixed(median, 1),
+        crate::color::ratio_label(measured, threshold),
+        crate::color::ratio_label(median, threshold),
         number_to_string(threshold),
         method,
         text_label
@@ -1978,6 +1978,29 @@ mod tests {
         assert_eq!(out2["status"], "unresolved");
         assert_eq!(out2["reason"], "not enough readable samples");
         assert_eq!(out2["samples"], json!(1));
+    }
+
+    #[test]
+    fn finish_analysis_never_prints_a_failing_ratio_as_the_bar() {
+        // #777777 over #070707 samples 4.498:1. One decimal read 4.5 and two
+        // read 4.50, under a `need 4.5:1` it fails.
+        let candidate = json!({ "selector": "p", "text": "Plans", "threshold": 4.5 });
+        let tc = rgba(119.0, 119.0, 119.0, 1.0);
+        let dark: Vec<Value> = (0..3)
+            .map(|_| json!({ "status": "sampled", "color": { "r": 7, "g": 7, "b": 7, "a": 1 }, "method": "solid-background" }))
+            .collect();
+        let out = finish_analysis(&candidate, &tc, &dark, 3);
+        assert_eq!(out["status"], "fail");
+        assert_eq!(out["finding"]["snippet"], "browser contrast 4.49:1 median 4.49:1 (need 4.5:1) via solid-background \"Plans\"");
+        // A median above the bar prints one decimal.
+        let mut mixed = dark.clone();
+        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        let out = finish_analysis(&candidate, &tc, &mixed, 7);
+        let snippet = out["finding"]["snippet"].as_str().unwrap();
+        assert!(snippet.starts_with("browser contrast 4.49:1 median 4.7:1 (need 4.5:1)"), "{snippet}");
     }
 
     #[test]

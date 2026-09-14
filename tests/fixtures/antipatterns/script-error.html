@@ -40,9 +40,14 @@
 
   <script>
     // Should flag: a throw that is not an Error. The finding names its
-    // properties and the function and script position it was thrown from.
+    // properties and the function and script position it was thrown from:
+    // `Uncaught Object {code: "E_CONSENT", ...} (at loadConsentConfig, <url>:44:...)`.
     function loadConsentConfig() { throw { code: 'E_CONSENT', message: 'consent config missing' }; }
     setTimeout(loadConsentConfig, 0);
+    // Should flag: code with no script URL, built the way a tag manager builds
+    // a custom tag. It reports its type and V8's name for the script:
+    // `Uncaught ReferenceError: missingAnalyticsQueue is not defined (at eval, <anonymous>:3:1)`.
+    setTimeout(new Function('missingAnalyticsQueue.push({ event: "view" })'), 0);
     // Should pass: a caught error and console.error never reach the page
     // error stream.
     try { throw new Error('handled quietly'); } catch (e) { console.error('handled quietly', e); }

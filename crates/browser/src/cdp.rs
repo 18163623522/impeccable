@@ -750,14 +750,17 @@ impl<'a> Page<'a> {
                         .unwrap_or(false);
                 if counts {
                     if let Some(details) = params.get("exceptionDetails") {
+                        // First line, trimmed, 160 characters, deduped. One
+                        // throw that surfaces both synchronously and as an
+                        // unhandled rejection reports once, as it first
+                        // arrived.
                         let message = page_error_message(details);
-                        // detect-url.mjs: first line, trimmed, 160 chars, deduped.
-                        let first = message.split('\n').next().unwrap_or("");
-                        let trimmed = impeccable_core::js::trim(first);
-                        let sliced: String = trimmed.chars().take(160).collect();
-                        if !sliced.is_empty() && !self.page_errors.iter().any(|e| e.message == sliced) {
+                        let key = page_error_key(&message);
+                        if !message.is_empty()
+                            && !self.page_errors.iter().any(|e| page_error_key(&e.message) == key)
+                        {
                             self.page_errors.push(PageError {
-                                message: sliced,
+                                message,
                                 source: page_error_source(details),
                             });
                         }
@@ -1281,14 +1284,15 @@ fn value_from_remote_object(remote: &Value) -> Value {
     remote.get("value").cloned().unwrap_or(Value::Null)
 }
 
-/// One uncaught page error: its message (first line, trimmed, at most 160
-/// characters) and, when V8 named a script, where it was thrown.
+/// One uncaught page error: its message ([`page_error_message`]) and, when
+/// V8 recorded a script or a frame, where it was thrown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageError {
     pub message: String,
     /// `at <function>, <script url>:<line>:<column>` (1-based), or
     /// `at <script url>:<line>:<column>` for an anonymous frame or a script
-    /// with no stack (a syntax error).
+    /// with no stack (a syntax error). A script with no URL reads
+    /// `<anonymous>` in the URL's place.
     pub source: Option<String>,
 }
 
@@ -1296,22 +1300,138 @@ pub struct PageError {
 /// carrying a long query), so the location never swamps the message.
 const PAGE_ERROR_URL_MAX: usize = 160;
 
-/// The message a page error reports. An `Error` reads the way puppeteer reads
-/// it ([`client_error_message`]). A thrown value that is not an `Error` (a
-/// plain object, a class instance, a rejected object) has no message of its
-/// own and describes itself as `Object`, so its class and the properties V8
-/// previews stand in for one, the way the console prints it:
-/// `Object {code: "E_CONFIG", message: "config missing"}`.
+/// CDP's marker in front of an uncaught error (`exceptionDetails.text`), and
+/// the one it uses for an unhandled rejection.
+const UNCAUGHT: &str = "Uncaught";
+const UNCAUGHT_IN_PROMISE: &str = "Uncaught (in promise)";
+
+/// A message body past this many characters is cut.
+const PAGE_ERROR_MESSAGE_MAX: usize = 160;
+
+/// The message a page error reports, one shape whatever path the throw
+/// took, the way the console prints it: `Uncaught <Type>: <message>`, or
+/// `Uncaught (in promise) <Type>: <message>` for an unhandled rejection.
+///
+/// - An `Error` reads the first line of its description, which names the
+///   type (`TypeError: ...`, or the name a library gave it,
+///   `ChunkLoadError: ...`). A description that names none (a replaced
+///   `stack`) gets the class in front.
+/// - A thrown value that is not an `Error` (a plain object, a class
+///   instance, a rejected object) has no message of its own, so its class
+///   and the properties V8 previews stand in for one:
+///   `Uncaught Object {code: "E_CONFIG", message: "config missing"}`.
+/// - A primitive reads as `String(value)`: `Uncaught boom`.
+/// - A throw that arrives with no exception object (a script from another
+///   origin) keeps CDP's text, which already reads `Uncaught TypeError: ...`.
+///
+/// The body is its first line, trimmed and cut at 160 characters. A throw
+/// whose body is empty reports nothing, so this returns an empty string.
 pub fn page_error_message(details: &Value) -> String {
-    if let Some(exception) = details.get("exception") {
-        let is_object = exception.get("type").and_then(Value::as_str) == Some("object");
-        if is_object && exception.get("subtype").is_none() {
-            if let Some(rendered) = exception.get("preview").and_then(|p| render_preview(exception, p)) {
-                return rendered;
+    let text = details.get("text").and_then(Value::as_str).unwrap_or("");
+    let Some(exception) = details.get("exception") else {
+        let first = first_line(text);
+        for marker in [UNCAUGHT_IN_PROMISE, UNCAUGHT] {
+            if let Some(rest) = first.strip_prefix(marker) {
+                if rest.is_empty() {
+                    return marker.to_string();
+                }
+                if rest.starts_with(' ') {
+                    return format!("{marker} {}", cap_message(&first_line(rest)));
+                }
             }
+        }
+        return cap_message(&first);
+    };
+    let marker = if text.starts_with(UNCAUGHT_IN_PROMISE) {
+        UNCAUGHT_IN_PROMISE
+    } else {
+        UNCAUGHT
+    };
+    let body = cap_message(&first_line(&thrown_value_label(details, exception)));
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("{marker} {body}")
+}
+
+/// The cut at [`PAGE_ERROR_MESSAGE_MAX`] characters, applied to the message
+/// after its type (`TypeError: `), so naming the type never costs the
+/// message any of what it showed before.
+fn cap_message(line: &str) -> String {
+    let cut = |s: &str| s.chars().take(PAGE_ERROR_MESSAGE_MAX).collect::<String>();
+    if names_a_type(line) {
+        let name_len = line
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if let Some(after_colon) = line[name_len..].strip_prefix(':') {
+            let message = after_colon.trim_start();
+            let prefix = &line[..line.len() - message.len()];
+            return format!("{prefix}{}", cut(message));
+        }
+    }
+    cut(line)
+}
+
+/// What two reports of one throw share: the message with the rejection
+/// marker read as a plain `Uncaught`. A throw that surfaces both
+/// synchronously and as an unhandled rejection (a consent manager's patched
+/// `document.createElement`, called from a script and from a promise) has one
+/// key. The source is not part of it.
+pub fn page_error_key(message: &str) -> std::borrow::Cow<'_, str> {
+    match message.strip_prefix(UNCAUGHT_IN_PROMISE) {
+        Some(rest) => std::borrow::Cow::Owned(format!("{UNCAUGHT}{rest}")),
+        None => std::borrow::Cow::Borrowed(message),
+    }
+}
+
+/// The first line, trimmed. [`cap_message`] makes the cut.
+fn first_line(s: &str) -> String {
+    let first = s.split('\n').next().unwrap_or("");
+    impeccable_core::js::trim(first).chars().collect()
+}
+
+/// The thrown value, typed: `TypeError: ...`, `Object {...}`, `boom`.
+fn thrown_value_label(details: &Value, exception: &Value) -> String {
+    let is_object = exception.get("type").and_then(Value::as_str) == Some("object");
+    let subtype = exception.get("subtype").and_then(Value::as_str);
+    if is_object && subtype == Some("error") {
+        let class = exception
+            .get("className")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let description = exception
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let first = first_line(description);
+        return if first.is_empty() {
+            class.to_string()
+        } else if class.is_empty() || names_a_type(&first) {
+            first
+        } else {
+            format!("{class}: {first}")
+        };
+    }
+    if is_object && subtype.is_none() {
+        if let Some(rendered) = exception.get("preview").and_then(|p| render_preview(exception, p)) {
+            return rendered;
         }
     }
     client_error_message(details)
+}
+
+/// Whether an error description's first line starts with the error's type,
+/// the way V8 writes `stack`: a name alone, or a name and a colon.
+fn names_a_type(line: &str) -> bool {
+    let name: String = line
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    let starts_like_a_name = name.chars().next().is_some_and(|c| !c.is_ascii_digit());
+    let rest = &line[name.len()..];
+    starts_like_a_name && (rest.is_empty() || rest.starts_with(':'))
 }
 
 /// `Class {name: value, ...}` from a CDP `ObjectPreview`.
@@ -1343,16 +1463,29 @@ fn render_preview(exception: &Value, preview: &Value) -> Option<String> {
     Some(format!("{class} {{{}}}", parts.join(", ")))
 }
 
+/// V8's name for a script with no URL: code run through `eval` or
+/// `new Function`, or a script element given text instead of a `src`.
+const ANONYMOUS_SCRIPT: &str = "<anonymous>";
+
 /// Where a page error was thrown: the top stack frame when V8 recorded one
 /// with a script URL, else the script position the exception details carry
-/// (a syntax error has no stack). `None` when neither names a script, such as
-/// code evaluated with no URL.
+/// (a syntax error has no stack), else the top frame in a script with no URL,
+/// named `<anonymous>` the way V8's own stack names it. `None` when there is
+/// neither a named script nor a frame.
 pub fn page_error_source(details: &Value) -> Option<String> {
-    let frame = details
-        .pointer("/stackTrace/callFrames/0")
-        .filter(|f| f.get("url").and_then(Value::as_str).is_some_and(|u| !u.is_empty()));
-    let at = frame.unwrap_or(details);
-    let url = at.get("url").and_then(Value::as_str).filter(|u| !u.is_empty())?;
+    let names_script = |v: &Value| v.get("url").and_then(Value::as_str).is_some_and(|u| !u.is_empty());
+    let top = details.pointer("/stackTrace/callFrames/0");
+    let (at, frame) = match top {
+        Some(f) if names_script(f) => (f, Some(f)),
+        _ if names_script(details) => (details, None),
+        Some(f) => (f, Some(f)),
+        None => return None,
+    };
+    let url = at
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+        .unwrap_or(ANONYMOUS_SCRIPT);
     // CDP positions are 0-based; stack traces and editors count from 1.
     let position = |key: &str| at.get(key).and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64 + 1;
     let url = if url.chars().count() > PAGE_ERROR_URL_MAX {
@@ -1485,7 +1618,7 @@ mod tests {
                     { "name": "message", "type": "string", "value": "config \"missing\"" }
                 ] } }
         });
-        assert_eq!(page_error_message(&object), r#"Object {code: "E_CONFIG", message: "config \"missing\""}"#);
+        assert_eq!(page_error_message(&object), r#"Uncaught Object {code: "E_CONFIG", message: "config \"missing\""}"#);
         let instance = json!({
             "text": "Uncaught",
             "exception": { "type": "object", "className": "ApiError", "description": "ApiError", "objectId": "2",
@@ -1495,8 +1628,8 @@ mod tests {
                     { "name": "cause", "type": "undefined" }
                 ] } }
         });
-        assert_eq!(page_error_message(&instance), "ApiError {status: 500, body: Object, cause: undefined, ...}");
-        // An Error and a primitive read the way they always did.
+        assert_eq!(page_error_message(&instance), "Uncaught ApiError {status: 500, body: Object, cause: undefined, ...}");
+        // An Error names its type; a primitive reads as itself.
         let error = json!({
             "text": "Uncaught",
             "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "3",
@@ -1505,11 +1638,76 @@ mod tests {
         });
         assert_eq!(
             page_error_message(&error),
-            "Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418"
+            "Uncaught Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418"
         );
-        assert_eq!(page_error_message(&json!({ "text": "Uncaught", "exception": { "type": "string", "value": "boom" } })), "boom");
+        assert_eq!(page_error_message(&json!({ "text": "Uncaught", "exception": { "type": "string", "value": "boom" } })), "Uncaught boom");
         // A cross-origin throw arrives with no exception object to read.
         assert_eq!(page_error_message(&json!({ "text": "Uncaught [object Object]" })), "Uncaught [object Object]");
+    }
+
+    #[test]
+    fn page_error_message_names_the_type_on_every_path() {
+        // The thrown-object path used to drop the type (`jQuery is not
+        // defined` on adm.com) while CDP's text kept it for a script from
+        // another origin (`Uncaught TypeError: ...` from OneTrust).
+        let reference = json!({
+            "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "ReferenceError", "objectId": "1",
+                "description": "ReferenceError: jQuery is not defined\n    at https://www.adm.com/en-us/products-services/services/:4811:60" }
+        });
+        assert_eq!(page_error_message(&reference), "Uncaught ReferenceError: jQuery is not defined");
+        let rejected = json!({
+            "text": "Uncaught (in promise)",
+            "exception": { "type": "object", "subtype": "error", "className": "TypeError", "objectId": "2",
+                "description": "TypeError: Cannot read properties of undefined (reading 'ECID')\n    at <anonymous>:894:50" }
+        });
+        assert_eq!(
+            page_error_message(&rejected),
+            "Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'ECID')"
+        );
+        // The name a library gave its error is the type V8 prints.
+        let chunk = json!({
+            "text": "Uncaught (in promise)",
+            "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "3",
+                "description": "ChunkLoadError: Loading chunk web-vitals failed.\n(error: https://www.att.com/x.js)\n    at __webpack_require__.f.j (https://www.att.com/chat/runtime.js:298:31)" }
+        });
+        assert_eq!(page_error_message(&chunk), "Uncaught (in promise) ChunkLoadError: Loading chunk web-vitals failed.");
+        // A description that names no type gets the class in front; an empty
+        // message is the type alone.
+        let replaced_stack = json!({ "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "4", "description": "config went missing" } });
+        assert_eq!(page_error_message(&replaced_stack), "Uncaught Error: config went missing");
+        let bare = json!({ "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "AbortError", "objectId": "5", "description": "AbortError" } });
+        assert_eq!(page_error_message(&bare), "Uncaught AbortError");
+        // CDP's text for a throw from another origin is typed already.
+        let text_only = json!({ "text": "Uncaught (in promise) TypeError: Cannot redefine property: src\nmore" });
+        assert_eq!(page_error_message(&text_only), "Uncaught (in promise) TypeError: Cannot redefine property: src");
+        // The message after its type is cut at 160 characters, the cut base
+        // applied to the untyped message, so a long React invariant keeps
+        // everything it showed before.
+        let long = json!({ "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "6",
+                "description": format!("Error: {}", "x".repeat(300)) } });
+        assert_eq!(page_error_message(&long), format!("Uncaught Error: {}", "x".repeat(160)));
+        let long_text = json!({ "text": format!("Uncaught (in promise) TypeError: {}", "y".repeat(300)) });
+        assert_eq!(page_error_message(&long_text), format!("Uncaught (in promise) TypeError: {}", "y".repeat(160)));
+        let long_object = json!({ "text": "Uncaught", "exception": { "type": "string", "value": "z".repeat(300) } });
+        assert_eq!(page_error_message(&long_object), format!("Uncaught {}", "z".repeat(160)));
+        // A throw with nothing to say reports nothing, as before.
+        assert_eq!(page_error_message(&json!({ "text": "Uncaught", "exception": { "type": "string", "value": "" } })), "");
+        assert!(names_a_type("TypeError: x") && names_a_type("AbortError") && names_a_type("$Err: y"));
+        assert!(!names_a_type("config went missing") && !names_a_type("404: gone") && !names_a_type(""));
+    }
+
+    #[test]
+    fn a_throw_reported_sync_and_in_promise_has_one_key() {
+        let sync = "Uncaught TypeError: Cannot redefine property: src";
+        let rejected = "Uncaught (in promise) TypeError: Cannot redefine property: src";
+        assert_eq!(page_error_key(rejected), sync);
+        assert_eq!(page_error_key(sync), page_error_key(rejected));
+        assert_ne!(page_error_key(sync), page_error_key("Uncaught TypeError: Cannot redefine property: href"));
+        assert_eq!(page_error_key("Uncaught boom"), "Uncaught boom");
     }
 
     #[test]
@@ -1533,9 +1731,20 @@ mod tests {
         // A syntax error has no stack, only the script position.
         let syntax = json!({ "text": "Uncaught SyntaxError: Invalid or unexpected token", "url": "http://127.0.0.1/p.html", "lineNumber": 50, "columnNumber": 18 });
         assert_eq!(page_error_source(&syntax).as_deref(), Some("at http://127.0.0.1/p.html:51:19"));
-        // A frame with no URL falls back to the details; nothing named, nothing reported.
+        // A frame in a script with no URL (eval, `new Function`, an inline
+        // script given text) names V8's `<anonymous>` script, where it used to
+        // print no source at all (samsung.com `ECID`, heynoah.io `t.push`).
         let evaluated = json!({ "text": "Uncaught", "stackTrace": { "callFrames": [{ "functionName": "f", "url": "", "lineNumber": 0, "columnNumber": 0 }] } });
-        assert_eq!(page_error_source(&evaluated), None);
+        assert_eq!(page_error_source(&evaluated).as_deref(), Some("at f, <anonymous>:1:1"));
+        let injected = json!({ "text": "Uncaught (in promise)", "url": "", "lineNumber": 893, "columnNumber": 49,
+            "stackTrace": { "callFrames": [{ "functionName": "", "url": "", "lineNumber": 893, "columnNumber": 49 }] } });
+        assert_eq!(page_error_source(&injected).as_deref(), Some("at <anonymous>:894:50"));
+        // A named script in the details still wins over an unnamed top frame.
+        let inline = json!({ "url": "https://www.cvs.com/", "lineNumber": 2804, "columnNumber": 42,
+            "stackTrace": { "callFrames": [{ "functionName": "g", "url": "", "lineNumber": 0, "columnNumber": 0 }] } });
+        assert_eq!(page_error_source(&inline).as_deref(), Some("at https://www.cvs.com/:2805:43"));
+        // Nothing named and no frame: no source.
+        assert_eq!(page_error_source(&json!({ "text": "Uncaught" })), None);
         let long = format!("data:text/javascript,{}", "x".repeat(400));
         let cut = page_error_source(&json!({ "url": long, "lineNumber": 0, "columnNumber": 0 })).unwrap();
         assert!(cut.ends_with("...:1:1"), "{cut}");

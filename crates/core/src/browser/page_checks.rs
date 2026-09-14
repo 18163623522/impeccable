@@ -1348,26 +1348,124 @@ pub fn is_painted_for_occlusion(dom: &dyn Dom, el: ElId) -> bool {
 
 const OCCLUSION_TEXT_SKIP_TAGS: &[&str] = &["script", "style", "noscript", "template", "title"];
 
+/// The viewport the occlusion probes are asked inside, with the defaults a
+/// Dom that did not measure it reads as.
+pub fn occlusion_viewport(dom: &dyn Dom) -> (f64, f64) {
+    let w = dom.inner_width();
+    let h = dom.inner_height();
+    (
+        if num_truthy(w) { w } else { 1280.0 },
+        if num_truthy(h) { h } else { 800.0 },
+    )
+}
+
+/// JS `paintedRect(el, rect)`: the part of an element that is actually
+/// painted, after every scrolling or clipping ancestor has had its say.
+/// getBoundingClientRect reports where a box would be if nothing cut it off;
+/// the elementFromPoint probe must only sample coordinates the text is painted
+/// at (sticky footers under scroll regions otherwise read as burying the
+/// clipped-away half). Border box on purpose: it errs toward probing. `None`
+/// when a clip cuts the box down to less than a pixel.
+pub fn occlusion_probe_rect(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<Rect> {
+    let mut left = rect.left;
+    let mut top = rect.top;
+    let mut right = rect.right;
+    let mut bottom = rect.bottom;
+    let doc_el = dom.document_element();
+    let mut cur = dom.parent(el);
+    while let Some(c) = cur {
+        if Some(c) == doc_el {
+            break;
+        }
+        let ov = |k: &str| {
+            let v = dom.style(c, k);
+            if v.is_empty() {
+                "visible".to_string()
+            } else {
+                v
+            }
+        };
+        let clips_x = ov("overflowX") != "visible";
+        let clips_y = ov("overflowY") != "visible";
+        if !clips_x && !clips_y {
+            cur = dom.parent(c);
+            continue;
+        }
+        let b = dom.rect(c);
+        if clips_x {
+            left = js::math_max(left, b.left);
+            right = js::math_min(right, b.right);
+        }
+        if clips_y {
+            top = js::math_max(top, b.top);
+            bottom = js::math_min(bottom, b.bottom);
+        }
+        if right - left < 1.0 || bottom - top < 1.0 {
+            return None;
+        }
+        cur = dom.parent(c);
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        top,
+        right,
+        bottom,
+        left,
+    })
+}
+
+/// The points the occlusion grid asks about a painted text rect, column by
+/// column, skipping those outside the viewport: up to 30 columns by 4 rows.
+/// Other checks that need a hit-test stack over a run of text ask these same
+/// points, so a page answers each of them once and a recording made for this
+/// check answers them too.
+pub fn occlusion_probe_points(rect: &Rect, vw: f64, vh: f64) -> Vec<(f64, f64)> {
+    let cols = math_max(6.0, math_min(30.0, math_round(rect.width / 12.0)));
+    let rows = math_max(1.0, math_min(4.0, math_round(rect.height / 14.0)));
+    let mut points = Vec::new();
+    let mut i = 0.0;
+    while i < cols {
+        let x = rect.left + rect.width * ((i + 0.5) / cols);
+        i += 1.0;
+        if x < 1.0 || x > vw - 1.0 {
+            continue;
+        }
+        let mut j = 0.0;
+        while j < rows {
+            let y = rect.top + rect.height * ((j + 0.5) / rows);
+            j += 1.0;
+            if y < 1.0 || y > vh - 1.0 {
+                continue;
+            }
+            points.push((x, y));
+        }
+    }
+    points
+}
+
+/// Whether a captured rect holds a point, give or take a pixel. A hit-test
+/// answer comes from the live page after the capture; where the element it
+/// names is not where the capture put it, the page moved in between (a
+/// carousel advancing, a marquee scrolling) and the answer describes a
+/// different layout.
+pub fn rect_holds_point(rect: &Rect, x: f64, y: f64) -> bool {
+    const SLACK: f64 = 1.0;
+    rect.width > 0.0
+        && rect.height > 0.0
+        && x >= rect.left - SLACK
+        && x <= rect.right + SLACK
+        && y >= rect.top - SLACK
+        && y <= rect.bottom + SLACK
+}
+
 /// JS: checks.mjs#checkTextOcclusionDOM()
 pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
     let mut seen_victims: Vec<ElId> = Vec::new();
-    let vw = {
-        let w = dom.inner_width();
-        if num_truthy(w) {
-            w
-        } else {
-            1280.0
-        }
-    };
-    let vh = {
-        let h = dom.inner_height();
-        if num_truthy(h) {
-            h
-        } else {
-            800.0
-        }
-    };
+    let (vw, vh) = occlusion_viewport(dom);
     let body = dom.body();
 
     let is_floated = |el: ElId| -> bool {
@@ -1418,64 +1516,6 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         false
     };
 
-    // JS `paintedRect(el, rect)`: the part of an element that is actually
-    // painted, after every scrolling or clipping ancestor has had its say.
-    // getBoundingClientRect reports where a box would be if nothing cut it
-    // off; the elementFromPoint probe must only sample coordinates the text
-    // is painted at (sticky footers under scroll regions otherwise read as
-    // burying the clipped-away half). Border box on purpose: it errs toward
-    // probing.
-    let painted_rect = |el: ElId, rect: &Rect| -> Option<Rect> {
-        let mut left = rect.left;
-        let mut top = rect.top;
-        let mut right = rect.right;
-        let mut bottom = rect.bottom;
-        let doc_el = dom.document_element();
-        let mut cur = dom.parent(el);
-        while let Some(c) = cur {
-            if Some(c) == doc_el {
-                break;
-            }
-            let ov = |k: &str| {
-                let v = dom.style(c, k);
-                if v.is_empty() {
-                    "visible".to_string()
-                } else {
-                    v
-                }
-            };
-            let clips_x = ov("overflowX") != "visible";
-            let clips_y = ov("overflowY") != "visible";
-            if !clips_x && !clips_y {
-                cur = dom.parent(c);
-                continue;
-            }
-            let b = dom.rect(c);
-            if clips_x {
-                left = js::math_max(left, b.left);
-                right = js::math_min(right, b.right);
-            }
-            if clips_y {
-                top = js::math_max(top, b.top);
-                bottom = js::math_min(bottom, b.bottom);
-            }
-            if right - left < 1.0 || bottom - top < 1.0 {
-                return None;
-            }
-            cur = dom.parent(c);
-        }
-        Some(Rect {
-            x: left,
-            y: top,
-            width: right - left,
-            height: bottom - top,
-            top,
-            right,
-            bottom,
-            left,
-        })
-    };
-
     struct TextEl {
         el: ElId,
         rect: Rect,
@@ -1511,7 +1551,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         // Probe only where the text is on screen. A run clipped down to a
         // sliver is dropped rather than sampled.
-        let Some(rect) = painted_rect(el, &full) else {
+        let Some(rect) = occlusion_probe_rect(dom, el, &full) else {
             continue;
         };
         if rect.width < 6.0 || rect.height < 6.0 {
@@ -1543,56 +1583,48 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
 
-        let cols = math_max(6.0, math_min(30.0, math_round(rect.width / 12.0)));
-        let rows = math_max(1.0, math_min(4.0, math_round(rect.height / 14.0)));
         let mut total = 0usize;
         let mut occluded = 0usize;
         let mut occluder_el: Option<ElId> = None;
         let mut occluder_kind = "";
-        let mut i = 0.0;
-        while i < cols {
-            let x = rect.left + rect.width * ((i + 0.5) / cols);
-            i += 1.0;
-            if x < 1.0 || x > vw - 1.0 {
+        for (x, y) in occlusion_probe_points(rect, vw, vh) {
+            total += 1;
+            let Some(top) = dom.element_from_point(x, y) else { continue };
+            if top == el || dom.contains(el, top) || dom.contains(top, el) {
                 continue;
             }
-            let mut j = 0.0;
-            while j < rows {
-                let y = rect.top + rect.height * ((j + 0.5) / rows);
-                j += 1.0;
-                if y < 1.0 || y > vh - 1.0 {
-                    continue;
+            if is_floated(top) || is_marqueeish(top) || is_pinned_overlay(top) {
+                continue;
+            }
+            if effective_opacity_dom(dom, top) <= 0.02 {
+                continue;
+            }
+            let top_tag = tag_lower(dom, top);
+            if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
+                continue;
+            }
+            let top_has_text = !element_direct_text(dom, top).is_empty()
+                || closest_or_none(dom, top, "svg").is_some();
+            let top_style = ElStyle { dom, el: top };
+            // A box paints its fill and borders inside its own rect. Where the
+            // box the page answered with is not at the point in the capture,
+            // the page moved between the capture and the answer: a carousel
+            // slid the next card, wearing the same classes as this caption's
+            // own, under the point. The answer describes a layout the capture
+            // never measured, so it counts for nothing. A box that carries text
+            // of its own can still overflow its rect and is kept as text.
+            let box_here = rect_holds_point(&dom.rect(top), x, y);
+            if box_here && is_opaque_decorated_box(Some(&top_style)) {
+                occluded += 1;
+                if occluder_el.is_none() {
+                    occluder_el = Some(top);
+                    occluder_kind = "box";
                 }
-                total += 1;
-                let Some(top) = dom.element_from_point(x, y) else { continue };
-                if top == el || dom.contains(el, top) || dom.contains(top, el) {
-                    continue;
-                }
-                if is_floated(top) || is_marqueeish(top) || is_pinned_overlay(top) {
-                    continue;
-                }
-                if effective_opacity_dom(dom, top) <= 0.02 {
-                    continue;
-                }
-                let top_tag = tag_lower(dom, top);
-                if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
-                    continue;
-                }
-                let top_has_text = !element_direct_text(dom, top).is_empty()
-                    || closest_or_none(dom, top, "svg").is_some();
-                let top_style = ElStyle { dom, el: top };
-                if is_opaque_decorated_box(Some(&top_style)) {
-                    occluded += 1;
-                    if occluder_el.is_none() {
-                        occluder_el = Some(top);
-                        occluder_kind = "box";
-                    }
-                } else if top_has_text {
-                    occluded += 1;
-                    if occluder_el.is_none() {
-                        occluder_el = Some(top);
-                        occluder_kind = "text";
-                    }
+            } else if top_has_text {
+                occluded += 1;
+                if occluder_el.is_none() {
+                    occluder_el = Some(top);
+                    occluder_kind = "text";
                 }
             }
         }
@@ -2237,6 +2269,48 @@ mod tests {
                 class_selector(&d, sib)
             )
         );
+    }
+
+    /// A carousel that advances between the capture and the hit-test answer
+    /// puts the next slide's card, wearing this caption's own card classes,
+    /// under the probes. That card's captured rect is elsewhere, so the
+    /// answer describes a layout the capture never measured and counts for
+    /// nothing. The same card at the caption's place is still an occluder.
+    #[test]
+    fn text_occlusion_ignores_a_box_answered_where_the_capture_did_not_put_it() {
+        let run = |card_at: (f64, f64)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let base = &[("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("contentVisibility", "visible"), ("position", "static"), ("cssFloat", "none"), ("animationName", "none")][..];
+            let track = d.add(Some(body), "div");
+            d.set_styles(track, base);
+            d.set_rect(track, 0.0, 0.0, 1280.0, 400.0);
+            let own_card = d.add(Some(track), "div");
+            d.set_attr(own_card, "class", "card");
+            d.set_styles(own_card, base);
+            d.set_styles(own_card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(own_card, 96.0, 84.0, 488.0, 116.0);
+            let caption = d.add(Some(own_card), "div");
+            d.set_attr(caption, "class", "caption");
+            d.add_text(caption, "The newest issue is out on the eighth");
+            d.set_styles(caption, base);
+            d.set_rect(caption, 110.0, 98.0, 460.0, 48.0);
+            let next_card = d.add(Some(track), "div");
+            d.set_attr(next_card, "class", "card");
+            d.set_styles(next_card, base);
+            d.set_styles(next_card, &[("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(next_card, card_at.0, card_at.1, 488.0, 116.0);
+            mark_body_descendants(&mut d);
+            let rect = d.rect(caption);
+            for (x, y) in occlusion_probe_points(&rect, 1280.0, 800.0) {
+                d.set_point(x, y, vec![next_card, track, body]);
+            }
+            check_text_occlusion_dom(&d)
+        };
+        assert!(run((632.0, 84.0)).is_empty(), "{:?}", run((632.0, 84.0)));
+        let f = run((96.0, 84.0));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("is 100% covered by an opaque element"), "{f:?}");
     }
 
     #[test]

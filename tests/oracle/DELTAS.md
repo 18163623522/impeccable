@@ -1861,3 +1861,147 @@ eighteen new findings) and the one faded date, nothing else.
 4. **Static engine.** It keeps worst-stop gradients and cannot read a
    `background-size` longhand.
 5. **API.** `ColorOpts` gains a public `bg_source_host` field.
+
+## Recorded 2026-09-13: low-contrast skips covered text and surfaces the walk never read (corpus/fix-covered-text)
+
+Corpus run 16, issues 6, 32 and the hit-test half of 2. All three changes are
+in the URL engine's element pass, which no golden runs. The goldens move only
+because `covered-text-contrast.html` joins the fixture directory.
+
+- **Covered text is not scored.** `impeccable_core::browser::text_layers`
+  reads `elementsFromPoint` at the points the occlusion grid asks for the same
+  box (`occlusion_probe_points`, now shared with `check_text_occlusion_dom`).
+  A live scan answers them in the same `resolve_needs` round, and a recording
+  made for text-occlusion already holds them. Where every deciding point has
+  an image, a video, a canvas or an opaque fill at full opacity above the text
+  (not the element, its descendant or its ancestor), the text is covered at
+  capture and `low-contrast` prints no verdict. Examples: the hero stats under
+  hrsimple.app's fixed consent banner, a photo avatar over an SVG initial.
+- **No verdict against a surface the walk never read.** Between the text and
+  the box that ended the background walk, the same stacks name paint that is
+  nobody's ancestor: a picture, a gradient, an SVG shape, or a fill that
+  differs from the named surface by more than 24 summed over the channels.
+  Where every deciding point has such paint, or a layer above, no verdict is
+  printed. Paint at an alpha times opacity of 0.1 or less is a wash and is
+  read past, and so is a detached fill in the named colour. A candidate of
+  the pixel pass is still measured there; nothing is added to its candidates.
+- **Covered text is no visual candidate either.** The visual-contrast
+  collector skips a candidate the stacks say is covered. Without that, text
+  the element pass stood down on reached the sampled pass, because the visual
+  fallback had skipped it only for carrying a finding already (run 17 below).
+- **Fail safe.** The run has to lie wholly inside the viewport, every point
+  has to be answered, and at least half the points have to find the text in
+  the stack. Otherwise the verdict stands as before. A run part under a layer
+  and part over the named surface also keeps its verdict. The SAFE_TAGS path
+  asks before the page claims a colour pair, so the first uncovered link
+  wearing the colour reports instead. Placeholder hits pass the same test.
+- **text-occlusion ignores answers the capture disagrees with.** A decorated
+  box counts as an occluder only where its captured rect holds the probe
+  point. On co-trip.jp (80067, 80068, 80069) the Swiper track advanced between
+  the capture and the answers, and the next slide's card, wearing the
+  caption's own card classes, was named as the occluder. The engine already
+  skipped ancestors; the card was not one. A box whose own text overflows its
+  rect still counts, as text.
+
+Replay: a recording made before this change answers only the points it asked.
+The grid points of every text element text-occlusion probed are there, so
+most above-the-fold text is decided on replay. Anything else (a one-letter
+initial, text the occlusion collector skips) is unanswered, the verdict
+stands, and the points count toward `unanswered_hit_tests`.
+
+Goldens, recorded from the binary and read by hand:
+
+- `detect-fixture-json-covered-text-contrast-html`,
+  `detect-fixture-text-covered-text-contrast-html`: new. The static engine runs
+  no hit tests and no script, so it reports the should-pass copy too: ten
+  `low-contrast` (`#aaaaaa` four times and `#9a9a9a` once in the should-flag
+  column, the covered link, the two white initials, the two `#f0f0f0` lines
+  and the banner copy) plus one `flat-type-hierarchy`.
+- `detect-dir-json-all-fixtures`, `detect-no-advisory-json` (620 to 631, 540
+  to 551), `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+  `detect-no-advisory-text` (540 to 551 anti-patterns),
+  `detect-scope-type`, `detect-scope-both` (159 to 160, 207 to 208, the
+  `flat-type-hierarchy`): exactly the new fixture's findings, nothing removed.
+
+The URL behavior is pinned by `crates/browser/tests/covered_text.rs`, and the
+fixture joins `REPLAY_FIXTURES` in `crates/browser/tests/evidence.rs`. Scanned
+live, the base binary (edfe602b) reports `low-contrast` on all six should-pass
+copies and `text-occlusion` on both advancing captions, and misses
+`#flag-uncovered-link`. The branch reports every should-flag case and none of
+the should-pass ones.
+
+Corpus, replay of run 16 (344 captures): `low-contrast` 4,039 to 3,945 (94
+removed, 0 added), `text-occlusion` 49 to 46 (3 removed, all pattern-absent).
+Every removal was read against its capture's recorded stacks:
+
+- 14 confirmed-harmful, all hrsimple.app. Nine are the covered findings named
+  in issue 6 (85560 to 85562, 85616, 85618 to 85620, 85929, 86059), and 85617
+  is the mobile CTA under the same banner. The other four (85736, 85928,
+  85980, 86058, the 4.1:1 hero subline) sit over a hero photo at opacity 0.4
+  and two gradient tints, where the walk scored only the section's gradient.
+- 14 pattern-absent: donckelektro.nl hero copy over the hero photo (83479,
+  83510, 83936, 84067), and yungching.com.tw key-visual titles over the
+  slideshow images (81352 to 81355, 81396 to 81399, 81631, 81763).
+- 66 unjudged. Read against their stacks:
+  - donckelektro.nl's hero title and eyebrow over the hero photo (6);
+  - yungching.com.tw's large key-visual line over the slideshow (2);
+  - zigzag.kr's banner slide titles over their photos (6), and two prices
+    under the white bottom app bar;
+  - volkswagen-group.com's hero titles over a playing video (4), and the
+    slider copy under the cookie modal (2);
+  - thairath.co.th's copy under a full-viewport fixed video layer (4);
+  - billia.app's section title under the fixed mobile bar (1);
+  - bt.cn's tab label over the green gradient pill the walk read as grey (2),
+    and hero copy over a banner image at opacity 0.2 (4).
+
+  Not read one by one, all white text scored 1.0:1 on a named white:
+  shipthatcode.com (10), ynet.co.il's consent-dialog link text (6), te.eg's
+  cards (4), ktb.gov.tr's slider (4), aisupply.framer.website (3), att.com,
+  nubank.com.br and samsung.com (2 each).
+
+Live, the six sites of the issues recaptured with the branch engine, 34
+captures each time, against run 16:
+
+- **Run 17** exposed the visual-pass leak. hrsimple.app's stat labels under
+  the consent banner left the element pass and came back as `browser contrast
+  2.5:1 ... via analytic-gradient`. The covered-candidate gate above closes it.
+- **Run 18**, with the gate. Replaying its captures with the base engine
+  (edfe602b) isolates the engine from page drift. The branch drops 24
+  element-pass `low-contrast` findings and adds none. hrsimple.app has 14:
+  seven stat labels and three CTAs under the banner, and the hero subline
+  over the 0.4 photo four times. donckelektro.nl has 10: hero copy over the
+  hero photo. Every other site's element pass is identical to base on the
+  same captures.
+- **Pixel pass on dropped verdicts.** hrsimple.app's subline is now measured
+  by pixels (4.3:1 desktop, 4.2:1 mobile), and donckelektro.nl's orange
+  eyebrow is measured at 2.5:1 on its img underlay. In run 17 the pixel pass
+  measured haraj.com.sa's circle initials at 1.9:1 where the element pass had
+  scored them on the card.
+- **text-occlusion:** co-trip.jp 3 to 0 in both runs, hrsimple.app unchanged.
+- **Unchanged below the fold:** becomeautonomous.com (31 findings) and the
+  yna.co.kr marquee copy. yna.co.kr and haraj.com.sa report fewer findings in
+  run 18 than in run 17 on the same text volume. The base engine replays those
+  captures to the branch's findings, so that drop is page drift.
+
+### Known limits at merge
+
+1. **Only the viewport.** Points outside it cannot be asked, so covered or
+   layered text below the fold keeps its verdict: the yna.co.kr marquee copy
+   (80094, y 949), becomeautonomous.com's tabs (88167, 88316) and zid.sa
+   (82034, 82212) are unchanged.
+2. **Hit testing skips `pointer-events: none`.** A layer that opts out of hit
+   testing is invisible to the stacks, and text that does is silent.
+3. **Pseudo-elements.** A `::before` or `::after` layer is answered as its
+   originating element, whose own style is what is read.
+4. **A transparent picture over text counts as covering it.** An `img` at full
+   opacity is read as opaque, whatever its pixels.
+5. **Pixel pass reach.** Its candidates skip links and spans and stop at twelve
+   per page, so most text whose verdict is dropped here is not measured again.
+   Skipping covered candidates frees slots for the next ones in document
+   order, which can bring a new sampled verdict onto a page (hrsimple.app
+   mobile gained `browser contrast 4.5:1` on a muted card line in run 18).
+   Its samples still ignore unread layers beneath a candidate.
+6. **FakeDom tests.** Two link-contrast unit tests declare the stacks a browser
+   would answer, since FakeDom lists elements in document order. One of them
+   now also asserts that a later photo at the text's layer, in the viewport,
+   covers the link.

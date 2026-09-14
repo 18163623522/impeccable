@@ -185,6 +185,12 @@ struct Query<'a> {
     font_size: Option<f64>,
 }
 
+/// Whether a box declares `display: contents`: it generates no box, so it
+/// paints no background, and the walk reads past its fill.
+fn paints_no_box(style: &StyleValues) -> bool {
+    js::to_lower_case(js::trim(sv(style, "display"))) == "contents"
+}
+
 fn flatten(overlays: &[(NodeId, Rgba)], base: Rgba) -> Rgba {
     let mut acc = base;
     for (_, o) in overlays.iter().rev() {
@@ -266,6 +272,10 @@ fn walk_surface(
     let mut current = Some(*el);
     while let Some(cur) = current {
         let style = cur.style();
+        if paints_no_box(style) {
+            current = cur.parent_element();
+            continue;
+        }
         let bg_image = if (q.skip_image)(&cur) {
             "none"
         } else {
@@ -403,6 +413,10 @@ fn gradient_stops_walk(
     let mut overlays: Vec<(NodeId, Rgba)> = Vec::new();
     while let Some(cur) = current {
         let style = cur.style();
+        if paints_no_box(style) {
+            current = cur.parent_element();
+            continue;
+        }
         let skipped = (q.skip_image)(&cur);
         let bg_image = if skipped { "none" } else { sv(style, "backgroundImage") };
         if !bg_image.is_empty() && bg_image != "none" && URL_CALL_RE.is_match(bg_image) {

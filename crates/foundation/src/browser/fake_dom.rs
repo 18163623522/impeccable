@@ -48,10 +48,19 @@ pub struct FakeEl {
     /// The properties of the animations running on the element; `None` is a
     /// probe that could not read them.
     pub running_animations: Option<Vec<String>>,
+    /// The shadow host of a shadow tree's top-level node.
+    pub shadow_host: Option<ElId>,
+    /// `assignedSlot`.
+    pub assigned_slot: Option<ElId>,
+    /// The slot the element's direct text is assigned to.
+    pub text_slot: Option<ElId>,
 }
 
 #[derive(Debug, Default)]
 pub struct FakeDom {
+    /// A recording made before shadow trees were captured
+    /// ([`Dom::shadow_trees_recorded`] answers `false`).
+    pub shadow_trees_unrecorded: bool,
     pub els: Vec<FakeEl>,
     pub document_element: Option<ElId>,
     pub body: Option<ElId>,
@@ -199,13 +208,33 @@ impl FakeDom {
         self.points.push(((x, y), stack));
         self
     }
+    /// Add a top-level node of `host`'s open shadow tree. It is nobody's
+    /// child, so document queries never reach it, as in a browser.
+    pub fn add_shadow_child(&mut self, host: ElId, tag: &str) -> ElId {
+        let id = self.add(None, tag);
+        self.el_mut(id).shadow_host = Some(host);
+        id
+    }
+    /// Assign `el` (a light-DOM child of a shadow host) to `slot`.
+    pub fn set_assigned_slot(&mut self, el: ElId, slot: ElId) -> &mut Self {
+        self.el_mut(el).assigned_slot = Some(slot);
+        self
+    }
+    /// Assign `el`'s direct text to `slot`.
+    pub fn set_text_slot(&mut self, el: ElId, slot: ElId) -> &mut Self {
+        self.el_mut(el).text_slot = Some(slot);
+        self
+    }
 
     fn all_in_order(&self, root: Option<ElId>) -> Vec<ElId> {
         let mut out = Vec::new();
         let roots: Vec<ElId> = match root {
             Some(r) => self.child_elements(r),
             None => (1..self.els.len() as ElId)
-                .filter(|&i| self.els[i as usize].parent.is_none())
+                .filter(|&i| {
+                    let e = &self.els[i as usize];
+                    e.parent.is_none() && e.shadow_host.is_none()
+                })
                 .collect(),
         };
         fn walk(dom: &FakeDom, el: ElId, out: &mut Vec<ElId>) {
@@ -491,6 +520,16 @@ impl Dom for FakeDom {
     }
     fn running_animation_properties(&self, el: ElId) -> Option<Vec<String>> {
         self.els[el as usize].running_animations.clone()
+    }
+    fn flat_parent(&self, el: ElId) -> Option<ElId> {
+        let e = &self.els[el as usize];
+        e.assigned_slot.or(e.parent).or(e.shadow_host)
+    }
+    fn text_slot(&self, el: ElId) -> Option<ElId> {
+        self.els[el as usize].text_slot
+    }
+    fn shadow_trees_recorded(&self) -> bool {
+        !self.shadow_trees_unrecorded
     }
     fn pseudo_style(&self, el: ElId, pseudo: &str, prop: &str) -> Option<String> {
         let e = &self.els[el as usize];

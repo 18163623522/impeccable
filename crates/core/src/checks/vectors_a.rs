@@ -213,6 +213,9 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 visible_text: None,
                 bg_source: None,
                 bg_source_host: None,
+                // The recorded JS printed a surface in the text's own colour
+                // as `1.0:1` on every tag but the SAFE_TAGS ones.
+                same_color_surface_is_unread: false,
             };
             hits_to_js(&rules::check_colors(&opts))
         }

@@ -435,6 +435,20 @@ fn scores_safe_tag_text(opts: &ColorOpts) -> bool {
 #[derive(Debug, Default)]
 pub struct SafeTagTextSeen {
     reported: Vec<(String, String)>,
+    /// Keys claimed by a hit on an element only partly on screen, with that
+    /// element's handle and snippet.
+    provisional: Vec<((String, String), u64, String)>,
+    /// Provisional hits a later on-screen element wearing the same pair
+    /// replaced: `(handle, snippet)`.
+    superseded: Vec<(u64, String)>,
+}
+
+/// Who claims a colour pair, for [`SafeTagTextSeen::keep_first_keyed_claiming`]:
+/// an opaque handle for the element, and whether it lies wholly on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairClaim {
+    pub owner: u64,
+    pub on_screen: bool,
 }
 
 impl SafeTagTextSeen {
@@ -465,22 +479,82 @@ impl SafeTagTextSeen {
         keys_of: &dyn Fn(&RuleHit) -> Vec<String>,
         keep: &mut dyn FnMut(&RuleHit) -> bool,
     ) {
+        self.keep_first_keyed_claiming(hits, keys_of, None, keep);
+    }
+
+    /// [`Self::keep_first_keyed`] where the claimant may lie only partly on
+    /// screen. A marquee's first copy starts past the page's left edge, and a
+    /// carousel's first card is cut by its right edge: only 'IR' of 'HAIR'
+    /// is visible, and the words beside it wearing the same pair are the
+    /// ones a reader meets. A hit from such an element stands, but claims its
+    /// pair provisionally: the first later element that lies wholly on
+    /// screen and wears the same pair reports instead, and the provisional
+    /// hit is recorded in [`Self::take_superseded`] for the engine to
+    /// withdraw. A provisional claim nobody replaces stands. With no claim
+    /// every hit is on screen, which is what `keep_first_keyed` does.
+    pub fn keep_first_keyed_claiming(
+        &mut self,
+        hits: &mut Vec<RuleHit>,
+        keys_of: &dyn Fn(&RuleHit) -> Vec<String>,
+        claim: Option<PairClaim>,
+        keep: &mut dyn FnMut(&RuleHit) -> bool,
+    ) {
+        let on_screen = claim.map_or(true, |c| c.on_screen);
         hits.retain(|h| {
             let keys: Vec<(String, String)> =
                 keys_of(h).into_iter().map(|k| (h.id.clone(), k)).collect();
             if keys.iter().any(|k| self.reported.contains(k)) {
                 return false;
             }
+            let held = keys
+                .iter()
+                .any(|k| self.provisional.iter().any(|(p, _, _)| p == k));
+            if held && !on_screen {
+                return false;
+            }
             if !keep(h) {
                 return false;
             }
-            for key in keys {
-                if !self.reported.contains(&key) {
-                    self.reported.push(key);
+            if held {
+                let mut replaced: Vec<(u64, String)> = Vec::new();
+                self.provisional.retain(|(p, owner, snippet)| {
+                    if keys.contains(p) {
+                        if !replaced.iter().any(|(o, s)| o == owner && s == snippet) {
+                            replaced.push((*owner, snippet.clone()));
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for r in replaced {
+                    // Every key the replaced hit claimed goes with it.
+                    self.provisional.retain(|(_, owner, snippet)| !(r.0 == *owner && r.1 == *snippet));
+                    self.superseded.push(r);
+                }
+            }
+            match claim {
+                Some(c) if !on_screen => {
+                    for key in keys {
+                        self.provisional.push((key, c.owner, h.snippet.clone()));
+                    }
+                }
+                _ => {
+                    for key in keys {
+                        if !self.reported.contains(&key) {
+                            self.reported.push(key);
+                        }
+                    }
                 }
             }
             true
         });
+    }
+
+    /// The provisional hits later on-screen elements replaced, as
+    /// `(handle, snippet)` (drained).
+    pub fn take_superseded(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.superseded)
     }
 }
 
@@ -500,7 +574,13 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
         // is no background to score it against. Text with no letter and no
         // digit (a lone circle, a pair of braces) is not read, which the
         // SAFE_TAGS path already says through `paints_own_text`.
-        if bg_clip != "text" && !opts.is_glyph_only {
+        // A surface in exactly the text's own colour is the walk landing on
+        // a fill the text does not sit on, the same guard the SAFE_TAGS path
+        // applies (`resolved_bg_matches_text`).
+        if bg_clip != "text"
+            && !opts.is_glyph_only
+            && !(opts.same_color_surface_is_unread && resolved_bg_matches_text(opts, &text_color))
+        {
             findings.extend(contrast_findings(opts, &text_color));
         }
 
@@ -559,6 +639,19 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     findings
 }
 
+/// A text colour as a dedupe key: its hex, and its alpha where it is
+/// translucent. `color_to_hex` drops alpha, so `text-blue-100/70` on a link
+/// and `text-blue-100/80` on a caption beside it were one key on one
+/// gradient box, and the caption went unreported (veeza.ai).
+fn ink_key(text: &Rgba) -> String {
+    let alpha = text.alpha_or_one();
+    if alpha < 1.0 {
+        format!("{}@{}", color_to_hex(Some(text)), (alpha * 1000.0).round() / 1000.0)
+    } else {
+        color_to_hex(Some(text))
+    }
+}
+
 /// `check_colors` with the per-page dedupe the SAFE_TAGS text path owes.
 /// Each document's element loop threads one `SafeTagTextSeen` through this
 /// so a colour the page repeats on every link is reported where it first
@@ -571,6 +664,18 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
 pub fn check_colors_deduped(
     opts: &ColorOpts,
     seen: &mut SafeTagTextSeen,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
+    check_colors_deduped_claiming(opts, seen, None, keep)
+}
+
+/// [`check_colors_deduped`] with the claimant named, so an element only
+/// partly on screen claims its pair provisionally
+/// ([`SafeTagTextSeen::keep_first_keyed_claiming`]).
+pub fn check_colors_deduped_claiming(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    claim: Option<PairClaim>,
     keep: &mut dyn FnMut(&RuleHit) -> bool,
 ) -> Vec<RuleHit> {
     let mut hits = check_colors(opts);
@@ -589,14 +694,20 @@ pub fn check_colors_deduped(
             // one gradient stay one report, as they always were.
             (Some(source), Some(host), Some(text)) => {
                 let surface_key =
-                    format!("text {} over {} [{}]", color_to_hex(Some(text)), source, host);
-                seen.keep_first_keyed(
+                    format!("text {} over {} [{}]", ink_key(text), source, host);
+                seen.keep_first_keyed_claiming(
                     &mut hits,
                     &|h: &RuleHit| vec![h.snippet.clone(), surface_key.clone()],
+                    claim,
                     keep,
                 );
             }
-            _ => seen.keep_first(&mut hits, keep),
+            _ => seen.keep_first_keyed_claiming(
+                &mut hits,
+                &|h: &RuleHit| vec![h.snippet.clone()],
+                claim,
+                keep,
+            ),
         }
     }
     hits
@@ -651,11 +762,13 @@ fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
 ///
 /// What it hides, stated plainly: text that really is painted in its own
 /// background colour, which is invisible and a genuine 1:1 failure. That
-/// shape is rare, and when an author writes it deliberately it is usually
-/// `<p>` or `<div>` markup, which never reaches here: this guard covers
-/// only the SAFE_TAGS text path, and every other tag still reports the
-/// `1.0:1`. It is exact equality on the resolved hex, not a near-match, so
-/// a link one shade off its surface still reports.
+/// shape is rare, and a guard on the SAFE_TAGS path alone left `<p>`,
+/// headings and custom elements printing `1.0:1 — text #ffffff on #ffffff`
+/// for white copy over a photo or a card the walk never read (nike.com,
+/// exxonmobil.com), so the full pass in `check_colors` asks it too. It is
+/// exact equality on the resolved hex, not a near-match, so text one shade
+/// off its surface still reports. In the URL engine an element the pixel
+/// pass takes as a candidate is still measured there.
 ///
 /// Narrowing it means knowing whether the walk resolved a surface or gave
 /// up and fell through to the page fill, which the check cannot see from
@@ -1553,6 +1666,99 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provisional_claim_gives_way_to_a_copy_on_screen() {
+        let hit = || RuleHit::new("low-contrast", "2.2:1 (need 4.5:1) — text #c9a3c8 on #ffffff".to_string());
+        let keys = |h: &RuleHit| vec![h.snippet.clone()];
+        let claim = |owner: u64, on_screen: bool| Some(PairClaim { owner, on_screen });
+        let mut seen = SafeTagTextSeen::default();
+        let mut cut = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut cut, &keys, claim(1, false), &mut |_| true);
+        assert_eq!(cut.len(), 1, "the first cut copy stands for now");
+        let mut second_cut = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut second_cut, &keys, claim(2, false), &mut |_| true);
+        assert!(second_cut.is_empty(), "a second cut copy adds nothing");
+        let mut waived = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut waived, &keys, claim(3, true), &mut |_| false);
+        assert!(waived.is_empty());
+        assert!(seen.take_superseded().is_empty(), "a waived copy replaces nothing");
+        let mut readable = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut readable, &keys, claim(4, true), &mut |_| true);
+        assert_eq!(readable.len(), 1);
+        assert_eq!(seen.take_superseded(), vec![(1, hit().snippet)]);
+        let mut again = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut again, &keys, claim(5, true), &mut |_| true);
+        assert!(again.is_empty(), "the readable copy owns the pair");
+        let mut lone = SafeTagTextSeen::default();
+        let mut only = vec![hit()];
+        lone.keep_first_keyed_claiming(&mut only, &keys, claim(6, false), &mut |_| true);
+        assert_eq!(only.len(), 1);
+        assert!(lone.take_superseded().is_empty(), "a cut copy nobody replaces stands");
+    }
+
+    #[test]
+    fn translucent_inks_on_one_gradient_box_are_separate_pairs() {
+        // veeza.ai: `text-blue-100/70` on a link and `/80` on a caption beside
+        // it, on one blue gradient section.
+        let span = |alpha: f64| {
+            let ink = Rgba::new(219.0, 234.0, 254.0, alpha);
+            ColorOpts {
+                tag: "span".to_string(),
+                text_color: Some(ink),
+                effective_bg_stops: Some(vec![Rgba::new(37.0, 99.0, 235.0, 1.0)]),
+                font_size: 12.0,
+                font_weight: 400.0,
+                has_direct_text: true,
+                paints_own_text: true,
+                detector_is_browser: true,
+                visible_text: Some(ink),
+                bg_source: Some("gradient on section.blue-band".to_string()),
+                bg_source_host: Some("7".to_string()),
+                ..Default::default()
+            }
+        };
+        let mut seen = SafeTagTextSeen::default();
+        assert_eq!(check_colors_deduped(&span(0.7), &mut seen, &mut |_| true).len(), 1);
+        assert_eq!(check_colors_deduped(&span(0.8), &mut seen, &mut |_| true).len(), 1);
+        assert!(check_colors_deduped(&span(0.8), &mut seen, &mut |_| true).is_empty());
+    }
+
+    #[test]
+    fn the_full_pass_guard_is_opt_in() {
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        let opts = |guard: bool| ColorOpts {
+            tag: "p".to_string(),
+            text_color: Some(white),
+            effective_bg: Some(white),
+            font_size: 16.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            same_color_surface_is_unread: guard,
+            ..Default::default()
+        };
+        assert!(check_colors(&opts(false)).iter().any(|h| h.id == "low-contrast"));
+        assert!(!check_colors(&opts(true)).iter().any(|h| h.id == "low-contrast"));
+    }
+
+    #[test]
+    fn icon_fonts_and_close_letters() {
+        assert!(is_icon_font_family("\"Material Symbols Outlined\""));
+        assert!(is_icon_font_family("'Material Icons', sans-serif"));
+        assert!(is_icon_font_family("icomoon"));
+        assert!(is_icon_font_family("Brand Icons, sans-serif"));
+        assert!(!is_icon_font_family("Inter, sans-serif"));
+        assert!(!is_icon_font_family("sans-serif, 'Material Icons'"));
+        assert!(is_icon_ligature_text("arrow_forward", "Material Symbols Outlined"));
+        assert!(is_icon_ligature_text("counter_1", "Material Icons"));
+        assert!(!is_icon_ligature_text("Arrow forward", "Material Symbols Outlined"));
+        assert!(!is_icon_ligature_text("arrow_forward", "Inter"));
+        assert!(is_close_letter_text(" x "));
+        assert!(!is_close_letter_text("xl"));
+        assert!(names_close_control(&["modal-closeButton"]));
+        assert!(names_close_control(&["", "Dismiss banner"]));
+        assert!(!names_close_control(&["tag", "chip"]));
+    }
 
     #[test]
     fn declared_corners_apply_in_order() {

@@ -26,8 +26,9 @@ use impeccable_core::checks::measures::{
 use impeccable_core::checks::rules::{
     check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
-    check_placeholder_colors, is_emoji_only_text, is_glyph_only_text, is_heading_tag,
-    resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
+    check_placeholder_colors, is_close_letter_text, is_emoji_only_text, is_glyph_only_text,
+    is_heading_tag, is_icon_ligature_text, names_close_control, resolve_hero_heading_size_px,
+    BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
     HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit,
     SafeTagTextSeen, Sides,
 };
@@ -767,6 +768,33 @@ fn fold_surface_opacity(
     Some(fg)
 }
 
+/// Text a reader sees as an icon rather than words, as the URL engine reads
+/// it (`element_checks::is_icon_text`): no letter or digit, a ligature set in
+/// an icon font, or a Latin `x` in a control that names itself a close or
+/// dismiss button.
+fn is_icon_text(el: &StaticElement<'_>, style: &StyleValues, direct: &str) -> bool {
+    if is_glyph_only_text(direct) || is_icon_ligature_text(direct, sv(style, "fontFamily")) {
+        return true;
+    }
+    if !is_close_letter_text(direct) {
+        return false;
+    }
+    let mut boxes = vec![*el];
+    if let Some(p) = el.parent_element() {
+        boxes.push(p);
+    }
+    if let Some(control) = el.closest("button, [role=\"button\"], a") {
+        boxes.push(control);
+    }
+    boxes.iter().any(|b| {
+        let values: Vec<&str> = ["class", "id", "aria-label", "title"]
+            .iter()
+            .filter_map(|name| b.get_attribute(name))
+            .collect();
+        names_close_control(&values)
+    })
+}
+
 /// JS: checks.mjs#checkElementColors(el, style, tag, window, customPropMap, hasAnchorInheritRule)
 pub fn check_element_colors(
     el: &StaticElement<'_>,
@@ -804,13 +832,14 @@ pub fn check_element_colors(
     let has_direct_text = !js::trim(&direct_text).is_empty();
     let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
+    let icon_text = has_direct_text && is_icon_text(el, style, &direct_text);
 
     // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
     // walk and the hidden-text selector run only for those tags.
     let paints_own_text = has_direct_text
         && SAFE_TAGS.contains(&tag)
         && !is_emoji_only_text(&direct_text)
-        && !is_glyph_only_text(&direct_text)
+        && !icon_text
         && !is_visually_hidden(el, style)
         // The browser path also stands down where `-webkit-text-fill-color`
         // paints the glyphs in nothing. This engine cannot: the static
@@ -924,7 +953,7 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
-        is_glyph_only: is_glyph_only_text(&direct_text),
+        is_glyph_only: icon_text,
         paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
         bg_image: Some(own_image.to_string()),
@@ -933,6 +962,7 @@ pub fn check_element_colors(
         visible_text,
         bg_source,
         bg_source_host,
+        same_color_surface_is_unread: true,
     };
     // The page's one report of a colour pair goes to an element that will
     // actually print it, so an inline ignore on the first of fifty links

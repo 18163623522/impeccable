@@ -99,6 +99,10 @@ fn fixture_passes_every_should_pass_case_the_static_engine_can_read() {
         ("dark label on a faint dark tint", "#0f172b"),
         ("span at nine tenths opacity", "#111828"),
         ("copy in a nearly opaque ink", "#111827"),
+        // The cascade carries no `background-size` longhand, so the collapsed
+        // underline is read as a gradient in the text's own colour, and a
+        // stop in exactly that colour is a surface the text does not sit on.
+        ("link with a collapsed gradient underline", "#0f172a"),
     ] {
         assert!(
             !snippets.iter().any(|s| s.contains(color)),
@@ -106,12 +110,9 @@ fn fixture_passes_every_should_pass_case_the_static_engine_can_read() {
         );
     }
     // No layout: the gradient is scored at its worst stop, as it always was.
-    // The cascade carries no `background-size` longhand either, so only an
-    // underline written in the `background` shorthand can be read as one.
     for (case, color) in [
         ("label on the dark band of its gradient", "#fffdf8"),
         ("pill far from a radial glow", "#475569"),
-        ("link with a collapsed gradient underline", "#0f172a"),
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(color)),

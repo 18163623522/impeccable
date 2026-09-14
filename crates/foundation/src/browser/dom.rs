@@ -190,6 +190,43 @@ pub trait Dom {
     fn running_animation_properties(&self, _el: ElId) -> Option<Vec<String>> {
         None
     }
+
+    // ── the flat tree ─────────────────────────────────────────────────
+    /// The box an element paints inside once shadow trees are composed: the
+    /// slot a light-DOM child is assigned to, else its parent, else the host
+    /// of the shadow tree whose top-level node it is. A fill drawn by a
+    /// component's shadow tree sits between a slotted heading and the host,
+    /// and only this walk passes through it. The default is `parent`, which
+    /// is the light tree: a probe that cannot see shadow trees.
+    fn flat_parent(&self, el: ElId) -> Option<ElId> {
+        self.parent(el)
+    }
+    /// The slot this element's direct text is assigned to, where the element
+    /// is a shadow host whose own text is slotted into its shadow tree. That
+    /// text inherits its colour and font from the slot, not from the host.
+    fn text_slot(&self, _el: ElId) -> Option<ElId> {
+        None
+    }
+    /// Whether the probe reads open shadow trees ([`Dom::flat_parent`]), so
+    /// that an element with no assigned slot is not slotted anywhere. A
+    /// snapshot recorded before shadow trees were captured answers `false`.
+    fn shadow_trees_recorded(&self) -> bool {
+        true
+    }
+}
+
+/// `a` is `b` or a flat-tree ancestor of it ([`Dom::flat_parent`]).
+pub fn flat_contains(dom: &dyn Dom, a: ElId, b: ElId) -> bool {
+    const MAX_DEPTH: usize = 512;
+    let mut cur = Some(b);
+    for _ in 0..MAX_DEPTH {
+        let Some(c) = cur else { return false };
+        if c == a {
+            return true;
+        }
+        cur = dom.flat_parent(c);
+    }
+    false
 }
 
 // ── shared helpers over the trait ─────────────────────────────────────────

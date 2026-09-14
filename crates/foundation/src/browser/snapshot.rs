@@ -19,7 +19,9 @@
 //! `@keyframes` rules, the document HTML for the regex pass, the media
 //! intrinsics the visual-contrast path needs, and the properties of the
 //! animations and transitions running on each element at capture (`an`,
-//! read only where the snapshot sets `anim`).
+//! read only where the snapshot sets `anim`), and the open shadow trees
+//! (their elements after the light DOM, with `sh`, `as` and `ts` linking
+//! them into the flat tree, read only where the snapshot sets `shadow`).
 //!
 //! Two things a snapshot cannot answer up front:
 //!
@@ -309,6 +311,20 @@ pub struct SnapNode {
     /// the snapshot says it recorded animations ([`Snapshot::animations_recorded`]).
     #[serde(rename = "an", default)]
     pub animations: Option<Vec<String>>,
+    /// The host of the open shadow tree this element is a top-level node
+    /// of. Shadow-tree elements are recorded after every light-DOM element
+    /// and are nobody's child, so document walks and selectors never reach
+    /// them; only the flat-tree walk does.
+    #[serde(rename = "sh", default)]
+    pub shadow_host: Option<u32>,
+    /// `assignedSlot`: the slot of an open shadow tree this element is
+    /// assigned to.
+    #[serde(rename = "as", default)]
+    pub assigned_slot: Option<u32>,
+    /// The slot this element's first non-blank direct text node is assigned
+    /// to (a shadow host whose own text is slotted).
+    #[serde(rename = "ts", default)]
+    pub text_slot: Option<u32>,
 }
 
 fn minus_one() -> i8 {
@@ -403,6 +419,11 @@ pub struct Snapshot {
     /// known about running animations.
     #[serde(rename = "anim", default)]
     pub animations_recorded: bool,
+    /// Whether the capture walked open shadow trees (`sh`, `as`, `ts`).
+    /// Absent in captures older than that walk, where nothing is known about
+    /// shadow trees.
+    #[serde(rename = "shadow", default)]
+    pub shadow_trees_recorded: bool,
     /// Derived on load: column index per style property name.
     #[serde(skip)]
     style_index: HashMap<String, usize>,
@@ -713,6 +734,25 @@ impl Dom for SnapshotDom {
         }
         Some(self.snap.node(el).animations.clone().unwrap_or_default())
     }
+    fn flat_parent(&self, el: ElId) -> Option<ElId> {
+        if !self.valid(el) {
+            return None;
+        }
+        let node = self.snap.node(el);
+        node.assigned_slot
+            .filter(|s| self.valid(*s))
+            .or(node.parent)
+            .or(node.shadow_host.filter(|h| self.valid(*h)))
+    }
+    fn text_slot(&self, el: ElId) -> Option<ElId> {
+        if !self.valid(el) {
+            return None;
+        }
+        self.snap.node(el).text_slot.filter(|s| self.valid(*s))
+    }
+    fn shadow_trees_recorded(&self) -> bool {
+        self.snap.shadow_trees_recorded
+    }
     fn keyframes(&self, name: &str) -> Option<Vec<KeyframeFrame>> {
         if name.is_empty() {
             return None;
@@ -994,6 +1034,37 @@ mod tests {
 
     fn snap(json: &str) -> SnapshotDom {
         SnapshotDom::from_json(json).expect("snapshot json")
+    }
+
+    #[test]
+    fn shadow_trees_link_into_the_flat_tree_without_joining_the_document() {
+        let json = r#"{
+          "v": 1, "innerWidth": 1280, "innerHeight": 800, "shadow": true,
+          "styleProps": ["display"], "strings": ["block", "contents"],
+          "documentElement": 1, "body": 2,
+          "els": [
+            {"t":"HTML","c":[2],"s":[0]},
+            {"t":"BODY","p":1,"c":[3],"s":[0]},
+            {"t":"TCG-BUTTON","p":2,"c":[4,"Read more"],"s":[0],"ts":6},
+            {"t":"H3","p":3,"c":["Investors"],"s":[0],"as":6},
+            {"t":"DIV","c":[6],"s":[0],"sh":3},
+            {"t":"SLOT","p":5,"c":[],"s":[1]}
+          ]
+        }"#;
+        let d = snap(json);
+        assert!(d.shadow_trees_recorded());
+        assert_eq!(d.parent(4), Some(3));
+        assert_eq!(d.flat_parent(4), Some(6));
+        assert_eq!(d.flat_parent(6), Some(5));
+        assert_eq!(d.flat_parent(5), Some(3));
+        assert_eq!(d.parent(5), None);
+        assert_eq!(d.text_slot(3), Some(6));
+        assert_eq!(d.text_slot(4), None);
+        assert!(!d.query_all(None, "*").unwrap().contains(&5));
+        assert!(crate::browser::dom::flat_contains(&d, 3, 6));
+        assert!(!d.contains(3, 6));
+        assert!(!snap(SMALL).shadow_trees_recorded());
+        assert_eq!(snap(SMALL).flat_parent(5), Some(4));
     }
 
     const SMALL: &str = r#"{

@@ -28,10 +28,11 @@
 //! the walk's verdict is about the text a reader meets, and leaves the verdict
 //! alone wherever it cannot tell.
 
-use super::dom::{tag_lower, Dom, ElId, Rect};
+use super::dom::{flat_contains, tag_lower, Dom, ElId};
 use super::element_checks::{effective_opacity_dom, parse_rgb_or_any};
 use super::page_checks::{
-    occlusion_probe_points, occlusion_probe_rect, occlusion_viewport, rect_holds_point,
+    occlusion_grid_size, occlusion_probe_points, occlusion_probe_rect, occlusion_viewport,
+    rect_holds_point,
 };
 use crate::color::{composite_color_over, parse_gradient_colors, split_top_level_commas, Rgba};
 use crate::js;
@@ -49,9 +50,9 @@ pub enum TextLayers {
     /// The stacks agree with the walk, or part of the run is visible over the
     /// surface it named.
     Consistent,
-    /// Nothing can be said: a point is not answered (below the fold, a
-    /// recording that never asked it), the run is not wholly inside the
-    /// viewport, or too few points find the text at all.
+    /// Nothing can be said: a point is not answered (a recording that never
+    /// asked it), less than half of the run's grid lies inside the viewport
+    /// (below the fold), or too few points find the text at all.
     Undecided,
 }
 
@@ -123,10 +124,6 @@ fn is_document_surface(dom: &dyn Dom, node: ElId) -> bool {
 
 fn distance(a: &Rgba, b: &Rgba) -> f64 {
     (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
-}
-
-fn wholly_inside_viewport(rect: &Rect, vw: f64, vh: f64) -> bool {
-    rect.left >= 0.0 && rect.top >= 0.0 && rect.right <= vw && rect.bottom <= vh
 }
 
 /// Whether a layer above the text hides it at `(x, y)`: an image, a video, a
@@ -390,7 +387,10 @@ fn at_point(
     let on_ground = host.map_or(true, |h| is_document_surface(dom, h));
     let last = stack.iter().rposition(|&n| in_text(n)).unwrap_or(first);
     for &node in &stack[last + 1..] {
-        if host.map_or(false, |h| dom.contains(node, h)) || is_document_surface(dom, node) {
+        // The host can sit inside a shadow tree (a component's own fill), and
+        // a stack names only the shadow host, so containment is read through
+        // the flat tree.
+        if host.map_or(false, |h| flat_contains(dom, node, h)) || is_document_surface(dom, node) {
             return AtPoint::Consistent;
         }
         if in_text(node) || dom.contains(node, el) {
@@ -444,13 +444,16 @@ fn at_point(
 /// for the canvas, the element itself where it paints its own surface) and
 /// `resolved` the colour it named.
 ///
-/// Every point of the occlusion grid over the painted box is asked, so a
-/// live scan asks them all in one round. The run has to lie wholly inside the
-/// viewport, since only there can a point be answered, and every point has to
-/// be answered. Of those, the points where the stack holds the text decide,
-/// and there have to be at least half of them. The run is covered, or reads
-/// against a surface the walk never read, only where every deciding point
-/// says so; a run half under a banner or half over a photo keeps its verdict.
+/// Every point of the occlusion grid over the painted box that lies inside
+/// the viewport is asked, so a live scan asks them all in one round. Only
+/// there can a point be answered, so at least half of the run's grid has to
+/// lie inside the viewport: a title cut by the viewport's edge, or a hero
+/// line running past the fold, is answered from what is visible of it, and a
+/// run mostly below the fold is not. Every point asked has to be answered.
+/// Of those, the points where the stack holds the text decide, and there
+/// have to be at least half of them. The run is covered, or reads against a
+/// surface the walk never read, only where every deciding point says so; a
+/// run half under a banner or half over a photo keeps its verdict.
 pub fn layers_at_text(
     dom: &dyn Dom,
     el: ElId,
@@ -461,11 +464,8 @@ pub fn layers_at_text(
     let Some(rect) = occlusion_probe_rect(dom, el, &dom.rect(el)) else {
         return TextLayers::Undecided;
     };
-    if !wholly_inside_viewport(&rect, vw, vh) {
-        return TextLayers::Undecided;
-    }
     let points = occlusion_probe_points(&rect, vw, vh);
-    if points.is_empty() {
+    if points.is_empty() || points.len() * 2 < occlusion_grid_size(&rect) {
         return TextLayers::Undecided;
     }
     let answers: Vec<AtPoint> = points

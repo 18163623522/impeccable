@@ -613,6 +613,37 @@ const __impeccableSnapshot = {
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
     }
 
+    // 1b. Open shadow trees, after every light-DOM element so light ids do
+    // not move. Their top-level nodes are nobody's child (`sh` names the
+    // host), so the core's document walks never reach them; the flat-tree
+    // walk the contrast surface reads does, through `as` and `ts`.
+    const shadowHosts = new Map();
+    for (let i = 1; i < elements.length; i++) {
+      const host = elements[i];
+      let root = null;
+      try { root = host.shadowRoot; } catch { root = null; }
+      if (!root) continue;
+      const hostId = i;
+      const shadowStack = [];
+      const tops = root.children;
+      for (let k = tops.length - 1; k >= 0; k--) {
+        shadowHosts.set(tops[k], hostId);
+        shadowStack.push(tops[k]);
+      }
+      while (shadowStack.length) {
+        const el = shadowStack.pop();
+        if (options.exclude && options.exclude(el)) continue;
+        const id = elements.length;
+        elements.push(el);
+        ids.set(el, id);
+        if (elements.length > maxElements) {
+          return { error: `page has more than ${maxElements} elements` };
+        }
+        const kids = el.children;
+        for (let k = kids.length - 1; k >= 0; k--) shadowStack.push(kids[k]);
+      }
+    }
+
     // 2. Intern style values.
     const strings = [];
     const stringIndex = new Map();
@@ -635,6 +666,13 @@ const __impeccableSnapshot = {
       if (ns === undefined) { rec.n = 3; rec.nu = nsUri; } else if (ns !== 0) { rec.n = ns; }
       const parent = el.parentElement;
       if (parent) rec.p = ids.get(parent) || 0;
+      const shadowHost = shadowHosts.get(el);
+      if (shadowHost) rec.sh = shadowHost;
+      const slot = el.assignedSlot;
+      if (slot) {
+        const slotId = ids.get(slot);
+        if (slotId) rec.as = slotId;
+      }
       // childNodes: element ids, text data, CDATA as [data].
       const c = [];
       for (const n of el.childNodes) {
@@ -642,7 +680,12 @@ const __impeccableSnapshot = {
           const cid = ids.get(n);
           if (cid) c.push(cid);
         } else if (n.nodeType === 3) {
-          c.push(n.textContent || '');
+          const data = n.textContent || '';
+          c.push(data);
+          if (rec.ts === undefined && data.trim() && n.assignedSlot) {
+            const slotId = ids.get(n.assignedSlot);
+            if (slotId) rec.ts = slotId;
+          }
         } else if (n.nodeType === 4) {
           c.push([n.textContent || '']);
         }
@@ -727,6 +770,7 @@ const __impeccableSnapshot = {
       hits: options.hits || [],
     };
     if (animated) snapshot.anim = true;
+    snapshot.shadow = true;
     const json = JSON.stringify(snapshot);
     if (json.length > maxBytes) {
       return { error: `snapshot is ${json.length} bytes (limit ${maxBytes})` };

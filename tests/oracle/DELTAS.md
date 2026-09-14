@@ -1639,3 +1639,67 @@ binary, since the evidence fixes moved none.
    `clipped-overflow-container`.
 4. **Static engine unchanged.** The file engine measures no boxes and reports
    both columns of `painted-at-capture.html`, as the goldens above record.
+
+## Recorded 2026-09-13: full-page screenshot fixtures
+
+`corpus/fix-fullpage-screenshot` adds four fixtures for the URL engine's
+evidence screenshot: `fullpage-screenshot.html` (a tall, wide document),
+`fullpage-screenshot-scroller.html` (the body scrolls instead of the document),
+`fullpage-screenshot-frame.html` (a fixed frame a smooth-scroll library moves)
+and `fullpage-screenshot-virtual.html` (rows rendered once scrolled to). Their
+URL behavior is pinned by `crates/browser/tests/fullpage_screenshot.rs`; the
+static engine runs no script and measures no boxes, so its output for them is
+ordinary.
+
+New goldens, recorded from the binary and read by hand:
+`detect-fixture-json-fullpage-screenshot-html`,
+`detect-fixture-text-fullpage-screenshot-html`,
+`detect-fixture-json-fullpage-screenshot-scroller-html`,
+`detect-fixture-text-fullpage-screenshot-scroller-html`,
+`detect-fixture-json-fullpage-screenshot-frame-html`,
+`detect-fixture-text-fullpage-screenshot-frame-html`,
+`detect-fixture-json-fullpage-screenshot-virtual-html` and
+`detect-fixture-text-fullpage-screenshot-virtual-html`. The tall, scroller and
+frame fixtures each report `low-contrast` on the faint foot copy,
+`overused-font` for Arial and `repeating-stripes-gradient` for the striped
+spacers; the virtual fixture reports `overused-font` only.
+
+Re-recorded sweeps, compared finding by finding against the previous goldens:
+`detect-dir-json-all-fixtures` (570 to 580), `detect-scope-type` (150 to 154),
+`detect-scope-both` (188 to 192), `detect-no-advisory-json` (500 to 507), and
+the text forms `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`
+and `detect-no-advisory-text`. Every added finding belongs to the four new
+fixtures and nothing was removed; in the text forms the only removed lines are
+the summary counts (500 to 507 anti-patterns, 70 to 73 advisory notes).
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which approved it. `cdp.rs` conflicted where the branch's viewport
+shots and `content_size` sat beside evidence-bugs' `page_errors`, which now
+returns `PageError` with where it was thrown; both kept. The pixel pass merged
+cleanly: the branch's scroll into view wraps the glyph-core measurement that
+evidence-bugs changed. The seven sweep goldens that moved on both sides were
+re-recorded from the integrated binary and each moved by exactly the branch's
+delta, nothing removed: `detect-dir-json-all-fixtures` 591 to 601,
+`detect-scope-type` 155 to 159, `detect-scope-both` 203 to 207,
+`detect-no-advisory-json` 514 to 521, and in the text forms
+(`detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+`detect-no-advisory-text`) only the four fixtures' blocks and the summary counts
+(514 to 521 anti-patterns, 77 to 80 advisory notes).
+
+1. **Seams.** Stitched viewport tiles can repeat script-driven chrome (a sticky
+   header, a cookie bar) at tile seams.
+2. **Capture time.** Full-page evidence takes about 26% longer to capture.
+3. **Some past-cut findings lack crops.** Element shots stop at
+   `MAX_ELEMENT_SHOTS` (40), and a collapsed container has no rect to shoot.
+4. **Solid tall sections.** A real tall solid section reads as a blank band and
+   falls back to tiles; that costs time only, never pixels.
+5. **Scroller detection counts `overflow: hidden`.** A clipping box is treated
+   like a page scroller when unrolling the page.
+6. **Off-canvas precision unmeasured.** The pixel pass now scrolls off-canvas
+   candidates into view, and its precision on those candidates is not yet
+   measured.
+7. **Harness.** The corpus harness reads `element_shots` through uncommitted
+   changes to `harness/build.rs`, `Cargo.toml` and `capture.rs`; they are
+   committed from the corpus side, not here.

@@ -257,6 +257,112 @@ pub fn capture_visual_contrast_candidate(
     let Some(clip) = sanitize_screenshot_clip(candidate.get("clip"), Some(viewport_width)) else {
         return Ok(None);
     };
+    // A candidate past the document's content box (text inside an element the
+    // page scrolls instead of its document) paints nothing in a beyond-viewport
+    // capture, so both shots would read blank. Scroll it into view, read its
+    // pixels there, and put the scroll back.
+    let brought = bring_into_view(page, candidate, &clip, viewport_width);
+    let (candidate, clip) = match &brought {
+        Some((moved, moved_clip)) => (moved, *moved_clip),
+        None => (candidate, clip),
+    };
+    let outcome = measure_candidate(page, candidate, &reasons, clip);
+    if brought.is_some() {
+        let _ = page.evaluate(RESTORE_SCROLL_JS);
+    }
+    outcome
+}
+
+const BRING_INTO_VIEW_JS: &str = r#"(async (selector) => {
+  let el;
+  try {
+    el = document.querySelector(selector);
+  } catch (e) {
+    return null;
+  }
+  if (!el) return null;
+  const saved = [];
+  for (let p = el.parentElement; p; p = p.parentElement) saved.push([p, p.scrollTop, p.scrollLeft]);
+  const sx = window.scrollX;
+  const sy = window.scrollY;
+  el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+  const moved = window.scrollX !== sx || window.scrollY !== sy
+    || saved.some(([p, t, l]) => p.scrollTop !== t || p.scrollLeft !== l);
+  if (!moved) return { moved: false };
+  window.__impeccableContrastRestore = () => {
+    for (const [p, t, l] of saved) {
+      if (p.scrollTop !== t || p.scrollLeft !== l) p.scrollTo({ top: t, left: l, behavior: 'instant' });
+    }
+    window.scrollTo({ left: sx, top: sy, behavior: 'instant' });
+  };
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const r = el.getBoundingClientRect();
+  return { moved: true, x: r.left + window.scrollX, y: r.top + window.scrollY, width: r.width, height: r.height };
+})"#;
+
+const RESTORE_SCROLL_JS: &str = "(() => { const restore = window.__impeccableContrastRestore; delete window.__impeccableContrastRestore; if (restore) restore(); })()";
+
+/// Whether a clip reaches where a beyond-viewport capture paints nothing:
+/// below the document's content box (allowing the 2px pad and the rounding a
+/// candidate clip carries) or starting right of it. `content` is
+/// `Page.getLayoutMetrics().cssContentSize`.
+pub fn clip_beyond_content(clip: &Clip, content: (f64, f64)) -> bool {
+    let (width, height) = content;
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        return false;
+    }
+    clip.y + clip.height > height + 4.0 || clip.x >= width
+}
+
+/// For a clip past the content box, scroll its element into view and return
+/// the candidate with the clip measured there. `None` leaves the page as it
+/// was: nothing moved, or nothing to move.
+fn bring_into_view(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    clip: &Clip,
+    viewport_width: f64,
+) -> Option<(Value, Clip)> {
+    let content = page.content_size().ok()?;
+    if !clip_beyond_content(clip, content) {
+        return None;
+    }
+    let selector = candidate
+        .get("selector")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let v = page
+        .evaluate_value(&format!("({BRING_INTO_VIEW_JS})({})", json!(selector)))
+        .ok()?;
+    if v.get("moved").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let n = |key: &str| v.get(key).and_then(Value::as_f64).filter(|f| f.is_finite());
+    let live = match (n("x"), n("y"), n("width"), n("height")) {
+        (Some(x), Some(y), Some(w), Some(h)) => json!({
+            "x": math_max(0.0, (x - 2.0).floor()),
+            "y": math_max(0.0, (y - 2.0).floor()),
+            "width": math_max(1.0, (w + 4.0).ceil()),
+            "height": math_max(1.0, (h + 4.0).ceil()),
+        }),
+        _ => Value::Null,
+    };
+    let Some(moved_clip) = sanitize_screenshot_clip(Some(&live), Some(viewport_width)) else {
+        let _ = page.evaluate(RESTORE_SCROLL_JS);
+        return None;
+    };
+    let mut moved = candidate.clone();
+    moved["clip"] = live;
+    Some((moved, moved_clip))
+}
+
+/// The pixel pair for one candidate at `clip`: text painted, then hidden.
+fn measure_candidate(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    reasons: &[String],
+    clip: Clip,
+) -> CdpResult<Option<RawFinding>> {
     let before = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height)?;
     let token = format!(
         "impeccable-contrast-{}-{}",
@@ -425,6 +531,23 @@ mod tests {
         assert_eq!(c.width, 1.0);
         assert!(sanitize_screenshot_clip(None, None).is_none());
         assert!(sanitize_screenshot_clip(Some(&Value::Null), None).is_none());
+    }
+
+    #[test]
+    fn clips_past_the_content_box_are_brought_into_view() {
+        let clip = |x: f64, y: f64, width: f64, height: f64| Clip { x, y, width, height };
+        // A body scroller: the document is one 844px viewport tall.
+        assert!(clip_beyond_content(&clip(42.0, 2709.0, 357.0, 47.0), (390.0, 844.0)));
+        // Text at the document's foot, the clip's pad and rounding included.
+        assert!(!clip_beyond_content(&clip(40.0, 3380.0, 200.0, 24.0), (1280.0, 3401.0)));
+        assert!(!clip_beyond_content(&clip(40.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // Starting past the right edge.
+        assert!(clip_beyond_content(&clip(1400.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // Straddling the right edge still paints.
+        assert!(!clip_beyond_content(&clip(1200.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // No usable content size: leave the clip as it is.
+        assert!(!clip_beyond_content(&clip(0.0, 5000.0, 10.0, 10.0), (0.0, 0.0)));
+        assert!(!clip_beyond_content(&clip(0.0, 5000.0, 10.0, 10.0), (f64::NAN, 800.0)));
     }
 
     fn png_base64(w: u32, h: u32, rgba: &[u8]) -> String {

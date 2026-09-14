@@ -1185,6 +1185,57 @@ impl<'a> Page<'a> {
             .to_string())
     }
 
+    /// The visible viewport as it is painted now, base64 PNG. No clip and
+    /// nothing past the viewport, so a tile shows exactly what a visitor
+    /// scrolled to this position sees.
+    pub fn screenshot_viewport_png(&mut self) -> CdpResult<String> {
+        let res = self.send(
+            "Page.captureScreenshot",
+            json!({
+                "format": "png",
+                "optimizeForSpeed": true,
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+            }),
+        )?;
+        Ok(res
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// The visible viewport as base64 JPEG.
+    pub fn screenshot_viewport_jpeg(&mut self, quality: u32) -> CdpResult<String> {
+        let res = self.send(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": quality.min(100),
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+            }),
+        )?;
+        Ok(res
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// `Page.getLayoutMetrics().cssContentSize`: the document's scroll size in
+    /// CSS pixels, the region a beyond-viewport capture can paint.
+    pub fn content_size(&mut self) -> CdpResult<(f64, f64)> {
+        let res = self.send("Page.getLayoutMetrics", json!({}))?;
+        let size = res.get("cssContentSize").or_else(|| res.get("contentSize"));
+        let dim = |key: &str| {
+            size.and_then(|s| s.get(key))
+                .and_then(Value::as_f64)
+                .ok_or_else(|| CdpError::new("Page.getLayoutMetrics returned no content size"))
+        };
+        Ok((dim("width")?, dim("height")?))
+    }
+
     /// The deduped `pageerror` messages so far, each with where it was thrown.
     pub fn page_errors(&mut self) -> Vec<PageError> {
         self.pump_events();

@@ -547,6 +547,7 @@ name = "impeccable-browser"
 version = "0.1.5"
 dependencies = [
  "base64",
+ "image",
  "impeccable-core",
  "impeccable-detect",
  "percent-encoding",

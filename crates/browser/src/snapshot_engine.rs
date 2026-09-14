@@ -291,11 +291,23 @@ fn scroll_to(page: &mut Page<'_>, x: f64, y: f64) -> CdpResult<()> {
 }
 
 fn scroll_into_view(page: &mut Page<'_>, selector: &str) -> CdpResult<bool> {
+    // Every ancestor's offset is kept before the scroll, so an element scroller
+    // it moves (a page that scrolls inside its body or an app shell's main) can
+    // be put back: `window.scrollTo` never reaches those.
     let expr = format!(
-        "(function(){{ let el; try {{ el = document.querySelector({}); }} catch {{ return false; }} if (!el || typeof el.scrollIntoView !== 'function') return false; el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
+        "(function(){{ let el; try {{ el = document.querySelector({}); }} catch {{ return false; }} if (!el || typeof el.scrollIntoView !== 'function') return false; const saved = window.__impeccableVisualScrollSaved || (window.__impeccableVisualScrollSaved = new Map()); for (let p = el.parentElement; p; p = p.parentElement) {{ if (!saved.has(p)) saved.set(p, [p.scrollTop, p.scrollLeft]); }} el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
         json!(selector)
     );
     Ok(page.evaluate_value(&expr)?.as_bool() == Some(true))
+}
+
+/// Put back the element offsets [`scroll_into_view`] moved. Returns whether
+/// any element had moved.
+fn restore_element_scroll(page: &mut Page<'_>) -> CdpResult<bool> {
+    let out = page.evaluate_value(
+        "(function(){ const saved = window.__impeccableVisualScrollSaved; window.__impeccableVisualScrollSaved = undefined; if (!saved) return false; let moved = false; for (const [p, [t, l]] of saved) { if (p.scrollTop !== t || p.scrollLeft !== l) { p.scrollTo({ top: t, left: l, behavior: 'instant' }); moved = true; } } return moved; })()",
+    )?;
+    Ok(out.as_bool() == Some(true))
 }
 
 fn wait_for_paint(page: &mut Page<'_>) -> CdpResult<()> {
@@ -563,11 +575,20 @@ pub fn analyze_visual_contrast(
     })?;
     let mut results: Vec<Value> = Vec::with_capacity(candidates.len());
     let restore = live_scroll(page)?;
+    // Set once a retry scrolled, so a page that never retried pays nothing.
+    let mut retried = false;
     for candidate in &candidates {
         if scroll_offscreen {
+            // Back to the scroll the base snapshot measured, element scrollers
+            // included, before the next candidate reads the live page with the
+            // base geometry.
+            let element_moved = retried && restore_element_scroll(page)?;
+            retried = false;
             let now = live_scroll(page)?;
             if now != restore {
                 scroll_to(page, restore.0, restore.1)?;
+                wait_for_paint(page)?;
+            } else if element_moved {
                 wait_for_paint(page)?;
             }
         }
@@ -575,6 +596,7 @@ pub fn analyze_visual_contrast(
         if scroll_offscreen && visual::needs_scroll_retry(&result) {
             let selector = candidate.get("selector").and_then(Value::as_str).unwrap_or("");
             if scroll_into_view(page, selector)? {
+                retried = true;
                 wait_for_paint(page)?;
                 // Only geometry changed (the page scrolled); patch it onto the
                 // base snapshot rather than re-capturing the whole page.
@@ -585,9 +607,12 @@ pub fn analyze_visual_contrast(
         results.push(result);
     }
     if scroll_offscreen {
+        let element_moved = retried && restore_element_scroll(page)?;
         let now = live_scroll(page)?;
         if now != restore {
             scroll_to(page, restore.0, restore.1)?;
+        } else if element_moved {
+            wait_for_paint(page)?;
         }
     }
     Ok(results)

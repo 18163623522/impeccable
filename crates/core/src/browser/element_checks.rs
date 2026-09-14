@@ -1007,11 +1007,12 @@ pub fn check_element_colors_dom(
                 && layers_at().verdict_stands())
     };
     // The page's one report of a colour pair goes to a readable copy: an
-    // element cut by the page's edge claims it only until a copy wholly on
-    // screen wears it.
+    // element cut by the page's edge, or whose text a clipping ancestor cuts
+    // on the x axis (a slide part way past its track), claims it only until a
+    // copy wholly on screen wears it.
     let claim = PairClaim {
         owner: u64::from(el),
-        on_screen: wholly_within_page_width(dom, &rect),
+        on_screen: wholly_within_page_width(dom, &rect) && crate::browser::painted::text_shown_across(dom, el),
     };
     let mut findings = check_colors_deduped_claiming(&color_opts, seen, Some(claim), &mut |h: &RuleHit| {
         safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h)

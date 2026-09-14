@@ -3449,3 +3449,202 @@ branch moves (line-length, body-text-viewport-edge, text-overflow,
 tight-leading, cramped-padding, edge-flush-cards) are moved by no earlier
 merge. Every new run 20 violation is one of the branch ratchet's 89 (76
 line-length and 13 body-text-viewport-edge above).
+
+## Recorded 2026-09-14: what is on screen (corpus/fix-on-screen)
+
+Corpus run 25 (both cohorts), `reports/observations-25.md` issues 4, 13, 14, 20
+and 24, section 5's "What is on screen" branch plus the line-length regression.
+Every change is in the URL engine's rule pass; the goldens move only because
+`on-screen.html` joins the fixture directory.
+
+- **A visible-share floor for text measurements (issue 4).** The Text gate asks
+  the painted predicate with a floor: a text measurement with less than a
+  quarter of its width (`TEXT_MIN_VISIBLE_SHARE`) inside its clipping
+  ancestors (`clip_outcome`) or on the scrollable page (`outside_document`) is
+  not painted for the text rules. The share is taken of the text where it can
+  be measured (the phrasing extent), else of the box; passing a horizontal
+  scroller replaces both with the scroller's box, since scrolling brings
+  anything in its range into it. Only the x axis is floored: a line-clamped
+  standfirst or a collapsed "read more" box shows its first lines while the
+  text rects of the lines it hides run past its bottom. A box that truncates
+  its line with `text-overflow: ellipsis` shows the start of it and is not
+  floored. The Box, Raster and Toggle gates and the base predicate keep the
+  1px overlap test.
+- **The pair dedupe claims for good only a copy shown across (issue 4).** The
+  claim's `on_screen` also asks `text_shown_across`: no clipping ancestor and
+  no document edge cuts the text on the x axis, within a pixel. A copy part
+  way past a carousel clip claims the colour pair provisionally, as a copy cut
+  by the page edge already did, and the first copy wholly in view reports
+  instead. A copy under the floor never claims, because the claim's keep
+  callback asks the Text gate.
+- **Zero boxes (issue 14).** On the Text gate a box with neither width nor
+  height is not painted whatever its overflow. A box flat on one axis keeps
+  `no_area`'s overflow test, and `display: contents` is kept.
+- **body-text-viewport-edge needs text in the viewport (issue 14).** Text whose
+  measured span lies wholly past either side of the viewport meets no edge a
+  reader sees: a desktop column laid out past a phone viewport
+  (people.com.cn at x 515 on 390px), a list parked 800px right (news.cn).
+- **heading-rhythm behind the Text gate (issue 20).** A heading not painted for
+  the text rules is neither reported nor counted toward the two-heading
+  minimum (joongang.co.kr's tab slide parked past its track, whose twin met
+  the minimum).
+- **Transformed tracks (issue 24).** `scrolling_ancestor_cuts` also counts a box
+  that hides or clips x overflow and holds, between it and the text, an
+  element with a `transform` or `translate` (the identity matrix included)
+  that lays out a row of at least two boxes side by side and whose
+  `scrollWidth` runs past the clip's `clientWidth`: Framer tickers, Swiper and
+  slick tracks. A section cutting a paragraph with no such row still reports.
+- **line-length reads the font of the text runs (issue 13).** The characters a
+  line holds are estimated at the font size of the runs that set the text
+  (the block's own text and its inline phrasing children, weighted by
+  characters), and a monospace face (`is_monospace_family`: a generic
+  `monospace` or `ui-monospace`, a family with a `mono` word, or a known code
+  face, read from the first family) advances 0.6em a glyph
+  (`MONOSPACE_ADVANCE_EM`). Full-width CJK glyphs stay an em. With every run
+  at the block's size in a proportional face the numbers are unchanged.
+
+Fixtures and tests:
+
+- `on-screen.html` is new: dates on a carousel track (a 6px sliver, one wholly
+  in view, one mostly in view), dates past the page's left edge (4 of 70px,
+  40 of 70px), one colour pair on a word part way past its clip and on a word
+  wholly in view, a word with a sliver in its clip, a label its box truncates
+  with an ellipsis, a 10px notice collapsed to 0x0, and three crowded
+  headings, one on a slide parked past its track.
+  `crates/browser/tests/on_screen.rs` pins the URL engine. Scanned with the
+  base binary (05cbd66e) it reports all five pass cases (`#pass-parked-date`,
+  `#pass-edge-sliver`, `#pass-cut-copy` instead of `#flag-whole-copy`,
+  `#pass-sliver-copy`, the 0x0 notice's tiny-text) and `Pass Parked Slide`
+  with `(3 headings on page)`; the branch reports only the flag cases, with
+  `(2 headings on page)`.
+- `body-text-viewport-edge.html` gains `pass-past-viewport`,
+  `flag-runs-past`, `pass-ticker-first`, `pass-ticker-second` and
+  `flag-transformed-wrapper`; base reports the three pass cases
+  (`right -2199px`, `left -300px`, `right -260px`).
+- `line-length.html` gains `flag-large-span` (`~100`, base `~150`),
+  `flag-mono` (`~119`, base `~143`), `pass-large-span` (base `~102`) and
+  `pass-mono` (base `~97`). `crates/browser/tests/text_geometry.rs` pins both.
+- `on-screen.html` joins `REPLAY_FIXTURES` in `crates/browser/tests/evidence.rs`.
+- Unit tests: the floor, the ellipsis exemption, the unfloored y axis, a
+  scroller cell, the document floor in both directions, the zero box and
+  `text_shown_across` (`painted.rs`); the run font and the transformed track
+  (`text_geometry.rs`); the monospace families (`text_rules.rs`); the gated
+  heading count (`page_checks.rs`).
+
+Goldens, recorded from the binary and read by hand:
+
+- `detect-fixture-json-on-screen-html`, `detect-fixture-text-on-screen-html`:
+  new, 11 findings. The static engine has no layout: `low-contrast` 8 (all five
+  dates, the colour pair once for its first copy `#pass-cut-copy`, the sliver
+  word, the truncated label), `tiny-text` for the 0x0 notice, and a
+  `clipped-overflow-container` advisory for each word clip. No heading-rhythm.
+- `detect-dir-json-all-fixtures` 723 to 734, `detect-no-advisory-json` 631 to
+  640, `detect-scope-type` 176 to 177, `detect-scope-both` 232 to 235, and in
+  the text forms (`detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text`,
+  `detect-scope-layout-text`) only the new fixture's block and the summary
+  counts (631 to 640 anti-patterns, 92 to 94 advisory notes, 17 to 19 in the
+  layout scope). Every added finding belongs to the new fixture; nothing was
+  removed or rewritten. The static goldens of `body-text-viewport-edge.html`
+  and `line-length.html` stay empty.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+Corpus. Exact branch deltas from replaying every capture with the base and the
+branch engine; a rename is the same element reported with a new number.
+
+- **Run 25, both cohorts** (585 captures; `on-screen-25`, violations 56):
+  - body-text-viewport-edge 482 to 453: 29 removed (pattern-absent 24,
+    confirmed-harmful 3, unjudged 2): people.com.cn 18 and news.cn 3 wholly
+    past the viewport, zoptron.framer.ai 4 and tempra.framer.website 2 ticker
+    items, exxonmobil.com and aajtak.in 1 each.
+  - heading-rhythm 4 to 2: joongang.co.kr's pair (pattern-absent 2).
+  - line-length 1,142 to 1,056: 86 removed and 81 renamed (the ratchet counts
+    167 removed, 81 added; confirmed-harmful 30, pattern-absent 78,
+    real-harmless 36, unjudged 23). The removals are avikmukherjee.com's
+    JetBrains Mono paragraphs (83), cvs.com's subheadline, bitroad.ai and
+    sapo.vn's next Swiper slide past the viewport. The renames are pages whose
+    text sits in runs at another size or in code: vibe-genomics.replit.app 46,
+    cvs.com 8, ladepeche.fr 7 (`~95` to `~96`), bitroad.ai 5, centene.com 3
+    (`~123` to `~96`), useautumn.com 3.
+  - low-contrast 4,896 to 4,882: 15 removed, 1 added (confirmed-harmful 2,
+    real-harmless 3, unjudged 10): overdrive.health's rotating word parked left
+    of its clip and two tab buttons with 4 and 9% in view, vibe-genomics code
+    chips cut by a table scroller, ynet.co.il's times and clones, zigzag.kr's
+    rating 3px in view, fabadda.com's chip, useautumn.com, hungrygpu.com,
+    context.dev. The addition is ynet.co.il's `span.authorField` pair moving to
+    a copy wholly in view.
+  - tight-leading 2 (ynet.co.il's slick clone, samsung.com's slide), tiny-text 2
+    (att.com cells past a clip), undersized-ui-text 35 (confirmed-harmful 21,
+    real-harmless 13, unjudged 1): otto.de's `+N` colour counts at the edge of
+    the swatch scroller (9), visiby.net's chart labels cut to `T` (10),
+    yna.co.kr's icon labels (13), zigzag.kr's ratings (2), adant.ai (1).
+  - The 56 violations: 29 of the 30 line-length ones are renames that still
+    report (vibe-genomics.replit.app 26, centene.com 3), and sapo.vn's slide is
+    a copy 84 of 926px in view. The 21 undersized-ui-text ones are otto.de,
+    visiby.net and zigzag.kr copies under a quarter in view, carrying their
+    clusters' labels. body-text-viewport-edge 123513 to 123515 are news.cn
+    items 800px past the viewport. low-contrast 110070 and 110493 are the
+    zigzag.kr rating.
+- **Run 20, cohort 2** (244 captures; `on-screen-20` against `integration-20`):
+  violations 180 to 184. body-text-viewport-edge 10 removed (zoptron.framer.ai
+  4, news.cn 3, tempra.framer.website 2, exxonmobil.com 1), line-length 9
+  renamed (centene.com, fps-tester.com, codecanary.org, copperhead.sh),
+  low-contrast 2 removed and 1 added (fabadda.com's chip past its carousel;
+  climatempo.com.br's Taboola `span.branding` pair moving to another copy),
+  undersized-ui-text 10 removed (visiby.net). The 4 new violations are the two
+  codecanary.org renames (106977, 107004), 103501 and 108369.
+- **Run 19, cohort 1** (342 captures; `on-screen-19` against `integration-19`):
+  violations 4 to 9. body-text-viewport-edge 19 removed (people.com.cn 18,
+  aajtak.in 1), line-length 86 removed and 67 renamed, low-contrast 12 removed,
+  tight-leading 1, tiny-text 2, undersized-ui-text 25 removed. The 5 new
+  violations are zigzag.kr's rating (93595, 93596, 93998, 93999) and
+  overdrive.health's parked word (100733).
+- Crops opened: 111833, 110071, 121181, 121574, 112118, 117134, 110549,
+  110600, 109708, 123513, 123368, 114418, 116101, 116157, 119192, 119884,
+  116470, 115801, 103501, 116724. The swatch count, the rating, the chart label
+  and the two sliver tiles show nothing readable at the clip's edge; the ticker
+  items are cut at the window edge by their moving track; the mono and
+  span-sized paragraphs hold 73 and 67 characters a line; the people.com.cn,
+  news.cn and joongang.co.kr crops are element shots scrolled into view of
+  copies the phone viewport never shows. 116724's crop, cut after the scan,
+  shows the word that rotated in; in the snapshot the removed copy is
+  "Insurance Discovery", its text wholly left of the clip. 115801's code chip
+  shows "`LD_LIBRA" at rest, under a quarter of its text.
+
+Not changed, and why:
+
+- **co-trip.jp 109346.** Replayed, the finding is the copy at x 470, wholly in
+  view; the rect at x -66 was measured after the scan, once Swiper autoplay
+  had moved the track. The snapshot's partial copy sits at x -38 with 46% in
+  view and still reports, and these dates are divs scored by the full pass,
+  not the pair dedupe.
+- **thairath.co.th 112152 and 112153.** In the snapshot the consent paragraph
+  and its link have boxes (390x72); the 0x0 rect was measured after the scan.
+- **climatempo.com.br 123680.** The snapshot places the Taboola button inside
+  every clip of its card.
+
+### Known limits at merge
+
+1. **The floor is a width share.** A copy with 25 to 99% of its text in view
+   still reports (co-trip.jp's date at 46%), and a long code chip or table cell
+   with a readable start under a quarter of its text at rest no longer does.
+2. **Only ellipsis clips are exempt.** A box that hides a nowrap line without
+   `text-overflow: ellipsis` shows its start and is floored like a track.
+3. **Vertical cuts are not floored**, and neither is a fixed layer's content.
+4. **Transformed rows count as tracks.** A clip holding a transformed row of
+   boxes wider than itself exempts every paragraph it cuts, a layout bug in
+   such a row included; no confirmed-harmful finding was lost to it.
+5. **The run font is a character-weighted average**, and monospace is read
+   from the first family, so a missing mono web font whose fallback is
+   proportional still counts 0.6em.
+6. **Zero boxes whose text overflows visibly** are dropped on the Text gate.
+7. **Text past the viewport** reports nothing on body-text-viewport-edge; the
+   overflow itself stays unreported (observations-25 issue 8, P20).
+8. **Pairs move.** A colour pair first worn by a copy part way past its clip
+   now reports on a later copy wholly in view, which the ratchet counts as a
+   removal and an addition.
+9. **API.** `TEXT_MIN_VISIBLE_SHARE`, `text_shown_across`,
+   `phrasing_text_font`, `average_glyph_advance_em_at`,
+   `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
+   are new.

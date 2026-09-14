@@ -371,11 +371,26 @@ fn is_full_width_char(c: char) -> bool {
         || (is_cjk_char(c) && !matches!(c as u32, 0xFF66..=0xFF9F))
 }
 
+/// The average advance of a proportional face's Latin glyphs in ems, the
+/// estimate's old constant.
+pub const PROPORTIONAL_ADVANCE_EM: f64 = 0.5;
+
+/// The advance of a monospace face's glyphs in ems: 600 units to the em in
+/// JetBrains Mono, Courier, Menlo and SF Mono.
+pub const MONOSPACE_ADVANCE_EM: f64 = 0.6;
+
 /// The average advance of `text`'s characters in ems, for estimating how many
 /// fit on a line: half an em for Latin and the scripts set like it, a whole em
 /// for full-width CJK glyphs, weighted by how many of each the text holds.
 /// Text with no full-width glyph is exactly 0.5, the estimate's old constant.
 pub fn average_glyph_advance_em(text: &str) -> f64 {
+    average_glyph_advance_em_at(text, PROPORTIONAL_ADVANCE_EM)
+}
+
+/// [`average_glyph_advance_em`] with the advance of the text's Latin glyphs
+/// given: [`MONOSPACE_ADVANCE_EM`] for a monospace face. Full-width glyphs
+/// are a whole em in either.
+pub fn average_glyph_advance_em_at(text: &str, latin_em: f64) -> f64 {
     let mut total = 0usize;
     let mut wide = 0usize;
     for c in text.chars() {
@@ -385,9 +400,44 @@ pub fn average_glyph_advance_em(text: &str) -> f64 {
         }
     }
     if wide == 0 {
-        return 0.5;
+        return latin_em;
     }
-    (0.5 * (total - wide) as f64 + wide as f64) / total as f64
+    (latin_em * (total - wide) as f64 + wide as f64) / total as f64
+}
+
+/// Faces set on a fixed advance whose names hold no `mono` word.
+const MONOSPACE_FACES: &[&str] = &[
+    "andale mono",
+    "cascadia code",
+    "consolas",
+    "courier",
+    "courier new",
+    "fira code",
+    "hack",
+    "inconsolata",
+    "lucida console",
+    "menlo",
+    "monaco",
+    "source code pro",
+];
+
+/// Whether a computed `font-family` leads with a monospace face: a generic
+/// `monospace` or `ui-monospace`, a name with a `mono` word in it
+/// (`JetBrains Mono`, `SFMono-Regular`, `Roboto Mono`), or a known code face.
+/// Only the first family is read; a display face such as `Monotype Corsiva`
+/// holds no `mono` word.
+pub fn is_monospace_family(font_family: &str) -> bool {
+    let first = font_family
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_ascii_lowercase();
+    MONOSPACE_FACES.contains(&first.as_str())
+        || first
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| matches!(w, "mono" | "monospace" | "monospaced" | "sfmono"))
 }
 
 /// JS `/[—]|--(?=\S)/g` match count over `body`.
@@ -621,6 +671,28 @@ mod tests {
             ("borderBottomWidth", "1px"),
             ("backgroundColor", "rgba(255, 255, 255, 0.05)"),
         ]))));
+    }
+
+    #[test]
+    fn monospace_faces_advance_six_tenths_of_an_em() {
+        for family in [
+            "\"JetBrains Mono\", \"JetBrains Mono Fallback\", ui-monospace, monospace",
+            "ui-monospace, SFMono-Regular, Menlo, monospace",
+            "SFMono-Regular, Consolas, monospace",
+            "monospace",
+            "'Courier New', Courier, monospace",
+            "Menlo",
+            "\"Roboto Mono\", sans-serif",
+        ] {
+            assert!(is_monospace_family(family), "{family}");
+        }
+        for family in ["\"Monotype Corsiva\", cursive", "Inter, monospace", "system-ui, sans-serif", ""] {
+            assert!(!is_monospace_family(family), "{family}");
+        }
+        assert_eq!(average_glyph_advance_em("plain latin text"), 0.5);
+        assert_eq!(average_glyph_advance_em_at("plain latin text", MONOSPACE_ADVANCE_EM), 0.6);
+        // A full-width glyph is an em in either face: one of four.
+        assert!((average_glyph_advance_em_at("ab c漢", 0.6) - (0.6 * 4.0 + 1.0) / 5.0).abs() < 1e-12);
     }
 
     #[test]

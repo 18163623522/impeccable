@@ -17,11 +17,11 @@ use crate::checks::measures::{
 };
 use crate::checks::rules::RuleHit;
 use super::text_geometry::{
-    holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent,
+    holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent, phrasing_text_font,
     scrolling_ancestor_cuts, text_line_count,
 };
 use crate::checks::text_rules::{
-    average_glyph_advance_em, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
+    average_glyph_advance_em_at, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
     ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
     LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
@@ -559,14 +559,18 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         && (text_len as f64) > line_max
     {
         let text = collapse_ws(js::trim(&dom.text_content(el)));
-        let advance = average_glyph_advance_em(&text);
+        // Glyphs are as wide as the font of the runs that set them: a 16px
+        // paragraph whose words sit in a 24px span holds a third fewer
+        // characters a line, and a monospace face advances 0.6em a glyph.
+        let (text_size, latin_advance) = phrasing_text_font(dom, el, font_size);
+        let advance = average_glyph_advance_em_at(&text, latin_advance);
         let estimate = match phrasing_text_extent(dom, el) {
             Some(t) => {
                 let pitch = q
                     .line_height_px
                     .filter(|lh| *lh > 0.0)
                     .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-                let lines = text_line_count(t.height, pitch, font_size);
+                let lines = text_line_count(t.height, pitch, text_size);
                 if lines >= 2.0 {
                     let chars = utf16_len(&text) as f64;
                     // The half-em advance runs 10 to 20% wide of a real face,
@@ -582,12 +586,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                         LINE_FILLS_MEASURE
                     };
                     let estimate = if t.width >= rect.width * fill {
-                        chars_per_line_at(rect.width, font_size, advance)
+                        chars_per_line_at(rect.width, text_size, advance)
                     } else {
                         // The widest line from its glyphs. However narrow the
                         // face, some line holds at least the average count
                         // when all of the block's text sits in these lines.
-                        let from_width = chars_per_line_at(t.width, font_size, advance);
+                        let from_width = chars_per_line_at(t.width, text_size, advance);
                         if holds_only_phrasing(dom, el) {
                             js::math_max(from_width, chars / lines)
                         } else {
@@ -599,7 +603,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     None
                 }
             }
-            None if has_direct_text => Some(chars_per_line_at(rect.width, font_size, advance)),
+            None if has_direct_text => Some(chars_per_line_at(rect.width, text_size, advance)),
             None => None,
         };
         if let Some(cpl) = estimate.filter(|cpl| *cpl > line_max + 5.0) {
@@ -930,8 +934,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             }
         };
         let (left, right) = span.unwrap_or((f64::NAN, f64::NAN));
-        let left_close = left < 16.0;
-        let right_close = right > viewport_width - 16.0;
+        // Text wholly past either side of the viewport meets no edge a reader
+        // sees: a desktop column laid out past a phone viewport, a list
+        // parked 800px to the right.
+        let in_viewport = right > 0.0 && left < viewport_width;
+        let left_close = in_viewport && left < 16.0;
+        let right_close = in_viewport && right > viewport_width - 16.0;
         if left_close || right_close {
             let l = number_to_string(math_round(left));
             let r = number_to_string(math_round(viewport_width - right));

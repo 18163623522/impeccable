@@ -110,12 +110,16 @@ fn the_text_geometry_rules_measure_the_text() {
     assert_eq!(
         lines,
         vec![
+            ("~100 chars/line (aim for <80)".to_string(), "p.copy.flag-large-span".to_string()),
             ("~101 chars/line (aim for <80)".to_string(), "p.copy.cjk-wide".to_string()),
+            ("~119 chars/line (aim for <80)".to_string(), "p.copy.flag-mono".to_string()),
             ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(1)".to_string()),
             ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(2)".to_string()),
             ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(3)".to_string()),
         ],
-        "the wide column, its inline-prose twin, its 2.4 line-height twin and the 12px CJK column"
+        "the wide column, its inline-prose twin, its 2.4 line-height twin, the 12px CJK column, the \
+         24px span across 1,200px and the monospace column; the 16px paragraph set in a 24px span \
+         and the 680px monospace column hold under 85 characters a line"
     );
 
     let edges = findings(&engine, port, "body-text-viewport-edge.html", "body-text-viewport-edge");
@@ -127,14 +131,24 @@ fn the_text_geometry_rules_measure_the_text() {
             "li",
             "flag-inline-prose",
             "flag-cut-by-wrapper",
+            "flag-runs-past",
+            "flag-transformed-wrapper",
         ],
-        &["pass-centred-text", "pass-padded-text", "pass-clipped-slide"],
+        &[
+            "pass-centred-text",
+            "pass-padded-text",
+            "pass-clipped-slide",
+            "pass-past-viewport",
+            "pass-ticker-first",
+            "pass-ticker-second",
+        ],
         "body-text-viewport-edge",
     );
     assert_eq!(
         edges.len(),
-        5,
-        "two paragraphs, the list item, the inline prose and the paragraph an overflow-x-hidden wrapper cuts: {edges:?}"
+        7,
+        "two paragraphs, the list item, the inline prose, the paragraph an overflow-x-hidden wrapper cuts, \
+         the column running past the window and the paragraph in a transformed wrapper that holds no row: {edges:?}"
     );
 
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");

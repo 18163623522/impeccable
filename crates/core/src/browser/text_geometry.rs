@@ -10,9 +10,9 @@
 //! rather than the box. A Dom that cannot measure text answers `None` here,
 //! and each rule then keeps the box it read before.
 
-use super::dom::{tag_lower, Dom, ElId, Rect};
+use super::dom::{direct_text, tag_lower, Dom, ElId, Rect};
 use crate::checks::measures::resolve_length_px;
-use crate::checks::text_rules::NON_RENDERED_TAGS;
+use crate::checks::text_rules::{is_monospace_family, MONOSPACE_ADVANCE_EM, NON_RENDERED_TAGS, PROPORTIONAL_ADVANCE_EM};
 use crate::js::{self, parse_float};
 
 /// Phrasing content: the tags whose text flows in the line boxes of the block
@@ -100,6 +100,63 @@ pub fn phrasing_text_extent(dom: &dyn Dom, el: ElId) -> Option<Rect> {
     acc
 }
 
+/// One run of the text a block sets in its own line boxes: how many
+/// characters it holds, its font size and its Latin glyph advance.
+struct TextRun {
+    chars: f64,
+    font_size: f64,
+    advance_em: f64,
+}
+
+fn collect_runs(dom: &dyn Dom, el: ElId, font_size: f64, runs: &mut Vec<TextRun>) {
+    let advance_em = if is_monospace_family(&dom.style(el, "fontFamily")) {
+        MONOSPACE_ADVANCE_EM
+    } else {
+        PROPORTIONAL_ADVANCE_EM
+    };
+    let chars = direct_text(dom, el).chars().filter(|c| !c.is_whitespace()).count() as f64;
+    if chars > 0.0 {
+        runs.push(TextRun { chars, font_size, advance_em });
+    }
+    for c in dom.children(el) {
+        if !paints_nothing(dom, c) && is_inline_phrasing(dom, c) {
+            let size = parse_float(&dom.style(c, "fontSize"));
+            let size = if size.is_finite() && size > 0.0 { size } else { font_size };
+            collect_runs(dom, c, size, runs);
+        }
+    }
+}
+
+fn weighted(runs: &[TextRun], value: fn(&TextRun) -> f64) -> f64 {
+    let first = value(&runs[0]);
+    if runs.iter().all(|r| value(r) == first) {
+        return first;
+    }
+    let total: f64 = runs.iter().map(|r| r.chars).sum();
+    runs.iter().map(|r| r.chars * value(r)).sum::<f64>() / total
+}
+
+/// The font `el`'s text is set in, for estimating characters per line from
+/// its width: the font size of the text runs themselves and the average
+/// advance of their Latin glyphs in ems ([`PROPORTIONAL_ADVANCE_EM`], or
+/// [`MONOSPACE_ADVANCE_EM`] for a monospace face), each weighted by the
+/// characters the run holds. A 16px paragraph whose words sit in a 24px span
+/// is set at 24px. `font_size` is `el`'s own; a run whose size was not
+/// recorded takes its parent's. With no text runs, `el`'s own font stands.
+pub fn phrasing_text_font(dom: &dyn Dom, el: ElId, font_size: f64) -> (f64, f64) {
+    let mut runs = Vec::new();
+    collect_runs(dom, el, font_size, &mut runs);
+    if runs.is_empty() {
+        let advance = if is_monospace_family(&dom.style(el, "fontFamily")) {
+            MONOSPACE_ADVANCE_EM
+        } else {
+            PROPORTIONAL_ADVANCE_EM
+        };
+        return (font_size, advance);
+    }
+    (weighted(&runs, |r| r.font_size), weighted(&runs, |r| r.advance_em))
+}
+
 /// The line-height `el`'s text is set at, for an element with its own
 /// resolved `own` line-height. An inline element's line boxes belong to the
 /// block around it, whose strut sets the pitch when it is taller than the
@@ -149,7 +206,7 @@ pub fn scrolling_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         if Some(p) == root || Some(p) == body {
             break;
         }
-        if scrolls_x(dom, p) {
+        if scrolls_x(dom, p) || moves_a_track(dom, el, p) {
             let cr = dom.rect(p);
             if cr.all_finite() && (text.left < cr.left - 1.0 || text.right > cr.right + 1.0) {
                 return true;
@@ -158,6 +215,63 @@ pub fn scrolling_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
         cur = dom.parent(p);
     }
     false
+}
+
+/// Whether `clip`, a box that hides its horizontal overflow, holds a track a
+/// script moves with transforms: an element between `el` and `clip` that
+/// carries a `transform` or `translate`, lays out a row of at least two boxes
+/// side by side, and whose content runs past `clip`'s width. Framer tickers
+/// and Swiper, slick and Embla carousels move their track that way inside a
+/// box that only hides overflow, and the script brings what the clip cuts
+/// into view. A box that hides overflow around content with no such track (a
+/// section cutting a paragraph at the screen edge) proves no track, and
+/// neither does a metric the capture did not record.
+fn moves_a_track(dom: &dyn Dom, el: ElId, clip: ElId) -> bool {
+    if !matches!(overflow_x(dom, clip).as_str(), "hidden" | "clip") {
+        return false;
+    }
+    let client = dom.client_width(clip);
+    if !(client.is_finite() && client > 0.0) {
+        return false;
+    }
+    let mut cur = dom.parent(el);
+    while let Some(t) = cur {
+        if t == clip {
+            break;
+        }
+        let content = dom.scroll_width(t);
+        if is_transformed(dom, t) && content.is_finite() && content > client + 1.0 && holds_row(dom, t) {
+            return true;
+        }
+        cur = dom.parent(t);
+    }
+    false
+}
+
+/// A `transform` or `translate` other than `none`, the identity matrix
+/// included: a track parked at its first slide.
+fn is_transformed(dom: &dyn Dom, el: ElId) -> bool {
+    ["transform", "translate"].iter().any(|prop| {
+        let v = dom.style(el, prop);
+        !v.is_empty() && v != "none"
+    })
+}
+
+/// Whether two consecutive children with area sit side by side: one starts
+/// where the other ends, on overlapping lines.
+fn holds_row(dom: &dyn Dom, el: ElId) -> bool {
+    let boxes: Vec<Rect> = dom
+        .children(el)
+        .into_iter()
+        .map(|c| dom.rect(c))
+        .filter(|r| r.all_finite() && r.width >= 1.0 && r.height >= 1.0)
+        .collect();
+    boxes.windows(2).any(|w| {
+        let (a, b) = (&w[0], &w[1]);
+        let beside = b.left >= a.right - 1.0 || b.right <= a.left + 1.0;
+        let same_line = js::math_min(a.bottom, b.bottom) - js::math_max(a.top, b.top) > 0.0;
+        beside && same_line
+    })
 }
 
 /// Whether `el` scrolls on the x axis and has content to scroll to.
@@ -327,6 +441,97 @@ mod tests {
         let inner = d.add(Some(card), "br");
         d.set_style(inner, "display", "inline");
         assert!(!phrasing_holds_break(&d, q));
+    }
+
+    /// observations-25 issue 13: cvs.com's 16px paragraph sets its words in
+    /// a 24px span, and avikmukherjee.com's copy is JetBrains Mono.
+    #[test]
+    fn the_text_font_is_read_from_the_runs() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        d.set_styles(p, &[("display", "block"), ("fontSize", "16px"), ("fontFamily", "\"CVS Sans Regular\", Helvetica, sans-serif")]);
+        let span = d.add(Some(p), "span");
+        d.set_styles(span, &[("display", "inline"), ("fontSize", "24px")]);
+        d.add_text(span, "Create a good morning routine");
+        assert_eq!(phrasing_text_font(&d, p, 16.0), (24.0, 0.5));
+        // Own text beside it weighs in by its characters: 25 and 25.
+        d.add_text(p, "abcdefghijklmnopqrstuvwxy");
+        d.el_mut(span).child_nodes.clear();
+        d.add_text(span, "ABCDEFGHIJKLMNOPQRSTUVWXY");
+        assert_eq!(phrasing_text_font(&d, p, 16.0), (20.0, 0.5));
+        // A run whose size was not recorded takes its parent's.
+        d.set_style(span, "fontSize", "");
+        assert_eq!(phrasing_text_font(&d, p, 16.0), (16.0, 0.5));
+
+        let mono = d.add(Some(body), "p");
+        d.set_styles(mono, &[("display", "block"), ("fontSize", "14px"), ("fontFamily", "\"JetBrains Mono\", ui-monospace, monospace")]);
+        let strong = d.add(Some(mono), "strong");
+        // Computed style carries the inherited face.
+        d.set_styles(strong, &[("display", "inline"), ("fontFamily", "\"JetBrains Mono\", ui-monospace, monospace")]);
+        d.add_text(strong, "How do you keep state correct");
+        assert_eq!(phrasing_text_font(&d, mono, 14.0), (14.0, 0.6), "the run inherits the face");
+        // A code run in a proportional paragraph: half the characters at 0.6.
+        let prose = d.add(Some(body), "p");
+        d.set_styles(prose, &[("display", "block"), ("fontSize", "16px"), ("fontFamily", "Georgia, serif")]);
+        d.add_text(prose, "abcd");
+        let code = d.add(Some(prose), "code");
+        d.set_styles(code, &[("display", "inline"), ("fontSize", "16px"), ("fontFamily", "Menlo, monospace")]);
+        d.add_text(code, "wxyz");
+        let (size, advance) = phrasing_text_font(&d, prose, 16.0);
+        assert_eq!(size, 16.0);
+        assert!((advance - 0.55).abs() < 1e-9, "{advance}");
+        // No text runs: the element's own font.
+        let empty = d.add(Some(body), "p");
+        d.set_styles(empty, &[("display", "block"), ("fontFamily", "monospace")]);
+        assert_eq!(phrasing_text_font(&d, empty, 12.0), (12.0, 0.6));
+    }
+
+    /// observations-25 issue 24: tempra.framer.website's ticker moves a `ul`
+    /// of items with a transform inside a box that only clips its overflow.
+    #[test]
+    fn a_transformed_row_inside_a_clip_is_a_track() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let clip = d.add(Some(body), "div");
+        d.set_styles(clip, &[("overflow", "clip"), ("overflowX", "clip")]);
+        d.set_rect(clip, 0.0, 10000.0, 390.0, 240.0);
+        d.el_mut(clip).client_width = 390.0;
+        d.el_mut(clip).scroll_width = 1405.0;
+        let track = d.add(Some(clip), "ul");
+        d.set_style(track, "transform", "matrix(1, 0, 0, 1, -195.183, 0)");
+        d.set_rect(track, -175.0, 10000.0, 350.0, 236.0);
+        d.el_mut(track).client_width = 350.0;
+        d.el_mut(track).scroll_width = 1580.0;
+        let first = d.add(Some(track), "li");
+        d.set_rect(first, -175.0, 10000.0, 383.0, 236.0);
+        let second = d.add(Some(track), "li");
+        d.set_rect(second, 208.0, 10000.0, 383.0, 236.0);
+        let p = d.add(Some(first), "p");
+        let cut = Rect::from_xywh(-151.0, 10020.0, 335.0, 77.0);
+        assert!(scrolling_ancestor_cuts(&d, p, &cut), "a ticker item");
+        // The identity matrix parks a track at its first slide.
+        d.set_style(track, "transform", "matrix(1, 0, 0, 1, 0, 0)");
+        assert!(scrolling_ancestor_cuts(&d, p, &cut));
+        // No transform: a section cutting its content is no track.
+        d.set_style(track, "transform", "none");
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        d.set_style(track, "transform", "matrix(1, 0, 0, 1, -195.183, 0)");
+        // Content that does not run past the clip.
+        d.el_mut(track).scroll_width = 390.0;
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        // A metric the capture did not record proves no track.
+        d.el_mut(track).scroll_width = f64::NAN;
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        d.el_mut(track).scroll_width = 1580.0;
+        // Boxes stacked, not side by side, are no row.
+        d.set_rect(second, -175.0, 10236.0, 383.0, 236.0);
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
+        d.set_rect(second, 208.0, 10000.0, 383.0, 236.0);
+        // A box that scrolls on x without overflow to scroll to, and one
+        // that shows its overflow, hold no transformed track.
+        d.set_styles(clip, &[("overflow", "visible"), ("overflowX", "visible")]);
+        assert!(!scrolling_ancestor_cuts(&d, p, &cut));
     }
 
     #[test]

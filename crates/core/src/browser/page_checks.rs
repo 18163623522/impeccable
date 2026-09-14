@@ -1162,6 +1162,12 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if !is_visible_flow(h) {
             continue;
         }
+        // A heading nobody sees at rest (a slide parked past its track, a
+        // carousel clone, a tab panel off to the side) sets no rhythm and
+        // counts toward no page minimum.
+        if super::painted::unpainted_for(dom, h, super::painted::PaintGate::Text).is_some() {
+            continue;
+        }
         let text = collapse_ws(js::trim(&dom.text_content(h)));
         if utf16_len(&text) < 3 {
             continue;
@@ -2504,6 +2510,54 @@ mod tests {
             f[0].finding.detail,
             "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
         );
+    }
+
+    /// observations-25 issue 20: joongang.co.kr's tab slide parked past its
+    /// track holds the crowded heading's twin, which met the two-heading
+    /// minimum on its own.
+    #[test]
+    fn heading_rhythm_counts_only_headings_on_screen() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 800.0, 2000.0);
+        d.el_mut(html).scroll_width = 800.0;
+        let flow = [("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static")];
+        let sec = d.add(Some(body), "section");
+        d.set_styles(sec, &flow);
+        d.set_styles(sec, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("borderTopWidth", "0px"), ("boxShadow", "none")]);
+        d.set_rect(sec, 0.0, 0.0, 800.0, 1000.0);
+        let clip = d.add(Some(sec), "div");
+        d.set_styles(clip, &flow);
+        d.set_styles(clip, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(clip, 0.0, 400.0, 800.0, 200.0);
+        let track = d.add(Some(clip), "div");
+        d.set_styles(track, &flow);
+        d.set_rect(track, -900.0, 400.0, 800.0, 200.0);
+        let mut group = |d: &mut FakeDom, parent: ElId, x: f64, y: f64, title: &str| {
+            let p0 = d.add(Some(parent), "p");
+            d.add_text(p0, "Intro paragraph text that runs well past forty characters");
+            d.set_styles(p0, &flow);
+            d.set_style(p0, "fontSize", "20px");
+            d.set_rect(p0, x, y, 800.0, 20.0);
+            let h = d.add(Some(parent), "h2");
+            d.add_text(h, title);
+            d.set_styles(h, &flow);
+            d.set_style(h, "fontSize", "24px");
+            d.set_rect(h, x, y + 28.0, 800.0, 30.0);
+            let p1 = d.add(Some(parent), "p");
+            d.add_text(p1, "Body paragraph");
+            d.set_styles(p1, &flow);
+            d.set_style(p1, "fontSize", "16px");
+            d.set_rect(p1, x, y + 98.0, 800.0, 20.0);
+        };
+        group(&mut d, sec, 0.0, 0.0, "Heading on screen one");
+        group(&mut d, sec, 0.0, 160.0, "Heading on screen two");
+        group(&mut d, track, -900.0, 420.0, "Heading on a parked slide");
+        let f = check_heading_rhythm_dom(&d);
+        let details: Vec<&str> = f.iter().map(|x| x.finding.detail.as_str()).collect();
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert!(details.iter().all(|x| x.ends_with("(2 headings on page)")), "{details:?}");
+        assert!(!details.iter().any(|x| x.contains("parked")), "{details:?}");
     }
 
     #[test]

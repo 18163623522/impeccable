@@ -116,6 +116,33 @@
     </div>
   </div>
 
+  <!-- A column wholly past the window: a desktop layout at a phone width
+       parks it past the right edge of a page that scrolls sideways. No edge
+       of the window touches text that is not in it. -->
+  <div style="width: 3800px">
+    <p class="pass-past-viewport" style="width: 1100px; margin: 0 0 0 2600px">A column of a fixed-width desktop layout that starts past the right edge of the window, where nothing of it can touch the window's edge.</p>
+  </div>
+  <!-- The same column starting inside the window runs past its right edge. -->
+  <div style="width: 2400px">
+    <p class="flag-runs-past" style="width: 1100px; margin: 0 0 0 1100px">A column of a fixed-width desktop layout that starts inside the window and runs on past its right edge, cutting every line where the screen stops.</p>
+  </div>
+  <!-- A ticker moves its track with transforms inside a box that only hides
+       overflow. The items the clip cuts are brought into view by the script,
+       not by a missing gutter. -->
+  <div class="escape" style="overflow: hidden">
+    <ul style="display: flex; margin: 0; padding: 0; list-style: none; transform: translateX(-300px)">
+      <li style="flex: 0 0 1000px; margin: 0"><p class="pass-ticker-first" style="margin: 0">The first ticker item, moved part way past the left edge of the window by the transform on its track, waiting to slide back into view.</p></li>
+      <li style="flex: 0 0 1000px; margin: 0"><p class="pass-ticker-second" style="margin: 0">The second ticker item, cut by the right edge of the window while the track carries it along, one of a row of items the script scrolls.</p></li>
+    </ul>
+  </div>
+  <!-- A wrapper carried by a transform that holds one paragraph and no row of
+       items is no track, and the paragraph it lets the clip cut reports. -->
+  <div class="escape" style="overflow: hidden">
+    <div style="transform: translateX(0)">
+      <p class="flag-transformed-wrapper" style="width: 1400px; margin: 0 0 0 40px">A paragraph given a fixed width wider than the window, inside a wrapper a reveal animation left transformed, so the end of every line is cut off mid-word at the right edge of the screen, and nothing a visitor does brings the words back into view however far they scroll.</p>
+    </div>
+  </div>
+
   <script src="/js/detect-antipatterns-browser.js"></script>
 </body>
 </html>

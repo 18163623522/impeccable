@@ -37,6 +37,9 @@ const REPLAY_FIXTURES: &[&str] = &[
     // Closed disclosures, hidden panels and paused blinks, which the capture
     // records through checkVisibility and computed style.
     "painted-gate-coverage.html",
+    // Copies part way past a carousel clip and the page edge, measured on
+    // their text rects.
+    "on-screen.html",
 ];
 
 fn fixtures_dir() -> PathBuf {

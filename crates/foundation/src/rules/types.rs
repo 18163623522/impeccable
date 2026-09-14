@@ -167,6 +167,13 @@ pub struct ColorOpts {
     pub font_weight: f64,
     pub has_direct_text: bool,
     pub is_emoji_only: bool,
+    /// The element's own text has no letter and no digit
+    /// ([`is_glyph_only_text`]): a lone circle, a pair of braces, an arrow.
+    /// Nobody reads it, so it is not scored for text contrast on any path,
+    /// SAFE_TAGS or not. The recorded call vectors predate the field and
+    /// leave it false, which scores as they recorded.
+    #[serde(default)]
+    pub is_glyph_only: bool,
     /// The adapter's verdict that this element paints reading text of its
     /// own that no already-scored ancestor carries: direct text that is not
     /// an icon glyph, not visually hidden, and a `color` the nearest

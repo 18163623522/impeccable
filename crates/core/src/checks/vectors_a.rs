@@ -198,6 +198,9 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 font_weight: to_number(f(0, "fontWeight")),
                 has_direct_text: truthy(f(0, "hasDirectText")),
                 is_emoji_only: truthy(f(0, "isEmojiOnly")),
+                // The recorded JS scored glyph-only text on every tag but
+                // the SAFE_TAGS ones.
+                is_glyph_only: false,
                 // The recorded JS had no own-text verdict: the SAFE_TAGS
                 // gate it replays was the tag and the surface alone.
                 paints_own_text: false,

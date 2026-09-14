@@ -497,8 +497,10 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     if opts.has_direct_text && opts.text_color.is_some() && !opts.is_emoji_only {
         let text_color = opts.text_color.unwrap();
         // Gradient-clipped text paints the gradient, not `color`, so there
-        // is no background to score it against.
-        if bg_clip != "text" {
+        // is no background to score it against. Text with no letter and no
+        // digit (a lone circle, a pair of braces) is not read, which the
+        // SAFE_TAGS path already says through `paints_own_text`.
+        if bg_clip != "text" && !opts.is_glyph_only {
             findings.extend(contrast_findings(opts, &text_color));
         }
 
@@ -675,7 +677,7 @@ fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
 }
 
 /// The alpha at or below which an ink paints no glyph a reader could see.
-const TRANSPARENT_INK_FLOOR: f64 = 0.02;
+pub(crate) const TRANSPARENT_INK_FLOOR: f64 = 0.02;
 
 /// The contrast scoring `check_colors` and `check_placeholder_colors`
 /// share: gray-on-color, then WCAG AA against the worst background. The
@@ -1774,6 +1776,32 @@ mod tests {
         assert_eq!(
             extract_shadow_lengths("rgb(1, 2, 3) 0px 0px 20px", None),
             vec![1.0, 2.0, 3.0, 0.0, 0.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn glyph_only_text_is_not_scored_on_any_path() {
+        // A lone circle in white at 20% on green (bt.cn): the full pass for
+        // a div scored it at 1.3:1, while the same glyph in a span was
+        // already skipped. Words in that ink still report.
+        let opts = |is_glyph_only: bool| ColorOpts {
+            tag: "div".to_string(),
+            text_color: Some(Rgba::new(255.0, 255.0, 255.0, 0.2)),
+            effective_bg: Some(Rgba::new(29.0, 150.0, 52.0, 1.0)),
+            visible_text: Some(Rgba::new(255.0, 255.0, 255.0, 0.2)),
+            font_size: 20.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            is_glyph_only,
+            bg_clip: Some("border-box".to_string()),
+            bg_image: Some("none".to_string()),
+            ..Default::default()
+        };
+        assert!(check_colors(&opts(false)).iter().any(|h| h.id == "low-contrast"));
+        let glyph = check_colors(&opts(true));
+        assert!(
+            glyph.iter().all(|h| h.id != "low-contrast" && h.id != "gray-on-color"),
+            "{glyph:?}"
         );
     }
 

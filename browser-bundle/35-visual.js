@@ -69,13 +69,14 @@ function createVisualContrast(IO) {
     return core('vc_pixel_sample', d[0], d[1], d[2], d[3]);
   }
 
-  async function sampleCssBackground(node, point, textColor) {
+  async function sampleCssBackground(node, el, point, textColor) {
     const plan = await core('vc_css_plan', IO.handle(node), __j(textColor));
     if (plan.kind === 'sample') return plan.sample;
     // A url() layer: load, map the point onto the painted image, read a pixel.
+    // An image that covers neither its box nor the text is not the surface.
     const img = await IO.loadImage(plan.url);
-    if (!img) return core('vc_css_url_no_image');
-    const src = await core('vc_css_url_source_point', IO.handle(node), img.w, img.h, plan.size, plan.position, point.x, point.y);
+    if (!img) return core('vc_css_url_no_image', IO.handle(node), IO.handle(el), plan.size, plan.position);
+    const src = await core('vc_css_url_source_point', IO.handle(node), IO.handle(el), img.w, img.h, plan.size, plan.position, point.x, point.y);
     if (!src.point) return src.sample;
     return core('vc_css_url_finish', __j(await sampleDrawablePixel(img.ref, [img.w, img.h], src.point)));
   }
@@ -127,7 +128,7 @@ function createVisualContrast(IO) {
         // Paint this walk cannot read (vector artwork).
         sample = await core('vc_unreadable_stack_sample', IO.handle(node));
       } else {
-        sample = await sampleCssBackground(node, point, textColor);
+        sample = await sampleCssBackground(node, el, point, textColor);
       }
       if (sample.status === 'sampled') {
         if (await IO.core('vc_sample_is_opaque', __j(sample))) {

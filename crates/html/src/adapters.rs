@@ -588,17 +588,18 @@ fn resolved_text_color(style: &StyleValues, custom_props: CustomPropMap<'_>) -> 
 /// Whether an ancestor carrying direct text is one the contrast pass
 /// actually scores, so a descendant sharing its colour can stand down. A
 /// SAFE_TAG ancestor is only scored under the same predicate its
-/// descendant is, and an ancestor whose own text is an arrow or an icon
-/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
-/// report the span, because nothing reports the anchor.
+/// descendant is, and an ancestor whose own text is an arrow, an icon glyph
+/// or a pair of braces is not scored at all, whatever its tag —
+/// `<a><span>Read more</span> →</a>` has to report the span, because nothing
+/// reports the anchor.
 fn ancestor_scores_its_text(el: &StaticElement<'_>, direct: &str) -> bool {
-    if is_emoji_only_text(direct) {
+    if is_emoji_only_text(direct) || is_glyph_only_text(direct) {
         return false;
     }
     if !SAFE_TAGS.contains(&el.tag_lower().as_str()) {
         return true;
     }
-    !is_glyph_only_text(direct) && !is_visually_hidden(el, el.style())
+    !is_visually_hidden(el, el.style())
 }
 
 /// Whether this element's `color` comes from an ancestor the contrast pass
@@ -923,6 +924,7 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
+        is_glyph_only: is_glyph_only_text(&direct_text),
         paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
         bg_image: Some(own_image.to_string()),

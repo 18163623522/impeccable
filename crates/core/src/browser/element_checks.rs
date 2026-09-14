@@ -1278,7 +1278,7 @@ fn blur_radius_px(value: &str) -> f64 {
 /// renders, which is how a glow blob is usually softened. `backdrop-filter`
 /// is deliberately not read here: it blurs what sits behind the element,
 /// and the element's own background is painted on top of that, sharp.
-fn ai_palette_blur_px(dom: &dyn Dom, el: ElId) -> f64 {
+pub(crate) fn ai_palette_blur_px(dom: &dyn Dom, el: ElId) -> f64 {
     let mut widest = 0.0f64;
     let mut cur = Some(el);
     while let Some(c) = cur {

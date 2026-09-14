@@ -7,6 +7,7 @@
 
 use super::dom::{tag_lower, Dom, ElId, ElStyle};
 use super::element_checks::{class_selector, is_rendered_for_browser_rule};
+use super::painted::{unpainted_for, PaintGate};
 use crate::checks::measures::resolve_length_px;
 use crate::checks::rules::{check_kicker_above_heading, KickerCandidate, RuleHit};
 use crate::checks::text_rules::{
@@ -162,6 +163,13 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
             continue;
         }
         if heading_tag == "h1" && heading_font_size >= 48.0 && kicker_letter_spacing >= 1.6 {
+            continue;
+        }
+        // A pair a visitor cannot see (a section at `hidden`, an inactive
+        // hero slide, a closed panel) puts no label above a heading on screen.
+        if unpainted_for(dom, heading, PaintGate::Text).is_some()
+            || unpainted_for(dom, kicker, PaintGate::Text).is_some()
+        {
             continue;
         }
         candidates.push(KickerCandidate {
@@ -444,9 +452,11 @@ mod tests {
                 ("fontVariantCaps", "normal"),
             ],
         );
+        d.set_rect(kicker, 40.0, 100.0, 240.0, 16.0);
         let h = d.add(Some(sec), "h2");
         d.add_text(h, "Everything you need");
         d.set_style(h, "fontSize", "32px");
+        d.set_rect(h, 40.0, 124.0, 600.0, 40.0);
         let hits = check_kicker_above_heading_dom(&d);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "kicker-above-heading");
@@ -460,10 +470,58 @@ mod tests {
         let k2 = d.add(Some(art), "p");
         d.add_text(k2, "NEWS");
         d.set_styles(k2, &[("fontSize", "12px"), ("letterSpacing", "1.2px")]);
+        d.set_rect(k2, 40.0, 300.0, 240.0, 16.0);
         let h2 = d.add(Some(art), "h3");
         d.add_text(h2, "Card heading");
         d.set_style(h2, "fontSize", "24px");
+        d.set_rect(h2, 40.0, 324.0, 600.0, 32.0);
         assert_eq!(check_kicker_above_heading_dom(&d).len(), 1);
+    }
+
+    /// demotv.lol's hero pair in a section at `hidden`, and exxonmobil.com's
+    /// inactive slide: the same label and heading a visitor cannot see.
+    #[test]
+    fn kicker_above_heading_skips_a_pair_nobody_sees() {
+        let pair = |d: &mut FakeDom, parent: ElId, y: f64, heading: &str| {
+            let kicker = d.add(Some(parent), "span");
+            d.add_text(kicker, "Channel battle");
+            d.set_styles(
+                kicker,
+                &[("fontSize", "12px"), ("letterSpacing", "1.3px"), ("textTransform", "uppercase")],
+            );
+            d.set_rect(kicker, 40.0, y, 240.0, 16.0);
+            let h = d.add(Some(parent), "h2");
+            d.add_text(h, heading);
+            d.set_style(h, "fontSize", "32px");
+            d.set_rect(h, 40.0, y + 24.0, 600.0, 40.0);
+            (kicker, h)
+        };
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let shown = d.add(Some(body), "div");
+        pair(&mut d, shown, 100.0, "Which would you try");
+
+        let hidden = d.add(Some(body), "section");
+        d.set_attr(hidden, "hidden", "");
+        d.set_style(hidden, "display", "none");
+        let (k, h) = pair(&mut d, hidden, 0.0, "Watch both demos");
+        for el in [hidden, k, h] {
+            d.el_mut(el).check_visibility = Some(false);
+            d.set_rect(el, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        let slide = d.add(Some(body), "div");
+        d.set_styles(slide, &[("opacity", "0"), ("visibility", "hidden")]);
+        d.set_rect(slide, 0.0, 300.0, 1280.0, 400.0);
+        let (k, h) = pair(&mut d, slide, 320.0, "Second quarter results");
+        for el in [k, h] {
+            d.set_style(el, "visibility", "hidden");
+            d.el_mut(el).check_visibility = Some(false);
+        }
+
+        let hits = check_kicker_above_heading_dom(&d);
+        let snippets: Vec<&str> = hits.iter().map(|h| h.snippet.as_str()).collect();
+        assert_eq!(snippets, vec!["kicker \"Channel battle\" above h2 \"Which would you try\""]);
     }
 
     #[test]

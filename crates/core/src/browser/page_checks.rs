@@ -10,7 +10,10 @@ use super::dom::{
     ancestors_inclusive, class_attr, closest_or_none, direct_text, has_direct_text_longer_than, pf0,
     style_px, tag_lower, Dom, ElId, ElStyle, Rect,
 };
-use super::element_checks::{class_selector, effective_opacity_dom, is_rendered_for_browser_rule};
+use super::element_checks::{
+    ai_palette_blur_px, class_selector, effective_opacity_dom, is_rendered_for_browser_rule,
+};
+use super::painted::painted_at_capture;
 use super::{BrowserFinding, ElFinding};
 use crate::checks::measures::{
     cream_from_class_list, is_cream_color, is_opaque_decorated_box,
@@ -1348,6 +1351,73 @@ pub fn is_painted_for_occlusion(dom: &dyn Dom, el: ElId) -> bool {
 
 const OCCLUSION_TEXT_SKIP_TAGS: &[&str] = &["script", "style", "noscript", "template", "title"];
 
+/// The SVG elements that print text. Every other element inside an `<svg>`
+/// draws: a `path`, a `rect`, the `svg` itself.
+const SVG_TEXT_TAGS: &[&str] = &["text", "tspan", "textpath"];
+
+/// The blur radius at which text stops being words a reader could read: a
+/// teaser under a sign-in gate at `blur(12px)`. Nothing covering it hides a
+/// reading.
+const OCCLUSION_ILLEGIBLE_BLUR_PX: f64 = 4.0;
+
+/// Whether a decorated box counts through its own fill, the first of the two
+/// ways `is_opaque_decorated_box` accepts it.
+fn paints_opaque_fill(dom: &dyn Dom, el: ElId) -> bool {
+    parse_any_color(Some(&dom.style(el, "backgroundColor"))).is_some_and(|c| c.alpha_or_one() > 0.6)
+}
+
+/// Whether `text` shows fewer than `n` characters on screen. Combining marks,
+/// variation selectors, emoji skin tones and tag characters count with the
+/// character before them, so does whatever a zero-width joiner joins, and two
+/// regional indicators are one flag. Everything else counts on its own, so the
+/// count never falls below what a reader sees, and text with `n` characters
+/// is never dropped.
+fn fewer_characters_than(text: &str, n: usize) -> bool {
+    let mut count = 0usize;
+    let mut joined = false;
+    let mut open_flag = false;
+    for c in text.chars() {
+        let cp = c as u32;
+        if cp == 0x200D {
+            joined = true;
+            continue;
+        }
+        let extends = matches!(
+            cp,
+            0x0300..=0x036F
+                | 0x1AB0..=0x1AFF
+                | 0x1DC0..=0x1DFF
+                | 0x20D0..=0x20FF
+                | 0xFE00..=0xFE0F
+                | 0xFE20..=0xFE2F
+                | 0x1F3FB..=0x1F3FF
+                | 0xE0020..=0xE007F
+                | 0xE0100..=0xE01EF
+        );
+        if extends {
+            continue;
+        }
+        if joined {
+            joined = false;
+            continue;
+        }
+        if (0x1F1E6..=0x1F1FF).contains(&cp) {
+            if open_flag {
+                open_flag = false;
+                continue;
+            }
+            open_flag = true;
+        } else {
+            open_flag = false;
+        }
+        count += 1;
+        if count >= n {
+            return false;
+        }
+    }
+    count < n
+}
+
 /// The viewport the occlusion probes are asked inside, with the defaults a
 /// Dom that did not measure it reads as.
 pub fn occlusion_viewport(dom: &dyn Dom) -> (f64, f64) {
@@ -1516,6 +1586,20 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         false
     };
 
+    // The covered text, the text or box covering it, and the cards a headline
+    // overhangs all ask the shared painted-at-capture predicate, once per
+    // element. It only removes: every element it keeps also passed
+    // `is_painted_for_occlusion`.
+    let painted_cache: std::cell::RefCell<std::collections::HashMap<ElId, bool>> = Default::default();
+    let painted = |el: ElId| -> bool {
+        if let Some(&v) = painted_cache.borrow().get(&el) {
+            return v;
+        }
+        let v = painted_at_capture(dom, el);
+        painted_cache.borrow_mut().insert(el, v);
+        v
+    };
+
     struct TextEl {
         el: ElId,
         rect: Rect,
@@ -1536,7 +1620,8 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         } else {
             element_direct_text(dom, el)
         };
-        if utf16_len(&text) < 2 {
+        // One emoji is two UTF-16 units but one character on screen.
+        if utf16_len(&text) < 2 || fewer_characters_than(&text, 2) {
             continue;
         }
         if !is_painted_for_occlusion(dom, el) {
@@ -1558,6 +1643,17 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
         if rect.bottom <= 0.0 || rect.top >= vh {
+            continue;
+        }
+        // Text a visitor cannot see (the items of a closed `<details>`, a
+        // panel at `visibility: hidden`, a slide parked past its track) has
+        // nothing covering it on screen.
+        if !painted(el) {
+            continue;
+        }
+        // Text blurred past reading (a teaser under a sign-in gate) is
+        // texture; nothing on top of it hides words a reader could read.
+        if ai_palette_blur_px(dom, el) >= OCCLUSION_ILLEGIBLE_BLUR_PX {
             continue;
         }
         text_els.push(TextEl { el, rect, text });
@@ -1599,12 +1695,19 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if effective_opacity_dom(dom, top) <= 0.02 {
                 continue;
             }
+            // An answer naming an element the capture says is not painted
+            // describes a page that changed after the capture; it covers
+            // nothing the capture measured.
+            if !painted(top) {
+                continue;
+            }
             let top_tag = tag_lower(dom, top);
             if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
                 continue;
             }
-            let top_has_text = !element_direct_text(dom, top).is_empty()
-                || closest_or_none(dom, top, "svg").is_some();
+            let top_own_text = !element_direct_text(dom, top).is_empty();
+            let top_in_svg = closest_or_none(dom, top, "svg").is_some();
+            let top_has_text = top_own_text || top_in_svg;
             let top_style = ElStyle { dom, el: top };
             // A box paints its fill and borders inside its own rect. Where the
             // box the page answered with is not at the point in the capture,
@@ -1618,13 +1721,21 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 occluded += 1;
                 if occluder_el.is_none() {
                     occluder_el = Some(top);
-                    occluder_kind = "box";
+                    // A box counts through its fill or through its borders;
+                    // one with no opaque fill is named for what it draws.
+                    occluder_kind = if paints_opaque_fill(dom, top) { "box" } else { "border" };
                 }
             } else if top_has_text {
                 occluded += 1;
                 if occluder_el.is_none() {
                     occluder_el = Some(top);
-                    occluder_kind = "text";
+                    // Everything inside an SVG counts as drawing over the
+                    // text; only its text elements are text.
+                    occluder_kind = if top_in_svg && !top_own_text && !SVG_TEXT_TAGS.contains(&top_tag.as_str()) {
+                        "graphic"
+                    } else {
+                        "text"
+                    };
                 }
             }
         }
@@ -1632,12 +1743,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if total == 0 {
             continue;
         }
+        let text_like = occluder_kind == "text" || occluder_kind == "graphic";
         let occ_frac = occluded as f64 / total as f64;
-        if occ_frac < (if occluder_kind == "text" { 0.45 } else { 0.3 }) {
+        if occ_frac < (if text_like { 0.45 } else { 0.3 }) {
             continue;
         }
 
-        if occluder_kind == "text" {
+        if text_like {
             let victim_svg = closest_or_none(dom, el, "svg");
             let occ_svg = closest_or_none(dom, occ, "svg");
             if victim_svg.is_some() && occ_svg.is_some() && victim_svg == occ_svg {
@@ -1657,7 +1769,12 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                     class_selector(dom, el),
                     slice_utf16_prefix(text, 24),
                     number_to_string(math_round(occ_frac * 100.0)),
-                    if occluder_kind == "text" { "overlapping text" } else { "an opaque element" },
+                    match occluder_kind {
+                        "text" => "overlapping text",
+                        "graphic" => "an SVG graphic",
+                        "border" => "a bordered element",
+                        _ => "an opaque element",
+                    },
                     class_selector(dom, occ)
                 ),
             ),
@@ -1674,7 +1791,9 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if closest_or_none(dom, el, "svg").is_some() {
             continue;
         }
-        if !is_painted_for_occlusion(dom, el) {
+        // A card inside a closed disclosure or a hidden panel has no edge on
+        // screen for a headline to collide with.
+        if !is_painted_for_occlusion(dom, el) || !painted(el) {
             continue;
         }
         let bg = parse_any_color(Some(&dom.style(el, "backgroundColor")));
@@ -1768,6 +1887,9 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
         if dom.style(el, "display") != "inline" {
+            continue;
+        }
+        if !painted(el) {
             continue;
         }
         let Some(bg) = parse_any_color(Some(&dom.style(el, "backgroundColor"))) else { continue };
@@ -2311,6 +2433,171 @@ mod tests {
         let f = run((96.0, 84.0));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].finding.detail.contains("is 100% covered by an opaque element"), "{f:?}");
+    }
+
+    const OCCLUSION_BASE: &[(&str, &str)] = &[
+        ("display", "block"),
+        ("visibility", "visible"),
+        ("opacity", "1"),
+        ("contentVisibility", "visible"),
+        ("position", "static"),
+        ("cssFloat", "none"),
+        ("animationName", "none"),
+    ];
+
+    /// demotv.lol: the items of a menu inside a closed `<details>` keep their
+    /// layout, so they have boxes, but Chrome hides them on
+    /// `::details-content`, which no ancestor style shows. checkVisibility()
+    /// answers false. The items cover nothing, and nothing covers them.
+    #[test]
+    fn text_occlusion_skips_text_the_capture_did_not_paint() {
+        let run = |menu_open: bool| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let headline = d.add(Some(body), "h1");
+            d.add_text(headline, "Watch demos");
+            d.set_styles(headline, OCCLUSION_BASE);
+            d.set_rect(headline, 40.0, 100.0, 500.0, 60.0);
+            let menu = d.add(Some(body), "div");
+            d.set_styles(menu, OCCLUSION_BASE);
+            d.set_style(menu, "position", "absolute");
+            d.set_rect(menu, 40.0, 100.0, 500.0, 60.0);
+            let item = d.add(Some(menu), "a");
+            d.add_text(item, "Bring your demo to your site");
+            d.set_styles(item, OCCLUSION_BASE);
+            d.set_rect(item, 40.0, 100.0, 500.0, 60.0);
+            if !menu_open {
+                d.el_mut(menu).check_visibility = Some(false);
+                d.el_mut(item).check_visibility = Some(false);
+            }
+            mark_body_descendants(&mut d);
+            // The page answers with the headline under the closed menu.
+            for (x, y) in occlusion_probe_points(&d.rect(item), 1280.0, 800.0) {
+                d.set_point(x, y, vec![headline, body]);
+            }
+            (check_text_occlusion_dom(&d), item)
+        };
+        let (open, item) = run(true);
+        assert!(open.iter().any(|f| f.el == Some(item)), "{open:?}");
+        let (closed, _) = run(false);
+        assert!(closed.is_empty(), "{closed:?}");
+    }
+
+    #[test]
+    fn text_occlusion_overhang_needs_a_painted_card() {
+        let run = |card_painted: bool| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let title = d.add(Some(body), "h1");
+            d.add_text(title, "Watch demos");
+            d.set_styles(title, OCCLUSION_BASE);
+            d.set_styles(title, &[("fontSize", "48px"), ("lineHeight", "56px")]);
+            d.set_rect(title, 32.0, 318.0, 200.0, 56.0);
+            let card = d.add(Some(body), "div");
+            d.set_styles(card, OCCLUSION_BASE);
+            d.set_styles(
+                card,
+                &[("position", "absolute"), ("backgroundColor", "rgb(255, 255, 255)"), ("borderTopWidth", "1px")],
+            );
+            d.set_rect(card, 150.0, 300.0, 300.0, 200.0);
+            if !card_painted {
+                d.el_mut(card).check_visibility = Some(false);
+            }
+            mark_body_descendants(&mut d);
+            for (x, y) in occlusion_probe_points(&d.rect(title), 1280.0, 800.0) {
+                d.set_point(x, y, vec![title, body]);
+            }
+            check_text_occlusion_dom(&d)
+        };
+        let shown = run(true);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].finding.detail.contains("overhangs div by 82px"), "{shown:?}");
+        assert!(run(false).is_empty());
+    }
+
+    /// Covered text on an opaque box, a border-only field and an SVG shape;
+    /// the same text blurred behind a gate, and one emoji.
+    #[test]
+    fn text_occlusion_skips_illegible_text_and_names_what_covers_it() {
+        #[derive(Clone, Copy)]
+        enum Cover {
+            Fill,
+            Border,
+            Svg,
+        }
+        let run = |text: &str, blur: &str, cover: Cover| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let wrap = d.add(Some(body), "div");
+            d.set_styles(wrap, OCCLUSION_BASE);
+            d.set_style(wrap, "filter", blur);
+            d.set_rect(wrap, 40.0, 100.0, 240.0, 24.0);
+            let copy = d.add(Some(wrap), "p");
+            d.set_attr(copy, "class", "copy");
+            d.add_text(copy, text);
+            d.set_styles(copy, OCCLUSION_BASE);
+            d.set_rect(copy, 40.0, 100.0, 240.0, 24.0);
+            let top = match cover {
+                Cover::Fill | Cover::Border => {
+                    let el = d.add(Some(body), "div");
+                    d.set_attr(el, "class", "cover");
+                    d.set_styles(el, OCCLUSION_BASE);
+                    d.set_style(el, "position", "absolute");
+                    if matches!(cover, Cover::Fill) {
+                        d.set_style(el, "backgroundColor", "rgb(31, 122, 61)");
+                    } else {
+                        d.set_style(el, "backgroundColor", "rgba(0, 0, 0, 0)");
+                        for side in ["Top", "Right", "Bottom", "Left"] {
+                            d.set_style(el, &format!("border{side}Width"), "1px");
+                            d.set_style(el, &format!("border{side}Color"), "rgb(153, 153, 153)");
+                        }
+                    }
+                    d.set_rect(el, 30.0, 90.0, 280.0, 44.0);
+                    el
+                }
+                Cover::Svg => {
+                    let svg = d.add(Some(body), "svg");
+                    d.set_styles(svg, OCCLUSION_BASE);
+                    d.set_style(svg, "position", "absolute");
+                    d.set_rect(svg, 30.0, 90.0, 280.0, 44.0);
+                    let shape = d.add(Some(svg), "rect");
+                    d.set_styles(shape, OCCLUSION_BASE);
+                    d.set_rect(shape, 30.0, 90.0, 280.0, 44.0);
+                    shape
+                }
+            };
+            mark_body_descendants(&mut d);
+            for (x, y) in occlusion_probe_points(&d.rect(copy), 1280.0, 800.0) {
+                d.set_point(x, y, vec![top, body]);
+            }
+            check_text_occlusion_dom(&d).into_iter().map(|f| f.finding.detail).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            run("Palais Garnier, Paris", "none", Cover::Fill),
+            vec!["p.copy \"Palais Garnier, Paris\" is 100% covered by an opaque element (div.cover)"]
+        );
+        assert_eq!(
+            run("Calendar", "none", Cover::Border),
+            vec!["p.copy \"Calendar\" is 100% covered by a bordered element (div.cover)"]
+        );
+        assert_eq!(run("Team", "none", Cover::Svg), vec!["p.copy \"Team\" is 100% covered by an SVG graphic (rect)"]);
+        // Blurred past reading, under a gate.
+        assert!(run("Palais Garnier, Paris", "blur(12px)", Cover::Fill).is_empty());
+        // A soft blur still reads.
+        assert_eq!(run("Palais Garnier, Paris", "blur(2px)", Cover::Fill).len(), 1);
+        // One emoji is one character; two letters are two.
+        assert!(run("\u{1F3AF}", "none", Cover::Fill).is_empty());
+        assert_eq!(run("Go", "none", Cover::Fill).len(), 1);
+    }
+
+    #[test]
+    fn characters_on_screen() {
+        for one in ["\u{1F3AF}", "\u{1F44D}\u{1F3FD}", "\u{1F1EF}\u{1F1F5}", "e\u{301}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{2764}\u{FE0F}", "x"] {
+            assert!(fewer_characters_than(one, 2), "{one:?}");
+        }
+        for two in ["Go", "\u{1F1EF}\u{1F1F5}\u{1F1E9}\u{1F1EA}", "\u{1F3AF}\u{1F3AF}", "\u{AC00}\u{AC01}", "a\u{301}b"] {
+            assert!(!fewer_characters_than(two, 2), "{two:?}");
+        }
     }
 
     #[test]

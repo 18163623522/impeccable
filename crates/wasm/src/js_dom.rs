@@ -59,6 +59,7 @@ extern "C" {
     fn offset_height(el: u32) -> f64;
     fn check_visibility(el: u32) -> i32;
     fn direct_text_rect(el: u32) -> Vec<f64>;
+    fn running_animation_properties(el: u32) -> Option<String>;
 }
 
 fn opt(id: u32) -> Option<ElId> {
@@ -339,6 +340,9 @@ impl Dom for JsDom {
     }
     fn offset_height(&self, el: ElId) -> f64 {
         offset_height(el)
+    }
+    fn running_animation_properties(&self, el: ElId) -> Option<Vec<String>> {
+        serde_json::from_str(&running_animation_properties(el)?).ok()
     }
     fn check_visibility(&self, el: ElId) -> Option<bool> {
         match check_visibility(el) {

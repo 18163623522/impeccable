@@ -913,6 +913,11 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
         if !candidate_text_reads_at_rest(dom, el) {
             continue;
         }
+        // A box caught mid-reveal paints one frame of a fade; its pixels say
+        // nothing about the contrast a visitor meets once it settles.
+        if super::element_checks::caught_mid_reveal(dom, el) {
+            continue;
+        }
         let reasons = collect_visual_contrast_reasons(dom, el);
         if reasons.is_empty() {
             continue;
@@ -2427,6 +2432,37 @@ mod tests {
         let nodes = stack_nodes(&d, avatar, 10.0, 10.0, 0.0).unwrap();
         assert_eq!(nodes[0].kind, "unreadable");
         assert_eq!(unreadable_stack_sample(&d, avatar)["reason"], "svg paint");
+    }
+
+    /// A paragraph in a faded row: a candidate while the row is at rest, and
+    /// none while the row is caught mid-reveal, since the pixels would read a
+    /// frame of the fade.
+    #[test]
+    fn a_box_caught_mid_reveal_is_not_read_from_pixels() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_styles(body, &[("backgroundColor", "rgb(255, 255, 255)"), ("backgroundImage", "none")]);
+        let row = d.add(Some(body), "div");
+        d.set_styles(row, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("backgroundImage", "none"), ("opacity", "0.5")]);
+        d.set_rect(row, 0.0, 0.0, 400.0, 40.0);
+        let p = d.add(Some(row), "p");
+        d.add_text(p, "Pick a template:");
+        d.set_styles(p, &[("color", "rgb(10, 16, 21)"), ("fontSize", "16px"), ("fontWeight", "400"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("backgroundImage", "none"), ("opacity", "1")]);
+        d.set_rect(p, 10.0, 10.0, 200.0, 20.0);
+        let cands = collect_visual_contrast_candidates(&d, &json!({}));
+        assert_eq!(cands.len(), 1, "{cands:?}");
+        assert_eq!(cands[0]["reasons"], json!(["opacity stack"]));
+
+        // Sliding in from under 0.1 opacity.
+        d.set_styles(row, &[("opacity", "0.0283007"), ("transform", "matrix(1, 0, 0, 1, -19.1319, 0)")]);
+        assert!(collect_visual_contrast_candidates(&d, &json!({})).is_empty());
+        // Faded by a running animation.
+        d.set_styles(row, &[("opacity", "0.5"), ("transform", "none")]);
+        d.set_running_animations(row, &["opacity"]);
+        assert!(collect_visual_contrast_candidates(&d, &json!({})).is_empty());
+        // The animation settled.
+        d.set_running_animations(row, &[]);
+        assert_eq!(collect_visual_contrast_candidates(&d, &json!({})).len(), 1);
     }
 
     #[test]

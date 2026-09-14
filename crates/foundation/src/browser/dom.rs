@@ -179,6 +179,17 @@ pub trait Dom {
     /// of every non-blank direct text node (rects narrower/shorter than 1px
     /// dropped); `None` when there is none.
     fn direct_text_rect(&self, el: ElId) -> Option<Rect>;
+    /// The CSS properties (`opacity`, `filter`, hyphenated as the CSSOM
+    /// spells them) of every animation and transition running on the element
+    /// itself at capture: `document.getAnimations()` entries whose effect
+    /// targets it (not a pseudo-element) and whose `playState` is `running`
+    /// or that are still pending. An empty list is a capture that looked and
+    /// found none; `None` is a probe that could not look (a snapshot recorded
+    /// before the capture read animations, a page with no Web Animations
+    /// API).
+    fn running_animation_properties(&self, _el: ElId) -> Option<Vec<String>> {
+        None
+    }
 }
 
 // ── shared helpers over the trait ─────────────────────────────────────────

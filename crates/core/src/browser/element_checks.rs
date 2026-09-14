@@ -577,6 +577,105 @@ fn opacity_of(dom: &dyn Dom, el: ElId) -> f64 {
     }
 }
 
+/// The opacity under which a box that is also moving reads as the first
+/// frames of a reveal rather than a faded box at rest.
+const REVEAL_OPACITY: f64 = 0.1;
+
+/// The `will-change` values a script names ahead of a reveal.
+const REVEAL_WILL_CHANGE: &[&str] = &["opacity", "filter", "transform", "translate", "scale", "rotate"];
+
+/// Whether a faded box sits at the opacity a visitor meets it at, so the
+/// fold may blend that opacity into the ink. A capture can catch a reveal
+/// mid-frame: Framer's word-by-word reveal parks each word at `opacity:
+/// 0.001; filter: blur(10px); transform: translateY(10px)` and animates it
+/// in, and a scan that lands a few frames in reads 0.07 and scores the word
+/// as nearly invisible. A box is not at rest when:
+///
+/// - an animation or transition running on it at capture moves its
+///   `opacity` or its `filter`;
+/// - it is blurred (`filter: blur()` with a radius above 0), which no reader
+///   is asked to read through;
+/// - its opacity is under [`REVEAL_OPACITY`] while it is moved or about to
+///   be (a `transform` other than the identity, `translate`, `scale` or
+///   `rotate` other than `none`, a `will-change` naming one of them): a box
+///   sliding in from 0.
+///
+/// A capture that could not read running animations (a recording made
+/// before it did) is at rest unless one of the other two holds. A box that
+/// is not at rest contributes no fade, which scores the colour as declared,
+/// and the boxes around it that are at rest still fade the ink.
+fn opacity_at_rest(dom: &dyn Dom, el: ElId, opacity: f64) -> bool {
+    if dom
+        .running_animation_properties(el)
+        .is_some_and(|props| props.iter().any(|p| p == "opacity" || p == "filter"))
+    {
+        return false;
+    }
+    if has_active_blur(&dom.style(el, "filter")) {
+        return false;
+    }
+    opacity >= REVEAL_OPACITY || !is_moving(dom, el)
+}
+
+/// Whether the element or any ancestor is a faded box caught mid-reveal
+/// ([`opacity_at_rest`]). The pixel pass asks this before it reads a box: a
+/// frame of a reveal paints a contrast no visitor meets at rest.
+pub(crate) fn caught_mid_reveal(dom: &dyn Dom, el: ElId) -> bool {
+    const MAX_ANCESTORS: usize = 64;
+    let mut cur = Some(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        let opacity = opacity_of(dom, c);
+        if opacity < 0.999 && !opacity_at_rest(dom, c, opacity) {
+            return true;
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
+/// A `filter` list with a `blur()` whose radius is not 0. A radius the
+/// engine cannot read (`calc()`, a variable) counts as a blur.
+fn has_active_blur(filter: &str) -> bool {
+    let lower = js::to_lower_case(filter);
+    let mut rest = lower.as_str();
+    while let Some(at) = rest.find("blur(") {
+        let args = &rest[at + 5..];
+        let radius = args.split(')').next().unwrap_or("");
+        let v = parse_float(js::trim(radius));
+        if !v.is_finite() || v > 0.0 {
+            return true;
+        }
+        rest = args;
+    }
+    false
+}
+
+/// A box that is moved, or declared about to be: a `transform` other than
+/// `none` or the identity matrix, `translate`, `scale` or `rotate` other
+/// than `none`, or a `will-change` naming one of them, `opacity` or `filter`.
+fn is_moving(dom: &dyn Dom, el: ElId) -> bool {
+    let transform = js::trim(&dom.style(el, "transform")).to_string();
+    let identity = |t: &str| {
+        let t = t.replace(' ', "");
+        t == "matrix(1,0,0,1,0,0)" || t == "matrix3d(1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)"
+    };
+    if !transform.is_empty() && transform != "none" && !identity(&transform) {
+        return true;
+    }
+    if ["translate", "scale", "rotate"].iter().any(|p| {
+        let v = dom.style(el, p);
+        let v = js::trim(&v);
+        !v.is_empty() && v != "none"
+    }) {
+        return true;
+    }
+    dom.style(el, "willChange")
+        .split(',')
+        .map(js::trim)
+        .any(|v| REVEAL_WILL_CHANGE.contains(&v))
+}
+
 /// The ink a reader sees once the opacity of the boxes between the text and
 /// its surface is applied: `opacity: 0.5` on a span over a white footer
 /// fades its orange halfway to white, and the score has to be about that
@@ -589,7 +688,7 @@ fn opacity_of(dom: &dyn Dom, el: ElId) -> f64 {
 /// part. With no fill inside a faded box the glyphs alone fade, which is the
 /// text colour at a lower alpha; with one, both the glyphs and that fill
 /// fade, and `effective_bg` is replaced by what the fold says the surface
-/// looks like.
+/// looks like. A box caught mid-reveal (`opacity_at_rest`) fades nothing.
 fn fold_surface_opacity(
     dom: &dyn Dom,
     el: ElId,
@@ -611,7 +710,13 @@ fn fold_surface_opacity(
             break;
         }
         let fill = surface.overlays.iter().find(|(n, _)| *n == c).map(|(_, f)| *f);
-        layers.push((fill, opacity_of(dom, c)));
+        let opacity = opacity_of(dom, c);
+        let opacity = if opacity < 0.999 && !opacity_at_rest(dom, c, opacity) {
+            1.0
+        } else {
+            opacity
+        };
+        layers.push((fill, opacity));
         cur = dom.parent(c);
     }
     if !reached {
@@ -2674,6 +2779,117 @@ mod tests {
                 .any(|h| h.id == "low-contrast" && h.snippet.contains("#ea580c on #fff7ed")),
             "{hits:?}"
         );
+    }
+
+    /// Framer's word reveal a few frames in: the word's own opacity, blur,
+    /// slide and `will-change`, as a scan catches it.
+    fn caught_mid_reveal(d: &mut FakeDom, el: ElId, opacity: &str) {
+        d.set_styles(
+            el,
+            &[
+                ("opacity", opacity),
+                ("filter", "blur(9.28345px)"),
+                ("transform", "matrix(1, 0, 0, 1, 0, 9.2351)"),
+                ("willChange", "transform"),
+            ],
+        );
+    }
+
+    fn low_contrast(hits: &[RuleHit]) -> Vec<String> {
+        hits.iter()
+            .filter(|h| h.id == "low-contrast")
+            .map(|h| h.snippet.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_faded_box_at_rest_blends_and_a_reveal_mid_frame_does_not() {
+        // The accordion header: dark ink inside a box held at half opacity.
+        let (mut d, wrap, word) = muted_text_in_wrapper("span", "solutions", "rgb(10, 16, 21)");
+        d.set_style(wrap, "opacity", "0.5");
+        assert!(
+            low_contrast(&colors(&d, word)).iter().any(|s| s.contains("text #85888a on #ffffff")),
+            "{:?}",
+            colors(&d, word)
+        );
+        // The same header with will-change and a transform left at none is
+        // still at rest.
+        d.set_styles(wrap, &[("willChange", "transform"), ("transform", "none")]);
+        assert!(!low_contrast(&colors(&d, word)).is_empty());
+
+        // A word caught mid-reveal scores its declared colour, which passes.
+        let (mut d, wrap, word) = muted_text_in_wrapper("span", "solutions", "rgb(10, 16, 21)");
+        caught_mid_reveal(&mut d, word, "0.0725834");
+        assert!(low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+        caught_mid_reveal(&mut d, word, "0.208926");
+        assert!(low_contrast(&colors(&d, word)).is_empty(), "{:?}", colors(&d, word));
+
+        // The box around the moving word is still at rest and still fades it.
+        d.set_style(wrap, "opacity", "0.5");
+        assert!(
+            low_contrast(&colors(&d, word)).iter().any(|s| s.contains("text #85888a on #ffffff")),
+            "{:?}",
+            colors(&d, word)
+        );
+
+        // A faint word mid-reveal is scored at its declared colour, not at
+        // the blended one.
+        let (mut d, _wrap, word) = muted_text_in_wrapper("span", "faint", "rgb(176, 176, 176)");
+        caught_mid_reveal(&mut d, word, "0.2");
+        let hits = low_contrast(&colors(&d, word));
+        assert!(hits.iter().any(|s| s.contains("text #b0b0b0 on #ffffff")), "{hits:?}");
+
+        // A blur of 0 is no blur: the fade at rest is blended.
+        let (mut d, _wrap, word) = muted_text_in_wrapper("span", "copy", "rgb(10, 16, 21)");
+        d.set_styles(word, &[("opacity", "0.5"), ("filter", "blur(0px)")]);
+        assert!(!low_contrast(&colors(&d, word)).is_empty());
+    }
+
+    #[test]
+    fn a_box_sliding_in_from_nothing_scores_the_declared_colour() {
+        // kraflio.com: the message row at 0.028, sliding 19px.
+        let (mut d, wrap, p) = muted_text_in_wrapper("p", "Pick a template:", "rgb(10, 16, 21)");
+        d.set_styles(wrap, &[("opacity", "0.0283007"), ("transform", "matrix(1, 0, 0, 1, -19.1319, 0)")]);
+        assert!(low_contrast(&colors(&d, p)).is_empty(), "{:?}", colors(&d, p));
+        // Moving by will-change alone counts too.
+        d.set_styles(wrap, &[("transform", "none"), ("willChange", "opacity")]);
+        assert!(low_contrast(&colors(&d, p)).is_empty(), "{:?}", colors(&d, p));
+        // Held faint and still: blended, as before.
+        d.set_styles(wrap, &[("willChange", "auto"), ("transform", "matrix(1, 0, 0, 1, 0, 0)")]);
+        assert!(!low_contrast(&colors(&d, p)).is_empty(), "{:?}", colors(&d, p));
+        // Moving but faded past the reveal band is at rest.
+        d.set_styles(wrap, &[("opacity", "0.4"), ("transform", "matrix(1, 0, 0, 1, -19.1319, 0)")]);
+        assert!(!low_contrast(&colors(&d, p)).is_empty(), "{:?}", colors(&d, p));
+    }
+
+    #[test]
+    fn a_running_opacity_animation_scores_the_declared_colour() {
+        let (mut d, wrap, p) = muted_text_in_wrapper("p", "Tier details", "rgb(10, 16, 21)");
+        d.set_style(wrap, "opacity", "0.5");
+        // Unknown (an older recording): at rest.
+        assert!(!low_contrast(&colors(&d, p)).is_empty());
+        // Recorded, nothing running: at rest.
+        d.set_running_animations(wrap, &[]);
+        assert!(!low_contrast(&colors(&d, p)).is_empty());
+        // A running animation that moves something else: at rest.
+        d.set_running_animations(wrap, &["transform"]);
+        assert!(!low_contrast(&colors(&d, p)).is_empty());
+        // A running animation or transition on opacity or filter: declared.
+        for props in [&["opacity"][..], &["transform", "filter"][..]] {
+            d.set_running_animations(wrap, props);
+            assert!(low_contrast(&colors(&d, p)).is_empty(), "{props:?}: {:?}", colors(&d, p));
+        }
+    }
+
+    #[test]
+    fn blur_reads_every_radius_form() {
+        assert!(has_active_blur("blur(9.28345px)"));
+        assert!(has_active_blur("brightness(0.8) blur(2px)"));
+        assert!(has_active_blur("blur(calc(1px + 1px))"));
+        assert!(!has_active_blur("blur(0px)"));
+        assert!(!has_active_blur("none"));
+        assert!(!has_active_blur(""));
+        assert!(!has_active_blur("drop-shadow(0 0 4px black)"));
     }
 
     #[test]

@@ -447,6 +447,45 @@ function __snapKeyframes() {
   return out;
 }
 
+// The properties every running animation and transition animates, per
+// target element id: `document.getAnimations()` entries that are running or
+// still pending, on an element rather than a pseudo-element. `null` when the
+// Web Animations API is missing or throws, which the core reads as unknown.
+function __snapRunningAnimations(ids) {
+  if (typeof document.getAnimations !== 'function') return null;
+  let animations;
+  try { animations = document.getAnimations(); }
+  catch { return null; }
+  const metadata = new Set(['offset', 'computedOffset', 'easing', 'composite']);
+  const out = new Map();
+  for (const animation of animations) {
+    let effect;
+    try {
+      if (animation.playState !== 'running' && !animation.pending) continue;
+      effect = animation.effect;
+    } catch { continue; }
+    if (!effect || effect.pseudoElement) continue;
+    const id = ids.get(effect.target);
+    if (!id) continue;
+    let props = out.get(id);
+    if (!props) { props = []; out.set(id, props); }
+    const add = (property) => {
+      const name = __snapCssPropertyName(String(property));
+      if (name && !props.includes(name)) props.push(name);
+    };
+    if (typeof animation.transitionProperty === 'string') add(animation.transitionProperty);
+    let frames = [];
+    try { frames = effect.getKeyframes?.() || []; }
+    catch { frames = []; }
+    for (const frame of frames) {
+      for (const property of Object.keys(frame)) {
+        if (!metadata.has(property)) add(property);
+      }
+    }
+  }
+  return out;
+}
+
 // Which recorded pseudo-class states each element carries: one document
 // query per state (cheap), instead of N x states `matches` calls.
 function __snapStates(ids) {
@@ -585,6 +624,7 @@ const __impeccableSnapshot = {
     };
 
     const states = __snapStates(ids);
+    const animated = __snapRunningAnimations(ids);
     const els = new Array(elements.length - 1);
     for (let id = 1; id < elements.length; id++) {
       const el = elements[id];
@@ -643,6 +683,8 @@ const __impeccableSnapshot = {
       if (typeof el.className !== 'string') rec.k = true;
       const st = states.get(id);
       if (st) rec.st = st;
+      const an = animated && animated.get(id);
+      if (an && an.length) rec.an = an;
       if (tag === 'IMG' || tag === 'VIDEO' || tag === 'CANVAS' || tag === 'PICTURE') {
         rec.md = {
           nw: el.naturalWidth || 0, nh: el.naturalHeight || 0,
@@ -684,6 +726,7 @@ const __impeccableSnapshot = {
       bodyInnerText,
       hits: options.hits || [],
     };
+    if (animated) snapshot.anim = true;
     const json = JSON.stringify(snapshot);
     if (json.length > maxBytes) {
       return { error: `snapshot is ${json.length} bytes (limit ${maxBytes})` };

@@ -17,10 +17,14 @@
 //! What it cannot decide it keeps: a property or metric the capture did not
 //! record (a snapshot older than the measurement) never removes a finding.
 //!
-//! Two rules name an element other than the one they report on, and ask the
-//! predicate about it themselves: `clipped-overflow-container` about the
-//! positioned child it names ([`unpainted_inside`], which leaves the
-//! container's own clip to the rule), and `nested-cards` about the inner card.
+//! Rules that name an element other than the one they report on, or that report
+//! on the page, ask the predicate about it themselves: `clipped-overflow-container`
+//! about the positioned child it names ([`unpainted_inside`], which leaves the
+//! container's own clip to the rule), `nested-cards` about the inner card,
+//! `kicker-above-heading` about the heading and the label above it,
+//! `text-occlusion` about the covered text, the text or box covering it and
+//! the card a headline overhangs, and the page-level CSS-text forms in
+//! [`PAINT_GATED_PAGE_FORMS`] about the elements their selector matches.
 //!
 //! `content-hidden-at-rest` is deliberately not gated: hidden text is what it
 //! reports.
@@ -70,6 +74,10 @@ pub enum PaintGate {
     /// A rule about the element's own box: its own opacity counts, and it
     /// needs area.
     Box,
+    /// `blinking-cursor`, which reports the element toggling its own opacity
+    /// or visibility: a cursor caught in its off phase is still the cursor,
+    /// so only what its ancestors do hides it, and it needs area.
+    Toggle,
 }
 
 /// How the element's own opacity takes part.
@@ -81,17 +89,23 @@ pub enum OwnOpacity {
     /// ancestors count toward transparency, and a near-transparent element
     /// that is one state of a moving layer is skipped.
     Measured,
+    /// The rule reports the element switching its own opacity or visibility
+    /// on and off (`blinking-cursor`), so neither its own opacity nor a
+    /// `visibility: hidden` that its parent does not share hides it.
+    Toggled,
 }
 
-/// The text measurements that need painted text. Style tells (gradient text,
-/// palette, fonts, borders) describe authored CSS whatever state is showing
-/// and are not gated.
+/// The rules that measure one element's text. Style tells about the page
+/// (gradient text, fonts, borders) describe authored CSS whatever state is
+/// showing and are not gated; `italic-serif-display` reports one heading's
+/// display treatment, which a visitor meets only where the heading is shown.
 pub const PAINT_GATED_TEXT_RULES: &[&str] = &[
     "all-caps-body",
     "body-text-viewport-edge",
     "cramped-padding",
     "extreme-negative-tracking",
     "gray-on-color",
+    "italic-serif-display",
     "justified-text",
     "line-length",
     "low-contrast",
@@ -109,17 +123,28 @@ const TRANSPARENT_FLOOR: f64 = 0.02;
 /// The own-opacity ceiling of `buried-raster`'s opacity form.
 const STATE_LAYER_OPACITY: f64 = 0.15;
 
-/// The rules about an element's own box. `layout-transition` reports how a
-/// box animates its size; a box that shows nothing at rest (a collapsed tray
-/// at height 0, the volume panel of a player whose control bar is not
-/// rendered, a seek bar parked off the canvas) is not where a visitor meets
-/// that motion. The rule is advisory, and still skips them.
-pub const PAINT_GATED_BOX_RULES: &[&str] = &["layout-transition"];
+/// The rules about an element's own box. A box that shows nothing at rest (a
+/// collapsed tray at height 0, the volume panel of a player whose control bar
+/// is not rendered, a seek bar parked off the canvas, a loader at
+/// `display: none`, a closed flyout, a row still waiting to be revealed, a
+/// slide parked past its track's clip) is not where a visitor meets how it
+/// animates (`layout-transition`, `bounce-easing`), the glow around it
+/// (`dark-glow`) or the palette it paints (`ai-color-palette`).
+pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing", "dark-glow", "layout-transition"];
+
+/// The rules whose page-level CSS-text form names the rule a selector
+/// declared: such a finding reports only when at least one element the
+/// selector matches is painted at capture. The match is tested on the base
+/// predicate alone, with no area test, because the selector may name a
+/// pseudo-element (`.node::after`) whose host has no box of its own.
+pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "pulsing-dot"];
 
 /// Which gate a rule's findings pass through, or `None` for an ungated rule.
 pub fn paint_gate(rule_id: &str) -> Option<PaintGate> {
     if rule_id == "buried-raster" {
         Some(PaintGate::Raster)
+    } else if rule_id == "blinking-cursor" {
+        Some(PaintGate::Toggle)
     } else if PAINT_GATED_TEXT_RULES.contains(&rule_id) {
         Some(PaintGate::Text)
     } else if PAINT_GATED_BOX_RULES.contains(&rule_id) {
@@ -129,11 +154,21 @@ pub fn paint_gate(rule_id: &str) -> Option<PaintGate> {
     }
 }
 
+/// Whether a page-level CSS-text form of `rule_id` should report, given the
+/// elements its selector matched. A rule outside [`PAINT_GATED_PAGE_FORMS`],
+/// and a selector that matched nothing (which the caller decides on its
+/// own), keep base behavior.
+pub fn page_form_painted(dom: &dyn Dom, rule_id: &str, matches: &[ElId]) -> bool {
+    !PAINT_GATED_PAGE_FORMS.contains(&rule_id)
+        || matches.is_empty()
+        || matches.iter().any(|&el| painted_at_capture(dom, el))
+}
+
 /// Drop the findings on `el` whose rule needs a painted element when `el` is
 /// not painted. Each gate is evaluated at most once per element, and not at
 /// all when no finding needs it.
 pub fn retain_painted(dom: &dyn Dom, el: ElId, findings: &mut Vec<BrowserFinding>) {
-    let mut painted: [Option<bool>; 3] = [None; 3];
+    let mut painted: [Option<bool>; 4] = [None; 4];
     findings.retain(|f| match paint_gate(&f.type_) {
         None => true,
         Some(gate) => *painted[gate as usize].get_or_insert_with(|| unpainted_for(dom, el, gate).is_none()),
@@ -145,6 +180,7 @@ pub fn unpainted_for(dom: &dyn Dom, el: ElId, gate: PaintGate) -> Option<Unpaint
     match gate {
         PaintGate::Raster => unpainted_at_capture(dom, el, OwnOpacity::Measured),
         PaintGate::Box => unpainted_at_capture(dom, el, OwnOpacity::Counts).or_else(|| no_area(dom, el)),
+        PaintGate::Toggle => unpainted_at_capture(dom, el, OwnOpacity::Toggled).or_else(|| no_area(dom, el)),
         PaintGate::Text => unpainted_at_capture(dom, el, OwnOpacity::Counts)
             .or_else(|| no_text(dom, el))
             .or_else(|| no_area(dom, el)),
@@ -178,14 +214,22 @@ fn unpainted_walk(dom: &dyn Dom, el: ElId, own: OwnOpacity, clip_root: Option<El
     if Some(el) == dom.body() || Some(el) == dom.document_element() {
         return None;
     }
-    if dom.check_visibility(el) == Some(false) {
+    // An element caught in the off phase of its own toggle carries a
+    // `visibility: hidden` its parent does not, and `checkVisibility()`, which
+    // the capture asks with `checkVisibilityCSS`, answers false for it. For a
+    // rule about the toggle neither hides it; the walk below still reads the
+    // ancestors' `display` and `content-visibility`. A parent whose visibility
+    // was not recorded cannot share it, so the element is kept.
+    let toggled_off = own == OwnOpacity::Toggled
+        && hides_by_visibility(dom, el)
+        && !dom.parent(el).is_some_and(|p| hides_by_visibility(dom, p));
+    if !toggled_off && dom.check_visibility(el) == Some(false) {
         return Some(Unpainted::NotRendered);
     }
     // `visibility` inherits, so the element's computed value covers its
     // ancestors; `display: none` and `content-visibility: hidden` do not, and
     // the walk below reads them.
-    let visibility = js::to_lower_case(&dom.style(el, "visibility"));
-    if visibility == "hidden" || visibility == "collapse" || dom.style(el, "display") == "none" {
+    if (!toggled_off && hides_by_visibility(dom, el)) || dom.style(el, "display") == "none" {
         return Some(Unpainted::NotRendered);
     }
     if is_visually_hidden_box(dom, el) {
@@ -193,6 +237,13 @@ fn unpainted_walk(dom: &dyn Dom, el: ElId, own: OwnOpacity, clip_root: Option<El
     }
 
     match own {
+        OwnOpacity::Toggled => {
+            if let Some(p) = dom.parent(el) {
+                if effective_opacity_dom(dom, p) <= TRANSPARENT_FLOOR {
+                    return Some(Unpainted::Transparent);
+                }
+            }
+        }
         OwnOpacity::Counts => {
             if effective_opacity_dom(dom, el) <= TRANSPARENT_FLOOR {
                 return Some(Unpainted::Transparent);
@@ -330,6 +381,11 @@ impl Placement {
             Placement::Fixed => containment == Containment::Contains,
         }
     }
+}
+
+/// `visibility: hidden` or `collapse`, computed (so inherited).
+fn hides_by_visibility(dom: &dyn Dom, el: ElId) -> bool {
+    matches!(js::to_lower_case(&dom.style(el, "visibility")).as_str(), "hidden" | "collapse")
 }
 
 fn is_positioned(dom: &dyn Dom, el: ElId) -> bool {
@@ -1615,13 +1671,100 @@ mod tests {
             BrowserFinding::new("low-contrast", "2.0:1"),
             BrowserFinding::new("layout-transition", "transition: width"),
             BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("dark-glow", "Colored box-shadow glow (#cdaca2) on dark background"),
+            BrowserFinding::new("ai-color-palette", "Purple/violet gradient background"),
+            BrowserFinding::new("italic-serif-display", "italic serif h1 (playfair display) at 60px"),
+            BrowserFinding::new("blinking-cursor", "i.caret — 5x10px blinking cursor"),
         ];
         retain_painted(&d, a, &mut findings);
         let ids: Vec<&str> = findings.iter().map(|f| f.type_.as_str()).collect();
-        assert_eq!(ids, vec!["gradient-text", "bounce-easing"]);
+        assert_eq!(ids, vec!["gradient-text"]);
+
+        // Painted, every finding stays.
+        d.set_rect(wrap, 40.0, 300.0, 400.0, 40.0);
+        let mut kept = vec![
+            BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("dark-glow", "glow"),
+            BrowserFinding::new("blinking-cursor", "cursor"),
+        ];
+        retain_painted(&d, a, &mut kept);
+        assert_eq!(kept.len(), 3);
+
         assert_eq!(paint_gate("content-hidden-at-rest"), None);
+        assert_eq!(paint_gate("gradient-text"), None);
         assert_eq!(paint_gate("layout-transition"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("bounce-easing"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("dark-glow"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("ai-color-palette"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("italic-serif-display"), Some(PaintGate::Text));
         assert_eq!(paint_gate("low-contrast"), Some(PaintGate::Text));
         assert_eq!(paint_gate("buried-raster"), Some(PaintGate::Raster));
+        assert_eq!(paint_gate("blinking-cursor"), Some(PaintGate::Toggle));
+    }
+
+    /// copperhead.sh's caret between blinks, and a cursor inside a panel a
+    /// visitor never sees.
+    #[test]
+    fn a_toggle_rule_reads_only_what_hides_the_element_from_outside() {
+        let (mut d, body) = page();
+        let term = d.add(Some(body), "div");
+        d.set_rect(term, 40.0, 100.0, 280.0, 32.0);
+        let cursor = d.add(Some(term), "span");
+        d.set_rect(cursor, 100.0, 107.0, 10.0, 18.0);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+
+        // The off phase of an opacity blink is still the cursor.
+        d.set_style(cursor, "opacity", "0");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Box), Some(Unpainted::Transparent));
+        d.set_style(cursor, "opacity", "1");
+
+        // So is the off phase of a visibility blink, which checkVisibility()
+        // answers false for, while its parent stays visible or unrecorded.
+        d.set_style(cursor, "visibility", "hidden");
+        d.el_mut(cursor).check_visibility = Some(false);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        d.set_style(term, "visibility", "visible");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Box), Some(Unpainted::NotRendered));
+
+        // A panel at visibility: hidden hides it.
+        d.set_style(term, "visibility", "hidden");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+        d.set_style(term, "visibility", "visible");
+        d.set_style(cursor, "visibility", "visible");
+        d.el_mut(cursor).check_visibility = Some(true);
+
+        // So does a transparent panel, and one at display: none.
+        d.set_style(term, "opacity", "0");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::Transparent));
+        d.set_style(term, "opacity", "1");
+        d.set_style(term, "display", "none");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+        d.set_style(term, "visibility", "hidden");
+        d.set_style(cursor, "visibility", "hidden");
+        d.el_mut(cursor).check_visibility = Some(false);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+    }
+
+    #[test]
+    fn a_page_form_needs_a_painted_match() {
+        let (mut d, body) = page();
+        let loader = d.add(Some(body), "div");
+        d.set_style(loader, "display", "none");
+        d.el_mut(loader).check_visibility = Some(false);
+        let shown = d.add(Some(body), "div");
+        d.set_rect(shown, 40.0, 100.0, 200.0, 40.0);
+        assert!(!page_form_painted(&d, "bounce-easing", &[loader]));
+        assert!(page_form_painted(&d, "bounce-easing", &[loader, shown]));
+        assert!(!page_form_painted(&d, "pulsing-dot", &[loader]));
+        assert!(!page_form_painted(&d, "dark-glow", &[loader]));
+        // Outside the list, and with nothing matched, base behavior stands.
+        assert!(page_form_painted(&d, "layout-transition", &[loader]));
+        assert!(page_form_painted(&d, "bounce-easing", &[]));
+        // A pseudo-element host with no box of its own still counts.
+        let host = d.add(Some(body), "div");
+        d.set_rect(host, 40.0, 200.0, 0.0, 0.0);
+        assert!(page_form_painted(&d, "pulsing-dot", &[host]));
     }
 }

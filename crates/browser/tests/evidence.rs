@@ -34,6 +34,9 @@ const REPLAY_FIXTURES: &[&str] = &[
     // Hit tests over covered and layered text, and a page that moves between
     // the capture and the answers.
     "covered-text-contrast.html",
+    // Closed disclosures, hidden panels and paused blinks, which the capture
+    // records through checkVisibility and computed style.
+    "painted-gate-coverage.html",
 ];
 
 fn fixtures_dir() -> PathBuf {

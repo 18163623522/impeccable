@@ -819,6 +819,13 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
             if !matches.iter().any(|el| !scoped_ignore_active(dom, *el, &f.id)) {
                 continue;
             }
+            // A motion, glow or dot declared for elements a visitor never
+            // sees (a loader at `display: none`, a progress bar inside a
+            // transparent wrapper, the rail of a stepper not drawn at this
+            // width) is not on the page.
+            if !super::painted::page_form_painted(dom, &f.id, &matches) {
+                continue;
+            }
             // A left or right stripe from the style-text scans reports only
             // on a card rounded away from it, read off the elements it paints.
             if let Some(side) = crate::checks::css_scan::side_stripe_index(&f) {
@@ -1616,6 +1623,50 @@ mod tests {
                 ".rs — inset box-shadow 7px stripe (left)".to_string(),
             ]
         );
+    }
+
+    /// The page-level forms of bounce-easing, dark-glow and pulsing-dot name
+    /// the selector their declaration sits in. When that selector matches
+    /// only elements nobody sees (centene.com's loader at `display: none`,
+    /// tryrote.com's stepper rail not drawn at 390px), the form reports
+    /// nothing; a rule outside the list keeps base behavior.
+    #[test]
+    fn page_forms_of_gated_rules_need_a_painted_match() {
+        let run = |hidden: bool| {
+            let mut d = FakeDom::new();
+            let (html, body) = d.with_page();
+            d.set_rect(html, 0.0, 0.0, 1280.0, 2000.0);
+            d.set_rect(body, 0.0, 0.0, 1280.0, 2000.0);
+            d.el_mut(html).scroll_width = 1280.0;
+            let wrap = d.add(Some(body), "div");
+            d.set_rect(wrap, 0.0, 100.0, 600.0, 400.0);
+            if hidden {
+                d.set_style(wrap, "display", "none");
+                d.el_mut(wrap).check_visibility = Some(false);
+            }
+            for (selector, y) in [(".loader", 100.0), (".bar", 160.0), (".rail .node", 220.0), (".stripes", 280.0)] {
+                let el = d.add(Some(wrap), "div");
+                d.add_selector(el, selector);
+                d.set_rect(el, 0.0, y, 200.0, 40.0);
+                if hidden {
+                    d.el_mut(el).check_visibility = Some(false);
+                }
+            }
+            d.html_for_patterns = "<html><head><style>\
+.loader{animation:bounce 1s infinite}\
+.bar{box-shadow:0 0 16px rgba(26, 58, 214, 0.8)}\
+.rail .node::after{content:\"\";display:block;width:7px;height:7px;border-radius:50%;background:#22c55e;animation:pulse 2.4s ease-out infinite}\
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}\
+.stripes{background:repeating-linear-gradient(45deg,#000 0 2px,#fff 2px 4px)}\
+</style></head><body><div><div class=\"loader\"></div><div class=\"bar\"></div><div class=\"rail\"><div class=\"node\"></div></div><div class=\"stripes\"></div></div></body></html>"
+                .to_string();
+            let mut ids: Vec<String> = scoped_html_pattern_findings(&d).into_iter().map(|f| f.type_).collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        assert_eq!(run(false), vec!["bounce-easing", "dark-glow", "pulsing-dot", "repeating-stripes-gradient"]);
+        assert_eq!(run(true), vec!["repeating-stripes-gradient"]);
     }
 
     fn ds_config(v: serde_json::Value) -> BrowserConfig {

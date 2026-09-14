@@ -2540,3 +2540,178 @@ every golden it recorded replays as recorded.
 4. **The probe scrolls in one task.** The origin probe scrolls sideways and
    back within one task (limit 1 above); a scroll handler that reads position
    synchronously can still see it.
+
+## Recorded 2026-09-13: every rule that scores what a visitor sees asks the painted predicate (corpus/fix-painted-gate-coverage)
+
+Corpus run 20 (cohort 2), `reports/observations-20.md` rows 18, 27 and 49. All
+changes are in the URL engine. The goldens move only because
+`painted-gate-coverage.html` joins the fixture directory.
+
+- **Seven more rules skip what nobody sees.** `paint_gate` adds
+  `bounce-easing`, `dark-glow` and `ai-color-palette` to the Box gate and
+  `italic-serif-display` to the Text gate. `blinking-cursor` gets its own
+  Toggle gate: the cursor's own opacity, and a `visibility: hidden` its parent
+  does not share (with the `checkVisibility()` false that follows), do not hide
+  it, so a cursor caught between blinks still reports; what its ancestors do,
+  its clips and the document edges do hide it. `ai-color-palette` kept a model
+  of its own that read `display` and `visibility` only; the shared predicate
+  now decides, so a violet layer at `opacity: 0` no longer reports.
+- **kicker-above-heading** asks the Text gate about the heading and about the
+  label above it. A pair in a section at `hidden` (demotv.lol) or on an
+  inactive slide (exxonmobil.com) is not on screen.
+- **Page-level forms.** A `bounce-easing`, `dark-glow` or `pulsing-dot` form
+  from the style text reports only when at least one element its selector
+  matches is painted. The match is asked on the base predicate with no area
+  test, because the selector may name a pseudo-element whose host has no box.
+  A form that carries no selector (an inline `style` attribute) is unchanged.
+- **text-occlusion** keeps `is_painted_for_occlusion` and adds the shared
+  predicate for the covered text, for every hit-test answer that covers it,
+  for the cards a headline overhangs and for inline leak hosts, so it only
+  removes. The items of a closed `<details>` have boxes but are hidden on
+  `::details-content`, which no ancestor style shows; `checkVisibility()`
+  answers false for them. It also skips text under a `filter: blur()` of 4px
+  or more on the element or an ancestor (a teaser behind a sign-in gate), and
+  text with fewer than two characters on screen (a lone emoji is two UTF-16
+  units). What covers the text is named for what it draws: `an SVG graphic`
+  for an SVG element that is not text (it printed `overlapping text`), and `a
+  bordered element` for a box counted through its borders with no opaque fill
+  (it printed `an opaque element`). Counts and thresholds are unchanged.
+
+Not changed, and why:
+
+- **Row 49's rotating tagline** on agora.co.il (108272, 108321) is painted at
+  capture, and the page image read at the RTL offset shows the header buttons'
+  labels printed over it. The judges saw crops cut from the shifted RTL
+  screenshot (observations-20 section 5). It still reports.
+- **Covered, not hidden.** auradeballet.com's welcome dialog and install
+  banner over dark-glow (104329, 104409, 104334, 104438), italic-serif-display
+  (104328) and ai-color-palette (104698) need a cover test, not a paint test.
+- **visiby.net's dark-glow form** (106376, 106967) comes from an inline
+  `style` attribute and has no selector to test.
+
+Goldens, recorded from the binary and read by hand:
+
+- `detect-fixture-json-painted-gate-coverage-html`,
+  `detect-fixture-text-painted-gate-coverage-html`: new, 17 findings. The
+  static engine measures no boxes and reports what it can see in both columns:
+  `dark-glow` 4 (both CTAs, the bar and the bar's style-text form),
+  `bounce-easing` 3 (the visible row, the loader's `animation: pgc-bounce`, the
+  unrevealed row's bezier), `kicker-above-heading` 3, `italic-serif-display` 2,
+  `pulsing-dot` 2 (`.live-dot` and `.pass-rail .pgc-node::after`),
+  `skipped-heading` 2 (the two overhang titles) and `tight-leading` 1.
+- `detect-dir-json-all-fixtures` 648 to 665, `detect-no-advisory-json` 568 to
+  582, `detect-scope-type` 160 to 168, `detect-scope-both` 208 to 216, and in
+  the text forms (`detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text`) only the new
+  fixture's block and the summary counts (568 to 582 anti-patterns, 80 to 83
+  advisory notes). Every added finding belongs to the new fixture. Nothing was
+  removed.
+
+The URL behavior is pinned by `crates/browser/tests/painted_gate_coverage.rs`,
+and the fixture joins `REPLAY_FIXTURES` in `crates/browser/tests/evidence.rs`.
+Scanned live, the base binary (5ce750e5) reports all 17 should-pass cases (two
+cursors, two bounce-easing elements, the faded glow, the parked ramp, the
+hidden italic heading, two kickers, four page forms and four text-occlusion
+victims), and names the SVG and field occluders `overlapping text (rect)` and
+`an opaque element`. The branch reports none of the should-pass cases, every
+should-flag case (a cursor showing, one paused in the off phase of an opacity
+blink and one of a visibility blink included), and the two new labels.
+
+Corpus ratchets:
+
+- **Cohort 2, run 20** (244 captures): 81 removed, 3 added, 18 violations.
+  - ai-color-palette 11 (confirmed-harmful 8, real-harmless 2,
+    pattern-absent 1): fabadda.com's game-card overlays, `absolute inset-0
+    from-game-primary/60 ... opacity-0`, a hover layer at opacity 0 (103503,
+    103504, 103872, 103873, 103876, 103877, 103879, 103880), the `-top-3` cyan
+    badge on a card past the carousel clip (103498, 103874), and joongang.co.kr's
+    slide parked past its track (108213).
+  - blinking-cursor 2 (pattern-absent): copperhead.sh's caret (105195, 105283)
+    sits 1px past the typing span that clips it.
+  - bounce-easing 15 (pattern-absent 10, disputed 3, real-harmless 2). Among
+    the 12 samples: centene.com's `cmp-loader` at `display: none` (5),
+    progressive.com's closed flyout and the scroller inside it (108863,
+    108864), visiby.net's unrevealed inbox row at opacity 0 (105794, 106275),
+    and fabadda.com's `bounce-in` cards past the header's clip (103502,
+    103875, 103878).
+  - dark-glow 4 (pattern-absent): swipeloan.in's `on dark page` form, whose
+    selector matches only the chat widget's channel at `display: none`.
+  - kicker-above-heading 6 (confirmed-harmful): demotv.lol's `section[hidden]`
+    pairs (106695, 106697, 107056, 107058) and exxonmobil.com's inactive hero
+    slide (108901, 108927).
+  - pulsing-dot 1 (confirmed-harmful): tryrote.com's stepper rail node, not
+    drawn at 390px (104987).
+  - text-occlusion 42 removed, 3 added (confirmed-harmful 3, pattern-absent
+    37, real-harmless 2): demotv.lol's closed `<details>` menus and the
+    headline overhanging their hidden dropdown, fabadda.com's emoji (103835),
+    auradeballet.com's blurred teaser (104596, 104597), and the three
+    v0-dashboard relabels below.
+  - The 18 violations are not really wrong removals. 15 carry a label
+    inherited from their cluster: both judges called the representatives
+    pattern-absent where they were judged (104987, 106695 and 108901 are all
+    `hidden-or-offscreen`), and the fabadda.com overlays share a cluster with
+    violet surfaces a visitor sees. The other 3 are v0-dashboard-ui-redesign-nine
+    (105020, 105022, 105025), which still report with the new labels (`a
+    bordered element`, `an SVG graphic (path)`, `an SVG graphic (rect)`), the
+    3 added.
+- **Cohort 1, run 19** (342 captures): 159 removed, 0 added, 0 violations, all
+  unjudged. ai-color-palette 49 (nubank.com.br headings on swiper slides past
+  the clip, thairath.co.th's fixed player bar at opacity 0, sapo.vn's
+  registration button in the off-canvas menu), bounce-easing 94 (samsung.com's
+  `cm-loader` at `display: none` among the samples), dark-glow 4, pulsing-dot 6
+  (albayan.ae's `.iz-news-hub-sticky-red::before`, whose host is at
+  `display: none`) and text-occlusion 6 (bitroad.ai's closed mobile `<details>`
+  menu).
+- Crops opened: 103503, 103876, 103502, 105794, 108213, 105195, 103835, 104596,
+  106708, 107069, 107071, 95151, 95902, 102927. Ten show nothing of the
+  removed finding at rest: the game cards without their violet hover overlay,
+  the empty inbox row, the sliver of a parked slide, the empty caret box, the
+  blurred teaser, the headline with no card beside it, and page text where the
+  closed menus' items would be. 103835 shows the lone emoji the finding scored
+  as covered text. Three show state that changed after the capture: 103502 and
+  95151, carousel slides the element shot scrolled into view, and 95902,
+  thairath.co.th's bar, shown when the crop was taken while it sat at opacity 0
+  in the scan snapshot.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+### Known limits
+
+1. **Hover and reveal layers.** A layer held at opacity 0 until hover or
+   reveal no longer reports its palette, glow or motion, although a visitor
+   meets it on interaction.
+2. **Carousel slides past the clip.** A slide parked past its track loses its
+   palette, glow, motion, kicker and italic findings, as its text findings
+   already did. A crop that scrolls the track shows it.
+3. **State at capture decides.** A bar a script shows and hides (thairath.co.th)
+   is judged by the capture's opacity.
+4. **Cover is not paint.** Content under an open dialog or a banner still
+   reports.
+5. **Page forms without a selector** (inline `style` attributes) still report,
+   whether or not anything they style is painted.
+6. **A cursor switched off for good.** A caret held at opacity 0 by a finished
+   `forwards` animation, with nothing else hiding it, still reports: the
+   capture records running animations, not finished fills.
+7. **Characters on screen are approximated.** Combining marks, variation
+   selectors, emoji modifiers and tags, zero-width joins and regional-indicator
+   pairs count with the character before them; other sequences (Hangul jamo,
+   Indic clusters) count per code point, which only keeps more text.
+8. **Cluster keys move once** for text-occlusion findings covered by SVG shapes
+   or border-only boxes, whose snippets change.
+
+### Known limits at merge
+
+`corpus/integration` merges this branch after `corpus/fix-evidence-origin`.
+Only DELTAS.md and the seven sweep goldens conflicted; the source merged
+cleanly and the regenerated browser asset matched the merged one. The sweeps
+were re-recorded from the integrated binary and moved by exactly the branch's
+delta (17 findings in the JSON sweep, 14 without advisories, 8 in each scope
+sweep), the text summaries reading 577 to 591 here against 568 to 582 there.
+
+1. **Past a horizontal scroller's visible edge.** A tile parked past a
+   scroller's clip no longer reports its palette, glow, motion, kicker or
+   italic findings (context.dev's carousel cards), consistent with the text
+   rules.
+2. **Faded by its own animation.** An element an animation holds at opacity 0
+   is judged by the moment of capture, so one caught faded out is silent and
+   one caught faded in reports.

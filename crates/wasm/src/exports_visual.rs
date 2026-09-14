@@ -154,16 +154,20 @@ pub fn vc_css_plan(node: u32, text_color_json: &str) -> String {
     serde_json::to_string(&with_dom(|dom| vc::css_plan(dom, node, tc.as_ref()))).unwrap_or_default()
 }
 
-/// url path: `{ status: 'unresolved', reason: 'image unavailable' }`.
+/// url path, no image loaded: `{ status: 'unresolved', reason: 'image
+/// unavailable' }`, or the sample that ends the walk when the image's stated
+/// placement covers neither the candidate `el`'s text nor `node`'s box.
 #[wasm_bindgen]
-pub fn vc_css_url_no_image() -> String {
-    out(&vc::css_url_no_image())
+pub fn vc_css_url_no_image(node: u32, el: u32, size: &str, position: &str) -> String {
+    out(&with_dom(|dom| vc::css_url_no_image(dom, node, el, size, position)))
 }
 
 /// url path: source point on the loaded image (`{ point }` or `{ sample }`).
+/// `el` is the candidate whose text is being sampled: an image that covers
+/// neither its own box nor that text answers with a sample that ends the walk.
 #[wasm_bindgen]
-pub fn vc_css_url_source_point(node: u32, intrinsic_w: f64, intrinsic_h: f64, size: &str, position: &str, x: f64, y: f64) -> String {
-    match with_dom(|dom| vc::css_url_source_point(dom, node, intrinsic_w, intrinsic_h, size, position, x, y)) {
+pub fn vc_css_url_source_point(node: u32, el: u32, intrinsic_w: f64, intrinsic_h: f64, size: &str, position: &str, x: f64, y: f64) -> String {
+    match with_dom(|dom| vc::css_url_source_point(dom, node, el, intrinsic_w, intrinsic_h, size, position, x, y)) {
         Ok((px, py)) => json!({ "point": { "x": px, "y": py } }).to_string(),
         Err(sample) => json!({ "sample": sample }).to_string(),
     }

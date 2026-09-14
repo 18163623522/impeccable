@@ -439,17 +439,18 @@ pub fn read_pseudo_surface_dom(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<R
 /// Whether an ancestor carrying direct text is one the contrast pass
 /// actually scores, so a descendant sharing its colour can stand down. A
 /// SAFE_TAG ancestor is only scored under the same predicate its
-/// descendant is, and an ancestor whose own text is an arrow or an icon
-/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
-/// report the span, because nothing reports the anchor.
+/// descendant is, and an ancestor whose own text is an arrow, an icon glyph
+/// or a pair of braces is not scored at all, whatever its tag —
+/// `<a><span>Read more</span> →</a>` has to report the span, because nothing
+/// reports the anchor.
 fn ancestor_scores_its_text(dom: &dyn Dom, el: ElId, direct: &str) -> bool {
-    if is_emoji_only_text(direct) {
+    if is_emoji_only_text(direct) || is_glyph_only_text(direct) {
         return false;
     }
     if !SAFE_TAGS.contains(&tag_lower(dom, el).as_str()) {
         return true;
     }
-    !is_glyph_only_text(direct) && !is_visually_hidden(dom, el)
+    !is_visually_hidden(dom, el)
 }
 
 /// Whether this element's `color` comes from an ancestor the contrast pass
@@ -494,7 +495,7 @@ fn overlaps_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
 /// An inactive control. WCAG 1.4.3 exempts them, and a ghost or transparent
 /// disabled button is exactly the shape the SAFE_TAGS text path would
 /// otherwise start reporting.
-const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
+pub(crate) const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
 
 /// Whether an ancestor clips its background to text, which makes this run's
 /// glyphs part of that ancestor's fill. With a transparent fill the run is
@@ -757,6 +758,7 @@ pub fn check_element_colors_dom(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct),
+        is_glyph_only: is_glyph_only_text(&direct),
         paints_own_text,
         bg_clip: Some(bg_clip),
         bg_image: Some(own_image),
@@ -2830,6 +2832,37 @@ mod tests {
         // image to the page's own white and would report 1.0:1.
         let (d, _wrap, label) = muted_text_in_wrapper("span", "EN", "rgb(255, 255, 255)");
         assert!(colors(&d, label).is_empty());
+    }
+
+    #[test]
+    fn glyph_only_text_does_not_stand_in_for_the_words_inside_it() {
+        // `<p>{ <span>name</span> }</p>` in one washed-out colour
+        // (context.dev): the braces are not read, so the p reports nothing
+        // and the span reports its own words instead of standing down.
+        let (mut d, body) = page();
+        let muted = [
+            ("backgroundColor", "rgba(0, 0, 0, 0)"),
+            ("color", "rgb(175, 175, 175)"),
+            ("fontSize", "14px"),
+            ("fontWeight", "400"),
+            ("webkitBackgroundClip", "border-box"),
+        ];
+        let p = d.add(Some(body), "p");
+        visible(&mut d, p);
+        d.add_text(p, "{  }");
+        d.set_rect(p, 0.0, 0.0, 400.0, 20.0);
+        d.set_styles(p, &muted);
+        let name = d.add(Some(p), "span");
+        visible(&mut d, name);
+        d.add_text(name, "name");
+        d.set_rect(name, 20.0, 0.0, 60.0, 20.0);
+        d.set_styles(name, &muted);
+        assert!(colors(&d, p).is_empty(), "the braces are not read: {:?}", colors(&d, p));
+        assert!(
+            colors(&d, name).iter().any(|h| h.id == "low-contrast"),
+            "the words report: {:?}",
+            colors(&d, name)
+        );
     }
 
     #[test]

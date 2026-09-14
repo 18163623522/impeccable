@@ -439,11 +439,14 @@ fn sample_image_element(
     Ok(sample)
 }
 
-/// Port of `sampleCssBackground`.
+/// Port of `sampleCssBackground`. `el` is the candidate whose text is being
+/// sampled, which decides whether an image is under that text at all.
+#[allow(clippy::too_many_arguments)]
 fn sample_css_background(
     page: &mut Page<'_>,
     dom: &SnapshotDom,
     node: ElId,
+    el: ElId,
     px: f64,
     py: f64,
     text_color: &Rgba,
@@ -452,9 +455,9 @@ fn sample_css_background(
         CssPlan::Sample { sample } => Ok(sample),
         CssPlan::Url { url, size, position } => {
             let Some(img) = load_image(page, &url)? else {
-                return Ok(visual::css_url_no_image());
+                return Ok(visual::css_url_no_image(dom, node, el, &size, &position));
             };
-            match visual::css_url_source_point(dom, node, img.w, img.h, &size, &position, px, py) {
+            match visual::css_url_source_point(dom, node, el, img.w, img.h, &size, &position, px, py) {
                 Err(sample) => Ok(sample),
                 Ok(source) => {
                     let pixel = sample_drawable_pixel(
@@ -542,7 +545,7 @@ fn sample_background_impl(
             }
             // Paint this walk cannot read (vector artwork).
             "unreadable" => visual::unreadable_stack_sample(dom, node),
-            _ => sample_css_background(page, dom, node, px, py, text_color)?,
+            _ => sample_css_background(page, dom, node, el, px, py, text_color)?,
         };
         if is_sampled(&sample) {
             if visual::sample_is_opaque(&sample) {

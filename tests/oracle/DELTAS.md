@@ -1936,3 +1936,142 @@ nothing was re-recorded.
 6. **The twin browser test assumes loopback.** `script-error-twins.html` loads
    its script from `localhost` while the page sits on 127.0.0.1, so the test
    assumes `localhost` resolves to loopback.
+
+## Recorded 2026-09-13: the visual passes gate their candidates like the text path (corpus/fix-pixel-pass-gate)
+
+Three fixes from `reports/observations-16.md` in the corpus repo, issues 9, 14
+and 25.
+
+- **Candidates pass the text gates first (issue 9).**
+  `collect_visual_contrast_candidates` now refuses a candidate before it takes a
+  `maxCandidates` slot, asks a hit test, is sampled or is scrolled into view,
+  when:
+  - its own text has no letter and no digit;
+  - it is a disabled control (`[disabled]`, `[aria-disabled="true"]`);
+  - its font is under 1px, or its `color` is at alpha 0.02 or less, or its
+    `-webkit-text-fill-color` is transparent (a box that clips its own
+    background to its text keeps its slot as before);
+  - or the painted-at-capture predicate (`painted.rs`, text gate) says it is not
+    painted.
+
+  The pixel pass scrolls only candidates the analyses carried, so it no longer
+  brings a clipped tab cell or a parked carousel slide into a capture.
+- **An image has to be under the text (issue 14).** In the stack walk, a
+  background image drawn `no-repeat` (the first layer of the computed
+  `background` shorthand) whose painted rect covers neither the candidate's text
+  box nor its own box ends the walk as `background image does not cover the
+  text`. `body` and `html` are asked only about the text box. This holds at a
+  size the capture can place (pixels, percentages, `cover`, or any size once
+  the image's intrinsic size is loaded), whether or not the pass could load the
+  file. Before, the box's own `background-color` went unread, and the icon's
+  transparent pixels composited over whatever sat further down the stack: a
+  white count on a dark badge scored 1.1:1 against the page's fill. The
+  candidate now goes to the pixel pass. A repeating tile, and a placement the
+  capture cannot state, are read as before.
+- **Glyph-only text is not scored on any tag (issue 25).** `ColorOpts` gains
+  `is_glyph_only`, and the full `check_colors` pass skips contrast for it, as the
+  SAFE_TAGS path already did through `paints_own_text`. Both engines set it. In
+  both engines a descendant no longer stands down for a glyph-only ancestor that
+  shares its colour, so `<p>{ <span>name</span> }</p>` reports the words, not
+  the braces. The frozen call vectors pass `false` and replay as recorded.
+
+Goldens, recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-visual-contrast-gates-html`,
+  `detect-fixture-text-visual-contrast-gates-html`: new, 3 findings, all
+  should-flag cases the static engine can score.
+  - `1.3:1 (need 4.5:1) — text #4aab5d on #1d9634`, words at a fifth of white on
+    green.
+  - `2.1:1 (need 4.5:1) — text #b3b3b3 on #ffffff`, the code line in words.
+  - `2.4:1 (need 4.5:1) — text #6d83cb on #1e40af`, the visible launcher.
+
+  The glyph-only circle and braces report nothing; the base binary reports both.
+  The URL-only cases leave no static finding.
+- `detect-dir-json-all-fixtures` (620 to 623), `detect-no-advisory-json` (540 to
+  543), and the text forms `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures` and `detect-no-advisory-text`: exactly those 3
+  added, nothing removed. In the text forms only the new fixture's block and the
+  summary count (540 to 543 anti-patterns) change.
+
+No other golden moved: no existing fixture holds glyph-only text on a
+non-SAFE_TAGS element with low contrast.
+
+The URL behavior is pinned by
+`the_visual_passes_measure_only_text_a_reader_sees_on_its_own_surface`
+(`crates/browser/tests/visual_contrast_gates.rs`). The base binary, over the
+same fixture, reports seven should-pass cases: the clipped tab cell, the
+disabled button, the circle, the braces, the white count in a framing sprite,
+the label beside a button icon, and the 0px transparent launcher. The branch
+reports none, and every should-flag case flags.
+
+Measured on the corpus (the pixel and sampled passes do not replay, so issues 9
+and 14 were checked offline and live):
+
+- **Ratchet over run 16, scan path.** low-contrast 4,039 to 4,013, with 0
+  violations.
+  - 27 removed, every one glyph-only direct text: `||` and `|` separator rows
+    (yna.co.kr), `/` in swiper fraction pagination, `◯` (bt.cn 80918, 81097), `—`
+    (adant.ai), `{  }` (context.dev 89422, 89800), `×` on a delete button, and
+    symbol-only `code` chips such as `/`, `<*>`, `--` and `[ ]`.
+  - Labels on the removals: pattern-absent 2, real-harmless 2, unjudged 23.
+  - 1 added: the link inside a `||` separator div that stood in for it.
+- **Candidate replay over the run 16 scan snapshots.**
+  - 84 of the 97 visual-contrast findings are among base's candidates offline.
+    The other 13 depend on hit tests the capture did not record.
+  - The branch collector drops 20 of the 84: the yna.co.kr gallery badges (10),
+    fedex.com 87961 (0px transparent label), overdrive.health 88446 and 88478
+    (disabled), the context.dev tab cells (6, including 89960 and 89961), and a
+    context.dev date on a carousel slide past the 390px page.
+  - Freed slots admit 3 candidates on 2 captures.
+- **Live scans.** Base and branch binaries back to back per page, 16 pages of
+  context.dev, yna.co.kr, fedex.com, bt.cn, adant.ai and dograh.com, at 1280x800
+  and 390x844.
+  - fedex.com timed out on navigation in both.
+  - Visual-contrast findings: context.dev mobile 7 to 0 (the tab cells and the
+    parked date), yna.co.kr desktop 8 to 1 on two back-to-back runs (the badges),
+    adant.ai and dograh.com 0 to 0.
+  - Element-pass differences are the glyph-only removals, plus page drift.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which approved it. The code merged cleanly on top of
+`corpus/fix-script-error-format`: that branch's `ratio_label` in the pixel
+snippet sits beside this branch's collector gates in `visual.rs`, and this
+branch adds no ratio printer of its own. This file, the generated asset
+(regenerated) and the five sweep goldens conflicted. The sweeps were
+re-recorded from the integrated binary and compared finding by finding:
+`detect-dir-json-all-fixtures` 624 to 627 and `detect-no-advisory-json` 544 to
+547, exactly this branch's three `visual-contrast-gates.html` findings, and
+against this branch's own goldens (623 and 543) exactly the four
+`low-contrast-near-threshold.html` findings. In the text forms
+(`detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+`detect-no-advisory-text`) only the new fixture's block and the summary count
+(544 to 547 anti-patterns) change. Nothing removed.
+
+1. **The budget moves.** A candidate that no longer spends a slot frees it for
+   one base never analyzed, so a page can report a visual finding base did not.
+   3 entrants on 2 replayed captures; none produced a finding in the live scans.
+2. **Symbol-only code chips.** `--`, `<*>` and `[ ]` in a filled `code` chip are
+   no longer scored, the way an unfilled one already was not.
+3. **One yna.co.kr badge still reports.** The active slide's count, `via
+   solid-background`, on desktop. None of its samples read the sprite, so the
+   walk did not reach the badge at those points. Not explained here; a slide
+   that moves between capture and read would do it.
+4. **More pixel reads, and cluster keys split.** A no-repeat image that covers
+   neither its box nor the text (a letterboxed `contain` photo, a picture parked
+   at one side), or covers only the text, now gets a pixel verdict instead of a
+   sampled one, so the snippet names the pixel pass, a screenshot pair is spent,
+   and the corpus cluster keys for those findings split from the sampled ones.
+5. **API.** `ColorOpts` gains `is_glyph_only`. `css_url_source_point` and
+   `css_url_no_image` take the candidate element, and the wasm exports
+   `vc_css_url_source_point` and `vc_css_url_no_image` change signature (the
+   in-page bundle is regenerated).
+6. **Single digits under a glyph-only parent report nowhere.** The parent is
+   skipped as glyph-only, and the digit's own element pass returns early under
+   10px of width, so neither reports (zigzag.kr pagination; every such finding
+   was judged not harmful).
+7. **Cards past a horizontal scroller's edge.** The painted gate refuses a card
+   parked past the scroller's clip, so it loses its visual findings.
+8. **A sprite under a translucent badge.** An icon sprite beneath the glyphs of
+   a translucent badge reports nothing.

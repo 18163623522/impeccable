@@ -3,7 +3,8 @@
 //! `style=""` peeks and customPropMap resolution — are not reachable here
 //! and are not ported). See browser/mod.rs.
 
-use super::dom::{Dom, ElId};
+use super::dom::{style_px, tag_lower, Dom, ElId};
+use crate::checks::gradient_geometry::{self as geo, BackgroundLayers, Box2, PaintBox, UnderText};
 use crate::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_gradient_colors,
     parse_rgb, split_top_level_commas, Rgba,
@@ -33,6 +34,10 @@ pub struct BackgroundInfo {
     pub unresolved: bool,
 }
 
+/// The alpha a fill needs before the walk every rule but contrast shares
+/// composites it. The contrast walk composites every fill that paints.
+const LEGACY_MIN_FILL_ALPHA: f64 = 0.1;
+
 /// JS `parseRgb(x) || parseAnyColor(x)`.
 fn parse_rgb_or_any(value: &str) -> Option<Rgba> {
     parse_rgb(Some(value)).or_else(|| parse_any_color(Some(value)))
@@ -60,6 +65,46 @@ fn alpha_gt(bg: &Rgba, t: f64) -> bool {
     }
 }
 
+/// The surface the contrast check reads text against, with what the walk
+/// learned on the way: which box painted it, the translucent fills it
+/// composited, and the gradients it found paint nowhere under the text.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextSurface {
+    pub info: BackgroundInfo,
+    /// The gradient read at points inside the text box and flattened over
+    /// what sits behind it and under the fills above it.
+    pub samples: Option<Vec<Rgba>>,
+    /// The box whose gradient is the surface, sampled or not.
+    pub gradient_host: Option<ElId>,
+    /// The box that ended the walk: the opaque fill or the gradient. `None`
+    /// is the canvas.
+    pub host: Option<ElId>,
+    /// The opaque colour at `host` before the fills above it.
+    pub base: Option<Rgba>,
+    /// The translucent fills between the text and `host`, innermost first.
+    pub overlays: Vec<(ElId, Rgba)>,
+    /// Boxes whose gradient layers the walk read as absent because no layer
+    /// paints under the text (an underline tile, a faded glow).
+    pub skipped_images: Vec<ElId>,
+}
+
+struct Query<'a> {
+    skip_image: &'a dyn Fn(ElId) -> bool,
+    min_fill_alpha: f64,
+    /// The text box, for the gradient geometry.
+    text: Option<Box2>,
+    /// The text's font size, for the size-only coverage test.
+    font_size: Option<f64>,
+}
+
+fn flatten(overlays: &[(ElId, Rgba)], base: Rgba) -> Rgba {
+    let mut acc = base;
+    for (_, o) in overlays.iter().rev() {
+        acc = composite_color_over(o, &acc);
+    }
+    acc
+}
+
 /// JS: checks.mjs#resolveBackgroundInfo(el, win, customPropMap) in browser mode.
 pub fn resolve_background_info(dom: &dyn Dom, el: ElId) -> BackgroundInfo {
     resolve_background_info_skipping_images(dom, el, &|_| false)
@@ -75,17 +120,51 @@ pub fn resolve_background_info_skipping_images(
     el: ElId,
     skip_image: &dyn Fn(ElId) -> bool,
 ) -> BackgroundInfo {
-    let mut current = Some(el);
-    let mut overlays: Vec<Rgba> = Vec::new();
-    let flatten = |overlays: &Vec<Rgba>, base: Rgba| -> Rgba {
-        let mut acc = base;
-        for o in overlays.iter().rev() {
-            acc = composite_color_over(o, &acc);
-        }
-        acc
+    let query = Query {
+        skip_image,
+        min_fill_alpha: LEGACY_MIN_FILL_ALPHA,
+        text: None,
+        font_size: None,
     };
+    walk_surface(dom, el, &query).info
+}
+
+/// The surface under an element's text for the contrast check. It is the
+/// shared walk with three differences, each about what a reader sees:
+///
+/// - every translucent fill that paints is composited, not only those above
+///   an alpha of 0.1 (a `bg-primary/10` chip is the chip's colour, not the
+///   section's);
+/// - a gradient is read where the text sits inside the box that paints it,
+///   so a button label is scored against the middle of its button rather
+///   than the light rim at its top edge;
+/// - a gradient whose tiles paint nowhere under the text (an underline drawn
+///   as a 2px gradient, a radial glow that has faded out) is not a
+///   background of this text, and the walk continues past it.
+///
+/// Where the geometry cannot be read, the gradient is the surface the way it
+/// always was, and the caller scores its worst stop.
+pub fn resolve_text_surface(
+    dom: &dyn Dom,
+    el: ElId,
+    skip_image: &dyn Fn(ElId) -> bool,
+    text: Box2,
+    font_size: f64,
+) -> TextSurface {
+    let query = Query {
+        skip_image,
+        min_fill_alpha: 0.0,
+        text: Some(text),
+        font_size: Some(font_size),
+    };
+    walk_surface(dom, el, &query)
+}
+
+fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
+    let mut out = TextSurface::default();
+    let mut current = Some(el);
     while let Some(cur) = current {
-        let bg_image = if skip_image(cur) {
+        let bg_image = if (q.skip_image)(cur) {
             String::from("none")
         } else {
             dom.style(cur, "backgroundImage")
@@ -107,25 +186,51 @@ pub fn resolve_background_info_skipping_images(
         }
 
         match bg {
-            Some(b) if alpha_gt(&b, 0.1) => {
+            Some(b) if alpha_gt(&b, q.min_fill_alpha) => {
                 if b.a.map_or(false, |a| a >= 0.99) {
-                    return BackgroundInfo {
-                        color: Some(flatten(&overlays, b)),
+                    out.info = BackgroundInfo {
+                        color: Some(flatten(&out.overlays, b)),
                         unresolved: false,
                     };
+                    out.host = Some(cur);
+                    out.base = Some(b);
+                    return out;
                 }
-                overlays.push(b);
+                out.overlays.push((cur, b));
             }
             None if !is_no_paint_color_value(Some(&bg_color_raw)) => {
-                return BackgroundInfo {
+                out.info = BackgroundInfo {
                     color: None,
                     unresolved: true,
                 };
+                out.host = Some(cur);
+                return out;
             }
             _ => {}
         }
 
         if has_gradient_or_url {
+            match gradient_under_text(dom, cur, &bg_image, q) {
+                Some(UnderText::Misses) => {
+                    out.skipped_images.push(cur);
+                    current = dom.parent(cur);
+                    continue;
+                }
+                Some(UnderText::Paint(samples)) => {
+                    if let Some(flat) = flatten_samples(dom, cur, &samples, &mut out, q) {
+                        out.samples = Some(flat);
+                        out.gradient_host = Some(cur);
+                        out.host = Some(cur);
+                        out.info = BackgroundInfo {
+                            color: None,
+                            unresolved: false,
+                        };
+                        return out;
+                    }
+                }
+                _ => {}
+            }
+            out.host = Some(cur);
             let layers = split_top_level_commas(&bg_image);
             let top_paint_layer = layers
                 .iter()
@@ -137,10 +242,11 @@ pub fn resolve_background_info_skipping_images(
                 None => false,
             };
             if !gradient_on_top {
-                return BackgroundInfo {
+                out.info = BackgroundInfo {
                     color: None,
                     unresolved: true,
                 };
+                return out;
             }
             let top = top_paint_layer.expect("gradient_on_top implies a layer");
             let url_beneath = layers
@@ -151,23 +257,123 @@ pub fn resolve_background_info_skipping_images(
                 let provably_opaque =
                     !top_stops.is_empty() && top_stops.iter().all(|s| s.alpha_or_one() >= 0.99);
                 if !provably_opaque {
-                    return BackgroundInfo {
+                    out.info = BackgroundInfo {
                         color: None,
                         unresolved: true,
                     };
+                    return out;
                 }
             }
-            return BackgroundInfo {
+            out.gradient_host = Some(cur);
+            out.info = BackgroundInfo {
                 color: None,
                 unresolved: false,
             };
+            return out;
         }
         current = dom.parent(cur);
     }
-    BackgroundInfo {
-        color: Some(flatten(&overlays, Rgba::new(255.0, 255.0, 255.0, 1.0))),
+    let canvas = Rgba::new(255.0, 255.0, 255.0, 1.0);
+    out.info = BackgroundInfo {
+        color: Some(flatten(&out.overlays, canvas)),
         unresolved: false,
+    };
+    out.base = Some(canvas);
+    out
+}
+
+/// What a box's gradient layers paint under the queried text, when the query
+/// carries a text box or a font size and the layers are gradients alone.
+fn gradient_under_text(dom: &dyn Dom, node: ElId, bg_image: &str, q: &Query<'_>) -> Option<UnderText> {
+    if q.text.is_none() && q.font_size.is_none() {
+        return None;
     }
+    if URL_RE.is_match(bg_image) || !GRADIENT_RE.is_match(bg_image) {
+        return None;
+    }
+    let shorthand = dom.style(node, "background");
+    let size = dom.style(node, "backgroundSize");
+    if let Some(text) = q.text {
+        let rect = dom.rect(node);
+        let px = |prop: &str| style_px(dom, node, prop);
+        let paint = PaintBox {
+            border_box: Box2::new(rect.left, rect.top, rect.width, rect.height),
+            border: [
+                px("borderTopWidth"),
+                px("borderRightWidth"),
+                px("borderBottomWidth"),
+                px("borderLeftWidth"),
+            ],
+            padding: [px("paddingTop"), px("paddingRight"), px("paddingBottom"), px("paddingLeft")],
+        };
+        let layers = BackgroundLayers {
+            image: bg_image,
+            size: &size,
+            position: &dom.style(node, "backgroundPosition"),
+            shorthand: &shorthand,
+        };
+        match geo::gradient_paint_under_text(&layers, &paint, &text) {
+            UnderText::Unknown => {}
+            known => return Some(known),
+        }
+    }
+    // No geometry to read: what the tile's size and repeat say on their own.
+    let font_size = q.font_size?;
+    let repeat = geo::repeat_from("", &shorthand);
+    geo::gradient_tile_misses_text(&size, repeat, font_size).then_some(UnderText::Misses)
+}
+
+/// The sampled gradient flattened the way it paints: each sample over the
+/// host's own translucent fill, over whatever sits behind the host, and
+/// under the translucent fills between the host and the text. `None` when
+/// what sits behind a translucent sample cannot be read, which keeps the
+/// worst-stop reading.
+fn flatten_samples(
+    dom: &dyn Dom,
+    host: ElId,
+    samples: &[Rgba],
+    out: &mut TextSurface,
+    q: &Query<'_>,
+) -> Option<Vec<Rgba>> {
+    let host_fill = match out.overlays.last() {
+        Some((n, c)) if *n == host => Some(*c),
+        _ => None,
+    };
+    let canvas = Rgba::new(255.0, 255.0, 255.0, 1.0);
+    let translucent = samples.iter().any(|s| s.alpha_or_one() < 0.99);
+    let backdrops: Vec<Rgba> = if !translucent {
+        vec![canvas; samples.len()]
+    } else {
+        match dom.parent(host) {
+            None => vec![canvas; samples.len()],
+            Some(parent) => {
+                let behind = walk_surface(dom, parent, q);
+                if behind.info.unresolved {
+                    return None;
+                }
+                match (behind.info.color, behind.samples) {
+                    (Some(c), _) => vec![c; samples.len()],
+                    (None, Some(s)) if s.len() == samples.len() => s,
+                    _ => return None,
+                }
+            }
+        }
+    };
+    let flat: Vec<Rgba> = samples
+        .iter()
+        .zip(&backdrops)
+        .map(|(s, b)| {
+            let under = match host_fill {
+                Some(f) => geo::over_unrounded(&f, b),
+                None => *b,
+            };
+            composite_color_over(s, &under)
+        })
+        .collect();
+    if host_fill.is_some() {
+        out.overlays.pop();
+    }
+    Some(flat.into_iter().map(|c| flatten(&out.overlays, c)).collect())
 }
 
 /// JS: checks.mjs#resolveBackground(el, win, customPropMap)
@@ -176,13 +382,18 @@ pub fn resolve_background(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
 }
 
 /// JS: checks.mjs#compositeGradientStops(stops, gradientEl, win, customPropMap)
-fn composite_gradient_stops(dom: &dyn Dom, stops: Vec<Rgba>, gradient_el: ElId) -> Option<Vec<Rgba>> {
+fn composite_gradient_stops(
+    dom: &dyn Dom,
+    stops: Vec<Rgba>,
+    gradient_el: ElId,
+    q: &Query<'_>,
+) -> Option<Vec<Rgba>> {
     let has_alpha = stops.iter().any(|s| s.alpha_or_one() < 0.99);
     if !has_alpha {
         return Some(stops);
     }
     let base_el = dom.parent(gradient_el).unwrap_or(gradient_el);
-    let base = resolve_background(dom, base_el);
+    let base = walk_surface(dom, base_el, q).info.color;
     let mut out = Vec::new();
     for s in stops {
         let a = s.alpha_or_one();
@@ -203,10 +414,38 @@ fn composite_gradient_stops(dom: &dyn Dom, stops: Vec<Rgba>, gradient_el: ElId) 
 
 /// JS: checks.mjs#resolveGradientStops(el, win, customPropMap) in browser mode.
 pub fn resolve_gradient_stops(dom: &dyn Dom, el: ElId) -> Option<Vec<Rgba>> {
+    let query = Query {
+        skip_image: &|_| false,
+        min_fill_alpha: LEGACY_MIN_FILL_ALPHA,
+        text: None,
+        font_size: None,
+    };
+    gradient_stops_walk(dom, el, &query)
+}
+
+/// Every stop of the gradient a contrast surface walk stopped on, for text
+/// whose position on it could not be read: the stops walk with the contrast
+/// walk's fill threshold, reading the gradients it skipped as absent.
+pub fn resolve_text_gradient_stops(dom: &dyn Dom, el: ElId, surface: &TextSurface) -> Option<Vec<Rgba>> {
+    let skipped = |n: ElId| surface.skipped_images.contains(&n);
+    let query = Query {
+        skip_image: &skipped,
+        min_fill_alpha: 0.0,
+        text: None,
+        font_size: None,
+    };
+    gradient_stops_walk(dom, el, &query)
+}
+
+fn gradient_stops_walk(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> Option<Vec<Rgba>> {
     let mut current = Some(el);
-    let mut overlays: Vec<Rgba> = Vec::new();
+    let mut overlays: Vec<(ElId, Rgba)> = Vec::new();
     while let Some(cur) = current {
-        let bg_image = dom.style(cur, "backgroundImage");
+        let bg_image = if (q.skip_image)(cur) {
+            String::from("none")
+        } else {
+            dom.style(cur, "backgroundImage")
+        };
         if !bg_image.is_empty() && bg_image != "none" && URL_RE.is_match(&bg_image) {
             return None;
         }
@@ -218,36 +457,41 @@ pub fn resolve_gradient_stops(dom: &dyn Dom, el: ElId) -> Option<Vec<Rgba>> {
             }
         }
         if let Some(stops) = stops {
-            let composited = composite_gradient_stops(dom, stops, cur);
+            let composited = composite_gradient_stops(dom, stops, cur, q);
             let Some(composited) = composited else { return None };
             if overlays.is_empty() {
                 return Some(composited);
             }
-            return Some(
-                composited
-                    .into_iter()
-                    .map(|stop| {
-                        let mut acc = stop;
-                        for o in overlays.iter().rev() {
-                            acc = composite_color_over(o, &acc);
-                        }
-                        acc
-                    })
-                    .collect(),
-            );
+            return Some(composited.into_iter().map(|stop| flatten(&overlays, stop)).collect());
         }
         let bg = read_cascade_background_color(dom, cur);
         if let Some(b) = bg {
-            if alpha_gt(&b, 0.1) {
+            if alpha_gt(&b, q.min_fill_alpha) {
                 if b.a.map_or(false, |a| a >= 0.99) {
                     return None;
                 }
-                overlays.push(b);
+                overlays.push((cur, b));
             }
         }
         current = dom.parent(cur);
     }
     None
+}
+
+/// A short name for the box that painted a surface, for a snippet: the tag
+/// with its id, else with its first class.
+pub fn surface_label(dom: &dyn Dom, el: ElId) -> String {
+    let tag = tag_lower(dom, el);
+    let id = dom.attr(el, "id").unwrap_or_default();
+    let id = js::trim(&id);
+    if !id.is_empty() && !id.chars().any(|c| c.is_ascii_whitespace()) {
+        return format!("{tag}#{id}");
+    }
+    let class = dom.attr(el, "class").unwrap_or_default();
+    match class.split_ascii_whitespace().next() {
+        Some(first) => format!("{tag}.{first}"),
+        None => tag,
+    }
 }
 
 #[cfg(test)]
@@ -326,5 +570,91 @@ mod tests {
         d.set_style(chip, "backgroundImage", "none");
         d.set_style(chip, "color", "rgb(1, 2, 3)");
         assert_eq!(resolve_background(&d, chip), Some(Rgba::new(1.0, 2.0, 3.0, 1.0)));
+    }
+
+    fn clear(d: &mut FakeDom, el: ElId) {
+        d.set_style(el, "backgroundColor", "rgba(0, 0, 0, 0)");
+        d.set_style(el, "backgroundImage", "none");
+    }
+
+    #[test]
+    fn the_contrast_walk_composites_a_faint_tint_the_shared_walk_skips() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(body, "backgroundImage", "none");
+        let chip = d.add(Some(body), "button");
+        d.set_style(chip, "backgroundColor", "rgba(243, 123, 46, 0.1)");
+        d.set_style(chip, "backgroundImage", "none");
+        assert_eq!(resolve_background(&d, chip), Some(Rgba::new(255.0, 255.0, 255.0, 1.0)));
+        let s = resolve_text_surface(&d, chip, &|_| false, Box2::new(0.0, 0.0, 40.0, 16.0), 14.0);
+        assert_eq!(s.info.color, Some(Rgba::new(254.0, 242.0, 234.0, 1.0)));
+        assert_eq!(s.host, Some(body));
+        assert_eq!(s.overlays, vec![(chip, Rgba::new(243.0, 123.0, 46.0, 0.1))]);
+    }
+
+    #[test]
+    fn a_gradient_is_sampled_under_the_text_and_an_underline_tile_is_skipped() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(body, "backgroundImage", "none");
+        let button = d.add(Some(body), "a");
+        let image = "linear-gradient(rgb(255, 255, 255) 0%, rgb(0, 0, 0) 100%)";
+        d.set_styles(
+            button,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", image),
+                ("backgroundSize", "auto"),
+                ("backgroundPosition", "0% 0%"),
+                ("background", &format!("rgba(0, 0, 0, 0) {image} repeat scroll 0% 0% / auto padding-box border-box")),
+            ],
+        );
+        d.set_rect(button, 0.0, 0.0, 100.0, 60.0);
+        // Text in the lower half only ever sees the dark half.
+        let s = resolve_text_surface(&d, button, &|_| false, Box2::new(10.0, 36.0, 80.0, 18.0), 14.0);
+        let samples = s.samples.expect("samples");
+        assert!(samples.iter().all(|c| c.r < 110.0), "{samples:?}");
+        assert_eq!(s.gradient_host, Some(button));
+        // An empty text box keeps the worst-stop reading.
+        let s = resolve_text_surface(&d, button, &|_| false, Box2::new(0.0, 0.0, 0.0, 0.0), 14.0);
+        assert!(s.samples.is_none() && s.gradient_host == Some(button));
+        assert_eq!(resolve_text_gradient_stops(&d, button, &s).map(|v| v.len()), Some(2));
+
+        let link = d.add(Some(body), "a");
+        let rule = "linear-gradient(rgb(0, 0, 0), rgb(0, 0, 0))";
+        d.set_styles(
+            link,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", rule),
+                ("backgroundSize", "0% 2px"),
+                ("backgroundPosition", "0% 100%"),
+                ("background", &format!("rgba(0, 0, 0, 0) {rule} no-repeat scroll 0% 100% / 0% 2px padding-box border-box")),
+            ],
+        );
+        d.set_rect(link, 0.0, 100.0, 110.0, 31.0);
+        let s = resolve_text_surface(&d, link, &|_| false, Box2::new(10.0, 106.0, 90.0, 19.0), 14.0);
+        assert_eq!(s.info.color, Some(Rgba::new(255.0, 255.0, 255.0, 1.0)));
+        assert_eq!(s.skipped_images, vec![link]);
+        // Without a text box the size alone says the same.
+        let s = resolve_text_surface(&d, link, &|_| false, Box2::new(0.0, 0.0, 0.0, 0.0), 14.0);
+        assert_eq!(s.skipped_images, vec![link]);
+    }
+
+    #[test]
+    fn surface_labels_are_short() {
+        let mut d = FakeDom::new();
+        let (_, body) = d.with_page();
+        let a = d.add(Some(body), "a");
+        d.set_attr(a, "class", "primary button-lg");
+        assert_eq!(surface_label(&d, a), "a.primary");
+        d.set_attr(a, "id", "cta");
+        assert_eq!(surface_label(&d, a), "a#cta");
+        let s = d.add(Some(body), "section");
+        assert_eq!(surface_label(&d, s), "section");
     }
 }

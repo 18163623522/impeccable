@@ -205,6 +205,11 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 bg_image: opt_str(f(0, "bgImage")),
                 class_list: opt_str(f(0, "classList")),
                 detector_is_browser: false,
+                // The recorded JS scored `textColor` as declared, alpha and
+                // all, and named no gradient source.
+                visible_text: None,
+                bg_source: None,
+                bg_source_host: None,
             };
             hits_to_js(&rules::check_colors(&opts))
         }

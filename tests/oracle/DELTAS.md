@@ -1703,3 +1703,161 @@ delta, nothing removed: `detect-dir-json-all-fixtures` 591 to 601,
 7. **Harness.** The corpus harness reads `element_shots` through uncommitted
    changes to `harness/build.rs`, `Cargo.toml` and `capture.rs`; they are
    committed from the corpus side, not here.
+
+## Recorded 2026-09-13: low-contrast reads the surface and the ink a reader sees
+
+`corpus/fix-gradient-surface` changes how low-contrast resolves the background
+and the text colour, in both engines where they share the logic
+(`crates/core/src/checks/gradient_geometry.rs`, the contrast walk in
+`crates/core/src/browser/background.rs` and `crates/html/src/background.rs`,
+and `contrast_findings` in `crates/core/src/checks/rules.rs`):
+
+- **A gradient is named as the surface.** The snippet appends the box that
+  painted it, `(gradient on a.cta)`, and the page's one report of a colour is
+  keyed on the text colour and that box.
+- **The URL engine reads a gradient where the text sits.** Linear and radial
+  layers are evaluated at a 3x3 grid of points inside the text box, from the
+  painting box's size, `background-size`, `-position`, `-repeat` and
+  `-origin`, composited over what sits behind the box. Anything it cannot
+  read (a `calc()` stop, a conic or repeating gradient, `fixed` attachment, a
+  four-value position, a translucent sample over an unreadable backdrop) keeps
+  the worst-stop verdict. The static engine has no layout and keeps it always.
+- **A gradient tile that paints under no glyph is not a background.** An
+  underline drawn as `linear-gradient(#000, #000) no-repeat 0 100% / 0% 2px`
+  and a radial glow that has faded out before the text are read past. The
+  static engine reads this from a `background` shorthand's size and repeat,
+  since its cascade carries no `background-size` longhand.
+- **Every translucent fill that paints is composited.** The contrast walk no
+  longer skips fills at or under an alpha of 0.1. The walk the glow, palette
+  and hover checks share is unchanged.
+- **The ink is blended before it is scored and printed.** The text colour's
+  own alpha, and the opacity of the boxes between the text and its surface,
+  fade the glyphs toward the surface; a faded box with a fill of its own fades
+  that fill too. Ink at an alpha of 0.02 or less paints nothing and is not
+  scored. The frozen call vectors pass no adapter ink and score as recorded.
+
+Goldens re-recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-color-html`, `detect-fixture-text-color-html` (4),
+  `detect-fixture-*-dark-gradient-ground-html` (3),
+  `detect-fixture-*-dark-theme-modern-color-html` (1),
+  `detect-fixture-*-linked-url-patterns-html` (3),
+  `detect-fixture-*-nav-cta-constructions-html` (1),
+  `detect-fixture-*-overlay-positioning-html` (1): each gradient-surface
+  finding gains its source suffix. Ratio, text and background are unchanged,
+  because the static engine keeps the worst stop.
+- `detect-fixture-*-buried-raster-html`: one finding added,
+  `1.1:1 (need 4.5:1) — text #f2f2f2 on #ffffff`, the `.faint-text` paragraph
+  at `opacity: 0.05` that used to be scored as solid black. It is a pass case
+  for buried-raster, which still passes it.
+- `detect-fixture-*-design-system-html`: one finding added,
+  `2.0:1 (need 4.5:1) — text #dfaaa1 on #ffffff`, the `.pass-alpha-color` case
+  in `rgba(184, 66, 46, 0.45)`, a design-system pass that was scored as the
+  opaque colour.
+- `detect-fixture-*-visual-contrast-sampling-html`: one finding added,
+  `2.2:1 (need 4.5:1) — text #b0b0b0 on #ffffff`, case 6, the collapsed
+  accordion trigger faded by `opacity: 0.34`, which the fixture describes as
+  pale grey a visitor is asked to click.
+- `detect-fixture-json-gradient-surface-contrast-html`,
+  `detect-fixture-text-gradient-surface-contrast-html`: new. The seven
+  should-flag cases flag. The three should-pass cases marked "URL engine" flag
+  here at their worst stop, as the fixture header says; the URL behavior is
+  pinned by `crates/browser/tests/gradient_surface.rs`.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: exactly the sum of the above. Thirteen suffix
+  rewrites and thirteen added findings (the three above plus the new
+  fixture's ten), nothing removed; 500 to 513 anti-patterns.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+## Recorded 2026-09-13: one report per gradient box, and both ends of a line sampled
+
+Review of `corpus/fix-gradient-surface` found the per-page dedupe merging
+different gradient surfaces. The key was the text colour plus the source
+label, and the label is only a tag and a first class, so a row of
+`div.w-14` tiles on amber, lime and blue gradients shared one key and only
+the first failing tile reported (chorusai.replit.app, base findings 71770,
+71779, 71866 and 71875 lost). The revision:
+
+- **Keys the claim on the painting box's identity.** `ColorOpts` carries
+  `bg_source_host`, an opaque id of the box that painted the gradient (the
+  `ElId` in the URL engine, the `NodeId` in the static one). A SAFE_TAGS hit
+  on a gradient is dropped when the page has already reported its snippet or
+  its text colour on that box, and a hit that stands claims both. Fifty links
+  on one header stay one report, separate tiles report separately, and
+  identical tiles whose snippet is the same pair stay one report as they were
+  before the branch. With no identity the snippet alone is the key.
+- **Samples both ends of the line in the URL engine.** The grid keeps its
+  three rows a sixth inside the text box and adds two columns at its left and
+  right edges, half a pixel in, so a long line over a horizontal gradient is
+  read where its last word sits (15 samples instead of 9). The static engine
+  scores the worst stop and is unaffected.
+
+Goldens re-recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-gradient-surface-contrast-html`,
+  `detect-fixture-text-gradient-surface-contrast-html`: the fixture gains five
+  cases and five findings, the ten recorded above unchanged.
+  - `1.2:1 (need 4.5:1) — text #cbd5e0 on #e2e8f0 (gradient on nav.pale-header)`:
+    two links on one header, reported once.
+  - `1.6:1 (need 3:1) — text #fdfdfd on #fbbf24 (gradient on div.feature-tile)`
+    and `1.5:1 (need 3:1) — text #fdfdfd on #a3e635 (gradient on div.feature-tile)`:
+    same-class tiles on different gradients, both reported. The navy tile
+    beside them passes.
+  - `1.3:1 (need 4.5:1) — text #e0e0e1 on #ffffff (gradient on div.edge-banner)`:
+    copy justified to the light end of a banner.
+  - `1.3:1 (need 4.5:1) — text #dfdfe0 on #ffffff (gradient on div.edge-banner)`:
+    the should-pass short copy at the banner's dark end, marked "URL engine",
+    which this engine reports at the worst stop like the other three.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: exactly those five added, nothing removed or
+  rewritten; 513 to 518 anti-patterns.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which asked for changes on the per-label dedupe; `18106116` fixed them
+and the review approved. The merge conflicted only in this file, the generated
+asset (regenerated) and five sweep goldens. `element_checks.rs` merged cleanly:
+painted-leaks' `unpainted_for` gate still decides a SAFE_TAGS hit before the
+page claims its colour on a gradient box.
+
+**One interaction with `corpus/fix-evidence-bugs`.** That branch added a faded
+date through an opacity stack to `visual-contrast.html` (`div.fade-heavy > p`,
+`#d5dbe6` at `opacity: 0.35` on `#0a0b10`), which only the pixel pass could
+read, at about 2.6:1 from its glyph cores. The ink blend here folds that
+opacity into the text colour, so both engines now report it in the element
+pass at the same ratio, `2.6:1 (need 4.5:1) — text #51545b on #0a0b10`, and the
+URL engine's pixel pass skips an element that already carries a low-contrast
+finding. The readable twin at `opacity: 0.55` still passes in both engines.
+`pixel_contrast_reads_glyph_cores` in `crates/browser/tests/evidence_findings.rs`
+now accepts the faded date from either path and checks the readable date by
+selector as well as by pixel text. This fixture no longer yields a pixel
+snippet, so the verdict-not-above-median rule is pinned by the unit tests in
+`screenshot_contrast.rs` and `visual.rs`.
+
+Goldens re-recorded from the integrated binary and compared finding by finding:
+`detect-fixture-json-visual-contrast-html` and
+`detect-fixture-text-visual-contrast-html` (1 to 2, the faded date above), and
+the sweeps `detect-dir-json-all-fixtures` (601 to 620),
+`detect-no-advisory-json` (521 to 540) and the text forms
+`detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures` and
+`detect-no-advisory-text`. Each sweep moved by exactly this branch's delta (31
+added and 13 removed in the JSON form: the thirteen suffix rewrites plus
+eighteen new findings) and the one faded date, nothing else.
+
+1. **568 newly flagged elements in the corpus.** Mostly from blended ink and
+   opacity, including decorative text and text caught mid-reveal; to be judged
+   in the next run.
+2. **Blended ink exposes surfaces base already misread.** A light overlay the
+   walk never sees (context.dev) and an off-screen carousel item (drom.ru) now
+   score with faded ink over the wrong surface.
+3. **Opacity on the surface's own box is not folded.** Opacity on the box that
+   paints the surface, or on its ancestors, is not blended into the ink.
+4. **Static engine.** It keeps worst-stop gradients and cannot read a
+   `background-size` longhand.
+5. **API.** `ColorOpts` gains a public `bg_source_host` field.

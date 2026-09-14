@@ -109,13 +109,27 @@ fn pixel_contrast_reads_glyph_cores() {
             assert!(verdict <= median, "verdict above its median: {snippet}");
         }
     }
+    // The element pass folds the stack's opacity into the ink
+    // (`corpus/fix-gradient-surface`), so the faded date reports there at the
+    // glyph-core ratio, 2.6:1, and the pixel pass has nothing left to add.
+    // Either path counts; what must hold is that it flags and the readable
+    // date does not.
+    let low_with_selector: Vec<(&str, &str)> = findings
+        .iter()
+        .filter(|(id, _, _)| id == "low-contrast")
+        .map(|(_, s, sel)| (s.as_str(), sel.as_str()))
+        .collect();
     assert!(
-        low.iter().any(|s| s.contains("\"Faded date through a heavy opacity stack\"")),
-        "expected the faded date to flag, got {low:?}"
+        low_with_selector.iter().any(|(s, sel)| {
+            s.contains("\"Faded date through a heavy opacity stack\"") || sel.contains("fade-heavy")
+        }),
+        "expected the faded date to flag, got {low_with_selector:?}"
     );
     assert!(
-        !low.iter().any(|s| s.contains("Readable date through a light opacity stack")),
-        "the readable date flagged: {low:?}"
+        !low_with_selector.iter().any(|(s, sel)| {
+            s.contains("Readable date through a light opacity stack") || sel.contains("fade-light")
+        }),
+        "the readable date flagged: {low_with_selector:?}"
     );
 }
 

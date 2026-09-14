@@ -40,6 +40,7 @@
 //! `impeccable_foundation::vectors`.
 
 pub mod css_scan;
+pub mod gradient_geometry;
 pub mod html_patterns;
 pub mod measures;
 pub mod rules;

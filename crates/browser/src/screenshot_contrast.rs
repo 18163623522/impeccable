@@ -510,4 +510,41 @@ mod tests {
         assert_eq!(m.glyph_pixels, 32);
         assert!(measured(&m).unwrap() > 15.0, "{:?}", m.outcome);
     }
+
+    #[test]
+    fn partly_covered_pixels_do_not_set_the_verdict_or_the_median() {
+        // 12 glyph cores (#141414 on white, 18.4:1) and 30 pixels four fifths
+        // covered (#434343, 9.9:1). The partly covered ones clear three
+        // quarters of the strongest change, so they used to outvote the cores
+        // for the verdict, while the median came from yet another set.
+        let mut before = vec![255u8; 16 * 16 * 4];
+        for i in 0..12 {
+            for c in 0..3 {
+                before[i * 4 + c] = 20;
+            }
+        }
+        for i in 12..42 {
+            for c in 0..3 {
+                before[i * 4 + c] = 67;
+            }
+        }
+        let after = vec![255u8; 16 * 16 * 4];
+        let cand = json!({ "preferRenderedForeground": true, "textColor": Value::Null });
+        let m = compare_screenshot_contrast(
+            &png_base64(16, 16, &before),
+            &png_base64(16, 16, &after),
+            &cand,
+        )
+        .unwrap()
+        .unwrap();
+        match m.outcome {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 12);
+                assert!(measured > 15.0, "{measured}");
+                assert!(measured <= median, "{measured} above {median}");
+                assert_eq!(to_fixed(measured, 1), to_fixed(median, 1));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }

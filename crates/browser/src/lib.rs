@@ -827,11 +827,18 @@ fn scan_page_inner(
     })?;
     results.extend(hidden);
 
-    for message in page.page_errors().into_iter().take(3) {
+    for error in page.page_errors().into_iter().take(3) {
+        // The message alone rarely says which script failed (`Uncaught
+        // [object Object]`, a minified React invariant), so the finding names
+        // where it was thrown.
+        let snippet = match error.source {
+            Some(source) => format!("{} ({source})", error.message),
+            None => error.message,
+        };
         results.push(RawResult::new(
             origin::SCRIPT_ERROR,
             "script-error".to_string(),
-            message,
+            snippet,
         ));
     }
 

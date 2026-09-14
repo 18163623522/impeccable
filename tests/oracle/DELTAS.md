@@ -1552,3 +1552,47 @@ retired square flag case, the reworded `6px` snippets, and findings that moved
 down by inserted fixture lines), nothing extra and nothing missing. The only
 text lines that differ from the branch are the summary counts, 453 to 500 here
 against 419 to 466 there (523 to 570 with advisories).
+
+## Recorded 2026-09-13: evidence fixes move no golden
+
+`corpus/fix-evidence-bugs` fixes three findings whose evidence a corpus judge
+could not trust, all in the URL engine: the pixel contrast pass printed a
+verdict above its median (`pixel contrast 3.5:1 median 1.7:1`), script errors
+named no script (`Uncaught [object Object]`), and `text-overflow` reported
+ellipsized boxes as spills. The oracle records file scans only, so the replay
+passes against the branch binary with nothing re-recorded. The three fixtures
+the branch extends (`visual-contrast.html`, `script-error.html`,
+`text-overflow.html`) gained only browser-only cases, and their static and
+sweep goldens replay byte for byte. The browser behavior is pinned by
+`crates/browser/tests/evidence_findings.rs` and specified in `CLI-CONTRACT.md`
+(the script-error source suffix, the glyph-core verdict).
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which approved it.
+
+1. **The printed median always equals the verdict.** Both come from one
+   glyph-core set now, so the median no longer carries information of its own;
+   a reader cannot see how far the verdict sits from the rest of the glyphs.
+2. **Script URLs split cluster keys.** A script-error finding now names the
+   script URL and top frame, and a deploy that renames a hashed bundle gives the
+   same error a new snippet, so corpus clusters split across deploys.
+3. **React invariants are not decoded.** A minified React error keeps its
+   invariant number; the description names the thrown object but not the
+   decoded message.
+4. **Old recordings lack `webkitLineClamp`.** A capture recorded before the
+   property joined the snapshot reads it empty, so a line-clamp box in such a
+   recording is still measured and can still report.
+5. **Pixel verdicts near the threshold in tests.** `evidence_findings.rs`
+   asserts pixel contrast verdicts close to the threshold, which may be flaky on
+   other Chrome builds whose glyph rasterization differs.
+6. **Clamped boxes skip sideways spills.** A `-webkit-line-clamp` box holding a
+   long unbreakable token that spills sideways stays skipped. Rare.
+7. **Inline truncation (fixed at merge).** `truncates_by_design` ran before the
+   box and inline split, so an inline element (client width 0) with overflow
+   hidden, an ellipsis and `nowrap` was skipped, although CSS ignores overflow
+   on an inline box and its text really spills. Base reports `span.truncate`
+   and `a.truncate` inside a 140px block; the branch did not. The integration
+   commit after this merge applies the self-check only to an element that
+   generates a box, and the parent walk passes over inline ancestors.

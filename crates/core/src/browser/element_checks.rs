@@ -1936,6 +1936,30 @@ fn is_scroll_region(dom: &dyn Dom, el: ElId) -> bool {
     SCROLL_RE.is_match(&dom.style(el, "overflowX")) || SCROLL_RE.is_match(&dom.style(el, "overflow"))
 }
 
+/// A clipping box that marks or clamps its own truncation: `text-overflow`
+/// other than `clip` (an ellipsis, or a string) on a box whose inline overflow
+/// is hidden or clipped, or a `-webkit-line-clamp` box. The visitor sees the
+/// marker the author asked for, not text spilling out (ynet.co.il's
+/// `span.authorField`). A capture that recorded neither property reads empty
+/// here, and the box is still measured.
+fn truncates_by_design(dom: &dyn Dom, el: ElId) -> bool {
+    let overflow_x = dom.style(el, "overflowX");
+    let axis = if overflow_x.is_empty() {
+        dom.style(el, "overflow").split_whitespace().next().unwrap_or("").to_string()
+    } else {
+        overflow_x
+    };
+    if axis != "hidden" && axis != "clip" {
+        return false;
+    }
+    let marker = dom.style(el, "textOverflow");
+    if !marker.is_empty() && marker != "clip" {
+        return true;
+    }
+    let clamp = dom.style(el, "webkitLineClamp");
+    !clamp.is_empty() && clamp != "none"
+}
+
 /// JS: checks.mjs#checkElementTextOverflowDOM(el)
 pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
@@ -1974,6 +1998,9 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
         }
         p = dom.parent(pp);
     }
+    if truncates_by_design(dom, el) {
+        return Vec::new();
+    }
     let client_width = dom.client_width(el);
     let delta = dom.scroll_width(el) - client_width;
     if client_width > 0.0 && delta >= 16.0 {
@@ -1997,6 +2024,18 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
         let Some(container) = container else {
             return Vec::new();
         };
+        // An inline run inside a box that ellipsizes or clamps it ends at the
+        // marker, whatever its own rect says.
+        let mut clip = dom.parent(el);
+        while let Some(c) = clip {
+            if truncates_by_design(dom, c) {
+                return Vec::new();
+            }
+            if c == container {
+                break;
+            }
+            clip = dom.parent(c);
+        }
         let stop = dom.parent(container);
         let mut p = Some(el);
         while let Some(pp) = p {
@@ -4194,6 +4233,57 @@ mod tests {
         let hits = check_element_text_overflow_dom(&d, cell);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "div.cell overflows its box by 40px");
+    }
+
+    #[test]
+    fn text_overflow_skips_a_marked_or_clamped_truncation() {
+        let (mut d, body) = page();
+        // ynet.co.il span.authorField: nowrap, overflow hidden, an ellipsis.
+        let author = d.add(Some(body), "span");
+        visible(&mut d, author);
+        d.set_attr(author, "class", "authorField");
+        d.add_text(author, "A long author byline");
+        d.set_rect(author, 0.0, 0.0, 26.0, 16.0);
+        d.el_mut(author).client_width = 26.0;
+        d.el_mut(author).client_height = 16.0;
+        d.el_mut(author).scroll_width = 84.0;
+        d.set_styles(author, &[("display", "block"), ("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap"), ("position", "static"), ("fontSize", "12px"), ("width", "26px"), ("height", "16px")]);
+        assert!(check_element_text_overflow_dom(&d, author).is_empty());
+        // `overflow: clip` ellipsizes too, and so does a string marker.
+        d.set_styles(author, &[("overflow", "clip"), ("overflowX", "clip"), ("textOverflow", "\"~\"")]);
+        assert!(check_element_text_overflow_dom(&d, author).is_empty());
+        // Clipped with no marker, the words are cut off: still reported.
+        d.set_style(author, "textOverflow", "clip");
+        let hits = check_element_text_overflow_dom(&d, author);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "span.authorField overflows its box by 58px");
+        // A line clamp marks its own truncation.
+        d.set_style(author, "webkitLineClamp", "2");
+        assert!(check_element_text_overflow_dom(&d, author).is_empty());
+        // A capture that recorded neither property still measures the box.
+        d.set_styles(author, &[("webkitLineClamp", ""), ("textOverflow", "")]);
+        assert_eq!(check_element_text_overflow_dom(&d, author).len(), 1);
+        // An ellipsis on a visible box marks nothing.
+        d.set_styles(author, &[("overflow", "visible"), ("overflowX", "visible"), ("textOverflow", "ellipsis")]);
+        assert_eq!(check_element_text_overflow_dom(&d, author).len(), 1);
+
+        // An inline run with no box of its own, inside an ellipsizing row.
+        let row = d.add(Some(body), "div");
+        visible(&mut d, row);
+        d.set_rect(row, 0.0, 40.0, 160.0, 20.0);
+        d.el_mut(row).client_width = 160.0;
+        d.el_mut(row).client_height = 20.0;
+        d.set_styles(row, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap")]);
+        let run = d.add(Some(row), "span");
+        visible(&mut d, run);
+        d.add_text(run, "A long headline run inside the clipping row");
+        d.set_rect(run, 0.0, 40.0, 320.0, 20.0);
+        d.set_styles(run, &[("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "16px")]);
+        assert!(check_element_text_overflow_dom(&d, run).is_empty());
+        d.set_style(row, "textOverflow", "clip");
+        let hits = check_element_text_overflow_dom(&d, run);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "span overflows its container by 160px");
     }
 
     /// A clipping box with a real rect, the shape every case below shares.

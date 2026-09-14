@@ -166,6 +166,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "webkitBackgroundClip",
     "webkitClipPath",
     "webkitHyphens",
+    "webkitLineClamp",
     "webkitTextFillColor",
     "whiteSpace",
     "width",

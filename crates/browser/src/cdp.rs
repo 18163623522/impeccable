@@ -581,7 +581,7 @@ pub struct Page<'a> {
     target_id: String,
     frames: HashMap<String, FrameState>,
     main_frame_id: String,
-    page_errors: Vec<String>,
+    page_errors: Vec<PageError>,
     swapped: bool,
     same_document_navigation: bool,
     /// Auto-attached OOPIF sessions whose Page events feed the frame map.
@@ -750,13 +750,16 @@ impl<'a> Page<'a> {
                         .unwrap_or(false);
                 if counts {
                     if let Some(details) = params.get("exceptionDetails") {
-                        let message = client_error_message(details);
+                        let message = page_error_message(details);
                         // detect-url.mjs: first line, trimmed, 160 chars, deduped.
                         let first = message.split('\n').next().unwrap_or("");
                         let trimmed = impeccable_core::js::trim(first);
                         let sliced: String = trimmed.chars().take(160).collect();
-                        if !sliced.is_empty() && !self.page_errors.contains(&sliced) {
-                            self.page_errors.push(sliced);
+                        if !sliced.is_empty() && !self.page_errors.iter().any(|e| e.message == sliced) {
+                            self.page_errors.push(PageError {
+                                message: sliced,
+                                source: page_error_source(details),
+                            });
                         }
                     }
                 }
@@ -1182,8 +1185,8 @@ impl<'a> Page<'a> {
             .to_string())
     }
 
-    /// The deduped `pageerror` messages so far.
-    pub fn page_errors(&mut self) -> Vec<String> {
+    /// The deduped `pageerror` messages so far, each with where it was thrown.
+    pub fn page_errors(&mut self) -> Vec<PageError> {
         self.pump_events();
         self.page_errors.clone()
     }
@@ -1225,6 +1228,97 @@ fn value_from_remote_object(remote: &Value) -> Value {
         };
     }
     remote.get("value").cloned().unwrap_or(Value::Null)
+}
+
+/// One uncaught page error: its message (first line, trimmed, at most 160
+/// characters) and, when V8 named a script, where it was thrown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageError {
+    pub message: String,
+    /// `at <function>, <script url>:<line>:<column>` (1-based), or
+    /// `at <script url>:<line>:<column>` for an anonymous frame or a script
+    /// with no stack (a syntax error).
+    pub source: Option<String>,
+}
+
+/// Script URLs past this many characters are cut (a `data:` script, a URL
+/// carrying a long query), so the location never swamps the message.
+const PAGE_ERROR_URL_MAX: usize = 160;
+
+/// The message a page error reports. An `Error` reads the way puppeteer reads
+/// it ([`client_error_message`]). A thrown value that is not an `Error` (a
+/// plain object, a class instance, a rejected object) has no message of its
+/// own and describes itself as `Object`, so its class and the properties V8
+/// previews stand in for one, the way the console prints it:
+/// `Object {code: "E_CONFIG", message: "config missing"}`.
+pub fn page_error_message(details: &Value) -> String {
+    if let Some(exception) = details.get("exception") {
+        let is_object = exception.get("type").and_then(Value::as_str) == Some("object");
+        if is_object && exception.get("subtype").is_none() {
+            if let Some(rendered) = exception.get("preview").and_then(|p| render_preview(exception, p)) {
+                return rendered;
+            }
+        }
+    }
+    client_error_message(details)
+}
+
+/// `Class {name: value, ...}` from a CDP `ObjectPreview`.
+fn render_preview(exception: &Value, preview: &Value) -> Option<String> {
+    let properties = preview.get("properties")?.as_array()?;
+    let class = exception
+        .get("className")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty())
+        .unwrap_or("Object");
+    let mut parts: Vec<String> = properties
+        .iter()
+        .filter_map(|p| {
+            let name = p.get("name")?.as_str()?;
+            let kind = p.get("type").and_then(Value::as_str).unwrap_or("");
+            let raw = p.get("value").and_then(Value::as_str).unwrap_or("");
+            let value = match kind {
+                "string" => serde_json::to_string(raw).ok()?,
+                "undefined" => "undefined".to_string(),
+                _ if raw.is_empty() => kind.to_string(),
+                _ => raw.to_string(),
+            };
+            Some(format!("{name}: {value}"))
+        })
+        .collect();
+    if preview.get("overflow").and_then(Value::as_bool) == Some(true) {
+        parts.push("...".to_string());
+    }
+    Some(format!("{class} {{{}}}", parts.join(", ")))
+}
+
+/// Where a page error was thrown: the top stack frame when V8 recorded one
+/// with a script URL, else the script position the exception details carry
+/// (a syntax error has no stack). `None` when neither names a script, such as
+/// code evaluated with no URL.
+pub fn page_error_source(details: &Value) -> Option<String> {
+    let frame = details
+        .pointer("/stackTrace/callFrames/0")
+        .filter(|f| f.get("url").and_then(Value::as_str).is_some_and(|u| !u.is_empty()));
+    let at = frame.unwrap_or(details);
+    let url = at.get("url").and_then(Value::as_str).filter(|u| !u.is_empty())?;
+    // CDP positions are 0-based; stack traces and editors count from 1.
+    let position = |key: &str| at.get(key).and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64 + 1;
+    let url = if url.chars().count() > PAGE_ERROR_URL_MAX {
+        format!("{}...", url.chars().take(PAGE_ERROR_URL_MAX).collect::<String>())
+    } else {
+        url.to_string()
+    };
+    let location = format!("{url}:{}:{}", position("lineNumber"), position("columnNumber"));
+    let function = frame
+        .and_then(|f| f.get("functionName"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    Some(if function.is_empty() {
+        format!("at {location}")
+    } else {
+        format!("at {function}, {location}")
+    })
 }
 
 /// `String(err?.message || err)` over puppeteer's `createClientError` /
@@ -1326,6 +1420,75 @@ mod tests {
                 "description": "SyntaxError: Unexpected token '}'", "objectId": "2" }
         });
         assert_eq!(client_error_message(&syntax), "Unexpected token '}'");
+    }
+
+    #[test]
+    fn page_error_names_a_thrown_object_by_its_preview() {
+        // A plain object thrown from a named function (the shape adm.com's tag
+        // manager reported as `Uncaught [object Object]`).
+        let object = json!({
+            "text": "Uncaught",
+            "exception": { "type": "object", "className": "Object", "description": "Object", "objectId": "1",
+                "preview": { "type": "object", "description": "Object", "overflow": false, "properties": [
+                    { "name": "code", "type": "string", "value": "E_CONFIG" },
+                    { "name": "message", "type": "string", "value": "config \"missing\"" }
+                ] } }
+        });
+        assert_eq!(page_error_message(&object), r#"Object {code: "E_CONFIG", message: "config \"missing\""}"#);
+        let instance = json!({
+            "text": "Uncaught",
+            "exception": { "type": "object", "className": "ApiError", "description": "ApiError", "objectId": "2",
+                "preview": { "type": "object", "description": "ApiError", "overflow": true, "properties": [
+                    { "name": "status", "type": "number", "value": "500" },
+                    { "name": "body", "type": "object", "value": "Object" },
+                    { "name": "cause", "type": "undefined" }
+                ] } }
+        });
+        assert_eq!(page_error_message(&instance), "ApiError {status: 500, body: Object, cause: undefined, ...}");
+        // An Error and a primitive read the way they always did.
+        let error = json!({
+            "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "3",
+                "description": "Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418\n    at t3 (https://x.test/a.js:1:24070)" },
+            "stackTrace": { "callFrames": [{ "functionName": "t3", "url": "https://x.test/a.js", "lineNumber": 0, "columnNumber": 24069 }] }
+        });
+        assert_eq!(
+            page_error_message(&error),
+            "Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418"
+        );
+        assert_eq!(page_error_message(&json!({ "text": "Uncaught", "exception": { "type": "string", "value": "boom" } })), "boom");
+        // A cross-origin throw arrives with no exception object to read.
+        assert_eq!(page_error_message(&json!({ "text": "Uncaught [object Object]" })), "Uncaught [object Object]");
+    }
+
+    #[test]
+    fn page_error_source_is_the_top_frame_or_the_script_position() {
+        let framed = json!({
+            "text": "Uncaught [object Object]", "url": "https://www.googletagmanager.com/gtm.js?id=GTM-X",
+            "lineNumber": 271, "columnNumber": 503,
+            "stackTrace": { "callFrames": [
+                { "functionName": "error", "url": "https://www.googletagmanager.com/gtm.js?id=GTM-X", "lineNumber": 271, "columnNumber": 503 },
+                { "functionName": "c.m.onerror", "url": "https://www.googletagmanager.com/gtm.js?id=GTM-X", "lineNumber": 280, "columnNumber": 160 }
+            ] }
+        });
+        assert_eq!(
+            page_error_source(&framed).as_deref(),
+            Some("at error, https://www.googletagmanager.com/gtm.js?id=GTM-X:272:504")
+        );
+        let anonymous = json!({
+            "stackTrace": { "callFrames": [{ "functionName": "", "url": "https://co-trip.jp/_next/static/chunks/fd9d.js", "lineNumber": 0, "columnNumber": 63838 }] }
+        });
+        assert_eq!(page_error_source(&anonymous).as_deref(), Some("at https://co-trip.jp/_next/static/chunks/fd9d.js:1:63839"));
+        // A syntax error has no stack, only the script position.
+        let syntax = json!({ "text": "Uncaught SyntaxError: Invalid or unexpected token", "url": "http://127.0.0.1/p.html", "lineNumber": 50, "columnNumber": 18 });
+        assert_eq!(page_error_source(&syntax).as_deref(), Some("at http://127.0.0.1/p.html:51:19"));
+        // A frame with no URL falls back to the details; nothing named, nothing reported.
+        let evaluated = json!({ "text": "Uncaught", "stackTrace": { "callFrames": [{ "functionName": "f", "url": "", "lineNumber": 0, "columnNumber": 0 }] } });
+        assert_eq!(page_error_source(&evaluated), None);
+        let long = format!("data:text/javascript,{}", "x".repeat(400));
+        let cut = page_error_source(&json!({ "url": long, "lineNumber": 0, "columnNumber": 0 })).unwrap();
+        assert!(cut.ends_with("...:1:1"), "{cut}");
+        assert_eq!(cut.chars().count(), "at ".len() + 160 + "...:1:1".len());
     }
 
     #[test]

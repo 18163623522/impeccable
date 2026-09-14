@@ -864,16 +864,21 @@ pub fn check_element_colors(
         }
     }
 
-    let (effective_bg_stops, bg_source) = if surface_unresolved || final_effective_bg.is_some() {
-        (None, None)
-    } else {
-        let stops = resolve_text_gradient_stops(el, custom_props, &surface);
-        let source = stops
-            .as_ref()
-            .and(surface.gradient_label.as_ref())
-            .map(|label| format!("gradient on {label}"));
-        (stops, source)
-    };
+    let (effective_bg_stops, bg_source, bg_source_host) =
+        if surface_unresolved || final_effective_bg.is_some() {
+            (None, None, None)
+        } else {
+            let stops = resolve_text_gradient_stops(el, custom_props, &surface);
+            let source = stops
+                .as_ref()
+                .and(surface.gradient_label.as_ref())
+                .map(|label| format!("gradient on {label}"));
+            let host = source
+                .as_ref()
+                .and(surface.gradient_host)
+                .map(|id| format!("{id:?}"));
+            (stops, source, host)
+        };
     let visible_text = match text_color {
         Some(ink) if !pseudo_surface_read && !surface_unresolved => {
             fold_surface_opacity(el, &ink, &surface, &mut final_effective_bg)
@@ -925,6 +930,7 @@ pub fn check_element_colors(
         detector_is_browser: false,
         visible_text,
         bg_source,
+        bg_source_host,
     };
     // The page's one report of a colour pair goes to an element that will
     // actually print it, so an inline ignore on the first of fifty links

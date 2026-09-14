@@ -91,14 +91,24 @@ fn the_url_engine_reads_the_surface_under_the_text() {
         ("span at half opacity", "text #b5b9c0 on #ffffff"),
         ("copy in a translucent ink", "text #acaeb3 on #ffffff"),
         ("copy inside a faded wrapper", "text #9399a1 on #ffffff"),
+        ("copy running to the light end of a banner", "(gradient on div.edge-banner)"),
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(expected)),
             "{case} should flag as `{expected}`, got {snippets:?}"
         );
     }
+    // One text colour on one header box is one report however many links
+    // sit on it; same-class tiles on different gradients are two surfaces,
+    // and the navy tile beside them passes.
+    let header = snippets.iter().filter(|s| s.contains("#cbd5e0")).count();
+    assert_eq!(header, 1, "two links on one header, got {snippets:?}");
+    let tiles: Vec<&String> = snippets.iter().filter(|s| s.contains("text #fdfdfd")).collect();
+    assert_eq!(tiles.len(), 2, "amber and lime tiles, got {snippets:?}");
+    assert!(tiles.iter().all(|s| s.ends_with("(gradient on div.feature-tile)")), "{tiles:?}");
     for (case, color) in [
         ("label on the dark band of its gradient", "#fffdf8"),
+        ("short copy at the dark end of a banner", "#dfdfe0"),
         ("pill far from a radial glow", "#475569"),
         ("link with a collapsed gradient underline", "#0f172a"),
         ("link with a full-width gradient underline", "#1e293b"),

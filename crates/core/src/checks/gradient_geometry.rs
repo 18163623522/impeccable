@@ -747,14 +747,25 @@ fn point_in_tile(tile: &Box2, repeat: (bool, bool), x: f64, y: f64) -> Option<(f
     Some((axis(x, tile.x, tile.w, repeat.0)?, axis(y, tile.y, tile.h, repeat.1)?))
 }
 
-/// The sample points inside a text box: a 3x3 grid at a sixth, a half and
-/// five sixths of each axis, which keeps them off the box's edges, where a
-/// rule or an underline sits.
+/// The sample points inside a text box. Three rows, at a sixth, a half and
+/// five sixths of its height, keep off the top and bottom edges, where a
+/// rule or an underline sits. Five columns: a sixth, a half and five sixths
+/// of its width, and both ends of the line, half a pixel in so a text box
+/// that ends where its painting box ends still lands inside it. A long line
+/// over a horizontal gradient is read where its first and last words sit.
 fn sample_points(text: &Box2) -> Vec<(f64, f64)> {
-    let mut points = Vec::with_capacity(9);
+    let inset = (text.w / 2.0).min(0.5);
+    let xs = [
+        text.x + inset,
+        text.x + text.w / 6.0,
+        text.x + text.w * 0.5,
+        text.x + text.w * 5.0 / 6.0,
+        text.x + text.w - inset,
+    ];
+    let mut points = Vec::with_capacity(15);
     for fy in [1.0 / 6.0, 0.5, 5.0 / 6.0] {
-        for fx in [1.0 / 6.0, 0.5, 5.0 / 6.0] {
-            points.push((text.x + text.w * fx, text.y + text.h * fy));
+        for x in xs {
+            points.push((x, text.y + text.h * fy));
         }
     }
     points
@@ -945,10 +956,37 @@ mod tests {
         let shorthand = format!("rgba(0, 0, 0, 0) {image} repeat scroll 0% 0% / auto padding-box border-box");
         let bg = layers(image, "auto", "0% 0%", &shorthand);
         let samples = paint(gradient_paint_under_text(&bg, &plain_box(32.0, 606.0, 216.0, 54.0), &Box2::new(59.0, 625.0, 117.0, 15.0)));
-        assert_eq!(samples.len(), 9);
+        assert_eq!(samples.len(), 15);
         let lightest = samples.iter().map(|c| c.r).fold(0.0, f64::max);
         assert!(lightest < 170.0, "{samples:?}");
         assert!(lightest > 148.0, "{samples:?}");
+    }
+
+    #[test]
+    fn a_long_line_is_read_where_its_last_word_sits() {
+        // A banner black until 85% of its width, then to white. The copy runs
+        // the full width, so its last word sits on the light end, which a
+        // grid kept a sixth inside the text box never reaches.
+        let image = "linear-gradient(90deg, rgb(0, 0, 0) 0%, rgb(0, 0, 0) 85%, rgb(255, 255, 255) 100%)";
+        let shorthand = format!("rgba(0, 0, 0, 0) {image} repeat scroll 0% 0% / auto padding-box border-box");
+        let bg = layers(image, "auto", "0% 0%", &shorthand);
+        let banner = plain_box(0.0, 0.0, 520.0, 36.0);
+        let line = paint(gradient_paint_under_text(&bg, &banner, &Box2::new(16.0, 8.0, 488.0, 20.0)));
+        let lightest = line.iter().map(|c| c.r).fold(0.0, f64::max);
+        assert!(lightest > 190.0, "{line:?}");
+        // Short copy at the dark end is read on black.
+        let short = paint(gradient_paint_under_text(&bg, &banner, &Box2::new(16.0, 8.0, 120.0, 20.0)));
+        assert!(short.iter().all(|c| c.r < 1.0), "{short:?}");
+        // A text box that ends where its painting box ends still lands inside
+        // it, half a pixel in.
+        let flush = paint(gradient_paint_under_text(
+            &bg,
+            &plain_box(0.0, 0.0, 520.0, 36.0),
+            &Box2::new(0.0, 8.0, 520.0, 20.0),
+        ));
+        let lightest = flush.iter().map(|c| c.r).fold(0.0, f64::max);
+        assert!(lightest > 250.0, "{flush:?}");
+        assert!(flush.iter().all(|c| c.alpha_or_one() > 0.99), "{flush:?}");
     }
 
     #[test]

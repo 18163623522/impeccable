@@ -192,9 +192,17 @@ pub struct ColorOpts {
     pub visible_text: Option<Rgba>,
     /// What painted the surface when it was not a plain fill, printed after
     /// the background colour (`gradient on a.primary`). One page reports a
-    /// text colour once per gradient source, not once per sampled colour.
+    /// text colour once per box that paints the gradient, not once per
+    /// sampled colour.
     #[serde(default)]
     pub bg_source: Option<String>,
+    /// An opaque identity of the box `bg_source` names, unique within one
+    /// document. The page's one report of a text colour on a gradient is
+    /// claimed per box, because the label is only a tag and a class, which a
+    /// row of same-class tiles on different gradients shares. `None` dedupes
+    /// on the snippet alone.
+    #[serde(default)]
+    pub bg_source_host: Option<String>,
 }
 
 // ─── checkHoverContrast ─────────────────────────────────────────────────────

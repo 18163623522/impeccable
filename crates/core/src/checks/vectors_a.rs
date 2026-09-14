@@ -209,6 +209,7 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 // all, and named no gradient source.
                 visible_text: None,
                 bg_source: None,
+                bg_source_host: None,
             };
             hits_to_js(&rules::check_colors(&opts))
         }

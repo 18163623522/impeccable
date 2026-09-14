@@ -716,19 +716,18 @@ pub fn check_element_colors_dom(
             dom.style(el, "backgroundClip")
         }
     };
-    let (effective_bg_stops, bg_source) = if surface_unresolved || effective_bg.is_some() {
-        (None, None)
-    } else {
-        let stops = surface
-            .samples
-            .clone()
-            .or_else(|| resolve_text_gradient_stops(dom, el, &surface));
-        let source = stops
-            .as_ref()
-            .and(surface.gradient_host)
-            .map(|host| format!("gradient on {}", surface_label(dom, host)));
-        (stops, source)
-    };
+    let (effective_bg_stops, bg_source, bg_source_host) =
+        if surface_unresolved || effective_bg.is_some() {
+            (None, None, None)
+        } else {
+            let stops = surface
+                .samples
+                .clone()
+                .or_else(|| resolve_text_gradient_stops(dom, el, &surface));
+            let host = stops.as_ref().and(surface.gradient_host);
+            let source = host.map(|host| format!("gradient on {}", surface_label(dom, host)));
+            (stops, source, host.map(|host| host.to_string()))
+        };
     let visible_text = match text_color {
         Some(ink) if !pseudo_surface_read && !surface_unresolved => {
             fold_surface_opacity(dom, el, &ink, &surface, &mut effective_bg)
@@ -764,6 +763,7 @@ pub fn check_element_colors_dom(
         detector_is_browser: true,
         visible_text,
         bg_source,
+        bg_source_host,
     };
     let resolved = color_opts.effective_bg;
     let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {

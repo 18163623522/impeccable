@@ -38,12 +38,57 @@ fn fixture_flags_every_should_flag_case() {
         ("span at half opacity", "text #b5b9c0 on #ffffff"),
         ("copy in a translucent ink", "text #acaeb3 on #ffffff"),
         ("copy inside a faded wrapper", "text #9399a1 on #ffffff"),
+        ("amber tile", "text #fdfdfd on #fbbf24 (gradient on div.feature-tile)"),
+        ("lime tile beside it, same class", "text #fdfdfd on #a3e635 (gradient on div.feature-tile)"),
+        ("copy running to the light end of a banner", "text #e0e0e1 on #ffffff (gradient on div.edge-banner)"),
     ] {
         assert!(
             snippets.iter().any(|s| s.ends_with(expected)),
             "{case} should flag as `{expected}`, got {snippets:?}"
         );
     }
+}
+
+#[test]
+fn one_text_colour_reports_once_per_gradient_box_not_per_label() {
+    let snippets = fixture_snippets();
+    // Two links on one header: one report.
+    let header: Vec<&String> = snippets.iter().filter(|s| s.contains("#cbd5e0")).collect();
+    assert_eq!(header.len(), 1, "{snippets:?}");
+    assert!(header[0].ends_with("(gradient on nav.pale-header)"), "{header:?}");
+    // Amber and lime tiles share `div.feature-tile`: two reports. The navy
+    // tile beside them passes.
+    let tiles = snippets.iter().filter(|s| s.contains("text #fdfdfd")).count();
+    assert_eq!(tiles, 2, "{snippets:?}");
+}
+
+#[test]
+fn identical_tiles_on_one_gradient_stay_one_report() {
+    // Separate boxes whose snippet is the same colour pair on the same label
+    // are reported once, as before the per-box key.
+    let html = r#"<!DOCTYPE html>
+<html><head><style>
+body { background: #ffffff; }
+.tile { width: 56px; height: 56px; background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+.tile span { color: #ffffff; font-size: 24px; font-weight: 700; }
+.lime { background: linear-gradient(135deg, #a3e635, #84cc16); }
+</style></head>
+<body>
+<div class="tile"><span>A</span></div>
+<div class="tile"><span>B</span></div>
+<div class="tile"><span>C</span></div>
+<div class="tile lime"><span>D</span></div>
+</body></html>
+"#;
+    let snippets = low_contrast_snippets(html, Path::new("/tmp/tiles.html"));
+    assert_eq!(
+        snippets,
+        vec![
+            "1.7:1 (need 3:1) — text #ffffff on #fbbf24 (gradient on div.tile)".to_string(),
+            "1.5:1 (need 3:1) — text #ffffff on #a3e635 (gradient on div.tile)".to_string(),
+        ],
+        "{snippets:?}"
+    );
 }
 
 #[test]

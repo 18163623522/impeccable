@@ -1619,3 +1619,49 @@ Goldens re-recorded from the binary and reviewed finding by finding:
   fixture's ten), nothing removed; 500 to 513 anti-patterns.
 
 The generated browser asset was regenerated with `cargo xtask bundle`.
+
+## Recorded 2026-09-13: one report per gradient box, and both ends of a line sampled
+
+Review of `corpus/fix-gradient-surface` found the per-page dedupe merging
+different gradient surfaces. The key was the text colour plus the source
+label, and the label is only a tag and a first class, so a row of
+`div.w-14` tiles on amber, lime and blue gradients shared one key and only
+the first failing tile reported (chorusai.replit.app, base findings 71770,
+71779, 71866 and 71875 lost). The revision:
+
+- **Keys the claim on the painting box's identity.** `ColorOpts` carries
+  `bg_source_host`, an opaque id of the box that painted the gradient (the
+  `ElId` in the URL engine, the `NodeId` in the static one). A SAFE_TAGS hit
+  on a gradient is dropped when the page has already reported its snippet or
+  its text colour on that box, and a hit that stands claims both. Fifty links
+  on one header stay one report, separate tiles report separately, and
+  identical tiles whose snippet is the same pair stay one report as they were
+  before the branch. With no identity the snippet alone is the key.
+- **Samples both ends of the line in the URL engine.** The grid keeps its
+  three rows a sixth inside the text box and adds two columns at its left and
+  right edges, half a pixel in, so a long line over a horizontal gradient is
+  read where its last word sits (15 samples instead of 9). The static engine
+  scores the worst stop and is unaffected.
+
+Goldens re-recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-gradient-surface-contrast-html`,
+  `detect-fixture-text-gradient-surface-contrast-html`: the fixture gains five
+  cases and five findings, the ten recorded above unchanged.
+  - `1.2:1 (need 4.5:1) — text #cbd5e0 on #e2e8f0 (gradient on nav.pale-header)`:
+    two links on one header, reported once.
+  - `1.6:1 (need 3:1) — text #fdfdfd on #fbbf24 (gradient on div.feature-tile)`
+    and `1.5:1 (need 3:1) — text #fdfdfd on #a3e635 (gradient on div.feature-tile)`:
+    same-class tiles on different gradients, both reported. The navy tile
+    beside them passes.
+  - `1.3:1 (need 4.5:1) — text #e0e0e1 on #ffffff (gradient on div.edge-banner)`:
+    copy justified to the light end of a banner.
+  - `1.3:1 (need 4.5:1) — text #dfdfe0 on #ffffff (gradient on div.edge-banner)`:
+    the should-pass short copy at the banner's dark end, marked "URL engine",
+    which this engine reports at the worst stop like the other three.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: exactly those five added, nothing removed or
+  rewritten; 513 to 518 anti-patterns.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.

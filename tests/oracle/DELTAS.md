@@ -1861,3 +1861,109 @@ eighteen new findings) and the one faded date, nothing else.
 4. **Static engine.** It keeps worst-stop gradients and cannot read a
    `background-size` longhand.
 5. **API.** `ColorOpts` gains a public `bg_source_host` field.
+
+## Recorded 2026-09-13: the ink blend skips reveals caught mid-frame
+
+`corpus/fix-transient-opacity` stops low-contrast from folding the opacity of
+a box caught in the middle of a reveal into the ink. Round 3's blend scored
+Framer's word-by-word reveals at whatever frame the scan landed on: each word
+parks at `opacity: 0.001; filter: blur(10px); transform: translateY(10px);
+will-change: transform` and animates in, and a word read a few frames in
+(landio.framer.website 85169 at opacity 0.073 with a 9.3px blur) came out as
+nearly invisible. One testimonial produced 14 findings, one per word.
+
+The URL engine's fold (`fold_surface_opacity` in
+`crates/core/src/browser/element_checks.rs`) now asks, for every faded box
+between the text and its surface, whether that box is at rest
+(`opacity_at_rest`). A box is not at rest when:
+
+- an animation or transition running on it at capture moves its `opacity`
+  or its `filter`;
+- it carries a `filter: blur()` with a radius above 0 (or a radius the
+  engine cannot read);
+- its opacity is under 0.1 while a `transform` other than the identity, a
+  `translate`, `scale` or `rotate` other than `none`, or a `will-change`
+  naming one of them, `opacity` or `filter`, moves it.
+
+A box that is not at rest contributes no fade, so the text is scored at its
+declared colour, as before round 3. Boxes around it that are at rest still
+fade the ink: a word mid-reveal inside an accordion item held at 0.5 is
+scored at the item's fade. The painted gate and the 0.02 floor read the real
+opacity as before.
+
+The visual-contrast collector skips a candidate with a box caught mid-reveal
+in its ancestry (`caught_mid_reveal`). Without that, the pixel pass read the
+same frame from pixels once the element pass stopped reporting it: in the
+fixture, the sliding row and the heading faded by a running CSS animation
+came back as `pixel contrast ... on opacity stack`.
+
+Running animations are a new capture fact. `15-snapshot.js` records, per
+element, the properties of every `document.getAnimations()` entry that is
+running or pending and targets the element itself (`an`), and marks the
+snapshot as having looked (`anim: true`). `Dom::running_animation_properties`
+answers `None` where the capture did not look, which is every recording made
+before this change; there the blur and reveal-opacity markers still apply and
+anything else is at rest. The in-page probe (`10-probe.js`) answers the same
+question from `el.getAnimations()`.
+
+The static HTML engine is unchanged. Its cascade carries no `filter`,
+`transform` or `will-change` and nothing runs, so it keeps blending declared
+opacity.
+
+The new fixture `transient-opacity-contrast.html` pairs four should-flag cases
+(an accordion header in an item faded at rest, a card held faded with
+`will-change`, a label with an opacity transition at rest, a faint word
+mid-reveal scored at its declared colour) with four should-pass cases (a dark
+word mid-reveal, a row sliding in from 0.05, a heading faded by a running CSS
+animation, a word faded by a running Web Animations API animation). The
+browser test `the_url_engine_blends_only_the_opacity_at_rest`
+(`crates/browser/tests/transient_opacity.rs`) pins that the URL engine reports
+exactly the four should-flag cases; the base binary reports all eight, the
+pass column at blended colours.
+
+Goldens recorded from the binary and reviewed finding by finding:
+
+- `detect-fixture-json-transient-opacity-contrast-html`,
+  `detect-fixture-text-transient-opacity-contrast-html`: new, six findings.
+  The three faded-at-rest cases (`text #85888a`, `#94989c`, `#a4a4aa on
+  #ffffff`). The static engine also blends the two cases marked "URL engine"
+  (`1.6:1 (need 4.5:1) — text #cecfd1 on #ffffff`, the dark word, and
+  `1.1:1 (need 4.5:1) — text #f3f3f3 on #ffffff`, the sliding row) and scores
+  the faint word at its blended colour (`1.1:1 (need 4.5:1) — text #efeff0 on
+  #ffffff`) where the URL engine prints the declared `#b0b1b2`. The two running
+  animations read their declared opacity of 1 there and pass.
+- `detect-dir-json-all-fixtures`, `detect-no-advisory-json`: exactly those six
+  added, nothing removed or rewritten.
+- `detect-dir-text-all-fixtures`, `detect-no-advisory-text`,
+  `detect-dir-quiet-all-fixtures`: the same six, and the count moves from 540
+  to 546.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+On the run 16 recordings the ratchet removes 21 low-contrast findings and adds
+none: 19 labelled pattern-absent and 2 disputed, no confirmed-harmful removal.
+They are the landio.framer.website testimonial words 85143 to 85151 and 85163
+to 85169 (85164 and 85166 unlabelled, same cluster), aisupply.framer.website
+85024 and 85128 (opacity 0.21 with a 7.9px blur), and kraflio.com 84526, 84529
+and 84532 (a message row at 0.028 sliding 19px). The faded Framer accordion
+headers (aisupply 84895, 85025, 85204, 85205, #85888a on a computed #0a1015)
+stay. The ratchet replays the element pass only; the collector change is
+measured on live scans.
+
+### Known limits at merge
+
+1. **Reveals above 0.1 with no blur on old recordings.** A box sliding in at
+   0.3 opacity with no blur and no recorded animation still blends. New
+   captures catch it through the running-animation fact.
+2. **Running decorative loops.** An infinite opacity or filter animation (a
+   pulsing status badge) is scored at its declared colour, never at the faded
+   colour it passes through.
+3. **Scroll-driven animations.** An animation on a scroll or view timeline is
+   `running` while attached, so a box it holds faded at the capture's scroll
+   position is scored at its declared colour.
+4. **Static engine.** It blends the declared first frame of a reveal
+   (`opacity: 0.2; filter: blur(8px)`) because its cascade carries no filter or
+   transform.
+5. **API.** `Dom` gains `running_animation_properties` (default `None`),
+   `Snapshot` gains `animations_recorded` and `SnapNode` gains `animations`,
+   and `FakeDom` gains `set_running_animations`.

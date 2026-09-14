@@ -16,8 +16,10 @@
 //! `::placeholder` `color` on text controls, bounding rects, the
 //! client/scroll/offset metrics, `checkVisibility`, direct-text
 //! rects, viewport and scroll, hostname, quirks mode, `body.innerText`, the
-//! `@keyframes` rules, the document HTML for the regex pass, and the media
-//! intrinsics the visual-contrast path needs.
+//! `@keyframes` rules, the document HTML for the regex pass, the media
+//! intrinsics the visual-contrast path needs, and the properties of the
+//! animations and transitions running on each element at capture (`an`,
+//! read only where the snapshot sets `anim`).
 //!
 //! Two things a snapshot cannot answer up front:
 //!
@@ -300,6 +302,11 @@ pub struct SnapNode {
     pub states: Vec<String>,
     #[serde(rename = "md", default)]
     pub media: Option<MediaInfo>,
+    /// The properties of the animations and transitions running on the
+    /// element at capture, written only where there are some. Read only when
+    /// the snapshot says it recorded animations ([`Snapshot::animations_recorded`]).
+    #[serde(rename = "an", default)]
+    pub animations: Option<Vec<String>>,
 }
 
 fn minus_one() -> i8 {
@@ -388,6 +395,12 @@ pub struct Snapshot {
     pub body_inner_text: Option<String>,
     #[serde(default)]
     pub hits: Vec<HitTest>,
+    /// Whether the capture read `document.getAnimations()`, so an element
+    /// without `an` has nothing running. Absent in captures older than that
+    /// read, and on a page without the Web Animations API, where nothing is
+    /// known about running animations.
+    #[serde(rename = "anim", default)]
+    pub animations_recorded: bool,
     /// Derived on load: column index per style property name.
     #[serde(skip)]
     style_index: HashMap<String, usize>,
@@ -691,6 +704,12 @@ impl Dom for SnapshotDom {
     }
     fn css_escape(&self, s: &str) -> String {
         css_escape(s)
+    }
+    fn running_animation_properties(&self, el: ElId) -> Option<Vec<String>> {
+        if !self.snap.animations_recorded || !self.valid(el) {
+            return None;
+        }
+        Some(self.snap.node(el).animations.clone().unwrap_or_default())
     }
     fn keyframes(&self, name: &str) -> Option<Vec<KeyframeFrame>> {
         if name.is_empty() {
@@ -1084,6 +1103,33 @@ mod tests {
         assert_eq!(d.style(2, "display"), "v:display");
         assert_eq!(d.style(2, "zIndex"), "v:zIndex");
         assert!(d.unknown_style_props().is_empty());
+    }
+
+    /// Running animations are known only where the capture says it read
+    /// them: then an element without `an` has none running, and without the
+    /// flag nothing is known.
+    #[test]
+    fn running_animations_are_known_only_where_recorded() {
+        let els = serde_json::json!([
+            {"t": "HTML", "c": [2]},
+            {"t": "BODY", "p": 1, "c": [3]},
+            {"t": "SPAN", "p": 2, "c": ["solutions"], "an": ["opacity", "filter"]},
+        ]);
+        let recorded = serde_json::json!({
+            "v": 1, "documentElement": 1, "body": 2, "anim": true, "els": els,
+        })
+        .to_string();
+        let d = snap(&recorded);
+        assert_eq!(
+            d.running_animation_properties(3),
+            Some(vec!["opacity".to_string(), "filter".to_string()])
+        );
+        assert_eq!(d.running_animation_properties(2), Some(Vec::new()));
+        assert_eq!(d.running_animation_properties(0), None);
+        let older = serde_json::json!({ "v": 1, "documentElement": 1, "body": 2, "els": els }).to_string();
+        let d = snap(&older);
+        assert_eq!(d.running_animation_properties(3), None);
+        assert_eq!(d.running_animation_properties(2), None);
     }
 
     /// A capture recorded before the three properties were added still parses

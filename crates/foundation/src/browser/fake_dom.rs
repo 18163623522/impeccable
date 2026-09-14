@@ -45,6 +45,9 @@ pub struct FakeEl {
     pub class_name_is_string: bool,
     /// `innerText` override.
     pub inner_text: Option<String>,
+    /// The properties of the animations running on the element; `None` is a
+    /// probe that could not read them.
+    pub running_animations: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -184,6 +187,12 @@ impl FakeDom {
     /// `closest` / `query_all`.
     pub fn add_selector(&mut self, id: ElId, selector: &str) -> &mut Self {
         self.el_mut(id).selectors.push(selector.to_string());
+        self
+    }
+    /// The properties the animations running on `id` animate, as the capture
+    /// would record them (`&[]`: it looked and found none).
+    pub fn set_running_animations(&mut self, id: ElId, props: &[&str]) -> &mut Self {
+        self.el_mut(id).running_animations = Some(props.iter().map(|p| p.to_string()).collect());
         self
     }
     pub fn set_point(&mut self, x: f64, y: f64, stack: Vec<ElId>) -> &mut Self {
@@ -479,6 +488,9 @@ impl Dom for FakeDom {
             .get(prop)
             .cloned()
             .unwrap_or_default()
+    }
+    fn running_animation_properties(&self, el: ElId) -> Option<Vec<String>> {
+        self.els[el as usize].running_animations.clone()
     }
     fn pseudo_style(&self, el: ElId, pseudo: &str, prop: &str) -> Option<String> {
         let e = &self.els[el as usize];

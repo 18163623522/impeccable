@@ -336,6 +336,32 @@ pub fn is_cjk_text(text: &str) -> bool {
     cjk > 0 && cjk * 2 >= scripted
 }
 
+/// A glyph set a full em wide: Han, kana and Hangul, the CJK symbols and
+/// punctuation block, and the fullwidth forms. Halfwidth katakana is half.
+fn is_full_width_char(c: char) -> bool {
+    matches!(c as u32, 0x3000..=0x303F | 0xFF01..=0xFF60 | 0xFFE0..=0xFFE6)
+        || (is_cjk_char(c) && !matches!(c as u32, 0xFF66..=0xFF9F))
+}
+
+/// The average advance of `text`'s characters in ems, for estimating how many
+/// fit on a line: half an em for Latin and the scripts set like it, a whole em
+/// for full-width CJK glyphs, weighted by how many of each the text holds.
+/// Text with no full-width glyph is exactly 0.5, the estimate's old constant.
+pub fn average_glyph_advance_em(text: &str) -> f64 {
+    let mut total = 0usize;
+    let mut wide = 0usize;
+    for c in text.chars() {
+        total += 1;
+        if is_full_width_char(c) {
+            wide += 1;
+        }
+    }
+    if wide == 0 {
+        return 0.5;
+    }
+    (0.5 * (total - wide) as f64 + wide as f64) / total as f64
+}
+
 /// JS `/[—]|--(?=\S)/g` match count over `body`.
 fn count_em_dashes(body: &str) -> usize {
     let chars: Vec<char> = body.chars().collect();

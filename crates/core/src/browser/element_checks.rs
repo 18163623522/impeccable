@@ -2172,8 +2172,115 @@ pub fn check_element_clipped_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHi
 
 re!(SCROLL_RE, r"(auto|scroll)");
 
+/// Whether `el` scrolls on the x axis. Read from `overflow-x`: a page wrapper
+/// with Tailwind's `overflow-x-hidden` computes the shorthand to `hidden auto`,
+/// which scrolls only vertically and must not exempt every line under it.
 fn is_scroll_region(dom: &dyn Dom, el: ElId) -> bool {
-    SCROLL_RE.is_match(&dom.style(el, "overflowX")) || SCROLL_RE.is_match(&dom.style(el, "overflow"))
+    SCROLL_RE.is_match(&crate::browser::text_geometry::overflow_x(dom, el))
+}
+
+/// How far past its box content has to reach before it counts as a spill.
+const TEXT_OVERFLOW_MIN_PX: f64 = 16.0;
+
+/// Replaced elements, which paint content without text of their own.
+const REPLACED_TAGS: &[&str] = &[
+    "audio", "canvas", "embed", "iframe", "img", "input", "meter", "object", "picture", "progress",
+    "select", "svg", "textarea", "video",
+];
+
+/// Whether `el` paints a box of its own: a fill, a background image, a border.
+fn paints_own_box(dom: &dyn Dom, el: ElId) -> bool {
+    if !measures::css_color_is_transparent(Some(&dom.style(el, "backgroundColor"))) {
+        return true;
+    }
+    let image = dom.style(el, "backgroundImage");
+    if !image.is_empty() && image != "none" {
+        return true;
+    }
+    ["Top", "Right", "Bottom", "Left"]
+        .iter()
+        .any(|s| style_px(dom, el, &format!("border{s}Width")) > 0.0)
+}
+
+/// The rects of what `el`'s descendants paint, for deciding whether its
+/// overflow is seen: text by its text rect, replaced elements and painted
+/// boxes by their border boxes. A descendant with no text that is absolutely
+/// or fixed positioned (a ripple layer), or that paints nothing (an empty
+/// wrapper, a `min-width` reserve), adds nothing of its own. A descendant that
+/// clips on the x axis keeps its content inside its own box.
+fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>) {
+    for child in dom.children(el) {
+        if dom.style(child, "display") == "none" {
+            continue;
+        }
+        let has_text = !js::trim(&dom.text_content(child)).is_empty();
+        let position = dom.style(child, "position");
+        if !has_text && (position == "absolute" || position == "fixed") {
+            continue;
+        }
+        let r = dom.rect(child);
+        let has_area = r.all_finite() && r.width > 0.0 && r.height > 0.0;
+        if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str()) {
+            if has_area {
+                out.push(r);
+            }
+            continue;
+        }
+        if has_area && paints_own_box(dom, child) {
+            out.push(r);
+        }
+        if has_direct_text_longer_than(dom, child, 0) {
+            match dom.direct_text_rect(child) {
+                Some(t) if t.all_finite() && t.width > 0.0 && t.height > 0.0 => out.push(t),
+                Some(_) => {}
+                // Text the Dom cannot measure stands on its box.
+                None if has_area => out.push(r),
+                None => {}
+            }
+        }
+        if generates_box(dom, child) && crate::browser::text_geometry::clips_x(dom, child) {
+            if has_text && has_area {
+                out.push(r);
+            }
+            continue;
+        }
+        painted_descendant_extents(dom, child, out);
+    }
+}
+
+/// Whether the content that makes `el`'s `scrollWidth` exceed its box is
+/// content a reader sees reach past it. `scrollWidth` also counts what paints
+/// nothing there: the empty, absolutely positioned ripple span a Material
+/// button carries, a `min-width` reserve held for a rotating word, text an
+/// overflow-hidden box pushes wholly outside itself (`text-indent: -9999px`
+/// image replacement). When the element's own text cannot be measured the
+/// overflow is taken as read, as before.
+fn overflow_is_painted(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let Some(own) = dom.direct_text_rect(el) else {
+        return true;
+    };
+    let left = rect.left + dom.client_left(el);
+    let right = left + dom.client_width(el);
+    if !own.all_finite() || !left.is_finite() || !right.is_finite() {
+        return true;
+    }
+    let clips = generates_box(dom, el)
+        && matches!(crate::browser::text_geometry::overflow_x(dom, el).as_str(), "hidden" | "clip");
+    let mut extents = Vec::new();
+    if own.width > 0.0 && own.height > 0.0 {
+        extents.push(own);
+    }
+    painted_descendant_extents(dom, el, &mut extents);
+    extents.iter().any(|r| {
+        // A box that clips paints none of what lies wholly outside it.
+        if clips && (r.right <= left || r.left >= right) {
+            return false;
+        }
+        // `scrollWidth` and `clientWidth` are whole pixels while text rects
+        // are not, so a 16px overflow can come from 15.75px of glyphs.
+        let min = TEXT_OVERFLOW_MIN_PX - 1.0;
+        r.right - right >= min || left - r.left >= min
+    })
 }
 
 /// A clipping box that marks or clamps its own truncation: `text-overflow`
@@ -2253,7 +2360,10 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
     }
     let client_width = dom.client_width(el);
     let delta = dom.scroll_width(el) - client_width;
-    if client_width > 0.0 && delta >= 16.0 {
+    if client_width > 0.0 && delta >= TEXT_OVERFLOW_MIN_PX {
+        if !overflow_is_painted(dom, el, &rect) {
+            return Vec::new();
+        }
         return vec![RuleHit::new(
             "text-overflow",
             format!(
@@ -4752,6 +4862,107 @@ mod tests {
         // A block row that ellipsizes still ends the run at its marker.
         d.set_styles(row, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap")]);
         assert!(check_element_text_overflow_dom(&d, run).is_empty());
+    }
+
+    /// observations-20 row 33: nike.com's pill links carry an empty,
+    /// absolutely positioned `span.ripple` 340px across, so `scrollWidth` ran
+    /// 118px past a label that fits its box.
+    #[test]
+    fn text_overflow_ignores_content_that_paints_nothing_past_the_box() {
+        let (mut d, body) = page();
+        let btn = d.add(Some(body), "a");
+        visible(&mut d, btn);
+        d.set_attr(btn, "class", "nds-btn");
+        d.add_text(btn, "Shop NFL");
+        d.set_rect(btn, 48.0, 634.0, 105.0, 36.0);
+        d.el_mut(btn).client_width = 105.0;
+        d.el_mut(btn).client_height = 36.0;
+        d.el_mut(btn).scroll_width = 223.0;
+        d.set_styles(btn, &[("display", "inline-flex"), ("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "relative"), ("fontSize", "16px")]);
+        d.set_text_rect(btn, 64.0, 643.0, 73.0, 17.0);
+        let ripple = d.add(Some(btn), "span");
+        visible(&mut d, ripple);
+        d.set_styles(ripple, &[("display", "block"), ("position", "absolute")]);
+        d.set_rect(ripple, -69.0, 482.0, 340.0, 340.0);
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "an empty ripple layer");
+
+        // An inline-block reserve wider than its words paints nothing either.
+        d.set_style(ripple, "position", "static");
+        d.set_style(ripple, "display", "inline-block");
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty(), "an empty reserve");
+        // Given a fill, the same box shows past the edge.
+        d.set_style(ripple, "backgroundColor", "rgb(17, 17, 17)");
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "a painted box");
+        d.set_style(ripple, "backgroundColor", "rgba(0, 0, 0, 0)");
+        // A child whose words run past the box is a spill.
+        d.add_text(ripple, "and every other team in the league");
+        d.set_text_rect(ripple, 70.0, 643.0, 260.0, 17.0);
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "a child's text");
+        d.el_mut(ripple).child_nodes.clear();
+        d.el_mut(ripple).direct_text_rect = None;
+        // So is a replaced element.
+        let icon = d.add(Some(btn), "img");
+        visible(&mut d, icon);
+        d.set_rect(icon, 150.0, 640.0, 40.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, btn).len(), 1, "an image");
+        d.set_rect(icon, 110.0, 640.0, 24.0, 24.0);
+        assert!(check_element_text_overflow_dom(&d, btn).is_empty());
+
+        // When the element's own text cannot be measured the overflow stands.
+        d.el_mut(btn).direct_text_rect = None;
+        let hits = check_element_text_overflow_dom(&d, btn);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "a.nds-btn overflows its box by 118px");
+    }
+
+    /// so-net.ne.jp's sprite tabs push their label 9,999px out of an
+    /// overflow-hidden box: nothing of it shows, so nothing spills.
+    #[test]
+    fn text_overflow_skips_text_a_clipping_box_pushes_out_of_itself() {
+        let (mut d, body) = page();
+        let tab = d.add(Some(body), "a");
+        visible(&mut d, tab);
+        d.add_text(tab, "インターネット接続");
+        d.set_rect(tab, 166.0, 91.0, 189.0, 38.0);
+        d.el_mut(tab).client_width = 188.0;
+        d.el_mut(tab).client_height = 38.0;
+        d.el_mut(tab).scroll_width = 10187.0;
+        d.set_styles(tab, &[("display", "block"), ("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textIndent", "-9999px"), ("position", "static"), ("fontSize", "14px")]);
+        d.set_text_rect(tab, -9833.0, 94.0, 126.0, 14.0);
+        assert!(check_element_text_overflow_dom(&d, tab).is_empty());
+        // With visible overflow the label really lands 9,999px away.
+        d.set_styles(tab, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible")]);
+        assert_eq!(check_element_text_overflow_dom(&d, tab).len(), 1);
+    }
+
+    /// walkthroughs-20 miss 4a: `overflow-x: hidden` computes the shorthand to
+    /// `hidden auto`, and reading the shorthand made every line under a
+    /// Tailwind `overflow-x-hidden` page wrapper a scroll-region child.
+    #[test]
+    fn text_overflow_reads_the_x_axis_of_a_page_wrapper() {
+        let (mut d, body) = page();
+        let main = d.add(Some(body), "main");
+        visible(&mut d, main);
+        d.set_styles(main, &[("overflow", "hidden auto"), ("overflowX", "hidden"), ("overflowY", "auto")]);
+        let stat = d.add(Some(main), "div");
+        visible(&mut d, stat);
+        d.set_attr(stat, "class", "stat");
+        d.add_text(stat, "99.99%");
+        d.set_rect(stat, 20.0, 100.0, 93.0, 40.0);
+        d.el_mut(stat).client_width = 93.0;
+        d.el_mut(stat).client_height = 40.0;
+        d.el_mut(stat).scroll_width = 122.0;
+        d.set_styles(stat, &[("display", "block"), ("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "40px"), ("whiteSpace", "nowrap")]);
+        d.set_text_rect(stat, 20.0, 100.0, 122.0, 40.0);
+        let hits = check_element_text_overflow_dom(&d, stat);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "div.stat overflows its box by 29px");
+        // A wrapper that scrolls on x still exempts what it holds.
+        d.set_styles(main, &[("overflow", "auto"), ("overflowX", "auto")]);
+        assert!(check_element_text_overflow_dom(&d, stat).is_empty());
+        // A capture with only the shorthand reads its first value.
+        d.set_styles(main, &[("overflow", "hidden auto"), ("overflowX", "")]);
+        assert_eq!(check_element_text_overflow_dom(&d, stat).len(), 1);
     }
 
     /// zigzag.kr: the rate menu of a player whose control bar is at

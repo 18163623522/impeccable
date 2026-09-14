@@ -64,11 +64,13 @@ pub const LEADING_MIN_LINE_BOXES: f64 = 1.5;
 /// a heading tag.
 pub const LEADING_HEADING_CONTEXT: &str = "h1, h2, h3, h4, h5, h6, [role=\"heading\"]";
 
-/// The tags that carry a heading's own text when it is not in the heading
-/// element itself. The ancestor exemption is limited to these, because a
-/// heading can also contain a block of body copy: a page builder that nests a
-/// card's description paragraph inside the card's `h3` is still setting
-/// reading copy, and that block keeps the floor.
+/// The inline tags that carry a heading's own text when it is not in the
+/// heading element itself; any of them under a heading is heading text. Other
+/// boxes under a heading (the `div` a design system wraps heading copy in)
+/// are heading text too, unless they are, or sit inside, a reading block from
+/// [`QUALITY_TEXT_TAGS`]: a page builder that nests a card's description
+/// paragraph inside the card's `h3` is still setting reading copy, and that
+/// block keeps the floor.
 pub const LEADING_HEADING_TEXT_TAGS: &[&str] = &[
     "a", "span", "b", "i", "em", "strong", "small", "mark", "u", "abbr", "cite", "q", "time",
     "label", "font", "bdi", "bdo", "ins", "del",

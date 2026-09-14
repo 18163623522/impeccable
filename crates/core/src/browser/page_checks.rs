@@ -1185,9 +1185,11 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     }
 }
 
-/// JS `isScroller(s)` from checkEdgeFlushCardsDOM.
+/// JS `isScroller(s)` from checkEdgeFlushCardsDOM, read from `overflow-x`:
+/// `main.overflow-x-hidden` computes the shorthand to `hidden auto` and
+/// scrolls only vertically.
 fn is_scroller(dom: &dyn Dom, el: ElId) -> bool {
-    SCROLL_RE.is_match(&dom.style(el, "overflowX")) || SCROLL_RE.is_match(&dom.style(el, "overflow"))
+    SCROLL_RE.is_match(&super::text_geometry::overflow_x(dom, el))
 }
 
 /// JS: checks.mjs#checkEdgeFlushCardsDOM()
@@ -1211,6 +1213,10 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     };
 
     for scroller in dom.query_all(None, "*").unwrap_or_default() {
+        // The root and body scroll the page itself, not a row of cards.
+        if Some(scroller) == dom.document_element() || Some(scroller) == dom.body() {
+            continue;
+        }
         if !is_scroller(dom, scroller) {
             continue;
         }
@@ -1236,6 +1242,11 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             gap: f64,
         }
         let mut flush: Vec<Flush> = Vec::new();
+        // The card-shaped boxes this scroller holds, as the right edge of the
+        // one that ends first and the left edge of the one that starts last:
+        // a row has two that sit side by side.
+        let mut first_right = f64::INFINITY;
+        let mut last_left = f64::NEG_INFINITY;
         for card in dom.query_all(Some(scroller), "*").unwrap_or_default() {
             if !is_rendered_for_browser_rule(dom, card) {
                 continue;
@@ -1263,6 +1274,8 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if !has_bg && border_sides < 2 {
                 continue;
             }
+            first_right = math_min(first_right, rect.right);
+            last_left = math_max(last_left, rect.left);
             let left_gutter = rect.left - content_left;
             let right_gap = content_right - rect.right;
             let flush_right = left_gutter >= 6.0 && right_gap < 8.0 && right_gap > -24.0;
@@ -1277,6 +1290,11 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             });
         }
         if flush.is_empty() {
+            continue;
+        }
+        // One card, or cards stacked in a column, is not a row that scrolls
+        // past an edge: a textarea or a header button in a page wrapper.
+        if first_right > last_left + 1.0 {
             continue;
         }
         let mut worst = &flush[0];
@@ -2177,6 +2195,56 @@ mod tests {
         assert_eq!(m.hidden_samples, vec!["hidden words here".to_string()]);
     }
 
+    /// agora.co.il, joongang.co.kr, v0-optimus-delta.vercel.app: the root, a
+    /// page `#wrapper` at `overflow-x: hidden` (shorthand `hidden auto`) and a
+    /// `main.overflow-x-hidden` read as scrollers, with a lone textarea or
+    /// header button as the card.
+    #[test]
+    fn edge_flush_cards_skips_page_scrollers_and_lone_boxes() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        let setup_scroller = |d: &mut FakeDom, el: ElId, x: &str, shorthand: &str| {
+            d.set_styles(el, &[("overflowX", x), ("overflow", shorthand)]);
+            d.set_rect(el, 0.0, 0.0, 390.0, 2000.0);
+            let e = d.el_mut(el);
+            e.client_width = 390.0;
+            e.scroll_width = 711.0;
+        };
+        let card = |d: &mut FakeDom, parent: ElId, x: f64| {
+            let c = d.add(Some(parent), "div");
+            d.set_styles(c, &[("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(c, x, 40.0, 300.0, 120.0);
+            c
+        };
+
+        // The root scrolls the page.
+        setup_scroller(&mut d, html, "auto", "auto scroll");
+        let wrapper = d.add(Some(body), "div");
+        let a = card(&mut d, wrapper, -12.0);
+        let _ = a;
+        card(&mut d, wrapper, 320.0);
+        assert!(check_edge_flush_cards_dom(&d).is_empty());
+
+        // A page wrapper that hides x overflow scrolls only vertically.
+        setup_scroller(&mut d, html, "visible", "visible");
+        setup_scroller(&mut d, wrapper, "hidden", "hidden auto");
+        assert!(check_edge_flush_cards_dom(&d).is_empty());
+
+        // A real x scroller holding one flush box and no row.
+        let rail = d.add(Some(body), "div");
+        setup_scroller(&mut d, rail, "auto", "auto");
+        let lone = card(&mut d, rail, 80.0);
+        d.set_rect(lone, 80.0, 40.0, 308.0, 120.0);
+        assert!(check_edge_flush_cards_dom(&d).is_empty(), "one box is not a row");
+        // Two boxes stacked in a column are not a row either.
+        let below = card(&mut d, rail, 80.0);
+        d.set_rect(below, 80.0, 180.0, 308.0, 120.0);
+        assert!(check_edge_flush_cards_dom(&d).is_empty(), "a column is not a row");
+        // A second box beside them makes the row.
+        card(&mut d, rail, 400.0);
+        assert_eq!(check_edge_flush_cards_dom(&d).len(), 1);
+    }
+
     #[test]
     fn edge_flush_cards() {
         let mut d = FakeDom::new();
@@ -2196,6 +2264,10 @@ mod tests {
         d.set_attr(card, "class", "card");
         d.set_styles(card, &[("overflowX", "visible"), ("overflow", "visible"), ("backgroundColor", "rgb(255, 255, 255)"), ("borderTopWidth", "0px"), ("borderRightWidth", "0px"), ("borderBottomWidth", "0px"), ("borderLeftWidth", "0px")]);
         d.set_rect(card, 24.0, 110.0, 574.0, 150.0); // right edge at 598 → gap 2
+        // The next card in the row, past the clip edge.
+        let next = d.add(Some(sc), "article");
+        d.set_styles(next, &[("backgroundColor", "rgb(255, 255, 255)")]);
+        d.set_rect(next, 614.0, 110.0, 574.0, 150.0);
         let f = check_edge_flush_cards_dom(&d);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].el, Some(sc));

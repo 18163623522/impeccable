@@ -265,6 +265,8 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         "flag-inline-spill",
         "flag-hidden-no-marker",
         "flag-inline-truncate",
+        // A page wrapper at `overflow-x: hidden` scrolls only on y.
+        "flag-in-x-hidden-wrapper",
     ] {
         assert!(
             overflow.iter().any(|(s, sel)| s.contains(flag) || sel.contains(flag)),
@@ -276,5 +278,5 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         .filter(|(s, sel)| s.contains("pass-") || sel.contains("pass-") || sel.contains("ellipsis"))
         .collect();
     assert!(stray.is_empty(), "should-pass boxes flagged: {stray:?}");
-    assert_eq!(overflow.len(), 5, "{overflow:?}");
+    assert_eq!(overflow.len(), 6, "{overflow:?}");
 }

@@ -103,6 +103,10 @@
     /* ── PASS: big text with proportional padding ── */
     .pass-heading-good { padding: 16px; background: #f1f5f9; border-radius: 8px; font-size: 24px; font-weight: 600; line-height: 1.2; }
     .pass-hero-good { padding: 20px 32px; background: #f1f5f9; border-radius: 8px; font-size: 32px; font-weight: 700; line-height: 1.2; }
+
+    /* ── PASS: an inline highlight that wraps is two one-line fragments ── */
+    .pass-highlight-copy { width: 240px; font-size: 14px; line-height: 26px; margin: 0; }
+    .pass-highlight { background: #fef08a; padding: 0 5px; }
   </style>
 </head>
 <body>
@@ -252,6 +256,12 @@
       <div class="case">
         <span class="case-label">32px hero, 20px / 32px padding</span>
         <div class="pass-hero-good">Hero With Big Padding</div>
+      </div>
+
+      <h3>Inline highlight across two lines</h3>
+      <div class="case">
+        <span class="case-label">an inline highlight with no vertical padding wraps onto two lines: each fragment is one 21px line, not one 43px box</span>
+        <div class="pass-highlight-copy">Every estimate is checked against the <span class="pass-highlight">carrier's own estimating guide before it ships</span> to the customer.</div>
       </div>
     </div>
   </div>

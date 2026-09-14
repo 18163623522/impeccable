@@ -363,3 +363,57 @@ fn an_element_past_the_cut_gets_its_own_shot() {
         "a shot was taken for an element inside the screenshot"
     );
 }
+
+#[test]
+fn a_right_to_left_page_records_where_its_screenshot_starts() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let Some((findings, evidence)) =
+        scan(&engine, port, "fullpage-screenshot-rtl.html", (390, 844), &EvidenceRequest::default())
+    else {
+        return;
+    };
+    let all = flagged(&findings, &evidence);
+    assert!(all.contains(&("low-contrast", "#flag-rtl-copy", origin::SCAN)), "{all:?}");
+    assert!(!all.iter().any(|(_, s, _)| *s == "#pass-rtl-copy"), "{all:?}");
+
+    // The body scrolls from the right, and the 900px grid overflows 510px
+    // left of the viewport, at negative document x. The image starts there.
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    assert!((shot.width - 900.0).abs() <= 16.0, "{}", shot.width);
+    assert!((shot.origin_x - (390.0 - shot.width)).abs() <= 16.0, "{} {}", shot.origin_x, shot.width);
+    let img = decode(&shot.jpeg_base64);
+    assert_eq!(img.width() as f64, shot.width);
+    let rect = rect_of(&evidence, "#flag-rtl-copy");
+    assert!(rect[0] < 0.0 && rect[0] > -80.0, "{rect:?}");
+    let image_x = rect[0] - shot.origin_x;
+    assert!(
+        luma_spread(&img, [image_x, rect[1], rect[2], rect[3]]) > 20,
+        "the flagged copy is blank at its image position"
+    );
+    // The marker under the copy is green where the origin puts it; the rect's
+    // x taken as image x lands on the other column's blue marker.
+    let marker_y = (rect[1] + rect[3] + 42.0) as u32;
+    let green = |p: [u8; 3]| p[1] > 90 && p[0] < 70 && p[2] < 110;
+    let blue = |p: [u8; 3]| p[2] > 150 && p[0] < 90 && p[1] < 120;
+    let at = |x: f64| img.get_pixel(x as u32, marker_y).0;
+    assert!(green(at(image_x + 200.0)), "no green marker at the image position: {:?}", at(image_x + 200.0));
+    assert!(blue(at(rect[0].max(0.0) + 200.0)), "the uncorrected position is not the other column: {:?}", at(rect[0].max(0.0) + 200.0));
+
+    // Nothing overflows at desktop width, and a page that scrolls from the
+    // left keeps its origin at 0 however wide it is.
+    let Some((_, desktop)) =
+        scan(&engine, port, "fullpage-screenshot-rtl.html", (1280, 800), &EvidenceRequest::default())
+    else {
+        return;
+    };
+    assert_eq!(desktop.screenshot.as_ref().expect("screenshot").origin_x, 0.0);
+    let Some((_, wide)) =
+        scan(&engine, port, "fullpage-screenshot.html", (390, 844), &EvidenceRequest::default())
+    else {
+        return;
+    };
+    let wide_shot = wide.screenshot.as_ref().expect("screenshot");
+    assert!(wide_shot.width >= 900.0, "{}", wide_shot.width);
+    assert_eq!(wide_shot.origin_x, 0.0);
+}

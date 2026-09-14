@@ -38,8 +38,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use impeccable_core::browser::driver::{collect_browser_findings, serialize_findings};
+use impeccable_core::browser::dom::{Dom, ElId};
 use impeccable_core::browser::page_checks::measure_hidden_text_dom;
-use impeccable_core::browser::snapshot::Facts;
+use impeccable_core::browser::snapshot::{Facts, SnapshotDom};
 use impeccable_core::checks::measures::{check_content_hidden_at_rest, ContentHiddenInput};
 use impeccable_core::findings::{try_finding, Finding};
 use impeccable_detect::design_system::DesignSystem;
@@ -265,6 +266,11 @@ struct RawResult {
     /// The flagged element's selector, when the pass names an element.
     selector: Option<String>,
     origin: &'static str,
+    /// The flagged element in the scan's capture, when the pass knows it. A
+    /// generated selector names one element unless the page repeats an id,
+    /// and the evidence resolves the selector to this element (see
+    /// [`scan_identities`]).
+    scan_el: Option<ElId>,
 }
 
 impl RawResult {
@@ -276,6 +282,7 @@ impl RawResult {
             severity: String::new(),
             selector: None,
             origin,
+            scan_el: None,
         }
     }
 }
@@ -330,6 +337,14 @@ pub struct Screenshot {
     pub document_height: f64,
     /// How it was captured, one of [`fullpage::method`].
     pub method: &'static str,
+    /// The document x of the image's left edge, in CSS pixels: an element
+    /// rect's image x is its `x` minus this (its y needs no shift). 0 for most
+    /// pages. Negative when the document scrolls from the right (a
+    /// right-to-left page wider than the viewport), whose overflow lies at
+    /// negative document x: the image starts at the left edge of that
+    /// overflow, or, when [`fullpage::MAX_SCREENSHOT_WIDTH`] cuts it, as far
+    /// left as keeps the viewport in the image.
+    pub origin_x: f64,
 }
 
 /// What [`detect_url_evidence`] should capture beyond the findings.
@@ -621,6 +636,7 @@ fn results_from_groups(groups: &[Value]) -> Vec<RawResult> {
                 severity: js_str_or_empty(f.get("severity")),
                 selector: selector.clone(),
                 origin: origin::SCAN,
+                scan_el: None,
             });
         }
     }
@@ -762,7 +778,7 @@ fn scan_page_inner(
         return match evidence {
             None => Err(EngineError::new(message)),
             Some((ev, request)) => {
-                capture_post_scan(page, ev, request, &[]);
+                capture_post_scan(page, ev, request, &[], &Map::new());
                 Ok(Vec::new())
             }
         };
@@ -816,7 +832,21 @@ fn scan_page_inner(
             .as_array()
             .cloned()
             .unwrap_or_default();
-        Ok::<_, EngineError>(results_from_groups(&serialized_groups))
+        let mut results = results_from_groups(&serialized_groups);
+        // One serialized group per finding group, one result per finding, in
+        // order. Anything else leaves the elements unset, and the evidence
+        // resolves those selectors as before.
+        let counts = collected.groups.iter().map(|g| g.findings.len()).sum::<usize>();
+        if counts == results.len() {
+            let els = collected
+                .groups
+                .iter()
+                .flat_map(|g| std::iter::repeat(g.el).take(g.findings.len()));
+            for (r, el) in results.iter_mut().zip(els) {
+                r.scan_el = Some(el);
+            }
+        }
+        Ok::<_, EngineError>(results)
     })?;
 
     // content-hidden-at-rest: what is still hidden once the reveal handlers
@@ -857,7 +887,12 @@ fn scan_page_inner(
         snapshot_engine::analyze_visual_contrast(page, &base, 12.0, true)
     })
     .map_err(cdp_err)?;
-    let visual = run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    let mut visual = run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    if evidence.is_some() {
+        for r in visual.iter_mut() {
+            r.scan_el = r.selector.as_deref().and_then(|s| visual_scan_element(&base, s, &analyses));
+        }
+    }
     results.extend(visual);
 
     if let Some((ev, request)) = evidence {
@@ -869,9 +904,86 @@ fn scan_page_inner(
                 }
             }
         }
-        capture_post_scan(page, ev, request, &selectors);
+        let identities = scan_identities(&base, &results);
+        capture_post_scan(page, ev, request, &selectors, &identities);
     }
     Ok(results)
+}
+
+/// Per flagged selector the scan's capture matched on more than one element,
+/// `[n, count]`: the flagged element is the `n`th of `count` matches, in
+/// document order. A generated selector names one element unless an id
+/// anchors it and the page repeats that id (a search box rendered once per
+/// breakpoint), and then `querySelector` returns the first copy, which can be
+/// a collapsed duplicate the scan never scored. The evidence takes the `n`th
+/// match while the page still has `count` of them, and `querySelector`'s
+/// answer otherwise. The first result naming a selector decides, as it does
+/// for [`Evidence::element_rects`]; a selector matched once, or a result with
+/// no known element, is left out.
+fn scan_identities(dom: &SnapshotDom, results: &[RawResult]) -> Map<String, Value> {
+    let mut out = Map::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for r in results {
+        let Some(selector) = r.selector.as_deref() else { continue };
+        if seen.contains(&selector) {
+            continue;
+        }
+        seen.push(selector);
+        // Without an id the generator checks that its selector is unique.
+        if !selector.contains('#') {
+            continue;
+        }
+        let Some(el) = r.scan_el else { continue };
+        let Ok(matches) = dom.query_all(None, selector) else { continue };
+        if matches.len() < 2 {
+            continue;
+        }
+        if let Some(n) = matches.iter().position(|m| *m == el) {
+            out.insert(selector.to_string(), json!([n, matches.len()]));
+        }
+    }
+    out
+}
+
+/// The element a visual-contrast result on `selector` was measured on: the
+/// match whose box gives the clip of every analysis on that selector (the
+/// collector's `clip`, from the capture's rect and scroll). `None` when no
+/// single match gives them all, and for a selector with no id, which names
+/// one element.
+fn visual_scan_element(dom: &SnapshotDom, selector: &str, analyses: &[Value]) -> Option<ElId> {
+    if !selector.contains('#') {
+        return None;
+    }
+    let matches = dom.query_all(None, selector).ok()?;
+    if matches.len() < 2 {
+        return matches.first().copied();
+    }
+    let (sx, sy) = (dom.scroll_x(), dom.scroll_y());
+    let clip_of = |el: ElId| {
+        let r = dom.rect(el);
+        [
+            (r.left + sx - 2.0).floor().max(0.0),
+            (r.top + sy - 2.0).floor().max(0.0),
+            (r.width + 4.0).ceil().max(1.0),
+            (r.height + 4.0).ceil().max(1.0),
+        ]
+    };
+    let mut found: Option<ElId> = None;
+    for analysis in analyses
+        .iter()
+        .filter(|a| a.get("selector").and_then(Value::as_str) == Some(selector))
+    {
+        let clip = analysis.get("clip")?;
+        let num = |k: &str| clip.get(k).and_then(Value::as_f64);
+        let want = [num("x")?, num("y")?, num("width")?, num("height")?];
+        let hits: Vec<ElId> = matches.iter().copied().filter(|el| clip_of(*el) == want).collect();
+        match (hits.as_slice(), found) {
+            ([el], None) => found = Some(*el),
+            ([el], Some(f)) if *el == f => {}
+            _ => return None,
+        }
+    }
+    found
 }
 
 /// Element rects, the screenshot and the element shots, after every pass has
@@ -883,16 +995,19 @@ fn capture_post_scan(
     ev: &mut Evidence,
     request: &EvidenceRequest,
     selectors: &[String],
+    identities: &Map<String, Value>,
 ) {
     if !selectors.is_empty() {
         let expr = format!(
             r#"(() => {{
   const props = ['display', 'position', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-transform', 'text-align', 'color', 'background-color', 'background-image', 'border', 'border-radius', 'box-shadow', 'padding', 'margin', 'width', 'height', 'max-width', 'opacity'];
+  const resolve = {resolve};
+  const identities = {ids};
   const rects = {{}};
   const details = {{}};
   for (const s of {sels}) {{
     try {{
-      const el = document.querySelector(s);
+      const el = resolve(s, identities[s]);
       if (!el) continue;
       const r = el.getBoundingClientRect();
       rects[s] = [r.x + window.scrollX, r.y + window.scrollY, r.width, r.height];
@@ -909,7 +1024,9 @@ fn capture_post_scan(
   }}
   return {{ rects, details }};
 }})()"#,
-            sels = json!(selectors)
+            sels = json!(selectors),
+            resolve = fullpage::RESOLVE_FLAGGED_JS,
+            ids = Value::Object(identities.clone()),
         );
         if let Ok(v) = page.evaluate_value(&expr) {
             if let Some(Value::Object(m)) = v.get("rects") {
@@ -928,6 +1045,8 @@ fn capture_post_scan(
             ev.element_shots = fullpage::capture_element_shots(
                 page,
                 &ev.element_rects,
+                identities,
+                shot.origin_x,
                 shot.width,
                 shot.height,
                 request.jpeg_quality,

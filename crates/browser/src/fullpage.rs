@@ -101,6 +101,10 @@ pub struct Geometry {
     /// Set when the document does not scroll but an element covering most of
     /// the viewport does.
     pub scroller: Option<Scroller>,
+    /// The furthest left the document scrolls, in document coordinates: 0,
+    /// or negative when the document scrolls from the right (a right-to-left
+    /// page wider than the viewport keeps its overflow at negative x).
+    pub scroll_origin_x: f64,
 }
 
 impl Geometry {
@@ -122,6 +126,7 @@ impl Geometry {
             document_width: num(v.get("docW"), viewport_width).max(1.0),
             document_height: num(v.get("docH"), viewport_height).max(1.0),
             scroller,
+            scroll_origin_x: num(v.get("originX"), 0.0).min(0.0),
         }
     }
 
@@ -132,6 +137,25 @@ impl Geometry {
             .min(MAX_SCREENSHOT_WIDTH)
             .max(self.viewport_width)
             .round()
+    }
+
+    /// The document x of the screenshot's left edge ([`Screenshot::origin_x`]).
+    /// A capture starts where the document's scrolling does, at
+    /// [`Geometry::scroll_origin_x`]. When the width cap cuts a page that
+    /// scrolls from the right, the capture starts further right instead, so
+    /// the cut falls on the far overflow and the viewport stays in the image.
+    pub fn capture_origin_x(&self) -> f64 {
+        if self.scroll_origin_x >= 0.0 {
+            return 0.0;
+        }
+        let cut = (self.document_width.round() - self.capture_width()).max(0.0);
+        (self.scroll_origin_x + cut).min(0.0)
+    }
+
+    /// [`Geometry::capture_origin_x`] as a `Page.captureScreenshot` clip x,
+    /// whose 0 is the left edge of what the document scrolls.
+    pub fn capture_clip_x(&self) -> f64 {
+        self.capture_origin_x() - self.scroll_origin_x
     }
 }
 
@@ -147,7 +171,20 @@ const GEOMETRY_JS: &str = r#"(() => {
     docW: Math.max(se ? se.scrollWidth : 0, vw),
     docH: Math.max(de ? de.scrollHeight : 0, body ? body.scrollHeight : 0, vh),
     scroller: null,
+    originX: 0,
   };
+  // A document that scrolls from the right (a right-to-left page wider than
+  // the viewport) keeps its overflow at negative x, and a beyond-viewport
+  // capture starts at the left edge of that overflow: the furthest left the
+  // document scrolls. Asked by scrolling there and straight back, in one task;
+  // a page that scrolls from the left does not move.
+  if (se && se.scrollWidth > se.clientWidth + 1) {
+    const sx = window.scrollX;
+    const sy = window.scrollY;
+    window.scrollTo({ left: -se.scrollWidth, top: sy, behavior: 'instant' });
+    out.originX = Math.min(0, window.scrollX);
+    if (window.scrollX !== sx) window.scrollTo({ left: sx, top: sy, behavior: 'instant' });
+  }
   try { delete window.__impeccableShotScroller; } catch (e) {}
   if (se && se.scrollHeight > vh + 1) return out;
   let best = null;
@@ -261,10 +298,22 @@ const RESTORE_JS: &str = r#"(({ scrollTop }) => {
   if (el) el.scrollTo({ left: el.scrollLeft, top: scrollTop, behavior: 'instant' });
 })"#;
 
-const ELEMENT_INTO_VIEW_JS: &str = r#"(async ({ selector, reuse, mayScroll }) => {
+/// The element a flagged selector names. `identity` is `[n, count]` when the
+/// scan's capture matched the selector on `count` elements and flagged the
+/// `n`th (a repeated id): while the page still has `count` matches, the `n`th.
+/// Otherwise, and with no identity, `querySelector`'s answer.
+pub const RESOLVE_FLAGGED_JS: &str = r#"((selector, identity) => {
+  if (Array.isArray(identity)) {
+    const all = document.querySelectorAll(selector);
+    if (all.length === identity[1]) return all[identity[0]] || null;
+  }
+  return document.querySelector(selector);
+})"#;
+
+const ELEMENT_INTO_VIEW_JS: &str = r#"(async (resolve, { selector, identity, reuse, mayScroll }) => {
   let el;
   try {
-    el = document.querySelector(selector);
+    el = resolve(selector, identity);
   } catch (e) {
     return null;
   }
@@ -342,6 +391,7 @@ fn capture_with(
                     height,
                     document_height,
                     method: method::STITCHED,
+                    origin_x: geometry.capture_origin_x(),
                 });
             }
         }
@@ -349,13 +399,14 @@ fn capture_with(
 
     let document_height = geometry.document_height;
     let height = document_height.min(max_height);
-    let jpeg_base64 = page.screenshot_jpeg(0.0, 0.0, width, height, quality)?;
+    let jpeg_base64 = page.screenshot_jpeg(geometry.capture_clip_x(), 0.0, width, height, quality)?;
     let beyond = Screenshot {
         jpeg_base64,
         width,
         height,
         document_height,
         method: method::BEYOND_VIEWPORT,
+        origin_x: geometry.capture_origin_x(),
     };
     let vh = geometry.viewport_height;
     if height < 3.0 * vh {
@@ -522,7 +573,9 @@ fn stitch(
             let mut at_bottom = false;
             for (col, &tx) in xs.iter().enumerate() {
                 let args = json!({
-                    "x": tx,
+                    // Columns start where the image does, left of 0 on a page
+                    // that scrolls from the right.
+                    "x": geometry.capture_origin_x() + tx,
                     "y": ty,
                     "useScroller": use_scroller,
                     "hideFixed": row > 0 || col > 0,
@@ -550,9 +603,9 @@ fn stitch(
                     return Err(CdpError::new("a viewport tile does not match the viewport"));
                 }
                 let rows = tile_rows(scroller.as_ref(), vh, row == 0, at_bottom);
-                paste(&mut canvas, &tile, sx, sy - origin, rows);
+                paste(&mut canvas, &tile, sx - geometry.capture_origin_x(), sy - origin, rows);
                 // A scroll that stops short sideways has reached the right edge.
-                if sx + 0.5 < tx {
+                if sx - geometry.capture_origin_x() + 0.5 < tx {
                     break;
                 }
             }
@@ -570,13 +623,14 @@ fn stitch(
 }
 
 /// Whether a flagged element's document rect falls outside the screenshot
-/// (past the cut or the right edge) while something of it lies in the
-/// document's positive quadrant.
-pub fn needs_element_shot(rect: &[f64], shot_width: f64, shot_height: f64) -> bool {
+/// (past the cut or the right edge) while something of it lies right of the
+/// image's left edge and below its top. `origin_x` is the image's left edge
+/// in document coordinates ([`Screenshot::origin_x`]).
+pub fn needs_element_shot(rect: &[f64], origin_x: f64, shot_width: f64, shot_height: f64) -> bool {
     if rect.len() < 4 || rect.iter().any(|v| !v.is_finite()) {
         return false;
     }
-    let (x, y, w, h) = (rect[0], rect[1], rect[2], rect[3]);
+    let (x, y, w, h) = (rect[0] - origin_x, rect[1], rect[2], rect[3]);
     if w < 1.0 || h < 1.0 || x + w <= 0.0 || y + h <= 0.0 {
         return false;
     }
@@ -586,9 +640,14 @@ pub fn needs_element_shot(rect: &[f64], shot_width: f64, shot_height: f64) -> bo
 /// A viewport shot per flagged element past the screenshot, the element
 /// scrolled into view first. An element that stays clipped away gets none, and
 /// failures skip that element: the findings stand without the picture.
+/// `identities` names which match of a repeated selector the scan flagged
+/// ([`RESOLVE_FLAGGED_JS`]).
+#[allow(clippy::too_many_arguments)]
 pub fn capture_element_shots(
     page: &mut Page<'_>,
     rects: &Map<String, Value>,
+    identities: &Map<String, Value>,
+    origin_x: f64,
     shot_width: f64,
     shot_height: f64,
     quality: u32,
@@ -606,15 +665,16 @@ pub fn capture_element_shots(
             .as_array()
             .map(|a| a.iter().filter_map(Value::as_f64).collect())
             .unwrap_or_default();
-        if !needs_element_shot(&r, shot_width, shot_height) {
+        if !needs_element_shot(&r, origin_x, shot_width, shot_height) {
             continue;
         }
         let args = json!({
             "selector": selector,
+            "identity": identities.get(selector).cloned().unwrap_or(Value::Null),
             "reuse": last.is_some(),
             "mayScroll": captures < MAX_ELEMENT_SHOTS,
         });
-        let Ok(v) = page.evaluate_value(&format!("({ELEMENT_INTO_VIEW_JS})({args})")) else {
+        let Ok(v) = page.evaluate_value(&format!("({ELEMENT_INTO_VIEW_JS})({RESOLVE_FLAGGED_JS}, {args})")) else {
             last = None;
             continue;
         };
@@ -802,14 +862,42 @@ mod tests {
 
     #[test]
     fn only_elements_outside_the_screenshot_get_a_shot() {
-        assert!(needs_element_shot(&[100.0, 12500.0, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(needs_element_shot(&[1400.0, 300.0, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[100.0, 11990.0, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[100.0, 300.0, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[100.0, 12500.0, 0.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[-500.0, 12500.0, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[100.0, f64::NAN, 200.0, 20.0], 1280.0, 12000.0));
-        assert!(!needs_element_shot(&[100.0, 12500.0], 1280.0, 12000.0));
+        assert!(needs_element_shot(&[100.0, 12500.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(needs_element_shot(&[1400.0, 300.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, 11990.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, 300.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, 12500.0, 0.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[-500.0, 12500.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, f64::NAN, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, 12500.0], 0.0, 1280.0, 12000.0));
+        // An image that starts at document x -510 (a right-to-left page):
+        // x -500 lies inside it, and its right edge is at document x 390.
+        assert!(!needs_element_shot(&[-500.0, 300.0, 200.0, 20.0], -510.0, 900.0, 12000.0));
+        assert!(needs_element_shot(&[-500.0, 12500.0, 200.0, 20.0], -510.0, 900.0, 12000.0));
+        assert!(needs_element_shot(&[400.0, 300.0, 200.0, 20.0], -510.0, 900.0, 12000.0));
+        assert!(!needs_element_shot(&[-800.0, 12500.0, 200.0, 20.0], -510.0, 900.0, 12000.0));
+    }
+
+    #[test]
+    fn the_screenshot_starts_where_the_document_scrolls() {
+        // A page that scrolls from the left starts at 0, however wide.
+        let g = Geometry::from_value(&json!({ "vw": 390, "vh": 844, "docW": 1380, "docH": 7685, "originX": 0 }));
+        assert_eq!((g.capture_origin_x(), g.capture_clip_x()), (0.0, 0.0));
+        // A right-to-left page with 321px of overflow starts at its left edge.
+        let g = Geometry::from_value(&json!({ "vw": 390, "vh": 844, "docW": 711, "docH": 1932, "originX": -321 }));
+        assert_eq!((g.capture_width(), g.capture_origin_x(), g.capture_clip_x()), (711.0, -321.0, 0.0));
+        // Past the width cap, the cut falls on the far overflow and the
+        // viewport (document x 0 to 1280) stays in the image.
+        let g = Geometry::from_value(&json!({ "vw": 1280, "vh": 800, "docW": 6000, "docH": 800, "originX": -4720 }));
+        assert_eq!(g.capture_width(), MAX_SCREENSHOT_WIDTH);
+        assert_eq!(g.capture_origin_x(), -(MAX_SCREENSHOT_WIDTH - 1280.0));
+        assert_eq!(g.capture_clip_x(), 6000.0 - MAX_SCREENSHOT_WIDTH);
+        assert_eq!(g.capture_origin_x() + g.capture_width(), 1280.0);
+        // A probe with no origin, or a positive one, reads as 0.
+        let g = Geometry::from_value(&json!({ "vw": 390, "vh": 844, "docW": 711, "docH": 1932 }));
+        assert_eq!(g.scroll_origin_x, 0.0);
+        let g = Geometry::from_value(&json!({ "vw": 390, "vh": 844, "docW": 711, "docH": 1932, "originX": 40 }));
+        assert_eq!(g.capture_origin_x(), 0.0);
     }
 
     #[test]

@@ -377,3 +377,76 @@ fn evidence_matches_the_cli_path_and_replay_matches_live() {
     }
     browser.close();
 }
+
+#[test]
+fn evidence_measures_the_element_the_scan_flagged_when_an_id_repeats() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let mut browser = engine.launch().expect("launch");
+    let url = format!("http://127.0.0.1:{port}/evidence-duplicate-id.html");
+    let (findings, evidence) = detect_url_evidence(
+        &mut browser,
+        &url,
+        &ScanOptions::default(),
+        "load",
+        100,
+        &EvidenceRequest::default(),
+    )
+    .expect("evidence scan");
+    browser.close();
+    let flagged: Vec<(&str, &str)> = findings
+        .iter()
+        .map(|f| {
+            (
+                f.antipattern.as_str(),
+                f.extras.get("selector").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        })
+        .collect();
+    for selector in ["#dup-note", "#dup-first-note", "#solo-note"] {
+        assert!(flagged.contains(&("low-contrast", selector)), "{selector} not flagged: {flagged:?}");
+    }
+    let rect = |s: &str| -> Vec<f64> {
+        evidence
+            .element_rects
+            .get(s)
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("no rect for {s}: {:?}", evidence.element_rects.keys()))
+            .iter()
+            .filter_map(|n| n.as_f64())
+            .collect()
+    };
+    let text = |s: &str| evidence.element_details[s]["text"].as_str().unwrap_or("").to_string();
+
+    // Should flag: the copy the scan scored sits below two collapsed copies
+    // and a 320px spacer. `querySelector` would name the first collapsed copy.
+    let dup = rect("#dup-note");
+    assert!(dup[2] > 400.0 && dup[3] > 10.0 && dup[1] > 320.0, "{dup:?}");
+    assert_eq!(text("#dup-note"), "Faint note, the copy a visitor sees.");
+    // Should pass: the visible copy comes first, and a unique id.
+    let first = rect("#dup-first-note");
+    assert!(first[2] > 400.0 && first[1] < 200.0, "{first:?}");
+    assert_eq!(text("#dup-first-note"), "Faint note, visible first copy.");
+    assert!(rect("#solo-note")[2] > 400.0);
+    assert_eq!(text("#solo-note"), "Faint note with an id of its own.");
+
+    // The screenshot shows the flagged copy at its rect.
+    use base64::Engine as _;
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&shot.jpeg_base64)
+        .expect("base64");
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+        .expect("jpeg")
+        .to_rgb8();
+    let (mut lo, mut hi) = (255u8, 0u8);
+    for y in dup[1] as u32..(dup[1] + dup[3]) as u32 {
+        for x in dup[0] as u32..(dup[0] + dup[2]).min(img.width() as f64) as u32 {
+            let p = img.get_pixel(x, y).0;
+            let l = ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8;
+            lo = lo.min(l);
+            hi = hi.max(l);
+        }
+    }
+    assert!(hi.saturating_sub(lo) > 20, "the flagged copy is blank at its rect");
+}

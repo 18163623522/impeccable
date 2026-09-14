@@ -223,6 +223,34 @@ fn one_throw_reported_sync_and_in_promise_reports_once() {
 }
 
 #[test]
+fn a_production_react_invariant_reads_as_its_message() {
+    let Some(findings) = scan("script-error-react.html") else {
+        return;
+    };
+    let errors = script_errors(&findings);
+    // A number the table knows: the message in place of the boilerplate, the
+    // number kept, the source after it.
+    assert!(
+        errors.iter().any(|s| s.starts_with(
+            "Uncaught Error: Minified React error #418: Hydration failed because the initial UI does not match what was rendered on the server. (at hydrateApp, http://127.0.0.1:"
+        )),
+        "expected the decoded invariant with its source, got {errors:?}"
+    );
+    // A number it does not know, and text that is not an invariant, as before.
+    assert!(
+        errors.iter().any(|s| s.starts_with(
+            "Uncaught Error: Minified React error #9999; visit https://react.dev/errors/9999 for the full message"
+        )),
+        "expected the unknown invariant undecoded, got {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|s| s.starts_with("Uncaught Error: Order #418 failed to sync (at syncOrder, ")),
+        "expected the plain error untouched, got {errors:?}"
+    );
+    assert_eq!(errors.len(), 3, "{errors:?}");
+}
+
+#[test]
 fn contrast_just_under_the_bar_prints_under_the_bar() {
     let Some(findings) = scan("low-contrast-near-threshold.html") else {
         return;

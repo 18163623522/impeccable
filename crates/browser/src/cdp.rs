@@ -1326,7 +1326,63 @@ const PAGE_ERROR_MESSAGE_MAX: usize = 160;
 ///
 /// The body is its first line, trimmed and cut at 160 characters. A throw
 /// whose body is empty reports nothing, so this returns an empty string.
+///
+/// A production React invariant then reads as its message, the number kept
+/// ([`decode_react_invariant`]).
 pub fn page_error_message(details: &Value) -> String {
+    decode_react_invariant(&typed_page_error_message(details))
+}
+
+/// The common invariants a production React build throws by number, with the
+/// message React's error decoder prints for each (its leading sentences, where
+/// the rest is advice on how to fix it).
+const REACT_INVARIANTS: &[(u32, &str)] = &[
+    (31, "Objects are not valid as a React child."),
+    (130, "Element type is invalid: expected a string (for built-in components) or a class/function (for composite components)."),
+    (185, "Maximum update depth exceeded."),
+    (300, "Rendered fewer hooks than expected. This may be caused by an accidental early return statement."),
+    (301, "Too many re-renders. React limits the number of renders to prevent an infinite loop."),
+    (310, "Rendered more hooks than during the previous render."),
+    (321, "Invalid hook call. Hooks can only be called inside of the body of a function component."),
+    (418, "Hydration failed because the initial UI does not match what was rendered on the server."),
+    (419, "The server could not finish this Suspense boundary, likely due to an error during server rendering. Switched to client rendering."),
+    (421, "This Suspense boundary received an update before it finished hydrating."),
+    (422, "There was an error while hydrating this Suspense boundary. Switched to client rendering."),
+    (423, "There was an error while hydrating. Because the error happened outside of a Suspense boundary, the entire root will switch to client rendering."),
+    (425, "Text content does not match server-rendered HTML."),
+    (426, "A component suspended while responding to synchronous input."),
+];
+
+/// A production React build throws `Minified React error #418; visit <url>
+/// for the full message or use the non-minified dev environment for full
+/// errors and additional helpful warnings.`, which says nothing on its own.
+/// For a number in [`REACT_INVARIANTS`] the boilerplate after the number is
+/// replaced by the message: `Minified React error #418: Hydration failed
+/// because the initial UI does not match what was rendered on the server.`
+/// The message is added after the 160-character cut, so it is never cut. A
+/// number the table does not know, and any other text, stays as it was.
+pub fn decode_react_invariant(message: &str) -> String {
+    const MARK: &str = "Minified React error #";
+    let Some(at) = message.find(MARK) else {
+        return message.to_string();
+    };
+    let rest = &message[at + MARK.len()..];
+    let digits_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let Ok(code) = rest[..digits_len].parse::<u32>() else {
+        return message.to_string();
+    };
+    let Some((_, text)) = REACT_INVARIANTS.iter().find(|(c, _)| *c == code) else {
+        return message.to_string();
+    };
+    let tail = &rest[digits_len..];
+    if !(tail.is_empty() || tail.starts_with("; visit ")) {
+        return message.to_string();
+    }
+    format!("{}: {text}", &message[..at + MARK.len() + digits_len])
+}
+
+/// [`page_error_message`] before a React invariant is decoded.
+fn typed_page_error_message(details: &Value) -> String {
     let text = details.get("text").and_then(Value::as_str).unwrap_or("");
     let Some(exception) = details.get("exception") else {
         let first = first_line(text);
@@ -1636,9 +1692,11 @@ mod tests {
                 "description": "Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418\n    at t3 (https://x.test/a.js:1:24070)" },
             "stackTrace": { "callFrames": [{ "functionName": "t3", "url": "https://x.test/a.js", "lineNumber": 0, "columnNumber": 24069 }] }
         });
+        // A production React invariant reads as its message
+        // (`a_react_invariant_reads_as_its_message`).
         assert_eq!(
             page_error_message(&error),
-            "Uncaught Error: Minified React error #418; visit https://reactjs.org/docs/error-decoder.html?invariant=418"
+            "Uncaught Error: Minified React error #418: Hydration failed because the initial UI does not match what was rendered on the server."
         );
         assert_eq!(page_error_message(&json!({ "text": "Uncaught", "exception": { "type": "string", "value": "boom" } })), "Uncaught boom");
         // A cross-origin throw arrives with no exception object to read.
@@ -1708,6 +1766,46 @@ mod tests {
         assert_eq!(page_error_key(sync), page_error_key(rejected));
         assert_ne!(page_error_key(sync), page_error_key("Uncaught TypeError: Cannot redefine property: href"));
         assert_eq!(page_error_key("Uncaught boom"), "Uncaught boom");
+    }
+
+    #[test]
+    fn a_react_invariant_reads_as_its_message() {
+        // Both URL forms, after the cut: React 18's decoder page and React
+        // 19's errors page. The number stays; the boilerplate goes.
+        assert_eq!(
+            decode_react_invariant("Uncaught Error: Minified React error #423; visit https://reactjs.org/docs/error-decoder.html?invariant=423 for the full message or use the non-minified dev environment for full"),
+            "Uncaught Error: Minified React error #423: There was an error while hydrating. Because the error happened outside of a Suspense boundary, the entire root will switch to client rendering."
+        );
+        assert_eq!(
+            decode_react_invariant("Uncaught Error: Minified React error #425; visit https://react.dev/errors/425 for the full message or use the non-minified dev environment for full errors and additional helpful warnings."),
+            "Uncaught Error: Minified React error #425: Text content does not match server-rendered HTML."
+        );
+        assert_eq!(
+            decode_react_invariant("Uncaught (in promise) Error: Minified React error #422"),
+            "Uncaught (in promise) Error: Minified React error #422: There was an error while hydrating this Suspense boundary. Switched to client rendering."
+        );
+        // The decoded message is added after the cut, so it is never cut.
+        let details = json!({
+            "text": "Uncaught",
+            "exception": { "type": "object", "subtype": "error", "className": "Error", "objectId": "1",
+                "description": "Error: Minified React error #423; visit https://reactjs.org/docs/error-decoder.html?invariant=423 for the full message or use the non-minified dev environment for full errors and additional helpful warnings.\n    at x (https://x.test/a.js:1:2)" }
+        });
+        assert!(page_error_message(&details).ends_with("the entire root will switch to client rendering."));
+        // A number the table does not know, and text that is not an invariant,
+        // stay as they were.
+        for unchanged in [
+            "Uncaught Error: Minified React error #9999; visit https://react.dev/errors/9999 for the full message",
+            "Uncaught Error: Order #418 failed to sync",
+            "Uncaught Error: Minified React error #418 happened twice",
+            "Uncaught Error: Minified React error #",
+            "Uncaught boom",
+        ] {
+            assert_eq!(decode_react_invariant(unchanged), unchanged);
+        }
+        // Both reports of one invariant still share a key.
+        let sync = page_error_message(&json!({ "text": "Uncaught Error: Minified React error #418; visit https://react.dev/errors/418 for the full message" }));
+        let rejected = page_error_message(&json!({ "text": "Uncaught (in promise) Error: Minified React error #418; visit https://react.dev/errors/418 for the full message" }));
+        assert_eq!(page_error_key(&sync), page_error_key(&rejected));
     }
 
     #[test]

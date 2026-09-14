@@ -2442,3 +2442,101 @@ captures each time, against run 16:
 10. **Tints over a photo.** Where gradient tints lie above a photo and the walk
    named a gradient, the tints decide and the verdict stands, whatever the
    photo does to the surface (hrsimple.app's subline).
+
+## Recorded 2026-09-13: evidence origin, scan identity and React invariants (corpus/fix-evidence-origin)
+
+`corpus/fix-evidence-origin` fixes three things a corpus judge saw wrong in the
+URL engine's evidence and one in its script-error snippets. None of them is in
+a file scan, so no existing fixture's output moves; the goldens move only
+because three fixtures were added.
+
+- **The screenshot's document origin.** A document that scrolls from the right
+  (agora.co.il sets `direction: rtl` on body) keeps its overflow at negative
+  document x, and a beyond-viewport capture starts at the left edge of that
+  overflow. The engine measures the furthest left the document scrolls
+  (`GEOMETRY_JS`, by scrolling there and straight back) and records the
+  image's left edge as `Screenshot::origin_x`: 0 for most pages, minus the
+  overflow here. Past the 4,096px width cap the capture starts further right,
+  so the viewport stays in the image. Stitched captures step their columns
+  from the origin, and `needs_element_shot` compares image x. Pinned by
+  `fullpage.rs` unit tests and `a_right_to_left_page_records_where_its_screenshot_starts`
+  in `crates/browser/tests/fullpage_screenshot.rs`.
+- **Rects from the element the scan flagged.** `capture_post_scan` resolved
+  each flagged selector with `querySelector`. A generated selector names one
+  element unless an id anchors it and the page repeats the id, and d3shop.ae
+  has three inputs with one id, two collapsed, so finding 108250's rect and
+  crop came from a hidden copy. The scan now carries each result's element in
+  its capture, and for an id-anchored selector the capture matched more than
+  once the evidence takes the same match (`[n, count]`, used while the page
+  still has `count` matches, `querySelector` otherwise). Element shots resolve
+  the same way. Pinned by `evidence_measures_the_element_the_scan_flagged_when_an_id_repeats`
+  in `crates/browser/tests/evidence.rs`.
+- **React invariants.** `Minified React error #418; visit <url> ...` reads
+  `Minified React error #418: Hydration failed because the initial UI does not
+  match what was rendered on the server.` for 14 common numbers
+  (`REACT_INVARIANTS` in `cdp.rs`, specified in `CLI-CONTRACT.md`). Pinned by
+  `a_react_invariant_reads_as_its_message` and
+  `a_production_react_invariant_reads_as_its_message`.
+
+New goldens, recorded from the binary and read by hand:
+`detect-fixture-json-fullpage-screenshot-rtl-html` and the text form
+(`low-contrast` on the faint copy, `overused-font` for Arial);
+`detect-fixture-json-evidence-duplicate-id-html` and the text form (the static
+engine measures no boxes, so it reports all six faint copies, collapsed ones
+included, plus `overused-font`); `detect-fixture-json-script-error-react-html`
+and the text form (nothing: the static engine runs no script).
+
+Re-recorded sweeps, compared finding by finding against the previous goldens;
+every added finding belongs to the two new fixtures that report, and nothing
+was removed: `detect-dir-json-all-fixtures` 648 to 657 and
+`detect-no-advisory-json` 568 to 577 (9 added each), `detect-scope-type` 160 to
+162 and `detect-scope-both` 208 to 210 (the two `overused-font`). In the text forms
+(`detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+`detect-no-advisory-text`) only the two fixture blocks were added and the
+summary moved from 568 to 577 anti-patterns.
+
+The corpus harness reads the origin behind `cfg(engine_screenshot_origin)`
+(committed from the corpus side), and `judge/prepare.ts` and `judge/tiles.py`
+place tiles by it, recovering it for older captures.
+
+### Known limits
+
+1. **The origin is measured by scrolling.** Only a page that scrolls from the
+   right moves, sideways and back in one task, but a horizontal scroll handler
+   on such a page could still react before the capture.
+2. **The pixel contrast pass is unchanged.** Its clips floor document x at 0,
+   and on a page that scrolls from the right a candidate in the overflow is
+   likely measured at the wrong pixels. Not measured on the corpus.
+3. **Identity reaches the evidence only.** The pixel pass and its scroll into
+   view still resolve a repeated id with `querySelector`, so they can measure
+   a collapsed copy.
+4. **Visual-contrast results on a repeated id.** Their element is known only
+   when every analysis on that selector gives the clip of one match; otherwise
+   the evidence resolves the selector as before.
+5. **React wording.** The table carries React 18's messages; React 19 words
+   418 slightly differently, and the decoded snippet drops the decoder URL
+   with its `args[]`. Unknown numbers keep React's text.
+6. **Older captures.** `prepare.ts` recovers the origin from body or html
+   `direction: rtl` and the image width; a vertical writing mode that scrolls
+   from the right is not recovered, and the labeler reads only a recorded
+   origin.
+7. **CLI-CONTRACT.** It describes no evidence JSON, so the origin is documented
+   on `Screenshot::origin_x` rather than there.
+
+### Known limits at merge
+
+`corpus/integration` merges this branch first of round 5, with no conflicts;
+every golden it recorded replays as recorded.
+
+1. **Pixel pass on a right-to-left overflow page.** The pixel contrast pass
+   still floors clip x at 0, so a candidate in the negative-x overflow is
+   measured at the wrong pixels (limit 2 above).
+2. **Repeated ids outside the evidence.** The pixel pass and its scroll into
+   view still resolve a repeated id with `querySelector` (limit 3 above).
+3. **A clipped right-to-left root.** With `overflow-x: hidden` on both html and
+   body and `direction: rtl`, the document does not scroll sideways, so the
+   screenshot is only viewport-wide and overflow nobody can scroll to falls
+   outside it.
+4. **The probe scrolls in one task.** The origin probe scrolls sideways and
+   back within one task (limit 1 above); a scroll handler that reads position
+   synchronously can still see it.

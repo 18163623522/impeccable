@@ -34,7 +34,7 @@ const __SNAP_STYLE_PROPS = [
   "hyphens", "inlineSize", "inset", "insetBlock", "insetBlockEnd",
   "insetBlockStart", "insetInline", "insetInlineEnd", "insetInlineStart",
   "left", "letterSpacing", "lineHeight", "marginBottom", "marginLeft",
-  "marginRight", "marginTop", "maxHeight", "maxWidth", "minHeight", "minWidth",
+  "marginRight", "marginTop", "maskImage", "maxHeight", "maxWidth", "minHeight", "minWidth",
   "mixBlendMode", "objectFit", "objectPosition", "opacity", "outline",
   "outlineColor", "outlineOffset", "outlineStyle", "outlineWidth", "overflow",
   "overflowX", "overflowY", "paddingBottom", "paddingLeft", "paddingRight",
@@ -45,7 +45,7 @@ const __SNAP_STYLE_PROPS = [
   "transitionProperty", "transitionTimingFunction", "translate", "unicodeBidi",
   "verticalAlign",
   "visibility", "webkitBackgroundClip", "webkitClipPath", "webkitHyphens",
-  "webkitLineClamp", "webkitTextFillColor", "whiteSpace", "width", "willChange", "wordBreak",
+  "webkitLineClamp", "webkitMaskImage", "webkitTextFillColor", "whiteSpace", "width", "willChange", "wordBreak",
   "zIndex",
 ];
 // `::before` / `::after` properties, recorded where `content` is set.

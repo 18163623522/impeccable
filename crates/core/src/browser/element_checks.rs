@@ -874,9 +874,29 @@ pub fn check_element_colors_dom(
         bg_source_host,
     };
     let resolved = color_opts.effective_bg;
+    // A contrast verdict is about the surface the walk resolved. Where the
+    // hit-test stacks say the text is covered at capture (a fixed banner over
+    // it, a photo laid over an initial), or reads over paint the walk never
+    // read (a sibling photo, a slideshow image, an SVG shape), that verdict
+    // is about nothing a reader sees, and no verdict is printed. An element
+    // the pixel pass takes as a candidate is still measured there. Asked once
+    // per element, late, and only for an element the rule failed; the
+    // SAFE_TAGS path asks before the page claims the colour pair, so the
+    // first uncovered link wearing it reports instead.
+    let surface_host = if pseudo_surface_read { Some(el) } else { surface.host };
+    let layers = std::cell::OnceCell::new();
+    let verdict_stands = |h: &RuleHit| {
+        h.id != "low-contrast"
+            || layers
+                .get_or_init(|| {
+                    crate::browser::text_layers::layers_at_text(dom, el, surface_host, resolved)
+                })
+                .verdict_stands()
+    };
     let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
-        safe_tag_text_hit_stands(dom, el, h, resolved)
+        safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h)
     });
+    findings.retain(|h| verdict_stands(h));
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -894,11 +914,11 @@ pub fn check_element_colors_dom(
             if !skip {
                 if let Some(ph_raw) = dom.pseudo_style(el, "::placeholder", "color") {
                     if let Some(ph_color) = parse_rgb_or_any(&ph_raw) {
-                        findings.extend(check_placeholder_colors(
-                            &color_opts,
-                            placeholder,
-                            ph_color,
-                        ));
+                        findings.extend(
+                            check_placeholder_colors(&color_opts, placeholder, ph_color)
+                                .into_iter()
+                                .filter(|h| verdict_stands(h)),
+                        );
                     }
                 }
             }
@@ -3440,8 +3460,11 @@ mod tests {
         // The photo comes after the content in the markup and is laid beneath
         // it by `z-index`, either its own negative one or the content's
         // positive one.
-        let hero = |photo_z: &str, content_position: &str, content_z: &str| {
+        // `photo_on_top` is the hit-test answer a browser gives for the layers
+        // described; `fold` puts the viewport's bottom edge where it is.
+        let hero = |photo_z: &str, content_position: &str, content_z: &str, photo_on_top: bool, fold: f64| {
             let (mut d, body) = page();
+            d.inner_height = fold;
             let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 500.0));
             d.set_styles(hero, &[("position", "relative"), ("zIndex", "0")]);
             let content = bare_box(&mut d, hero, "div", (0.0, 0.0, 1280.0, 500.0));
@@ -3449,19 +3472,38 @@ mod tests {
             let a = muted_link(&mut d, content, "rgb(243, 123, 46)", (100.0, 200.0, 420.0, 20.0));
             let img = bare_box(&mut d, hero, "img", (0.0, 0.0, 1280.0, 500.0));
             d.set_styles(img, &[("position", "absolute"), ("zIndex", photo_z)]);
+            let stack = if photo_on_top {
+                vec![img, a, content, hero, body]
+            } else {
+                vec![a, content, img, hero, body]
+            };
+            stack_at_text(&mut d, a, stack);
             colors(&d, a)
         };
-        assert!(hero("-1", "static", "auto").is_empty());
-        assert!(hero("auto", "relative", "1").is_empty());
+        assert!(hero("-1", "static", "auto", false, 800.0).is_empty());
+        assert!(hero("auto", "relative", "1", false, 800.0).is_empty());
         // At the same layer the later photo paints over the text, so it is not
-        // what the text is read against, and the link is scored on the page.
+        // what the text is read against. Where no point can be asked (here the
+        // fold sits above the run), the link is scored on the page.
         assert!(
-            hero("auto", "static", "auto")
+            hero("auto", "static", "auto", true, 150.0)
                 .iter()
                 .any(|h| h.snippet.contains("#f37b2e on #ffffff")),
             "{:?}",
-            hero("auto", "static", "auto")
+            hero("auto", "static", "auto", true, 150.0)
         );
+        // Where the page answers, the photo over the text covers it, and there
+        // is nothing to score.
+        assert!(hero("auto", "static", "auto", true, 800.0).is_empty());
+    }
+
+    /// Answer every point the occlusion grid asks over `el`'s box with `stack`.
+    fn stack_at_text(d: &mut FakeDom, el: ElId, stack: Vec<ElId>) {
+        let rect = d.rect(el);
+        let (vw, vh) = (d.inner_width, d.inner_height);
+        for (x, y) in crate::browser::page_checks::occlusion_probe_points(&rect, vw, vh) {
+            d.set_point(x, y, stack.clone());
+        }
     }
 
     #[test]
@@ -3579,6 +3621,8 @@ mod tests {
                 section,
                 &[("position", "relative"), ("backgroundColor", section_fill)],
             );
+            // The header's `z-index: 1` lays the later section beneath it.
+            stack_at_text(&mut d, a, vec![a, header, section, wrapper, body]);
             colors(&d, a)
         };
         assert!(header("rgb(10, 16, 21)").is_empty(), "{:?}", header("rgb(10, 16, 21)"));
@@ -5335,5 +5379,296 @@ mod tests {
                 "cards staged with {prop} {value}"
             );
         }
+    }
+
+    // ── layers the walk does not read, answered by the hit-test stack ──────
+
+    /// A faint paragraph, which takes the full pass rather than the link path.
+    fn faint_copy(d: &mut FakeDom, parent: ElId, color: &str, rect: (f64, f64, f64, f64)) -> ElId {
+        let p = d.add(Some(parent), "p");
+        visible(d, p);
+        d.add_text(p, "Team size and setup time");
+        d.set_rect(p, rect.0, rect.1, rect.2, rect.3);
+        d.set_styles(
+            p,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", color),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        p
+    }
+
+    fn reports_contrast(hits: &[RuleHit]) -> bool {
+        hits.iter().any(|h| h.id == "low-contrast")
+    }
+
+    #[test]
+    fn text_under_a_fixed_banner_is_not_scored() {
+        let run = |banner_rect: (f64, f64, f64, f64), opacity: &str, copy_top: f64| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 1400.0));
+            let p = faint_copy(&mut d, hero, "rgb(170, 170, 170)", (16.0, copy_top, 300.0, 28.0));
+            let banner = bare_box(&mut d, body, "div", banner_rect);
+            d.set_styles(
+                banner,
+                &[
+                    ("position", "fixed"),
+                    ("backgroundColor", "rgba(255, 255, 255, 0.95)"),
+                    ("opacity", opacity),
+                ],
+            );
+            colors(&d, p)
+        };
+        // The banner lies over every point of the run: nothing to score.
+        assert!(!reports_contrast(&run((0.0, 645.0, 1280.0, 155.0), "1", 700.0)));
+        // Over the lower line only, the upper line is read: the verdict stands.
+        assert!(reports_contrast(&run((0.0, 712.0, 1280.0, 88.0), "1", 700.0)));
+        // A translucent banner shows the text through it.
+        assert!(reports_contrast(&run((0.0, 645.0, 1280.0, 155.0), "0.5", 700.0)));
+        // Below the fold no point can be asked, and the verdict stands.
+        assert!(reports_contrast(&run((0.0, 645.0, 1280.0, 1000.0), "1", 900.0)));
+    }
+
+    #[test]
+    fn a_photo_over_an_svg_initial_leaves_it_unscored() {
+        let (mut d, body) = page();
+        let avatar = bare_box(&mut d, body, "div", (758.0, 400.0, 25.0, 25.0));
+        d.set_style(avatar, "position", "relative");
+        let svg = bare_box(&mut d, avatar, "svg", (758.0, 400.0, 25.0, 25.0));
+        let text = d.add(Some(svg), "text");
+        visible(&mut d, text);
+        d.add_text(text, "M");
+        d.set_rect(text, 764.0, 405.0, 12.0, 15.0);
+        d.set_styles(
+            text,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(255, 255, 255)"),
+                ("fontSize", "25px"),
+                ("fontWeight", "400"),
+            ],
+        );
+        assert!(reports_contrast(&colors(&d, text)), "no photo: white on white");
+        let img = bare_box(&mut d, avatar, "img", (758.0, 400.0, 25.0, 25.0));
+        d.set_style(img, "zIndex", "10");
+        assert!(!reports_contrast(&colors(&d, text)), "{:?}", colors(&d, text));
+    }
+
+    #[test]
+    fn paint_under_the_text_that_the_walk_never_read_leaves_no_verdict() {
+        // `section > (layer, content > p)`: the layer is nobody's ancestor, so
+        // the walk passes under it to the page white.
+        let run = |layer: Option<(&str, &[(&str, &str)])>| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 600.0));
+            d.set_style(hero, "position", "relative");
+            if let Some((tag, styles)) = layer {
+                let el = bare_box(&mut d, hero, tag, (0.0, 0.0, 1280.0, 600.0));
+                d.set_styles(el, &[("position", "absolute")]);
+                d.set_styles(el, styles);
+            }
+            let content = bare_box(&mut d, hero, "div", (0.0, 300.0, 1280.0, 100.0));
+            d.set_style(content, "position", "relative");
+            let p = faint_copy(&mut d, content, "rgb(240, 240, 240)", (20.0, 320.0, 600.0, 28.0));
+            colors(&d, p)
+        };
+        assert!(reports_contrast(&run(None)), "nothing under it: the page white is the surface");
+        assert!(!reports_contrast(&run(Some(("img", &[])))), "a photo");
+        assert!(
+            !reports_contrast(&run(Some(("div", &[("backgroundImage", "linear-gradient(rgb(10, 20, 30), rgb(40, 50, 60))")])))),
+            "a gradient layer"
+        );
+        assert!(
+            !reports_contrast(&run(Some(("div", &[("backgroundColor", "rgb(20, 20, 20)")])))),
+            "a dark panel"
+        );
+        assert!(
+            reports_contrast(&run(Some(("div", &[("backgroundColor", "rgb(255, 255, 255)")])))),
+            "a white panel is the surface the walk named"
+        );
+        assert!(
+            reports_contrast(&run(Some(("div", &[("backgroundColor", "rgba(0, 0, 0, 0.04)")])))),
+            "a faint wash is not a surface"
+        );
+        assert!(
+            reports_contrast(&run(Some(("img", &[("opacity", "0.05")])))),
+            "a nearly transparent picture is not a surface"
+        );
+        assert!(
+            reports_contrast(&run(Some((
+                "div",
+                &[("backgroundImage", "linear-gradient(rgba(192, 88, 243, 0.08), rgba(255, 255, 255, 0))")]
+            )))),
+            "a gradient tint at 8% is a wash"
+        );
+        assert!(
+            !reports_contrast(&run(Some((
+                "div",
+                &[("backgroundImage", "linear-gradient(rgba(192, 88, 243, 0.4), rgba(255, 255, 255, 0))")]
+            )))),
+            "a gradient tint at 40% is paint the walk never read"
+        );
+    }
+
+    #[test]
+    fn texture_under_the_text_leaves_the_walk_verdict() {
+        // `section > (layer, content > p)`. With `dark`, the section paints
+        // its own #0f172a and the walk names it; without, the walk reaches the
+        // page white.
+        let run = |dark: bool, tag: &str, styles: &[(&str, &str)]| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 600.0));
+            d.set_style(hero, "position", "relative");
+            if dark {
+                d.set_style(hero, "backgroundColor", "rgb(15, 23, 42)");
+            }
+            let el = bare_box(&mut d, hero, tag, (0.0, 0.0, 1280.0, 600.0));
+            d.set_styles(el, &[("position", "absolute")]);
+            d.set_styles(el, styles);
+            let content = bare_box(&mut d, hero, "div", (0.0, 300.0, 1280.0, 100.0));
+            d.set_style(content, "position", "relative");
+            let ink = if dark { "rgb(71, 85, 105)" } else { "rgb(156, 163, 175)" };
+            let p = faint_copy(&mut d, content, ink, (20.0, 320.0, 600.0, 28.0));
+            colors(&d, p)
+        };
+        const DOTS: &str = "radial-gradient(rgb(51, 65, 85) 1px, rgba(0, 0, 0, 0) 1px)";
+        const LINES: &str = "linear-gradient(to right, rgb(229, 231, 235) 1px, rgba(0, 0, 0, 0) 1px), linear-gradient(rgb(229, 231, 235) 1px, rgba(0, 0, 0, 0) 1px)";
+        const GRAIN: &str = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='1' height='1' fill='%23fff'/%3E%3C/svg%3E\")";
+        let stands = |dark: bool, tag: &str, styles: &[(&str, &str)], what: &str| {
+            let hits = run(dark, tag, styles);
+            assert!(reports_contrast(&hits), "{what}: {hits:?}");
+        };
+        let set_aside = |dark: bool, tag: &str, styles: &[(&str, &str)], what: &str| {
+            let hits = run(dark, tag, styles);
+            assert!(!reports_contrast(&hits), "{what}: {hits:?}");
+        };
+        stands(true, "div", &[("backgroundImage", DOTS), ("backgroundSize", "24px 24px")], "a dot grid in 24px cells");
+        stands(false, "div", &[("backgroundImage", LINES), ("backgroundSize", "64px 64px, 64px 64px")], "grid lines in 64px cells on the page ground");
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(to right, rgba(255, 255, 255, 0.15) 1px, rgba(0, 0, 0, 0) 1px)")],
+            "hairline lines at the box's size",
+        );
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "repeating-linear-gradient(45deg, rgb(30, 41, 59) 0px, rgb(30, 41, 59) 10px, rgb(15, 23, 42) 10px, rgb(15, 23, 42) 20px)")],
+            "a repeating gradient",
+        );
+        stands(true, "div", &[("backgroundImage", GRAIN), ("opacity", "0.2")], "a grain tile at 0.2");
+        stands(true, "div", &[("backgroundImage", GRAIN)], "a grain tile at full opacity");
+        stands(
+            false,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(10, 20, 30), rgb(40, 50, 60))"), ("maskImage", "radial-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))")],
+            "a masked layer",
+        );
+        stands(false, "img", &[("opacity", "0.3")], "a photo ghosted at 0.3");
+        stands(
+            false,
+            "div",
+            &[("backgroundImage", "url(\"https://example.test/tile.png\")")],
+            "a remote image tiled at its own size is undecided",
+        );
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(15, 23, 42), rgb(20, 28, 46))")],
+            "a gradient in the section's own colour",
+        );
+        stands(true, "div", &[("backgroundColor", "rgb(17, 24, 39)")], "a panel in the section's own colour");
+        // Paint that could really change what the text sits on still sets the
+        // verdict aside, whatever surface the walk named.
+        set_aside(true, "img", &[], "a photo over the section's own fill");
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", "url(\"https://example.test/hero.jpg\")"), ("backgroundSize", "cover")],
+            "a cover photo background",
+        );
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(255, 255, 255), rgb(240, 240, 240))")],
+            "a light gradient over the dark section",
+        );
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", DOTS), ("backgroundSize", "24px 24px"), ("backgroundColor", "rgb(255, 255, 255)")],
+            "a dot grid over a white panel of its own",
+        );
+    }
+
+    #[test]
+    fn a_shape_under_svg_text_is_a_surface_the_walk_never_read() {
+        let run = |with_circle: bool| {
+            let (mut d, body) = page();
+            let svg = bare_box(&mut d, body, "svg", (100.0, 100.0, 25.0, 25.0));
+            if with_circle {
+                let circle = bare_box(&mut d, svg, "circle", (100.0, 100.0, 25.0, 25.0));
+                d.set_style(circle, "backgroundImage", "none");
+            }
+            let g = bare_box(&mut d, svg, "g", (106.0, 105.0, 12.0, 15.0));
+            let text = d.add(Some(g), "text");
+            visible(&mut d, text);
+            d.add_text(text, "M");
+            d.set_rect(text, 106.0, 105.0, 12.0, 15.0);
+            d.set_styles(
+                text,
+                &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgb(255, 255, 255)"), ("fontSize", "25px")],
+            );
+            colors(&d, text)
+        };
+        assert!(reports_contrast(&run(false)));
+        assert!(!reports_contrast(&run(true)));
+    }
+
+    #[test]
+    fn an_answer_the_capture_disagrees_with_does_not_cover_the_text() {
+        // The page answered with a box whose captured rect is somewhere else,
+        // as when a carousel advances between the capture and the answer.
+        let (mut d, body) = page();
+        let p = faint_copy(&mut d, body, "rgb(170, 170, 170)", (16.0, 100.0, 300.0, 28.0));
+        let elsewhere = bare_box(&mut d, body, "div", (700.0, 100.0, 300.0, 28.0));
+        d.set_style(elsewhere, "backgroundColor", "rgb(255, 255, 255)");
+        let rect = d.rect(p);
+        for (x, y) in crate::browser::page_checks::occlusion_probe_points(&rect, 1280.0, 800.0) {
+            d.set_point(x, y, vec![elsewhere, p, body]);
+        }
+        assert!(reports_contrast(&colors(&d, p)));
+    }
+
+    #[test]
+    fn unanswered_points_keep_the_verdict() {
+        // A recording made before these points were asked answers nothing
+        // there, which says nothing about what covers the text.
+        let (mut d, body) = page();
+        let p = faint_copy(&mut d, body, "rgb(170, 170, 170)", (16.0, 700.0, 300.0, 28.0));
+        let banner = bare_box(&mut d, body, "div", (0.0, 645.0, 1280.0, 155.0));
+        d.set_styles(banner, &[("position", "fixed"), ("backgroundColor", "rgb(255, 255, 255)")]);
+        let rect = d.rect(p);
+        let points = crate::browser::page_checks::occlusion_probe_points(&rect, 1280.0, 800.0);
+        assert!(!reports_contrast(&colors(&d, p)), "answered: covered");
+        d.set_point(points[0].0, points[0].1, Vec::new());
+        assert!(reports_contrast(&colors(&d, p)), "one point unanswered: undecided");
+    }
+
+    #[test]
+    fn the_first_uncovered_link_wearing_a_colour_reports_it() {
+        let (mut d, body) = page();
+        let covered = muted_link(&mut d, body, "rgb(160, 160, 160)", (16.0, 700.0, 200.0, 20.0));
+        let banner = bare_box(&mut d, body, "div", (0.0, 645.0, 1280.0, 155.0));
+        d.set_styles(banner, &[("position", "fixed"), ("backgroundColor", "rgb(255, 255, 255)")]);
+        let visible_link = muted_link(&mut d, body, "rgb(160, 160, 160)", (16.0, 200.0, 200.0, 20.0));
+        let mut seen = SafeTagTextSeen::default();
+        assert!(check_element_colors_dom(&d, covered, &mut seen).is_empty());
+        let hits = check_element_colors_dom(&d, visible_link, &mut seen);
+        assert!(reports_contrast(&hits), "{hits:?}");
     }
 }

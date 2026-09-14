@@ -31,6 +31,9 @@ const REPLAY_FIXTURES: &[&str] = &[
     "typography-should-flag.html",
     "quality.html",
     "layout.html",
+    // Hit tests over covered and layered text, and a page that moves between
+    // the capture and the answers.
+    "covered-text-contrast.html",
 ];
 
 fn fixtures_dir() -> PathBuf {

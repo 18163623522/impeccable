@@ -925,6 +925,14 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
         if image_only && !reasons.iter().any(|r| r == "image background") {
             continue;
         }
+        // Text another layer covers at capture (a fixed consent banner, a photo
+        // over an initial) is scored by no pass. The element pass stands down
+        // on it, and the samples here read only what lies under the text.
+        if crate::browser::text_layers::layers_at_text(dom, el, None, None)
+            == crate::browser::text_layers::TextLayers::Covered
+        {
+            continue;
+        }
         let text_color = parse_rgb_or_any(&dom.style(el, "color"));
         let font_size = {
             let v = parse_float(&dom.style(el, "fontSize"));
@@ -2747,5 +2755,28 @@ mod tests {
         assert!(!placed_size_is_known("auto 16px", 0.0, 0.0));
         assert!(!placed_size_is_known("calc(50% + 10px) auto", 300.0, 200.0));
         assert!(!placed_size_is_known("10em 2em", 300.0, 200.0));
+    }
+
+    /// Text a fixed layer covers at capture is no candidate: the element pass
+    /// stands down on it, and a sampled or pixel verdict would score it anyway.
+    #[test]
+    fn covered_text_is_no_candidate() {
+        let build = |banner_opacity: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let sec = d.add(Some(body), "section");
+            d.set_styles(sec, &[("backgroundImage", "linear-gradient(red, blue)"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+            d.set_rect(sec, 0.0, 600.0, 1280.0, 200.0);
+            let p = d.add(Some(sec), "p");
+            d.add_text(p, "Team size");
+            d.set_styles(p, &[("color", "rgb(250, 240, 250)"), ("fontSize", "14px"), ("fontWeight", "400"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("backgroundImage", "none"), ("opacity", "1")]);
+            d.set_rect(p, 16.0, 735.0, 184.0, 20.0);
+            let banner = d.add(Some(body), "div");
+            d.set_styles(banner, &[("position", "fixed"), ("backgroundColor", "rgba(255, 255, 255, 0.95)"), ("backgroundImage", "none"), ("opacity", banner_opacity)]);
+            d.set_rect(banner, 0.0, 645.0, 1280.0, 155.0);
+            collect_visual_contrast_candidates(&d, &json!({}))
+        };
+        assert!(build("1").is_empty(), "{:?}", build("1"));
+        assert_eq!(build("0.5").len(), 1, "a translucent banner shows the text");
     }
 }

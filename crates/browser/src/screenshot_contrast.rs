@@ -10,7 +10,7 @@ use base64::Engine as _;
 use impeccable_core::browser::visual::{
     self, GlyphPixel, PixelContrastOutcome, GLYPH_MIN_PIXELS,
 };
-use impeccable_core::js::{math_max, number_to_string, to_fixed};
+use impeccable_core::js::{math_max, number_to_string};
 use serde_json::{json, Value};
 
 use crate::cdp::{CdpResult, Page};
@@ -471,15 +471,35 @@ fn measure_candidate(
     };
     Ok(Some(RawFinding {
         id: "low-contrast",
-        snippet: format!(
-            "pixel contrast {}:1 median {}:1 (need {}:1) on {}{}",
-            to_fixed(measured, 1),
-            to_fixed(median, 1),
-            js_string(candidate.get("threshold").unwrap_or(&Value::Null)),
-            reason_label,
-            text_label
+        snippet: pixel_contrast_snippet(
+            measured,
+            median,
+            candidate.get("threshold").unwrap_or(&Value::Null),
+            &reason_label,
+            &text_label,
         ),
     }))
+}
+
+/// The pixel pass's snippet. The verdict and the median print against the
+/// threshold ([`impeccable_core::color::ratio_label`]), so a verdict just
+/// under the bar never reads as the bar itself.
+fn pixel_contrast_snippet(
+    measured: f64,
+    median: f64,
+    threshold: &Value,
+    reason_label: &str,
+    text_label: &str,
+) -> String {
+    let bar = num(Some(threshold));
+    format!(
+        "pixel contrast {}:1 median {}:1 (need {}:1) on {}{}",
+        impeccable_core::color::ratio_label(measured, bar),
+        impeccable_core::color::ratio_label(median, bar),
+        js_string(threshold),
+        reason_label,
+        text_label
+    )
 }
 
 fn truthy(v: &Value) -> bool {
@@ -513,6 +533,23 @@ fn rand_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use impeccable_core::js::to_fixed;
+
+    #[test]
+    fn pixel_snippet_never_prints_a_failing_verdict_as_the_bar() {
+        assert_eq!(
+            pixel_contrast_snippet(4.4983, 4.62, &json!(4.5), "solid-background", " \"Plans\""),
+            "pixel contrast 4.49:1 median 4.6:1 (need 4.5:1) on solid-background \"Plans\""
+        );
+        assert_eq!(
+            pixel_contrast_snippet(2.998, 2.998, &json!(3), "visual background", ""),
+            "pixel contrast 2.99:1 median 2.99:1 (need 3:1) on visual background"
+        );
+        assert_eq!(
+            pixel_contrast_snippet(3.46, 3.9, &json!(4.5), "image", ""),
+            "pixel contrast 3.5:1 median 3.9:1 (need 4.5:1) on image"
+        );
+    }
 
     #[test]
     fn sanitize_clip_matches_js() {

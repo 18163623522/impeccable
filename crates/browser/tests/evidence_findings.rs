@@ -5,8 +5,14 @@
 //! - `visual-contrast.html`: the pixel pass reads glyph cores, so a readable
 //!   date through an opacity stack passes, a faded one still fails, and no
 //!   snippet prints a verdict above its own median.
-//! - `script-error.html`: a thrown object names its properties and every
-//!   script error names where it was thrown; a caught error reports nothing.
+//! - `script-error.html`: every script error reads `Uncaught <Type>: ...`, a
+//!   thrown object names its properties, and every error names where it was
+//!   thrown, `<anonymous>` for code with no script URL; a caught error reports
+//!   nothing.
+//! - `script-error-twins.html`: a throw reported both synchronously and as an
+//!   unhandled rejection reports once, from the same origin and from another.
+//! - `low-contrast-near-threshold.html`: a ratio just under its bar prints
+//!   under the bar, never as the bar itself.
 //! - `text-overflow.html`: an ellipsis, a line clamp and an inline run inside
 //!   an ellipsizing row are truncations, not spills; a clipped line with no
 //!   marker, and truncation classes on an inline span, still report.
@@ -45,12 +51,19 @@ fn handle(mut stream: TcpStream) {
         .unwrap_or("/")
         .trim_start_matches('/')
         .to_string();
-    let (status, body) = match std::fs::read(fixtures_dir().join(&rel)) {
-        Ok(body) if !rel.contains("..") => ("200 OK", body),
-        _ => ("404 Not Found", b"missing".to_vec()),
+    // `script-error-twins.html` loads this from `localhost` while it sits on
+    // 127.0.0.1, so the script is from another origin and the browser hands
+    // over only the text of what it throws. No CORS header, no fixture file.
+    let (status, content_type, body) = if rel == "vendor/redefine-src.js" {
+        ("200 OK", "text/javascript", VENDOR_TWIN_SCRIPT.as_bytes().to_vec())
+    } else {
+        match std::fs::read(fixtures_dir().join(&rel)) {
+            Ok(body) if !rel.contains("..") => ("200 OK", "text/html; charset=utf-8", body),
+            _ => ("404 Not Found", "text/html; charset=utf-8", b"missing".to_vec()),
+        }
     };
     let head = format!(
-        "HTTP/1.0 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.0 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(head.as_bytes());
@@ -133,33 +146,107 @@ fn pixel_contrast_reads_glyph_cores() {
     );
 }
 
+/// What `script-error-twins.html` loads from another origin: one function
+/// that throws synchronously and again inside a promise.
+const VENDOR_TWIN_SCRIPT: &str = "function redefineSrc() { const el = {}; Object.defineProperty(el, 'src', { value: 1 }); Object.defineProperty(el, 'src', { value: 2 }); }\nPromise.resolve().then(redefineSrc);\nredefineSrc();\n";
+
+fn script_errors(findings: &[(String, String, String)]) -> Vec<&str> {
+    findings
+        .iter()
+        .filter(|(id, _, _)| id == "script-error")
+        .map(|(_, s, _)| s.as_str())
+        .collect()
+}
+
 #[test]
 fn script_errors_name_the_thrown_value_and_where_it_was_thrown() {
     let Some(findings) = scan("script-error.html") else {
         return;
     };
-    let errors: Vec<&str> = findings
-        .iter()
-        .filter(|(id, _, _)| id == "script-error")
-        .map(|(_, s, _)| s.as_str())
-        .collect();
+    let errors = script_errors(&findings);
     assert!(
         errors.iter().any(|s| s.starts_with(
-            "Object {code: \"E_CONSENT\", message: \"consent config missing\"} (at loadConsentConfig, http://127.0.0.1:"
+            "Uncaught Object {code: \"E_CONSENT\", message: \"consent config missing\"} (at loadConsentConfig, http://127.0.0.1:"
         ) && s.contains("/script-error.html:")),
         "expected the thrown object with its source, got {errors:?}"
     );
-    assert!(errors.len() >= 2, "expected the syntax error too, got {errors:?}");
+    assert!(
+        errors.iter().any(|s| s.starts_with("Uncaught SyntaxError: ") && s.contains("/script-error.html:")),
+        "expected the syntax error, typed, got {errors:?}"
+    );
+    // Code with no script URL names V8's `<anonymous>` script, and its type.
+    assert!(
+        errors.iter().any(|s| s.starts_with("Uncaught ReferenceError: missingAnalyticsQueue is not defined (at ")
+            && s.contains("<anonymous>:")),
+        "expected the anonymous script's error with its source, got {errors:?}"
+    );
     for snippet in &errors {
-        assert!(
-            snippet.contains("/script-error.html:"),
-            "script error without a source: {snippet}"
-        );
+        assert!(snippet.starts_with("Uncaught "), "script error without its marker: {snippet}");
+        assert!(snippet.contains(" (at "), "script error without a source: {snippet}");
     }
     assert!(
         !errors.iter().any(|s| s.contains("handled quietly")),
         "a caught error reported: {errors:?}"
     );
+}
+
+#[test]
+fn one_throw_reported_sync_and_in_promise_reports_once() {
+    let Some(findings) = scan("script-error-twins.html") else {
+        return;
+    };
+    let errors = script_errors(&findings);
+    // The same-origin pair arrives with an exception object to read.
+    let href: Vec<&&str> = errors.iter().filter(|s| s.contains("Cannot redefine property: href")).collect();
+    assert_eq!(href.len(), 1, "expected one report of the same-origin pair, got {errors:?}");
+    assert!(
+        href[0].starts_with("Uncaught TypeError: Cannot redefine property: href (at redefineHref, http://127.0.0.1:"),
+        "expected the first report's text and source, got {errors:?}"
+    );
+    // The cross-origin pair arrives as CDP's text alone, which used to report twice.
+    let src: Vec<&&str> = errors.iter().filter(|s| s.contains("Cannot redefine property: src")).collect();
+    assert_eq!(src.len(), 1, "expected one report of the cross-origin pair, got {errors:?}");
+    assert!(
+        src[0].starts_with("Uncaught TypeError: Cannot redefine property: src (at redefineSrc, http://localhost:"),
+        "expected the first report's text and source, got {errors:?}"
+    );
+    // A different rejection still reports on its own, under the cap.
+    assert!(
+        errors.iter().any(|s| s.starts_with("Uncaught (in promise) RangeError: storage quota exceeded")),
+        "expected the separate rejection, got {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|s| s.contains("handled rejection")),
+        "a handled rejection reported: {errors:?}"
+    );
+    assert_eq!(errors.len(), 3, "{errors:?}");
+}
+
+#[test]
+fn contrast_just_under_the_bar_prints_under_the_bar() {
+    let Some(findings) = scan("low-contrast-near-threshold.html") else {
+        return;
+    };
+    let low: Vec<&str> = findings
+        .iter()
+        .filter(|(id, _, _)| id == "low-contrast")
+        .map(|(_, s, _)| s.as_str())
+        .collect();
+    for expected in [
+        "4.49:1 (need 4.5:1) — text #777777 on #070707",
+        "2.99:1 (need 3:1) — text #595959 on #000000",
+        "4.49:1 (need 4.5:1) — text #7b7b7b on #101010",
+    ] {
+        assert!(low.iter().any(|s| s.starts_with(expected)), "expected {expected}, got {low:?}");
+    }
+    for snippet in &low {
+        for bar in ["4.50:1 (need 4.5:1)", "4.5:1 (need 4.5:1)", "3.00:1 (need 3:1)", "3.0:1 (need 3:1)"] {
+            assert!(!snippet.contains(bar), "a failing ratio printed as the bar: {snippet}");
+        }
+        for readable in ["#767676", "#5a5a5a", "#787878"] {
+            assert!(!snippet.contains(readable), "a readable pair flagged: {snippet}");
+        }
+    }
 }
 
 #[test]

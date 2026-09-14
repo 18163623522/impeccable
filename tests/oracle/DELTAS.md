@@ -1861,3 +1861,78 @@ eighteen new findings) and the one faded date, nothing else.
 4. **Static engine.** It keeps worst-stop gradients and cannot read a
    `background-size` longhand.
 5. **API.** `ColorOpts` gains a public `bg_source_host` field.
+
+## Recorded 2026-09-13: script errors and contrast ratios print one way (corpus/fix-script-error-format)
+
+Recorded from the binary. The branch fixes three evidence problems from corpus
+run 16 (`observations-16.md` issues 11, 20 and 36):
+
+- **Script errors read `Uncaught <Type>: <message> (at <source>)`.** The
+  thrown-object path used to print puppeteer's `err.message`, which drops the
+  type (`jQuery is not defined`), while a cross-origin throw kept CDP's typed
+  text (`Uncaught TypeError: ...`). Every message now carries CDP's marker and
+  the type, and a frame in a script with no URL names `<anonymous>` where it
+  printed no source. The message after the type keeps the 160-character cut.
+- **One throw reports once.** The dedupe reads `Uncaught (in promise)` as
+  `Uncaught`, so a throw reported synchronously and as an unhandled rejection
+  keeps only the first report.
+- **A failing ratio never prints as the bar.** Every contrast producer prints
+  one decimal, two when one would round up to the threshold, and those two cut
+  when rounding them would still reach it (`4.49:1 (need 4.5:1)` where it read
+  `4.50:1` or `:hover state 4.5:1`). The helper is
+  `impeccable_core::color::ratio_label`. The old two-decimal rule is kept
+  wherever two decimals already sat under the bar, so no existing golden or
+  frozen vector moves.
+
+Script errors come only from the URL engine, which the oracle does not run, so
+`script-error.html` (a new `new Function` case) and the new
+`script-error-twins.html` add no static findings. Their URL behavior is pinned
+by `crates/browser/tests/evidence_findings.rs`.
+
+New goldens, read by hand:
+
+- `detect-fixture-json-low-contrast-near-threshold-html`,
+  `detect-fixture-text-low-contrast-near-threshold-html`: four findings, one
+  per should-flag case. They are `4.49:1 (need 4.5:1) — text #777777 on #070707`,
+  `2.99:1 (need 3:1) — text #595959 on #000000`,
+  `4.49:1 (need 4.5:1) — text #7b7b7b on #101010` (a link) and
+  `:hover state 4.49:1 (need 4.5:1) — text #747474 on #000000`. Base prints
+  `4.50`, `3.00`, `4.50` and `4.5` for them. Nothing in the should-pass column.
+- `detect-fixture-json-script-error-twins-html`,
+  `detect-fixture-text-script-error-twins-html`: no findings (`[]`, empty text
+  output).
+
+Re-recorded sweeps, compared finding by finding against the previous goldens:
+`detect-dir-json-all-fixtures` (620 to 624), `detect-no-advisory-json` (540 to
+544), and the text forms `detect-dir-text-all-fixtures`,
+`detect-dir-quiet-all-fixtures` and `detect-no-advisory-text` (540 to 544
+anti-patterns). Each gains exactly the four findings above. Nothing is removed
+or rewritten.
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which approved it. The merge had no conflicts: the branch sits on the
+integration head, and the generated asset regenerated to the branch's bytes.
+Every golden the branch recorded replays against the integrated binary, so
+nothing was re-recorded.
+
+1. **The first report wins.** When the rejection arrives before the
+   synchronous throw, the snippet keeps `Uncaught (in promise)`. It is still
+   one report.
+2. **Twins are matched on text only.** Two different throws with the same
+   message on one page merge, as they already did on the sync path.
+3. **`<anonymous>` names no owner.** A script with no URL (tag manager custom
+   HTML, `eval`) now has a source, but the source does not say whose code it
+   is. The caller's script sits deeper in the stack and is not printed.
+4. **Cluster keys move.** Every script-error snippet gains the marker and the
+   type, so corpus cluster keys for script errors change once, and new-vs
+   matching reads each of them as a new finding once.
+5. **A subclass without `name` prints its class name.** The type is taken from
+   the first line of CDP's description, so an `Error` subclass that sets no
+   `name` of its own prints the class name found there.
+6. **The twin browser test assumes loopback.** `script-error-twins.html` loads
+   its script from `localhost` while the page sits on 127.0.0.1, so the test
+   assumes `localhost` resolves to loopback.

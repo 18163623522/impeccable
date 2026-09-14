@@ -1960,6 +1960,16 @@ fn truncates_by_design(dom: &dyn Dom, el: ElId) -> bool {
     !clamp.is_empty() && clamp != "none"
 }
 
+/// Whether the element generates a box of its own, the only kind `overflow`
+/// and `text-overflow` apply to. An inline span or link with Tailwind's
+/// `truncate` (overflow hidden, an ellipsis, nowrap) clips nothing, so its
+/// text really spills past the block around it. A capture that recorded no
+/// display reads empty here and counts as a box.
+fn generates_box(dom: &dyn Dom, el: ElId) -> bool {
+    let display = dom.style(el, "display");
+    display != "inline" && display != "contents"
+}
+
 /// JS: checks.mjs#checkElementTextOverflowDOM(el)
 pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
@@ -1998,7 +2008,7 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
         }
         p = dom.parent(pp);
     }
-    if truncates_by_design(dom, el) {
+    if generates_box(dom, el) && truncates_by_design(dom, el) {
         return Vec::new();
     }
     let client_width = dom.client_width(el);
@@ -2025,10 +2035,11 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
             return Vec::new();
         };
         // An inline run inside a box that ellipsizes or clamps it ends at the
-        // marker, whatever its own rect says.
+        // marker, whatever its own rect says. An inline ancestor carrying the
+        // same properties clips nothing and is passed over.
         let mut clip = dom.parent(el);
         while let Some(c) = clip {
-            if truncates_by_design(dom, c) {
+            if generates_box(dom, c) && truncates_by_design(dom, c) {
                 return Vec::new();
             }
             if c == container {
@@ -4284,6 +4295,57 @@ mod tests {
         let hits = check_element_text_overflow_dom(&d, run);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "span overflows its container by 160px");
+    }
+
+    #[test]
+    fn text_overflow_reports_an_inline_truncate_that_spills() {
+        let (mut d, body) = page();
+        // Tailwind `truncate` on an inline span inside a 140px block cell.
+        // Overflow does not apply to an inline box, so nothing clips it.
+        let cell = d.add(Some(body), "div");
+        visible(&mut d, cell);
+        d.set_rect(cell, 0.0, 0.0, 140.0, 22.0);
+        d.el_mut(cell).client_width = 140.0;
+        d.el_mut(cell).client_height = 22.0;
+        let truncate = &[("display", "inline"), ("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap"), ("position", "static"), ("fontSize", "16px")];
+        let span = d.add(Some(cell), "span");
+        visible(&mut d, span);
+        d.set_attr(span, "class", "truncate");
+        d.add_text(span, "Order #4821 shipped to Rotterdam warehouse");
+        d.set_rect(span, 0.0, 0.0, 330.0, 22.0);
+        d.set_styles(span, truncate);
+        let hits = check_element_text_overflow_dom(&d, span);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "span.truncate overflows its container by 190px");
+        // Given a box of its own, the same span ellipsizes and passes.
+        d.set_style(span, "display", "inline-block");
+        d.el_mut(span).client_width = 140.0;
+        d.el_mut(span).scroll_width = 330.0;
+        assert!(check_element_text_overflow_dom(&d, span).is_empty());
+
+        // An inline run whose inline ancestor carries `truncate` spills too:
+        // the walk passes over the ancestor to the block row.
+        let row = d.add(Some(body), "div");
+        visible(&mut d, row);
+        d.set_rect(row, 0.0, 40.0, 140.0, 22.0);
+        d.el_mut(row).client_width = 140.0;
+        d.el_mut(row).client_height = 22.0;
+        let link = d.add(Some(row), "a");
+        visible(&mut d, link);
+        d.set_attr(link, "class", "truncate");
+        d.set_rect(link, 0.0, 40.0, 380.0, 22.0);
+        d.set_styles(link, truncate);
+        let run = d.add(Some(link), "b");
+        visible(&mut d, run);
+        d.add_text(run, "docs.example.com/guides/getting-started/installation");
+        d.set_rect(run, 0.0, 40.0, 380.0, 22.0);
+        d.set_styles(run, &[("display", "inline"), ("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "16px")]);
+        let hits = check_element_text_overflow_dom(&d, run);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "b overflows its container by 240px");
+        // A block row that ellipsizes still ends the run at its marker.
+        d.set_styles(row, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap")]);
+        assert!(check_element_text_overflow_dom(&d, run).is_empty());
     }
 
     /// A clipping box with a real rect, the shape every case below shares.

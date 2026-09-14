@@ -9,7 +9,7 @@
 //!   script error names where it was thrown; a caught error reports nothing.
 //! - `text-overflow.html`: an ellipsis, a line clamp and an inline run inside
 //!   an ellipsizing row are truncations, not spills; a clipped line with no
-//!   marker still reports.
+//!   marker, and truncation classes on an inline span, still report.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -158,7 +158,13 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         .filter(|(id, _, _)| id == "text-overflow")
         .map(|(_, s, sel)| (s.as_str(), sel.as_str()))
         .collect();
-    for flag in ["flag-nowrap", "flag-longword", "flag-inline-spill", "flag-hidden-no-marker"] {
+    for flag in [
+        "flag-nowrap",
+        "flag-longword",
+        "flag-inline-spill",
+        "flag-hidden-no-marker",
+        "flag-inline-truncate",
+    ] {
         assert!(
             overflow.iter().any(|(s, sel)| s.contains(flag) || sel.contains(flag)),
             "expected {flag} to flag, got {overflow:?}"
@@ -169,5 +175,5 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         .filter(|(s, sel)| s.contains("pass-") || sel.contains("pass-") || sel.contains("ellipsis"))
         .collect();
     assert!(stray.is_empty(), "should-pass boxes flagged: {stray:?}");
-    assert_eq!(overflow.len(), 4, "{overflow:?}");
+    assert_eq!(overflow.len(), 5, "{overflow:?}");
 }

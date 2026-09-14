@@ -39,6 +39,7 @@
       white-space: nowrap;
     }
     .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .truncate { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
   </style>
 </head>
@@ -53,6 +54,9 @@
       <div class="box"><span class="flag-inline-spill" style="white-space: nowrap">IOC-QARTOD-ARGO-PROFILES-SPILLING-WELL-PAST-THE-CELL</span></div>
       <!-- Clipped with no marker: the line is cut off mid-word, a real spill. -->
       <div class="box flag-hidden-no-marker" style="overflow: hidden; white-space: nowrap; text-overflow: clip">A clipped line with no ellipsis that simply cuts the words off at the edge.</div>
+      <!-- Truncation classes on an inline span: overflow does not apply to an
+           inline box, so nothing clips or ellipsizes and the line spills. -->
+      <div class="box"><span class="flag-inline-truncate truncate">Order #4821 shipped to the Rotterdam warehouse on Tuesday</span></div>
     </section>
 
     <!-- PASS column: real scroll regions, preformatted code, wrapping text, scroll ancestors -->

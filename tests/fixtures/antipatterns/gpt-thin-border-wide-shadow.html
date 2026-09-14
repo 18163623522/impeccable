@@ -90,15 +90,15 @@
         <div class="stack">
           <article class="outcome">
             <p class="copy">First outcome.</p>
-            <div class="viz"><figure class="card panel flag-panel-first" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+            <div class="viz"><figure class="card panel flag-panel-first" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -12px rgba(8,33,25,0.6)"></figure></div>
           </article>
           <article class="outcome">
-            <div class="viz"><figure class="card panel flag-panel-second" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+            <div class="viz"><figure class="card panel flag-panel-second" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -12px rgba(8,33,25,0.6)"></figure></div>
             <p class="copy">Second outcome.</p>
           </article>
           <article class="outcome">
             <p class="copy">Third outcome.</p>
-            <div class="viz"><figure class="card panel flag-panel-third" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)"></figure></div>
+            <div class="viz"><figure class="card panel flag-panel-third" style="border: 1px solid rgba(15,126,126,0.35); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -12px rgba(8,33,25,0.6)"></figure></div>
           </article>
         </div>
       </div>
@@ -131,6 +131,29 @@
           <div class="card pass-tight-third" style="border: 1px solid #e5e7eb; box-shadow: 0 0 24px rgba(15,23,42,0.18)">Third pill.</div>
         </div>
       </div>
+
+      <div class="case">
+        <h3>A row whose negative spread pulls a 40px blur into a tight lift</h3>
+        <div class="row">
+          <div class="card pass-spread-first" style="border: 1px solid #e5e7eb; box-shadow: 0 18px 40px -26px rgba(0,0,0,0.95)">First lifted card.</div>
+          <div class="card pass-spread-second" style="border: 1px solid #e5e7eb; box-shadow: 0 18px 40px -26px rgba(0,0,0,0.95)">Second lifted card.</div>
+          <div class="card pass-spread-third" style="border: 1px solid #e5e7eb; box-shadow: 0 18px 40px -26px rgba(0,0,0,0.95)">Third lifted card.</div>
+        </div>
+      </div>
+
+      <!-- Its own band, so a file scan, which cannot read the surface and
+           reports this row, does not count its cards as mates of the pair
+           above. -->
+      <section class="dark-band" style="background: #0a0a0b; padding: 16px">
+        <div class="case">
+          <h3 style="color: #a1a1aa">A black halo on a near-black surface, around cards rimmed in their own fill</h3>
+          <div class="row">
+            <div class="card pass-dark-first" style="background: #18181b; color: #e4e4e7; border: 1px solid #1c1c1f; box-shadow: 0 0 40px rgba(0,0,0,0.18)">First dark card.</div>
+            <div class="card pass-dark-second" style="background: #18181b; color: #e4e4e7; border: 1px solid #1c1c1f; box-shadow: 0 0 40px rgba(0,0,0,0.18)">Second dark card.</div>
+            <div class="card pass-dark-third" style="background: #18181b; color: #e4e4e7; border: 1px solid #1c1c1f; box-shadow: 0 0 40px rgba(0,0,0,0.18)">Third dark card.</div>
+          </div>
+        </div>
+      </section>
 
       <div class="case">
         <h3>A row whose wide shadow is drawn inside the box</h3>

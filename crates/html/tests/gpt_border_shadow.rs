@@ -54,7 +54,7 @@ fn a_row_lit_from_above_counts() {
     // repeated drop shadow is the population the rule is named for.
     for shadow in [
         "0 8px 40px rgba(15,23,42,0.22)",
-        "0 30px 60px -40px rgba(15,23,42,0.35)",
+        "0 30px 60px -12px rgba(15,23,42,0.35)",
     ] {
         assert_eq!(
             snippets(&row(3, shadow)).len(),
@@ -69,6 +69,10 @@ fn tight_and_inset_shadows_stay_silent() {
     for shadow in [
         "0 0 24px rgba(15,23,42,0.18)",
         "0 8px 24px rgba(15,23,42,0.22)",
+        // A negative spread pulls the blurred shape in: these are tight lifts
+        // under the box, 20px and 14px once the spread is taken off.
+        "0 30px 60px -40px rgba(15,23,42,0.35)",
+        "0 18px 40px -26px rgba(0,0,0,0.95)",
         "inset 0 0 40px rgba(15,23,42,0.18)",
         "inset 0 8px 40px rgba(15,23,42,0.18)",
     ] {
@@ -136,7 +140,7 @@ fn cards_wrapped_in_grid_items_are_a_row() {
 fn panels_repeated_one_per_article_are_a_row() {
     // The panels sit at the same depth of each article but not at the same
     // index: the middle article puts its panel first.
-    let panel = "<figure style=\"margin:0;border:1px solid rgba(15,126,126,0.35);box-shadow:inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -40px rgba(8,33,25,0.6)\"></figure>";
+    let panel = "<figure style=\"margin:0;border:1px solid rgba(15,126,126,0.35);box-shadow:inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 60px -12px rgba(8,33,25,0.6)\"></figure>";
     let html = format!(
         "<!DOCTYPE html><html><body><div class=\"stack\">\
 <article><p>Copy</p><div class=\"viz\">{panel}</div></article>\
@@ -277,7 +281,10 @@ fn fixture_flag_and_pass_columns() {
         .filter(|f| f.antipattern == "gpt-thin-border-wide-shadow")
         .map(|f| f.snippet)
         .collect();
-    // The five flag rows and nothing from the pass column.
+    // The five flag rows, and from the pass column only the dark row: a file
+    // scan reads no painted surface, so it cannot tell a black halo on a
+    // near-black ground, or a hairline in the card's own colour, from one that
+    // shows. The browser test pins that the URL engine drops that row too.
     assert_eq!(
         found,
         vec![
@@ -296,6 +303,9 @@ fn fixture_flag_and_pass_columns() {
             "1px border + 60px shadow blur, repeated across the row",
             "1px border + 60px shadow blur, repeated across the row",
             "1px border + 60px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
+            "1px border + 40px shadow blur, repeated across the row",
         ],
         "fixture columns moved"
     );

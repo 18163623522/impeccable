@@ -371,7 +371,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         let op = parse_float(sv(style, "opacity"));
         if op.is_finite() && op < 0.15 && op >= 0.0 {
             let bg = sv(style, "backgroundImage");
-            if tag == "img" || RASTER_URL_RE.is_match(bg) {
+            if (tag == "img" || RASTER_URL_RE.is_match(bg))
+                && !impeccable_core::checks::measures::raster_source_is_svg(
+                    tag == "img",
+                    el.get_attribute("src"),
+                    bg,
+                )
+            {
                 let label = if tag == "img" {
                     el.get_attribute("alt").unwrap_or("").to_string()
                 } else {
@@ -603,6 +609,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             && font_size < 11.0
             && dt_len >= 2
             && !ui_skip_tags.contains(&tag)
+            // A footnote marker is set small by convention, and so is the
+            // link inside it (`<sup><a>[7]</a></sup>`).
+            && el.closest("sub, sup").is_none()
             && !is_non_rendered_text(el, tag, Some(style))
         {
             let is_exempt_context = el.closest(EXEMPT_CONTEXT).is_some();

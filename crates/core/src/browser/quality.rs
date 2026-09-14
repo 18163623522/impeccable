@@ -331,6 +331,92 @@ pub struct QualityInput {
     pub viewport_width: f64,
 }
 
+/// The largest box, on either axis, that reads as an icon rather than a
+/// picture.
+const RASTER_ICON_MAX_PX: f64 = 48.0;
+
+/// The `blur()` radius past which a faint raster is a blur-up placeholder.
+const RASTER_PLACEHOLDER_MIN_BLUR_PX: f64 = 4.0;
+
+/// Whether a near-transparent raster is one state of a layer rather than
+/// buried material: vector art, an icon-sized box, a blurred low-resolution
+/// placeholder, or a frame stacked under a painted raster in the same box (a
+/// crossfade whose visible frame is a sibling, a placeholder under a parent
+/// that paints the loaded picture).
+fn raster_is_state_layer(dom: &dyn Dom, el: ElId, tag: &str, bg: &str, rect: &Rect) -> bool {
+    if crate::checks::measures::raster_source_is_svg(tag == "img", dom.attr(el, "src").as_deref(), bg) {
+        return true;
+    }
+    if rect.width > 0.0
+        && rect.height > 0.0
+        && rect.width <= RASTER_ICON_MAX_PX
+        && rect.height <= RASTER_ICON_MAX_PX
+    {
+        return true;
+    }
+    if filter_blur_px(&dom.style(el, "filter")) >= RASTER_PLACEHOLDER_MIN_BLUR_PX {
+        return true;
+    }
+    let area = rect.width * rect.height;
+    if !(area > 0.0) {
+        return false;
+    }
+    let covers = |other: &Rect| {
+        let w = (rect.right.min(other.right) - rect.left.max(other.left)).max(0.0);
+        let h = (rect.bottom.min(other.bottom) - rect.top.max(other.top)).max(0.0);
+        w * h >= area * 0.5
+    };
+    let paints_raster = |node: ElId| {
+        let own = parse_float(&dom.style(node, "opacity"));
+        let visible = !own.is_finite() || own >= 0.15;
+        let t = tag_lower(dom, node);
+        let raster = matches!(t.as_str(), "img" | "picture" | "video" | "canvas")
+            || QUALITY_RASTER_URL_RE.is_match(&dom.style(node, "backgroundImage"));
+        visible && raster && dom.style(node, "display") != "none" && covers(&dom.rect(node))
+    };
+    let Some(parent) = dom.parent(el) else {
+        return false;
+    };
+    if dom
+        .children(parent)
+        .into_iter()
+        .any(|sibling| sibling != el && paints_raster(sibling))
+    {
+        return true;
+    }
+    let mut ancestor = Some(parent);
+    for _ in 0..2 {
+        let Some(node) = ancestor else {
+            break;
+        };
+        if Some(node) == dom.body() || Some(node) == dom.document_element() {
+            break;
+        }
+        if paints_raster(node) {
+            return true;
+        }
+        ancestor = dom.parent(node);
+    }
+    false
+}
+
+/// The largest `blur()` radius in a computed `filter`, 0 when there is none.
+fn filter_blur_px(filter: &str) -> f64 {
+    let mut max = 0.0f64;
+    let lower = filter.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(start) = rest.find("blur(") {
+        let after = &rest[start + 5..];
+        let end = after.find(')').unwrap_or(after.len());
+        let v = parse_float(js::trim(&after[..end]));
+        if v.is_finite() {
+            max = max.max(v);
+        }
+        rest = &after[end..];
+    }
+    max
+}
+
 /// JS: checks.mjs#checkQuality(opts), browser adapter inputs (`rect` set,
 /// `win` = window).
 pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
@@ -360,7 +446,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let op = parse_float(&st("opacity"));
         if op.is_finite() && op < 0.15 && op >= 0.0 {
             let bg = st("backgroundImage");
-            if tag == "img" || QUALITY_RASTER_URL_RE.is_match(&bg) {
+            if (tag == "img" || QUALITY_RASTER_URL_RE.is_match(&bg))
+                && !raster_is_state_layer(dom, el, tag, &bg, rect)
+            {
                 let label = if tag == "img" {
                     dom.attr(el, "alt").unwrap_or_default()
                 } else {
@@ -786,6 +874,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             && font_size < 11.0
             && dt_len >= 2
             && !ui_skip_tags.contains(&tag)
+            // A footnote marker is set small by convention, and so is the
+            // link inside it (`<sup><a>[7]</a></sup>`).
+            && closest_or_none(dom, el, "sub, sup").is_none()
             && !is_non_rendered_text(dom, el, tag)
         {
             let is_exempt_context = matches_or_closest(dom, el, EXEMPT_CONTEXT);
@@ -966,6 +1057,113 @@ pub fn check_page_quality_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
 mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
+
+    fn raster(d: &mut FakeDom, parent: ElId, tag: &str, rect: (f64, f64, f64, f64)) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.set_styles(el, &[("opacity", "0"), ("backgroundImage", "none"), ("filter", "none")]);
+        d.set_rect(el, rect.0, rect.1, rect.2, rect.3);
+        el
+    }
+
+    fn buried(d: &FakeDom, el: ElId) -> bool {
+        check_quality(
+            d,
+            &QualityInput {
+                el,
+                tag: tag_lower(d, el),
+                has_direct_text: false,
+                text_len: 0,
+                font_size: 16.0,
+                line_height_px: None,
+                letter_spacing_px: None,
+                rect: d.rect(el),
+                line_max: 80.0,
+                viewport_width: 1280.0,
+            },
+        )
+        .iter()
+        .any(|h| h.id == "buried-raster")
+    }
+
+    /// climatempo.com.br's icon states, picomq.com's copy button,
+    /// exxonmobil.com's blur-up placeholders, resurf.so's crossfade frames.
+    #[test]
+    fn buried_raster_skips_state_layers() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let photo = raster(&mut d, body, "img", (0.0, 0.0, 480.0, 300.0));
+        d.set_attr(photo, "src", "/texture.png");
+        assert!(buried(&d, photo));
+        d.set_attr(photo, "src", "/dist/images/v2/svg/location-granted.svg");
+        assert!(!buried(&d, photo), "vector art");
+
+        let copy = raster(&mut d, body, "button", (0.0, 400.0, 480.0, 300.0));
+        d.set_style(copy, "backgroundImage", "url(\"data:image/svg+xml,%3Csvg%3E\")");
+        assert!(!buried(&d, copy), "an SVG data URI");
+
+        let icon = raster(&mut d, body, "img", (0.0, 800.0, 16.0, 16.0));
+        d.set_attr(icon, "src", "/pin.png");
+        assert!(!buried(&d, icon), "an icon-sized raster");
+
+        let placeholder = raster(&mut d, body, "canvas", (0.0, 1000.0, 353.0, 199.0));
+        d.set_style(placeholder, "backgroundImage", "url(\"/keytopic.jpg?w=40\")");
+        assert!(buried(&d, placeholder));
+        d.set_style(placeholder, "filter", "blur(10px)");
+        assert!(!buried(&d, placeholder), "a blurred placeholder");
+
+        let card = d.add(Some(body), "article");
+        d.set_style(card, "backgroundImage", "url(\"/keytopic.jpg?w=2048\")");
+        d.set_rect(card, 16.0, 1600.0, 321.0, 181.0);
+        let under = raster(&mut d, card, "canvas", (0.0, 1590.0, 353.0, 199.0));
+        d.set_style(under, "backgroundImage", "url(\"/keytopic.jpg?w=40\")");
+        assert!(!buried(&d, under), "under a parent painting the loaded picture");
+
+        let stack = d.add(Some(body), "div");
+        let shown = raster(&mut d, stack, "img", (160.0, 3012.0, 960.0, 600.0));
+        d.set_style(shown, "opacity", "1");
+        let frame = raster(&mut d, stack, "img", (160.0, 3012.0, 960.0, 600.0));
+        d.set_attr(frame, "src", "/screenshot-inbox.png");
+        assert!(!buried(&d, frame), "a crossfade frame under a painted sibling");
+        d.set_style(shown, "opacity", "0");
+        assert!(buried(&d, frame), "no painted frame over it");
+    }
+
+    /// copperhead.sh: `<sup><a>[7]</a></sup>` at 10.2px.
+    #[test]
+    fn undersized_ui_text_skips_links_inside_markers() {
+        let ui = |d: &FakeDom, el: ElId| {
+            check_quality(
+                d,
+                &QualityInput {
+                    el,
+                    tag: "a".to_string(),
+                    has_direct_text: true,
+                    text_len: 3,
+                    font_size: 10.2,
+                    line_height_px: None,
+                    letter_spacing_px: None,
+                    rect: Rect::from_xywh(0.0, 0.0, 12.0, 13.0),
+                    line_max: 80.0,
+                    viewport_width: 1280.0,
+                },
+            )
+            .iter()
+            .any(|h| h.id == "undersized-ui-text")
+        };
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "The board was routed in one pass");
+        let sup = d.add(Some(p), "sup");
+        let link = d.add(Some(sup), "a");
+        d.add_text(link, "[7]");
+        d.add_selector(link, INTERACTIVE);
+        assert!(!ui(&d, link));
+        let nav_link = d.add(Some(body), "a");
+        d.add_text(nav_link, "[7]");
+        d.add_selector(nav_link, INTERACTIVE);
+        assert!(ui(&d, nav_link));
+    }
 
     fn text_el(d: &mut FakeDom, body: ElId, tag: &str, text: &str, font: &str) -> ElId {
         let p = d.add(Some(body), tag);

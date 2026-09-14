@@ -11,7 +11,7 @@
 //! `HashMap` all fit.
 
 use crate::color::{self, Rgba};
-use crate::js::{self, ci, math_max, math_max3, parse_float, WS, WS_CHARS};
+use crate::js::{self, ci, math_max, math_max3, math_min, parse_float, WS, WS_CHARS};
 use crate::js_ext_b::num_truthy;
 use crate::rules::types::{Corners, D};
 use once_cell::sync::Lazy;
@@ -675,6 +675,96 @@ fn shadow_max_blur_px_among(
         }
     }
     max_blur
+}
+
+/// One layer of a computed `box-shadow`: its offsets, blur, spread, whether
+/// it is drawn inside the box, and its colour (`None` when the layer names
+/// none, which is `currentcolor`, or names one that does not parse).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowLayer {
+    pub x: f64,
+    pub y: f64,
+    pub blur: f64,
+    pub spread: f64,
+    pub inset: bool,
+    pub alpha: f64,
+    pub color: Option<color::Rgba>,
+}
+
+impl ShadowLayer {
+    /// How far the layer paints past the box on `[top, right, bottom, left]`.
+    /// A Gaussian blur shows about half its radius past the shape it blurs,
+    /// and the shape is the box grown by the spread and moved by the offsets:
+    /// `0 2px 4px -2px` draws a 2px lip under the box and nothing at its
+    /// sides, where `0 2px 4px 0` draws 2px at the sides too.
+    pub fn outer_reach(&self) -> [f64; 4] {
+        let base = self.spread + self.blur / 2.0;
+        [base - self.y, base + self.x, base + self.y, base - self.x]
+    }
+
+    /// The blur that shows as a halo: the radius less whatever a negative
+    /// spread pulls the shape in by. `0 18px 40px -26px` is a tight lift under
+    /// the box, not a 40px halo.
+    pub fn halo_blur(&self) -> f64 {
+        self.blur + math_min(self.spread, 0.0)
+    }
+}
+
+/// Every layer of a computed `box-shadow` that parses to at least two
+/// lengths, in order. `none` and the empty string have none.
+pub fn parse_shadow_layers(box_shadow: &str) -> Vec<ShadowLayer> {
+    re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
+    re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
+    if box_shadow.is_empty() || box_shadow == "none" {
+        return Vec::new();
+    }
+    let mut layers = Vec::new();
+    for layer in split_shadow_layers(box_shadow) {
+        let color = CSS_COLOR_TOKEN_RE
+            .find(layer)
+            .and_then(|m| color::parse_any_color(Some(m.as_str())));
+        let alpha = shadow_layer_alpha(layer);
+        let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        let inset = INSET_RE.is_match(&cleaned);
+        let cleaned = WORD_RE.replace_all(&cleaned, " ");
+        let nums: Vec<f64> = NUM_RE
+            .find_iter(&cleaned)
+            .map(|m| parse_float(m.as_str()))
+            .collect();
+        if nums.len() < 2 || nums.iter().any(|n| !n.is_finite()) {
+            continue;
+        }
+        layers.push(ShadowLayer {
+            x: nums[0],
+            y: nums[1],
+            blur: nums.get(2).copied().unwrap_or(0.0),
+            spread: nums.get(3).copied().unwrap_or(0.0),
+            inset,
+            alpha,
+            color,
+        });
+    }
+    layers
+}
+
+/// The alpha under which a shadow or a border paints nothing a reader sees.
+pub const FAINT_PAINT_ALPHA: f64 = 0.05;
+
+/// How far, per channel, a painted colour has to move the surface it lands on
+/// before a reader sees an edge: a black shadow on a near-black page, or a
+/// hairline in the card's own colour, draws nothing.
+pub const VISIBLE_EDGE_CHANNEL_DELTA: f64 = 8.0;
+
+/// Whether `paint` (with its own alpha) composited over the opaque `surface`
+/// shows against it.
+pub fn paint_shows_over(paint: &color::Rgba, surface: &color::Rgba) -> bool {
+    let over = color::composite_color_over(paint, surface);
+    math_max3(
+        (over.r - surface.r).abs(),
+        (over.g - surface.g).abs(),
+        (over.b - surface.b).abs(),
+    ) >= VISIBLE_EDGE_CHANNEL_DELTA
 }
 
 /// JS: checks.mjs#cssColorAlpha.

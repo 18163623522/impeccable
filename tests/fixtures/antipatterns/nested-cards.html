@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nested cards fixture</title>
+<!--
+  A browser scan reads card-likeness from the computed box: a card paints an
+  edge on at least three sides (borders, or a shadow that reaches past the
+  box there) or a fill that differs from the surface under it, and it is
+  rounded or casts a shadow. A one-sided rule is a divider, a pill or a
+  one-line eyebrow is a label, a band along a card's own edges is part of that
+  card, and a white box on a white card with a 2px lip is not a second surface.
+
+  The file scan has no layout and reads class names and declared styles, so it
+  reports some of the pass column. crates/browser/tests/card_heuristics.rs pins
+  what the URL engine reports.
+-->
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f4f4f5; color: #18181b; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+  .case { margin: 0 0 32px; }
+  p { margin: 0 0 8px; font-size: 16px; line-height: 24px; }
+  .card { background: #ffffff; border: 1px solid #e4e4e7; border-radius: 16px; padding: 24px; }
+  .inner { background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 16px; }
+  .raised { background: #ffffff; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
+  .band { background: #ffffff; border-top: 1px solid #e4e4e7; padding: 32px; }
+  .strip { background: #fafafa; border-bottom: 4px solid #18181b; padding: 32px; }
+  .pill { display: inline-block; border: 1px solid #d4d4d8; border-radius: 9999px; padding: 8px 16px; font-size: 12px; line-height: 16px; background: #f4f4f5; }
+  .eyebrow { display: inline-block; border: 1px solid #18181b; box-shadow: 3px 3px 0 #22d3ee; background: #f472b6; padding: 5px 10px; font-size: 12px; line-height: 18px; margin: 0 0 16px; }
+  .plain-card { padding: 0; }
+  .header-band { background: #f1f5f9; border-bottom: 1px solid #e4e4e7; border-radius: 16px 16px 0 0; padding: 20px; }
+  .card-rest { padding: 20px; }
+  .soft-card { background: #ffffff; border-radius: 28px; padding: 8px; box-shadow: 0 4px 8px -2px rgba(0, 0, 0, 0.1); }
+  .lip { background: #ffffff; border-radius: 24px; padding: 16px; box-shadow: 0 2px 4px -2px rgba(0, 0, 0, 0.12); }
+</style>
+</head>
+<body>
+<div class="cols">
+  <section class="flag" aria-label="Should flag">
+    <div class="case card border rounded-2xl" id="flag-outlined-outer">
+      <p>Outer card with a border on every side.</p>
+      <div class="inner border rounded-xl" id="flag-outlined-inner">
+        <p>An inner card, outlined on every side and rounded, holding its own copy.</p>
+        <p>A second line makes it a surface, not a label.</p>
+      </div>
+    </div>
+
+    <div class="case raised shadow-sm rounded-xl" id="flag-raised-outer">
+      <p>A white card lifted off the page by a small shadow.</p>
+      <div class="raised shadow-sm rounded-xl" id="flag-raised-inner">
+        <p>Another lifted white card inside it, holding a paragraph of its own.</p>
+        <p>Its shadow draws an edge on three sides.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="pass" aria-label="Should pass">
+    <section class="case band border-t bg-white" id="pass-band-outer">
+      <p>A full-width section with a one-pixel top rule.</p>
+      <div class="inner border rounded-xl" id="pass-band-inner">
+        <p>A card inside a section that draws only a divider along its top.</p>
+        <p>The section is not a card, so nothing nests.</p>
+      </div>
+    </section>
+
+    <footer class="case strip border-b-[4px] border-black bg-gray-50" id="pass-strip-outer">
+      <p>A footer strip with a heavy bottom rule.</p>
+      <div class="inner border rounded-xl" id="pass-strip-inner">
+        <p>A card in a footer whose only edge is its bottom rule.</p>
+        <p>One edge is a divider.</p>
+      </div>
+    </footer>
+
+    <div class="case card" id="pass-pill-outer">
+      <p>A card holding a pill.</p>
+      <span class="pill border rounded-full" id="pass-pill-inner">Most popular plan</span>
+    </div>
+
+    <div class="case card" id="pass-eyebrow-outer">
+      <p class="eyebrow" id="pass-eyebrow-inner">Station numbers</p>
+      <p>A card whose eyebrow is drawn as a bordered box with an offset shadow.</p>
+    </div>
+
+    <article class="case card plain-card" id="pass-header-outer">
+      <div class="header-band" id="pass-header-band">
+        <p>Croatia, full service</p>
+        <p>A tinted header band along the card's own top edge.</p>
+      </div>
+      <div class="card-rest"><p>The rest of the card.</p></div>
+    </article>
+
+    <form class="case card" id="pass-field-outer">
+      <p>Book a visit with our team.</p>
+      <div class="field" id="pass-field-box" style="background: #e9ecef; border-radius: 10px; padding: 12px">
+        <select><option>Air Conditioning Installation</option><option>Furnace and Heating Repair</option></select>
+      </div>
+    </form>
+
+    <div class="case card" id="pass-media-outer">
+      <p>A card holding a video thumbnail in a bordered frame.</p>
+      <div class="inner" id="pass-media-frame" style="position: relative; width: 256px; padding: 8px; background: #25241f">
+        <img src="assets/thumbnail.jpg" alt="Demo recording" width="240" height="135" style="display: block; width: 240px; height: 135px">
+        <span style="position: absolute; right: 16px; bottom: 16px; color: #ffffff">18.2K views</span>
+      </div>
+      <p>Copy with a <mark class="inner" id="pass-mark-inline" style="display: inline; padding: 0 4px; background: rgba(217, 119, 6, 0.12)">golden hour highlight run</mark> inside a line.</p>
+    </div>
+
+    <div class="case soft-card" id="pass-lip-outer">
+      <div class="lip" id="pass-lip-inner">
+        <p>A white box on a white card with a 2px lip under it.</p>
+        <p>Nothing about it draws a second surface.</p>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

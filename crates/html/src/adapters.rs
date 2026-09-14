@@ -1109,7 +1109,21 @@ pub fn check_element_icon_tile(el: &StaticElement<'_>, tag: &str) -> Vec<RuleHit
         sibling_bottom: 0.0,
         sibling_bg_color: parse_rgb(sv_opt(sib_style, "backgroundColor")),
         sibling_bg_image: Some(sv(sib_style, "backgroundImage").to_string()),
-        sibling_border_width: pf0(sv(sib_style, "borderTopWidth")),
+        // A ring drawn by a zero-blur box-shadow (`ring-1`) is the tile's
+        // border as far as a reader can tell.
+        sibling_border_width: pf0(sv(sib_style, "borderTopWidth")).max(
+            impeccable_core::checks::measures::parse_shadow_layers(sv(sib_style, "boxShadow"))
+                .iter()
+                .filter(|l| {
+                    l.alpha >= impeccable_core::checks::measures::FAINT_PAINT_ALPHA
+                        && l.x == 0.0
+                        && l.y == 0.0
+                        && l.blur == 0.0
+                        && l.spread >= 0.5
+                })
+                .map(|l| l.spread)
+                .fold(0.0, f64::max),
+        ),
         sibling_border_radius: resolve_border_radius_px(sib_style, sib_width),
         has_icon_child: icon_child.is_some() || has_inline_emoji_icon,
         icon_child_width: icon_width,
@@ -1417,19 +1431,8 @@ pub fn class_selector(el: &StaticElement<'_>) -> String {
     }
 }
 
-static DECORATIVE_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?-u:\b)(art|bg|background|badge|blob|crop|decor|dot|glow|grain|image|mask|ornament|overlay|photo|scrim|shadow|shine|texture)(?-u:\b)")
-        .expect("DECORATIVE_IDENT_RE")
-});
 static VIEWPORT_ROLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?-u:\b)(carousel|slider)(?-u:\b)").expect("VIEWPORT_ROLE_RE"));
-static VIEWPORT_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|flickity|marquee|owl|preview|scroller|slider|slideshow|splide|split|swiper|ticker|viewport)(?-u:\b)")
-        .expect("VIEWPORT_IDENT_RE")
-});
-static VIEWPORT_DEMO_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(demo-area|demo-stage|demo-viewport)(?-u:\b)").expect("VIEWPORT_DEMO_RE")
-});
 
 /// JS: checks.mjs#positionedChildHasSubstantiveContent(child)
 fn positioned_child_has_substantive_content(child: &StaticElement<'_>) -> bool {
@@ -1461,7 +1464,12 @@ fn positioned_child_is_decorative(child: &StaticElement<'_>) -> bool {
         child.get_attribute("class").unwrap_or(""),
         child.get_attribute("id").unwrap_or("")
     );
-    if DECORATIVE_IDENT_RE.is_match(&ident) && !positioned_child_has_substantive_content(child) {
+    if impeccable_core::checks::measures::ident_names_any(
+        &ident,
+        impeccable_core::browser::element_checks::DECOR_IDENT_WORDS,
+        &[],
+    ) && !positioned_child_has_substantive_content(child)
+    {
         return true;
     }
     false
@@ -1505,12 +1513,16 @@ fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
 }
 
 fn ident_names_viewport(el: &StaticElement<'_>) -> bool {
-    let ident = js::to_lower_case(&format!(
+    let ident = format!(
         "{} {}",
         el.get_attribute("class").unwrap_or(""),
         el.get_attribute("id").unwrap_or("")
-    ));
-    VIEWPORT_IDENT_RE.is_match(&ident) || VIEWPORT_DEMO_RE.is_match(&ident)
+    );
+    impeccable_core::checks::measures::ident_names_any(
+        &ident,
+        impeccable_core::browser::element_checks::VIEWPORT_IDENT_WORDS,
+        impeccable_core::browser::element_checks::VIEWPORT_IDENT_PAIRS,
+    )
 }
 
 /// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
@@ -1596,6 +1608,11 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
             continue;
         }
         if positioned_child_is_decorative(&child) {
+            continue;
+        }
+        // A slide, a ticker track or a scroller names itself: what its window
+        // cuts off is the next frame, wherever it sits under the container.
+        if ident_names_viewport(&child) {
             continue;
         }
         // No layout statically: `positionedChildEscapesClip` is null, and

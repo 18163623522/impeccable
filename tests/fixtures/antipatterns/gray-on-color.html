@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gray on color fixture</title>
+<!--
+  gray-on-color asks whether a background reads as colour. The channel spread
+  it needs rises as the colour darkens under a luminance of 0.01, so light gray
+  on a navy so dark it reads as black is gray on black, while a mid navy, a
+  dark navy and a deep teal still read as colour. A state variant utility
+  (`hover:bg-*`) paints only in that state and is not the resting background.
+-->
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #ffffff; color: #111111; }
+  .swatch { width: 420px; padding: 16px; margin: 0 0 16px; font-size: 16px; line-height: 24px; }
+</style>
+</head>
+<body>
+  <section aria-label="Should flag">
+    <div class="swatch" id="flag-gray-on-navy" style="background: #1e3a8a; color: #e5e7eb">Gray copy on a mid navy panel reads washed out.</div>
+    <div class="swatch" id="flag-gray-on-teal" style="background: #115e59; color: #e5e7eb">Gray copy on a deep teal panel reads washed out.</div>
+    <div class="swatch" id="flag-gray-on-dark-navy" style="background: #001c47; color: #d4d4d8">Gray copy on a dark navy that still reads as navy.</div>
+    <div class="swatch text-gray-400 bg-blue-600" id="flag-tailwind-classes">Utility classes name gray text on a blue fill.</div>
+  </section>
+
+  <section aria-label="Should pass">
+    <div class="swatch" id="pass-gray-on-near-black-navy" style="background: #04002d; color: #d1d1d1">Light gray copy on a navy so dark it reads as black.</div>
+    <div class="swatch text-gray-500 bg-white hover:bg-emerald-400" id="pass-hover-variant">A hover fill is not the resting background.</div>
+  </section>
+</body>
+</html>

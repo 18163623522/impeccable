@@ -1,0 +1,7 @@
+{
+  "stdout": "",
+  "stderr": "\n<REPO>/tests/fixtures/antipatterns/gray-on-color.html\n  [gray-on-color] text #e5e7eb on bg #1e3a8a\n    → Gray text looks washed out on colored backgrounds. Use a darker shade of the background color instead, or white/near-white for contrast.\n  [gray-on-color] text #e5e7eb on bg #115e59\n    → Gray text looks washed out on colored backgrounds. Use a darker shade of the background color instead, or white/near-white for contrast.\n  [gray-on-color] text #d4d4d8 on bg #001c47\n    → Gray text looks washed out on colored backgrounds. Use a darker shade of the background color instead, or white/near-white for contrast.\n  [gray-on-color] text-gray-400 on bg-blue-600\n    → Gray text looks washed out on colored backgrounds. Use a darker shade of the background color instead, or white/near-white for contrast.\n\n4 anti-patterns found.\n",
+  "exit": 2,
+  "signal": null,
+  "files": {}
+}

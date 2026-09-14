@@ -133,6 +133,7 @@ fn the_text_geometry_rules_measure_the_text() {
             "flag-cut-by-wrapper",
             "flag-runs-past",
             "flag-transformed-wrapper",
+            "flag-shell-sliver",
         ],
         &[
             "pass-centred-text",
@@ -146,9 +147,10 @@ fn the_text_geometry_rules_measure_the_text() {
     );
     assert_eq!(
         edges.len(),
-        7,
+        8,
         "two paragraphs, the list item, the inline prose, the paragraph an overflow-x-hidden wrapper cuts, \
-         the column running past the window and the paragraph in a transformed wrapper that holds no row: {edges:?}"
+         the column running past the window, the paragraph in a transformed wrapper that holds no row and \
+         the non-wrapping row's second column the page wrapper cuts under a quarter in view: {edges:?}"
     );
 
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");

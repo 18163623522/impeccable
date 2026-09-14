@@ -8,14 +8,21 @@
     /* Fixture for what the text rules score of copies only partly on screen
        (corpus observations-25, issues 4, 14 and 20).
 
-       - A copy with less than a quarter of its text width inside its
-         clipping ancestor, or on the scrollable page, is not painted for the
-         text rules: a date on a slide parked past its track with a sliver in
-         view, a date parked past the page's left edge with 4px on the page.
+       - A copy with less than a quarter of its text width inside a clip that
+         parks copies (a box narrower than the page, a scroller, a box around
+         a transformed track), or before the start of the page, is not painted
+         for the text rules: a date on a slide parked past its track with a
+         sliver in view, a date parked past the page's left edge with 4px on
+         the page, a word 20px into a 100vw clip around a moving track.
          A copy with more of it showing still reports, and so does a line a
          box truncates with an ellipsis, which shows the start of its text.
-       - A box with neither width nor height shows no text, whatever its
-         overflow: the 10px notice collapsed to 0x0 reports no tiny-text.
+       - A wrapper as wide as the viewport that only hides overflow is the
+         page shell: text it cuts is a layout bug a visitor sees and still
+         reports however little of it shows (a non-wrapping row's second
+         column with 60 of 280px in view, a desktop column 6,400px wide).
+       - A 0x0 box keeps the overflow test: a map pin's nowrap label that
+         overflows its 0x0 anchor reports tiny-text, and a 0x0 notice that
+         hides its overflow reports nothing.
        - The page's one report of a colour pair goes to a copy whose text
          shows across its whole width: a word part way past a carousel clip
          claims the pair only until a copy wholly in view wears it.
@@ -48,7 +55,17 @@
 
     .truncate { position: absolute; left: 20px; top: 0; width: 150px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .trunc-word { font-size: 16px; color: #9a8f7f; }
-    .zero-box { position: absolute; left: 400px; top: 20px; width: 0; height: 0; font-size: 10px; color: #444444; }
+    .zero-box { position: absolute; left: 400px; top: 20px; width: 0; height: 0; overflow: hidden; font-size: 10px; color: #444444; }
+    .pin { position: absolute; left: 700px; top: 20px; width: 0; height: 0; white-space: nowrap; font-size: 10px; color: #444444; }
+
+    .shell { position: relative; width: 100vw; overflow: hidden; margin: 0 0 24px; }
+    .shell-row { display: flex; width: max-content; }
+    .shell-gap { flex: 0 0 1220px; height: 40px; }
+    .shell-col { flex: 0 0 280px; margin: 0; color: #979ba1; }
+    .shell-desktop { width: 6400px; margin: 0; padding-left: 20px; font-size: 32px; line-height: 44px; color: #aaa6a2; }
+    .shell-track { display: flex; width: max-content; transform: translateX(-20px); }
+    .shell-slide { flex: 0 0 1280px; height: 40px; white-space: nowrap; }
+    .shell-word { font-size: 20px; line-height: 40px; color: #a4a09c; }
 
     .rhythm { width: 560px; margin: 0 20px; font-family: Georgia, serif; }
     .case { border-top: 1px solid #d8d2c8; padding-top: 24px; margin-bottom: 48px; }
@@ -97,10 +114,32 @@
     </div>
   </div>
 
-  <p class="label">A label its box truncates with an ellipsis, and a consent notice collapsed to 0x0</p>
+  <p class="label">A label its box truncates with an ellipsis, a consent notice collapsed to 0x0, and a map pin's label on a 0x0 anchor</p>
   <div class="row">
     <div class="truncate"><span id="flag-truncated-copy" class="trunc-word">A very long label that runs far past its narrow box, holding a whole sentence of words the box cuts off and ends in an ellipsis</span></div>
     <div id="pass-zero-box" class="zero-box">Collapsed consent notice text that runs on past its box</div>
+    <span id="flag-zero-anchor" class="pin">Harbour office, open 9 to 5</span>
+  </div>
+
+  <p class="label">A page shell cuts a non-wrapping row's second column with 60 of 280px in view</p>
+  <div class="shell">
+    <div class="shell-row">
+      <div class="shell-gap"></div>
+      <p id="flag-shell-cut" class="shell-col">The second column of a row that never wraps, starting near the right edge of the window and cut off by the page wrapper.</p>
+    </div>
+  </div>
+
+  <p class="label">A page shell cuts a desktop column 6,400px wide</p>
+  <div class="shell">
+    <p id="flag-shell-desktop" class="shell-desktop">A paragraph from a fixed desktop column six thousand four hundred pixels wide, so only the start of each very long line shows in the window and the rest is cut off by the page wrapper that hides overflow, which a visitor sees as text that stops mid-sentence at the right edge of the screen every single time, however they resize the window or scroll the page, because nothing brings the rest of the words into view and the wrapper throws them away at the edge of the screen for good.</p>
+  </div>
+
+  <p class="label">A 100vw clip around a moving track parks a word with 20px in view</p>
+  <div class="shell">
+    <div class="shell-track">
+      <div class="shell-slide"></div>
+      <div class="shell-slide"><span id="pass-shell-track-sliver" class="shell-word">Autumn collection notes</span></div>
+    </div>
   </div>
 
   <main class="rhythm">

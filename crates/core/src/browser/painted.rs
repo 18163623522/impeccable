@@ -193,7 +193,6 @@ pub fn unpainted_for(dom: &dyn Dom, el: ElId, gate: PaintGate) -> Option<Unpaint
         PaintGate::Toggle => unpainted_at_capture(dom, el, OwnOpacity::Toggled).or_else(|| no_area(dom, el)),
         PaintGate::Text => unpainted_walk(dom, el, OwnOpacity::Counts, None, &mut Visible::floored(TEXT_MIN_VISIBLE_SHARE))
             .or_else(|| no_text(dom, el))
-            .or_else(|| zero_box(dom, el))
             .or_else(|| no_area(dom, el)),
     }
 }
@@ -269,9 +268,19 @@ impl Visible {
     }
 
     /// Cut the shown part to `[lo, hi]`; true when what is left falls under
-    /// the floor.
-    fn cut(&mut self, lo: f64, hi: f64) -> bool {
+    /// the floor. `floors` says whether this cut may count toward the floor
+    /// (asked only on a floored walk): a cut that may not leaves the share
+    /// as it was, so the walk decides as the base predicate did. A tracked
+    /// walk records every cut.
+    fn cut(&mut self, lo: f64, hi: f64, floors: impl FnOnce() -> bool) -> bool {
         if !self.measured {
+            return false;
+        }
+        if self.min_share > 0.0 {
+            if !floors() {
+                return false;
+            }
+        } else if !self.track {
             return false;
         }
         self.shown = (js::math_max(self.shown.0, lo), js::math_min(self.shown.1, hi));
@@ -409,7 +418,7 @@ fn unpainted_walk(
             // below covers what it can never reach.
             let is_page = Some(p) == body || Some(p) == root;
             if clip_tests && !is_page && clips_contents(&display) {
-                match clip_outcome(dom, p, &band, vis, viewport_w, viewport_h) {
+                match clip_outcome(dom, el, p, &band, vis, viewport_w, viewport_h) {
                     Ok(next) => band = next,
                     Err(reason) => return Some(reason),
                 }
@@ -604,17 +613,9 @@ fn no_text(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
 /// reports 0). Text that runs past a zero-width box with visible overflow
 /// shows in its scroll extent and is kept, as is a metric the capture did not
 /// record, and `display: contents`, which generates no box for its content to
-/// sit in.
-/// A text measurement's element whose box has neither width nor height shows
-/// no text, whatever its overflow: a link in a consent block collapsed to
-/// 0x0. A box flat on one axis keeps [`no_area`]'s overflow test, and
-/// `display: contents`, which generates no box of its own, is kept.
-fn zero_box(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
-    let r = dom.rect(el);
-    (r.all_finite() && r.width <= 0.0 && r.height <= 0.0 && dom.style(el, "display") != "contents")
-        .then_some(Unpainted::NoArea)
-}
-
+/// sit in. The Text gate asks the same test: a 0x0 anchor whose nowrap label
+/// overflows it (a map pin, a chart label) shows that label, and a 0x0 box
+/// with nothing past its edges is flat on both axes.
 fn no_area(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
     let r = dom.rect(el);
     if !r.all_finite() || (r.width > 0.0 && r.height > 0.0) || dom.style(el, "display") == "contents" {
@@ -687,6 +688,7 @@ fn has_overflow(scroll: f64, client: f64) -> bool {
 /// the element; `Ok` carries the band for the ancestors above `p`.
 fn clip_outcome(
     dom: &dyn Dom,
+    el: ElId,
     p: ElId,
     band: &Rect,
     vis: &mut Visible,
@@ -716,7 +718,10 @@ fn clip_outcome(
     // A text measurement has to show enough of its width inside the box to be
     // read. A box that truncates its line with an ellipsis shows the start of
     // it, which is what a reader reads.
-    if clip_x && dom.style(p, "textOverflow") != "ellipsis" && vis.cut(cr.left, cr.right) {
+    if clip_x
+        && dom.style(p, "textOverflow") != "ellipsis"
+        && vis.cut(cr.left, cr.right, || parks_copies(dom, el, p, &cr, viewport_w))
+    {
         return Err(Unpainted::ClippedOut);
     }
     // Vertically only a box that hides its overflow does. A vertical scroll
@@ -807,11 +812,45 @@ fn outside_document(dom: &dyn Dom, rect: &Rect, vis: &mut Visible, viewport_w: f
     if rect.width > 0.0 && (right <= start || left >= end) {
         return Some(Unpainted::OutsideDocument);
     }
-    // A text measurement needs enough of its width on the scrollable page.
-    if vis.cut(start - sx, end - sx) {
+    // A text measurement needs enough of its width on the page's scroll
+    // origin side: a copy parked before the start of the document (a slide at
+    // x -66 with 4px on the page) can never be scrolled to. Text cut at the
+    // page's far edge runs past a page that hides its overflow, the page
+    // shell cutting a line a visitor reads, and keeps reporting as it did.
+    let (origin_lo, origin_hi) = if rtl { (f64::NEG_INFINITY, end - sx) } else { (start - sx, f64::INFINITY) };
+    if vis.cut(origin_lo, origin_hi, || true) {
         return Some(Unpainted::OutsideDocument);
     }
+    vis.cut(start - sx, end - sx, || false);
     None
+}
+
+/// Whether a clip that cuts a text measurement on the x axis is one that
+/// parks copies, where the visible-share floor applies: a box narrower than
+/// the page (a carousel, a swatch or badge row), a box that scrolls on x with
+/// content to scroll to, or a box around a track a script moves with
+/// transforms. A box at least as wide as the viewport that only hides its
+/// overflow is the page shell, and text it cuts is a layout bug a visitor
+/// sees (a non-wrapping row's second column, a desktop column at a phone
+/// width), so it keeps base behaviour. With no measured viewport the width
+/// test proves nothing.
+fn parks_copies(dom: &dyn Dom, el: ElId, p: ElId, cr: &Rect, viewport_w: f64) -> bool {
+    let page_w = page_width(dom, viewport_w);
+    (page_w > 0.0 && cr.width < page_w - 1.0)
+        || super::text_geometry::scrolls_x(dom, p)
+        || super::text_geometry::moves_a_track(dom, el, p)
+}
+
+/// The width of the page a visitor sees: the viewport, or the root's client
+/// width when a classic scrollbar makes that narrower. 0 when neither was
+/// measured.
+fn page_width(dom: &dyn Dom, viewport_w: f64) -> f64 {
+    let client = dom.document_element().map(|root| dom.client_width(root)).filter(|w| w.is_finite() && *w > 0.0);
+    match client {
+        Some(w) if viewport_w > 0.0 => js::math_min(w, viewport_w),
+        Some(w) => w,
+        None => viewport_w,
+    }
 }
 
 /// Whether a near-transparent raster is one state of a moving layer rather
@@ -1949,32 +1988,112 @@ mod tests {
         assert_eq!(unpainted_for(&d, edge, PaintGate::Text), Some(Unpainted::OutsideDocument));
         d.set_rect(edge, -30.0, 560.0, 70.0, 20.0);
         assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None, "40 of 70px on the page");
-        // Past the document's right edge.
+        // Past the document's far edge the page shell cuts a line that starts
+        // in view: a layout bug a visitor sees, which keeps reporting.
         d.set_rect(edge, 1270.0, 560.0, 70.0, 20.0);
-        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), Some(Unpainted::OutsideDocument));
-        // Right to left, the page scrolls past the left edge instead.
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None);
+        // Right to left, the page scrolls past the left edge instead, and the
+        // scroll origin is the right edge.
         let root = d.document_element.unwrap();
         d.set_style(root, "direction", "rtl");
         d.el_mut(root).scroll_width = 2560.0;
         d.set_rect(edge, -66.0, 560.0, 70.0, 20.0);
         assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None);
+        d.set_rect(edge, 1276.0, 560.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), Some(Unpainted::OutsideDocument));
     }
 
-    /// observations-25 issue 14: thairath.co.th's consent link in a block
-    /// collapsed to 0x0.
+    /// The review's overflow probe at 390px: a non-wrapping row's second
+    /// column with 50 of 280px in view, cut by a wrapper that hides overflow
+    /// across the whole viewport. A page shell's cut is a layout bug, not a
+    /// parked copy, so the floor does not apply; a narrower clip, a scroller
+    /// and a transformed track as wide as the viewport still floor.
     #[test]
-    fn a_zero_box_shows_no_text_whatever_its_overflow() {
+    fn a_page_shell_cut_is_not_floored() {
         let (mut d, body) = page();
-        let notice = d.add(Some(body), "div");
-        d.add_text(notice, "Collapsed consent notice");
-        d.set_rect(notice, 400.0, 20.0, 0.0, 0.0);
-        d.el_mut(notice).scroll_width = 140.0;
-        d.el_mut(notice).scroll_height = Some(60.0);
-        assert_eq!(unpainted_for(&d, notice, PaintGate::Box), None, "the box gate keeps the overflow test");
-        assert_eq!(unpainted_for(&d, notice, PaintGate::Text), Some(Unpainted::NoArea));
-        // Flat on one axis only, visible overflow still shows its lines.
-        d.set_rect(notice, 400.0, 20.0, 300.0, 0.0);
-        assert_eq!(unpainted_for(&d, notice, PaintGate::Text), None);
+        d.inner_width = 390.0;
+        let root = d.document_element.unwrap();
+        d.set_rect(root, 0.0, 0.0, 390.0, 4000.0);
+        d.el_mut(root).scroll_width = 390.0;
+        d.el_mut(root).client_width = 390.0;
+        let shell = d.add(Some(body), "div");
+        d.set_styles(shell, &[("overflowX", "hidden"), ("overflowY", "visible")]);
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+        d.el_mut(shell).client_width = 390.0;
+        d.el_mut(shell).scroll_width = 640.0;
+        let row = d.add(Some(shell), "div");
+        d.set_rect(row, 0.0, 400.0, 640.0, 120.0);
+        let left = d.add(Some(row), "div");
+        d.set_rect(left, 0.0, 400.0, 320.0, 120.0);
+        let right = d.add(Some(row), "div");
+        d.set_rect(right, 320.0, 400.0, 320.0, 120.0);
+        let p = d.add(Some(right), "p");
+        d.add_text(p, "The right column of the same row starts near the right edge of the phone screen");
+        d.set_rect(p, 340.0, 400.0, 280.0, 120.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None, "50 of 280px in view, cut by the page shell");
+        // A desktop column 1,700px wide in the same shell.
+        d.set_rect(p, 20.0, 400.0, 1700.0, 120.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+        d.set_rect(p, 340.0, 400.0, 280.0, 120.0);
+
+        // A classic scrollbar narrows the page: a shell at the root's client
+        // width is still the page shell.
+        d.el_mut(root).client_width = 375.0;
+        d.set_rect(shell, 0.0, 0.0, 375.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+        d.el_mut(root).client_width = 390.0;
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+
+        // A clip narrower than the page parks copies.
+        d.set_rect(shell, 0.0, 0.0, 360.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+
+        // A scroller as wide as the page brings its cells into view.
+        d.set_style(shell, "overflowX", "auto");
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_style(shell, "overflowX", "hidden");
+
+        // A track a script moves with transforms, as wide as the page.
+        d.set_style(row, "transform", "matrix(1, 0, 0, 1, -40, 0)");
+        d.el_mut(row).scroll_width = 640.0;
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_style(row, "transform", "none");
+
+        // With no measured viewport the width test proves nothing.
+        d.inner_width = f64::NAN;
+        d.el_mut(root).client_width = 0.0;
+        d.set_rect(shell, 0.0, 0.0, 360.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+    }
+
+    /// A 0x0 anchor whose nowrap label overflows it visibly (a map pin, a
+    /// chart label) shows that label, and the Text gate keeps it; a 0x0 box
+    /// with nothing past its edges shows no text.
+    #[test]
+    fn a_zero_box_shows_the_text_that_overflows_it() {
+        let (mut d, body) = page();
+        let pin = d.add(Some(body), "span");
+        d.set_styles(pin, &[("position", "absolute"), ("overflowX", "visible"), ("overflowY", "visible")]);
+        d.add_text(pin, "Harbour office, open 9 to 5");
+        d.set_rect(pin, 120.0, 60.0, 0.0, 0.0);
+        d.el_mut(pin).scroll_width = 140.0;
+        d.el_mut(pin).scroll_height = Some(15.0);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), None, "the label overflows visibly");
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Box), None);
+        // A metric the capture did not record keeps it.
+        d.el_mut(pin).scroll_width = f64::NAN;
+        d.el_mut(pin).scroll_height = None;
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), None);
+        // Nothing runs past its edges: no text shows.
+        d.el_mut(pin).scroll_width = 0.0;
+        d.el_mut(pin).scroll_height = Some(0.0);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), Some(Unpainted::NoArea));
+        // A 0x0 box that hides its overflow shows none of it.
+        d.el_mut(pin).scroll_width = 140.0;
+        d.el_mut(pin).scroll_height = Some(15.0);
+        d.set_styles(pin, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), Some(Unpainted::NoArea));
     }
 
     #[test]

@@ -3459,10 +3459,20 @@ Every change is in the URL engine's rule pass; the goldens move only because
 
 - **A visible-share floor for text measurements (issue 4).** The Text gate asks
   the painted predicate with a floor: a text measurement with less than a
-  quarter of its width (`TEXT_MIN_VISIBLE_SHARE`) inside its clipping
-  ancestors (`clip_outcome`) or on the scrollable page (`outside_document`) is
-  not painted for the text rules. The share is taken of the text where it can
-  be measured (the phrasing extent), else of the box; passing a horizontal
+  quarter of its width (`TEXT_MIN_VISIBLE_SHARE`) inside a clip that parks
+  copies (`clip_outcome`, `parks_copies`) or before the start of the page
+  (`outside_document`) is not painted for the text rules. A clip parks copies
+  when it is narrower than the page (the smaller of `innerWidth` and the root's
+  `clientWidth`), when it scrolls on x with content to scroll to, or when it
+  holds a transformed track (`moves_a_track`). A box at least as wide as the
+  viewport that only hides overflow is the page shell: text it cuts is a
+  layout bug a visitor sees, so that cut leaves the share as it was and the
+  gate decides as base did. The document floor likewise applies only on the
+  scroll origin side (left, or right under `direction: rtl`); text past the
+  page's far edge runs past a page that hides its overflow and keeps
+  reporting. With no measured viewport the width test proves nothing. The
+  share is taken of the text where it can be measured (the phrasing extent),
+  else of the box; passing a horizontal
   scroller replaces both with the scroller's box, since scrolling brings
   anything in its range into it. Only the x axis is floored: a line-clamped
   standfirst or a collapsed "read more" box shows its first lines while the
@@ -3477,9 +3487,13 @@ Every change is in the URL engine's rule pass; the goldens move only because
   by the page edge already did, and the first copy wholly in view reports
   instead. A copy under the floor never claims, because the claim's keep
   callback asks the Text gate.
-- **Zero boxes (issue 14).** On the Text gate a box with neither width nor
-  height is not painted whatever its overflow. A box flat on one axis keeps
-  `no_area`'s overflow test, and `display: contents` is kept.
+- **Zero boxes (issue 14): unchanged from base.** A 0x0 box keeps `no_area`'s
+  overflow test on the Text gate: it is not painted when it clips an axis or
+  its scroll extent there is at most 1px, and a 0x0 anchor whose nowrap label
+  overflows visibly (a map pin, a chart label) still reports. The branch first
+  dropped every 0x0 box; review found that silenced real visible text, and
+  keeping it only where the scroll extent is at most 1px on both axes is what
+  `no_area` already does, so the extra test was removed.
 - **body-text-viewport-edge needs text in the viewport (issue 14).** Text whose
   measured span lies wholly past either side of the viewport meets no edge a
   reader sees: a desktop column laid out past a phone viewport
@@ -3509,41 +3523,56 @@ Fixtures and tests:
   in view, one mostly in view), dates past the page's left edge (4 of 70px,
   40 of 70px), one colour pair on a word part way past its clip and on a word
   wholly in view, a word with a sliver in its clip, a label its box truncates
-  with an ellipsis, a 10px notice collapsed to 0x0, and three crowded
-  headings, one on a slide parked past its track.
-  `crates/browser/tests/on_screen.rs` pins the URL engine. Scanned with the
-  base binary (05cbd66e) it reports all five pass cases (`#pass-parked-date`,
+  with an ellipsis, a 10px notice collapsed to 0x0 that hides its overflow, a
+  map pin's nowrap 10px label on a 0x0 anchor (`#flag-zero-anchor`), a
+  non-wrapping row's second column a 100vw page shell cuts with 60 of 280px in
+  view (`#flag-shell-cut`), a 6,400px desktop column in the same shell
+  (`#flag-shell-desktop`), a word 20px into a 100vw clip around a transformed
+  track (`#pass-shell-track-sliver`), and three crowded headings, one on a
+  slide parked past its track.
+  `crates/browser/tests/on_screen.rs` pins the URL engine: low-contrast on the
+  seven flag cases only, tiny-text on `#flag-zero-anchor` and not on
+  `#pass-zero-box`, and the two crowded headings. Scanned with the base binary
+  (05cbd66e) it reports all pass cases (`#pass-parked-date`,
   `#pass-edge-sliver`, `#pass-cut-copy` instead of `#flag-whole-copy`,
-  `#pass-sliver-copy`, the 0x0 notice's tiny-text) and `Pass Parked Slide`
+  `#pass-sliver-copy`, `#pass-shell-track-sliver`) and `Pass Parked Slide`
   with `(3 headings on page)`; the branch reports only the flag cases, with
-  `(2 headings on page)`.
+  `(2 headings on page)`. dbeaa60d, the branch before review, dropped the
+  three shell and pin flag cases.
 - `body-text-viewport-edge.html` gains `pass-past-viewport`,
-  `flag-runs-past`, `pass-ticker-first`, `pass-ticker-second` and
-  `flag-transformed-wrapper`; base reports the three pass cases
-  (`right -2199px`, `left -300px`, `right -260px`).
+  `flag-runs-past`, `pass-ticker-first`, `pass-ticker-second`,
+  `flag-transformed-wrapper` and `flag-shell-sliver` (a non-wrapping row's
+  720px second column with 140px in view inside a 100vw wrapper that hides
+  overflow); base reports the three pass cases (`right -2199px`,
+  `left -300px`, `right -260px`), and dbeaa60d dropped `flag-shell-sliver`.
 - `line-length.html` gains `flag-large-span` (`~100`, base `~150`),
   `flag-mono` (`~119`, base `~143`), `pass-large-span` (base `~102`) and
   `pass-mono` (base `~97`). `crates/browser/tests/text_geometry.rs` pins both.
 - `on-screen.html` joins `REPLAY_FIXTURES` in `crates/browser/tests/evidence.rs`.
 - Unit tests: the floor, the ellipsis exemption, the unfloored y axis, a
-  scroller cell, the document floor in both directions, the zero box and
-  `text_shown_across` (`painted.rs`); the run font and the transformed track
+  scroller cell, the document floor on the origin side in both directions and
+  not at the far edge, the page shell (a row's second column and a desktop
+  column at 390px, a classic scrollbar, and the narrower clip, scroller and
+  transformed track that still floor, plus an unmeasured viewport), the 0x0
+  anchor whose label overflows and the 0x0 box with nothing past its edges,
+  and `text_shown_across` (`painted.rs`); the run font and the transformed track
   (`text_geometry.rs`); the monospace families (`text_rules.rs`); the gated
   heading count (`page_checks.rs`).
 
 Goldens, recorded from the binary and read by hand:
 
 - `detect-fixture-json-on-screen-html`, `detect-fixture-text-on-screen-html`:
-  new, 11 findings. The static engine has no layout: `low-contrast` 8 (all five
-  dates, the colour pair once for its first copy `#pass-cut-copy`, the sliver
-  word, the truncated label), `tiny-text` for the 0x0 notice, and a
+  new, 15 findings. The static engine has no layout: `low-contrast` 11 (all
+  five dates, the colour pair once for its first copy `#pass-cut-copy`, the
+  sliver word, the truncated label, the two shell cases and the track
+  sliver), `tiny-text` for the 0x0 notice and the pin, and a
   `clipped-overflow-container` advisory for each word clip. No heading-rhythm.
-- `detect-dir-json-all-fixtures` 723 to 734, `detect-no-advisory-json` 631 to
-  640, `detect-scope-type` 176 to 177, `detect-scope-both` 232 to 235, and in
+- `detect-dir-json-all-fixtures` 723 to 738, `detect-no-advisory-json` 631 to
+  644, `detect-scope-type` 176 to 178, `detect-scope-both` 232 to 236, and in
   the text forms (`detect-dir-text-all-fixtures`,
   `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text`,
   `detect-scope-layout-text`) only the new fixture's block and the summary
-  counts (631 to 640 anti-patterns, 92 to 94 advisory notes, 17 to 19 in the
+  counts (631 to 644 anti-patterns, 92 to 94 advisory notes, 17 to 19 in the
   layout scope). Every added finding belongs to the new fixture; nothing was
   removed or rewritten. The static goldens of `body-text-viewport-edge.html`
   and `line-length.html` stay empty.
@@ -3624,27 +3653,88 @@ Not changed, and why:
 - **climatempo.com.br 123680.** The snapshot places the Taboola button inside
   every clip of its card.
 
+### Revised at review: fail safe where the engine cannot tell
+
+The review approved dbeaa60d with two open issues. Where the engine cannot
+determine a fact, the gate now fails safe to base behaviour and keeps
+reporting.
+
+- **Zero boxes.** dbeaa60d dropped every 0x0 box on the Text gate. The review
+  probe's `#pin`, a 0x0 anchor with a visible nowrap 10px label, lost its
+  tiny-text at 390 and 1280. The Text gate is back on `no_area` (see above);
+  no corpus finding depended on the extra test.
+- **The floor and the page shell.** dbeaa60d floored any clip and both edges
+  of the document, which silenced text that starts in view and is cut by a
+  wrapper that hides overflow. On the review's `overflow-bug.html` at 390x844,
+  `#plain-right` (50 of 280px in view) lost `body-text-viewport-edge
+  right -250px`, and `#desktop` (a 1,700px column) lost low-contrast,
+  line-length and body-text-viewport-edge. The floor now applies only to
+  clips that park copies and to the document's origin side (see above).
+- **Probes, base 05cbd66e / dbeaa60d / now.** `#pin` tiny-text: reported /
+  none / reported, at 390 and 1280. `#plain-right` body-text-viewport-edge:
+  reported / none / reported. `#desktop` low-contrast, line-length `~215` and
+  body-text-viewport-edge `right -1330px`: reported / none / reported.
+  `#thirty` reports on all three. `#mq-one` (a single-span marquee in a
+  full-width strip at 390) comes back as base, because its strip is the page
+  shell. `#row-right`, `#sc20` and `#cl20` stay as dbeaa60d (limits 3 and 4
+  below). The rest of the review's probe pages (`partial`, `pair-floor`,
+  `prose`, and `shares` at 1280) match dbeaa60d exactly.
+- **Corpus.** `on-screen-25`, `on-screen-20` and `on-screen-19`, re-run on the
+  revised engine: violations 56, 184 and 9, as dbeaa60d, with every rule's
+  candidate, removed and added counts and its confirmed-harmful ids identical
+  on all three runs (only the ratchet's random 12-item samples vary, on rules
+  this change cannot reach as much as on those it can). The revision only lets
+  more text through the gate, so a finding coming back would raise a
+  candidate count and a pair moving would raise both removed and added: no
+  removal came back. Every floor removal in the corpus is cut by a clip
+  narrower than the page, a scroller, a transformed track, or the document's
+  start: otto.de's `+N` counts in the swatch scroller (111833), visiby.net's
+  chart labels (121574), zigzag.kr's rating (110070, 110071), sapo.vn's next
+  Swiper slide (112118) and overdrive.health's parked word (100733) are still
+  removed. No track condition on duplicate text was needed.
+- **Goldens.** Re-recorded from the binary: the nine above whose counts moved
+  (the two `on-screen-html` goldens, the three dir sweeps, `detect-scope-type`,
+  `detect-scope-both` and the two no-advisory forms). Each gains only the
+  fixture's four new static findings (three low-contrast pairs and the pin's
+  tiny-text) and the summary count; nothing else moved.
+- The generated browser asset was regenerated again with `cargo xtask bundle`.
+
 ### Known limits at merge
 
 1. **The floor is a width share.** A copy with 25 to 99% of its text in view
    still reports (co-trip.jp's date at 46%), and a long code chip or table cell
-   with a readable start under a quarter of its text at rest no longer does.
-2. **Only ellipsis clips are exempt.** A box that hides a nowrap line without
-   `text-overflow: ellipsis` shows its start and is floored like a track.
-3. **Vertical cuts are not floored**, and neither is a fixed layer's content.
-4. **Transformed rows count as tracks.** A clip holding a transformed row of
-   boxes wider than itself exempts every paragraph it cuts, a layout bug in
-   such a row included; no confirmed-harmful finding was lost to it.
-5. **The run font is a character-weighted average**, and monospace is read
-   from the first family, so a missing mono web font whose fallback is
-   proportional still counts 0.6em.
-6. **Zero boxes whose text overflows visibly** are dropped on the Text gate.
-7. **Text past the viewport** reports nothing on body-text-viewport-edge; the
+   with a readable start under a quarter of its text at rest no longer does
+   when a clip that parks copies cuts it.
+2. **Only ellipsis clips are exempt.** A box narrower than the page that hides
+   a nowrap line without `text-overflow: ellipsis` shows its start and is
+   floored like a track.
+3. **Scroller cells under a quarter in view** are floored even though
+   scrolling brings them in (the review's `#sc20` and `#cl20`, vibe-genomics'
+   code chip 115801). Base already refused cells wholly past a scroller.
+4. **`moves_a_track` counts identity transforms.** Any transformed element
+   holding a row of two side-by-side boxes wider than the clip counts as a
+   track, the identity matrix included (Tailwind's `transform` class, reveal
+   libraries), so a non-wrapping two-column row carrying such a transform is
+   floored and exempt from body-text-viewport-edge (the review's `#row-right`);
+   no confirmed-harmful finding was lost to it.
+5. **A single-span marquee at phone width** in a strip narrower than the page
+   is floored once under a quarter of it shows, which silences its
+   low-contrast. In a full-width strip it reports as base, and a track of two
+   copies still reports.
+6. **The page shell is read from width alone.** A shell narrower than the
+   viewport (a centred max-width wrapper at desktop widths) parks copies like
+   a carousel, and a full-width carousel whose slides are positioned rather
+   than a transformed row reports its parked copies as base did.
+7. **Vertical cuts are not floored**, and neither is a fixed layer's content.
+8. **The run font is a character-weighted average**, and monospace is read
+   from the first family only, so a missing mono web font whose fallback is
+   proportional still counts 0.6em, which fails toward fewer findings.
+9. **Text past the viewport** reports nothing on body-text-viewport-edge; the
    overflow itself stays unreported (observations-25 issue 8, P20).
-8. **Pairs move.** A colour pair first worn by a copy part way past its clip
-   now reports on a later copy wholly in view, which the ratchet counts as a
-   removal and an addition.
-9. **API.** `TEXT_MIN_VISIBLE_SHARE`, `text_shown_across`,
-   `phrasing_text_font`, `average_glyph_advance_em_at`,
-   `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
-   are new.
+10. **Pairs move.** A colour pair first worn by a copy part way past its clip
+    now reports on a later copy wholly in view, which the ratchet counts as a
+    removal and an addition.
+11. **API.** `TEXT_MIN_VISIBLE_SHARE`, `text_shown_across`,
+    `phrasing_text_font`, `average_glyph_advance_em_at`,
+    `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
+    are new; `scrolls_x` and `moves_a_track` are now `pub(crate)`.

@@ -135,6 +135,16 @@
       <li style="flex: 0 0 1000px; margin: 0"><p class="pass-ticker-second" style="margin: 0">The second ticker item, cut by the right edge of the window while the track carries it along, one of a row of items the script scrolls.</p></li>
     </ul>
   </div>
+  <!-- A row that never wraps, inside a page wrapper as wide as the window that
+       hides overflow: its second column starts 140px before the right edge
+       and the wrapper cuts the rest. However little of it shows, that is a
+       layout bug a visitor sees, not a copy a carousel parks. -->
+  <div class="escape" style="overflow: hidden">
+    <div style="display: flex; width: max-content">
+      <div style="flex: 0 0 1140px; height: 40px"></div>
+      <p class="flag-shell-sliver" style="flex: 0 0 720px; margin: 0">The second column of a row that never wraps, starting just before the right edge of the window, so the page wrapper cuts off almost every word of it.</p>
+    </div>
+  </div>
   <!-- A wrapper carried by a transform that holds one paragraph and no row of
        items is no track, and the paragraph it lets the clip cut reports. -->
   <div class="escape" style="overflow: hidden">

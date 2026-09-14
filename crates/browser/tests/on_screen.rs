@@ -105,17 +105,22 @@ fn text_rules_score_only_copies_a_reader_can_see() {
     let contrast = findings(&engine, port, "on-screen.html", "low-contrast");
     assert_cases(
         &contrast,
-        &["#flag-slide-date", "#flag-cut-date", "#flag-edge-half", "#flag-whole-copy", "#flag-truncated-copy"],
-        &["#pass-parked-date", "#pass-edge-sliver", "#pass-cut-copy", "#pass-sliver-copy"],
+        &[
+            "#flag-slide-date",
+            "#flag-cut-date",
+            "#flag-edge-half",
+            "#flag-whole-copy",
+            "#flag-truncated-copy",
+            "#flag-shell-cut",
+            "#flag-shell-desktop",
+        ],
+        &["#pass-parked-date", "#pass-edge-sliver", "#pass-cut-copy", "#pass-sliver-copy", "#pass-shell-track-sliver"],
         "low-contrast",
     );
-    assert_eq!(contrast.len(), 5, "only the flag cases: {contrast:?}");
+    assert_eq!(contrast.len(), 7, "only the flag cases: {contrast:?}");
 
     let tiny = findings(&engine, port, "on-screen.html", "tiny-text");
-    assert!(
-        !tiny.iter().any(|(_, sel)| sel.contains("pass-zero-box")),
-        "a 0x0 box shows no text: {tiny:?}"
-    );
+    assert_cases(&tiny, &["#flag-zero-anchor"], &["#pass-zero-box"], "tiny-text");
 
     let rhythm = findings(&engine, port, "on-screen.html", "heading-rhythm");
     assert_eq!(rhythm.len(), 2, "the two crowded headings on screen: {rhythm:?}");

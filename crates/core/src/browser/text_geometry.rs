@@ -226,7 +226,7 @@ pub fn scrolling_ancestor_cuts(dom: &dyn Dom, el: ElId, text: &Rect) -> bool {
 /// into view. A box that hides overflow around content with no such track (a
 /// section cutting a paragraph at the screen edge) proves no track, and
 /// neither does a metric the capture did not record.
-fn moves_a_track(dom: &dyn Dom, el: ElId, clip: ElId) -> bool {
+pub(crate) fn moves_a_track(dom: &dyn Dom, el: ElId, clip: ElId) -> bool {
     if !matches!(overflow_x(dom, clip).as_str(), "hidden" | "clip") {
         return false;
     }
@@ -275,7 +275,7 @@ fn holds_row(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// Whether `el` scrolls on the x axis and has content to scroll to.
-fn scrolls_x(dom: &dyn Dom, el: ElId) -> bool {
+pub(crate) fn scrolls_x(dom: &dyn Dom, el: ElId) -> bool {
     if !matches!(overflow_x(dom, el).as_str(), "auto" | "scroll") {
         return false;
     }

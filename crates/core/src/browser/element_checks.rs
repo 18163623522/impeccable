@@ -17,7 +17,8 @@ use super::BrowserFinding;
 use crate::browser::quality::is_visually_hidden;
 use crate::checks::measures::{
     self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
-    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_row_finding,
+    check_radial_spotlight, gpt_border_shadow_halo_blur_px, gpt_border_shadow_halo_blur_px_over,
+    gpt_border_shadow_row_finding,
     gpt_border_shadow_row_size, gpt_border_shadow_sizes_match, gpt_thin_border_wide_shadow_pair,
     is_screen_reader_only_text_style, parse_radius_corners, GptBorderShadowInput,
     GptBorderShadowRowTree, OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
@@ -34,11 +35,11 @@ use crate::checks::text_rules::{
     POSITIONED_CHILD_INTERACTIVE_SELECTOR, TEXT_OVERFLOW_SKIP_TAGS,
 };
 use crate::color::{
-    get_hue, has_chroma, parse_any_color, parse_gradient_colors, parse_rgb, relative_luminance,
-    Rgba,
+    composite_color_over, get_hue, has_chroma, parse_any_color, parse_gradient_colors, parse_rgb,
+    relative_luminance, Rgba,
 };
 use crate::constants::{BORDER_SAFE_TAGS, SAFE_TAGS};
-use crate::js::{self, math_round, number_to_string, parse_float, parse_int, WS};
+use crate::js::{self, math_max, math_round, number_to_string, parse_float, parse_int, WS};
 use crate::js_ext_a::num_truthy;
 use crate::js_ext_b::utf16_len;
 use once_cell::sync::Lazy;
@@ -935,9 +936,13 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     if !HEADING_TAGS.contains(&tag.as_str()) {
         return Vec::new();
     }
-    let Some(sibling) = dom.previous_element_sibling(el) else {
+    let Some(found) = super::text_collectors::label_before_heading(dom, el) else {
         return Vec::new();
     };
+    let sibling = tile_box(dom, found.label);
+    if found.levels > 0 && !super::text_collectors::label_near_heading(dom, sibling, el) {
+        return Vec::new();
+    }
     let sib_rect = dom.rect(sibling);
     let head_rect = dom.rect(el);
     let icon_child = dom
@@ -945,7 +950,8 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             Some(sibling),
             "svg, i[data-lucide], i[class*=\"fa-\"], i[class*=\"icon\"]",
         )
-        .unwrap_or(None);
+        .unwrap_or(None)
+        .or_else(|| masked_icon_child(dom, sibling));
     let icon_rect = icon_child.map(|c| dom.rect(c));
     let sib_direct = direct_text(dom, sibling);
     let has_inline_emoji_icon =
@@ -960,7 +966,10 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         sibling_bottom: sib_rect.bottom,
         sibling_bg_color: parse_rgb(Some(&dom.style(sibling, "backgroundColor"))),
         sibling_bg_image: Some(dom.style(sibling, "backgroundImage")),
-        sibling_border_width: style_px(dom, sibling, "borderTopWidth"),
+        sibling_border_width: math_max(
+            style_px(dom, sibling, "borderTopWidth"),
+            shadow_ring_px(&dom.style(sibling, "boxShadow")),
+        ),
         sibling_border_radius: style_px(dom, sibling, "borderRadius"),
         has_icon_child: icon_child.is_some() || has_inline_emoji_icon,
         // JS `iconRect?.width || 0`
@@ -969,6 +978,81 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             .filter(|w| num_truthy(*w))
             .unwrap_or(0.0),
     })
+}
+
+/// The box a tile is drawn on. A `display: contents` wrapper generates no box,
+/// so its last element child stands for it, and a wrapper that paints nothing
+/// around a single child of its own size (a Framer `-container`) stands for
+/// that child. At most three wrappers deep.
+fn tile_box(dom: &dyn Dom, el: ElId) -> ElId {
+    let mut current = el;
+    for _ in 0..3 {
+        let children = dom.children(current);
+        if dom.style(current, "display") == "contents" {
+            match children.last() {
+                Some(&last) => {
+                    current = last;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        if children.len() == 1 && box_paints_nothing(dom, current) {
+            let (outer, inner) = (dom.rect(current), dom.rect(children[0]));
+            let same = |a: f64, b: f64| (a - b).abs() <= 1.0;
+            if outer.width > 0.0
+                && same(outer.left, inner.left)
+                && same(outer.top, inner.top)
+                && same(outer.width, inner.width)
+                && same(outer.height, inner.height)
+            {
+                current = children[0];
+                continue;
+            }
+        }
+        break;
+    }
+    current
+}
+
+/// No fill, no image, no border and no shadow.
+fn box_paints_nothing(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    let shadow = dom.style(el, "boxShadow");
+    measures::css_color_is_transparent(Some(&dom.style(el, "backgroundColor")))
+        && (image.is_empty() || image == "none")
+        && (shadow.is_empty() || shadow == "none")
+        && !(style_px(dom, el, "borderTopWidth") > 0.0)
+}
+
+/// An icon drawn as a masked box (`mask-image: url(...svg)` over a fill), the
+/// way Framer ships its icon component.
+fn masked_icon_child(dom: &dyn Dom, tile: ElId) -> Option<ElId> {
+    dom.query_all(Some(tile), "*")
+        .unwrap_or_default()
+        .into_iter()
+        .find(|&child| {
+            ["maskImage", "webkitMaskImage"]
+                .iter()
+                .any(|p| dom.style(child, p).to_ascii_lowercase().contains("url("))
+        })
+}
+
+/// The width of a ring a box-shadow draws as a border: a layer with no offset
+/// and no blur whose spread is at least half a pixel (`ring-1`,
+/// `0 0 0 1px`). 0 when there is none.
+fn shadow_ring_px(box_shadow: &str) -> f64 {
+    measures::parse_shadow_layers(box_shadow)
+        .iter()
+        .filter(|l| {
+            l.alpha >= measures::FAINT_PAINT_ALPHA
+                && l.x == 0.0
+                && l.y == 0.0
+                && l.blur == 0.0
+                && l.spread >= 0.5
+        })
+        .map(|l| l.spread)
+        .fold(0.0, math_max)
 }
 
 /// JS: checks.mjs#checkElementItalicSerifDOM(el)
@@ -1645,10 +1729,16 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         return Vec::new();
     }
     let font_size = style_px(dom, el, "fontSize");
-    let heading_text = collapse_ws(js::trim(&dom.text_content(el)));
     let rect = dom.rect(el);
     let vw = dom.inner_width();
     let vh = dom.inner_height();
+    // An oversized headline is a first-screen claim: a heading that starts
+    // below the fold is met after the page has already made its case.
+    let scroll_y = if num_truthy(dom.scroll_y()) { dom.scroll_y() } else { 0.0 };
+    if num_truthy(vh) && rect.top + scroll_y >= vh {
+        return Vec::new();
+    }
+    let heading_text = collapse_ws(js::trim(&rendered_text_content(dom, el)));
     finding_hits(check_oversized_h1(&OversizedH1Input {
         tag: &tag,
         font_size,
@@ -1662,6 +1752,45 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     }))
 }
 
+/// `el`'s `textContent` without the text of descendants that paint nothing
+/// at capture (`display: none`, `visibility: hidden`, their own opacity at or
+/// below 0.02). A word rotator keeps every word in the headline and shows one.
+fn rendered_text_content(dom: &dyn Dom, el: ElId) -> String {
+    let full = dom.text_content(el);
+    let mut hidden: Vec<ElId> = Vec::new();
+    for d in dom.query_all(Some(el), "*").unwrap_or_default() {
+        if hidden.iter().any(|&h| dom.contains(h, d)) {
+            continue;
+        }
+        let visibility = dom.style(d, "visibility");
+        let opacity = parse_float(&dom.style(d, "opacity"));
+        if dom.style(d, "display") == "none"
+            || visibility == "hidden"
+            || visibility == "collapse"
+            || (opacity.is_finite() && opacity <= 0.02)
+        {
+            hidden.push(d);
+        }
+    }
+    if hidden.is_empty() {
+        return full;
+    }
+    let mut out = String::with_capacity(full.len());
+    let mut rest = full.as_str();
+    for h in hidden {
+        let text = dom.text_content(h);
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(pos) = rest.find(&text) {
+            out.push_str(&rest[..pos]);
+            rest = &rest[pos + text.len()..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The hairline-and-halo pair of one element, read off its computed style.
 /// The halo is measured first: it is one string parse, where the hairlines
 /// cost four style reads and two allocations, and a sibling row walk asks
@@ -1669,17 +1798,81 @@ pub fn check_element_oversized_h1_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
 fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     let box_shadow = dom.style(el, "boxShadow");
     gpt_border_shadow_halo_blur_px(Some(&box_shadow))?;
+    // The halo lands on the surface under the element, and a hairline is an
+    // edge only where it shows against the fill it rims (the surface, when the
+    // element paints none). Where a surface cannot be read, as before.
+    let surface = painted_surface_under(dom, el);
+    let blur = gpt_border_shadow_halo_blur_px_over(Some(&box_shadow), surface.as_ref())?;
+    let fill = surface.map(|s| own_fill_over(dom, el, &s));
     let style = ElStyle { dom, el };
     let widths = border_widths_from_style(&style);
     let colors: Vec<Option<String>> = border_colors_from_style(&style)
         .into_iter()
-        .map(Some)
+        .map(|c| {
+            let shows = match (fill.as_ref(), parse_any_color(Some(&c))) {
+                (Some(fill), Some(ink)) => measures::paint_shows_over(&ink, fill),
+                _ => true,
+            };
+            Some(if shows { c } else { "transparent".to_string() })
+        })
         .collect();
     gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
         box_shadow: Some(&box_shadow),
     })
+    .map(|(border, _)| (border, blur))
+}
+
+/// The opaque colour a box is painted onto: the nearest ancestor background,
+/// composited down through translucent fills, or the light canvas when
+/// nothing above paints. `None` when that cannot be read: an ancestor paints
+/// an image or a gradient, a colour does not parse, or the page asks for a
+/// dark scheme with nothing painted.
+pub(crate) fn painted_surface_under(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
+    let mut layers: Vec<Rgba> = Vec::new();
+    let mut current = dom.parent(el);
+    let mut base: Option<Rgba> = None;
+    while let Some(p) = current {
+        let image = dom.style(p, "backgroundImage");
+        if !image.is_empty() && image != "none" {
+            return None;
+        }
+        let raw = dom.style(p, "backgroundColor");
+        if !measures::css_color_is_transparent(Some(&raw)) {
+            let color = parse_any_color(Some(&raw))?;
+            if color.alpha_or_one() >= 0.999 {
+                base = Some(color);
+                break;
+            }
+            layers.push(color);
+        }
+        current = dom.parent(p);
+    }
+    let mut surface = match base {
+        Some(b) => b,
+        None if super::quality::canvas_is_light(&dom.style(el, "colorScheme")) => {
+            parse_any_color(Some(super::quality::CANVAS_BACKGROUND))?
+        }
+        None => return None,
+    };
+    for layer in layers.iter().rev() {
+        surface = composite_color_over(layer, &surface);
+    }
+    Some(surface)
+}
+
+/// `el`'s own background colour composited over `surface`, or `surface` when
+/// it paints none (or none that parses).
+pub(crate) fn own_fill_over(dom: &dyn Dom, el: ElId, surface: &Rgba) -> Rgba {
+    let raw = dom.style(el, "backgroundColor");
+    if measures::css_color_is_transparent(Some(&raw)) {
+        return *surface;
+    }
+    match parse_any_color(Some(&raw)) {
+        Some(fill) => composite_color_over(&fill, surface),
+        None => *surface,
+    }
 }
 
 /// Whether `el`, or a wrapper at most
@@ -1784,27 +1977,22 @@ pub fn check_element_gpt_border_shadow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleH
 
 // ── clipped overflow container ────────────────────────────────────────────
 
-// JS `\b` is ASCII (`(?-u:\b)`); `/i` folds ASCII only.
-re!(
-    DECOR_IDENT_RE,
-    format!(
-        "(?-u:\\b)({})(?-u:\\b)",
-        [
-            "art", "bg", "background", "badge", "blob", "crop", "decor", "dot", "glow", "grain",
-            "image", "mask", "ornament", "overlay", "photo", "scrim", "shadow", "shine", "texture",
-        ]
-        .iter()
-        .map(|w| js::ci(w))
-        .collect::<Vec<_>>()
-        .join("|")
-    )
-);
 re!(CAROUSEL_ROLE_RE, r"(?-u:\b)(carousel|slider)(?-u:\b)");
-re!(
-    VIEWPORT_IDENT_RE,
-    r"\b(carousel|comparison|compare|fisheye|flickity|marquee|owl|preview|scroller|slider|slideshow|splide|split|swiper|ticker|viewport)\b"
-);
-re!(DEMO_IDENT_RE, r"\b(demo-area|demo-stage|demo-viewport)\b");
+/// The words that name a window whose clip is the effect: a carousel, a
+/// marquee, a comparison frame. Read as whole words of a class list or an id
+/// ([`measures::ident_words`]), so a BEM element name and a camelCase id count.
+pub const VIEWPORT_IDENT_WORDS: &[&str] = &[
+    "carousel", "comparison", "compare", "fisheye", "flickity", "marquee", "owl", "preview",
+    "scroller", "slider", "slideshow", "splide", "split", "swiper", "ticker", "viewport",
+];
+/// Two-word viewport names (`demo-area`).
+pub const VIEWPORT_IDENT_PAIRS: &[(&str, &str)] =
+    &[("demo", "area"), ("demo", "stage"), ("demo", "viewport")];
+/// The words that name a purely decorative layer.
+pub const DECOR_IDENT_WORDS: &[&str] = &[
+    "art", "bg", "background", "badge", "blob", "crop", "decor", "dot", "glow", "grain", "image",
+    "mask", "ornament", "overlay", "photo", "scrim", "shadow", "shine", "texture",
+];
 
 /// JS: checks.mjs#positionedChildHasSubstantiveContent(child)
 pub fn positioned_child_has_substantive_content(dom: &dyn Dom, child: ElId) -> bool {
@@ -1839,7 +2027,9 @@ pub fn positioned_child_is_decorative(dom: &dyn Dom, child: ElId) -> bool {
         dom.attr(child, "class").unwrap_or_default(),
         dom.attr(child, "id").unwrap_or_default()
     );
-    if DECOR_IDENT_RE.is_match(&ident) && !positioned_child_has_substantive_content(dom, child) {
+    if measures::ident_names_any(&ident, DECOR_IDENT_WORDS, &[])
+        && !positioned_child_has_substantive_content(dom, child)
+    {
         return true;
     }
     false
@@ -1894,12 +2084,12 @@ pub fn clipping_container_is_intentional_viewport(dom: &dyn Dom, el: ElId) -> bo
 }
 
 fn ident_names_viewport(dom: &dyn Dom, el: ElId) -> bool {
-    let ident = js::to_lower_case(&format!(
+    let ident = format!(
         "{} {}",
         dom.attr(el, "class").unwrap_or_default(),
         dom.attr(el, "id").unwrap_or_default()
-    ));
-    VIEWPORT_IDENT_RE.is_match(&ident) || DEMO_IDENT_RE.is_match(&ident)
+    );
+    measures::ident_names_any(&ident, VIEWPORT_IDENT_WORDS, VIEWPORT_IDENT_PAIRS)
 }
 
 /// An element with no principal box (`display: contents`) or no area clips
@@ -2131,6 +2321,11 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             continue;
         }
         if positioned_child_is_decorative(dom, child) {
+            continue;
+        }
+        // A slide, a ticker track or a scroller names itself: what its window
+        // cuts off is the next frame, wherever it sits under the container.
+        if ident_names_viewport(dom, child) {
             continue;
         }
         // Cheapest test first: most positioned children are inside the box.
@@ -3930,6 +4125,159 @@ mod tests {
         assert!(hits[0].snippet.contains("\"Lightning Fast\""), "{}", hits[0].snippet);
     }
 
+    /// simplybudget.framer.ai: a paint-free container around a white tile with
+    /// a masked icon, the card heading four wrappers down; ai-pact.com behind a
+    /// `display: contents` variant; a ring as the tile's edge.
+    #[test]
+    fn icon_tile_climbs_wrappers_and_reads_masked_icons_and_rings() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let container = d.add(Some(row), "div");
+        visible(&mut d, container);
+        d.set_styles(
+            container,
+            &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("boxShadow", "none"), ("borderTopWidth", "0px")],
+        );
+        d.set_rect(container, 80.0, 4034.0, 70.0, 70.0);
+        let tile = d.add(Some(container), "div");
+        d.set_styles(
+            tile,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("backgroundImage", "none"),
+                ("borderTopWidth", "0px"),
+                ("borderRadius", "15px"),
+            ],
+        );
+        d.set_rect(tile, 80.0, 4034.0, 70.0, 70.0);
+        let icon = d.add(Some(tile), "div");
+        d.set_style(icon, "maskImage", "url(\"data:image/svg+xml,<svg/>\")");
+        d.set_rect(icon, 100.0, 4054.0, 30.0, 30.0);
+        let mut at = d.add(Some(row), "div");
+        for _ in 0..3 {
+            at = d.add(Some(at), "div");
+        }
+        let h6 = d.add(Some(at), "h6");
+        d.add_text(h6, "Voice Expense Logging");
+        d.set_rect(h6, 80.0, 4154.0, 215.0, 30.0);
+        let hits = check_element_icon_tile_dom(&d, h6);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "70x70px icon tile above h6 \"Voice Expense Logging\"");
+        // Past the gap a climbed tile is not the heading's.
+        d.set_rect(h6, 80.0, 4300.0, 215.0, 30.0);
+        assert!(check_element_icon_tile_dom(&d, h6).is_empty());
+
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        let variant = d.add(Some(row), "div");
+        d.set_style(variant, "display", "contents");
+        let tile = d.add(Some(variant), "div");
+        d.set_styles(
+            tile,
+            &[
+                ("backgroundColor", "rgba(40, 85, 189, 0.1)"),
+                ("backgroundImage", "none"),
+                ("borderTopWidth", "0px"),
+                ("borderRadius", "12px"),
+            ],
+        );
+        d.set_rect(tile, 0.0, 0.0, 48.0, 48.0);
+        let svg = d.add(Some(tile), "svg");
+        d.set_rect(svg, 12.0, 12.0, 24.0, 24.0);
+        let wrap = d.add(Some(row), "div");
+        d.set_rect(wrap, 0.0, 64.0, 300.0, 28.0);
+        let h3 = d.add(Some(wrap), "h3");
+        d.add_text(h3, "ADA Compliance");
+        d.set_rect(h3, 0.0, 64.0, 300.0, 28.0);
+        assert_eq!(check_element_icon_tile_dom(&d, h3).len(), 1);
+
+        let (mut d, body) = page();
+        let card = d.add(Some(body), "div");
+        let tile = d.add(Some(card), "div");
+        d.set_styles(
+            tile,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", "none"),
+                ("borderTopWidth", "0px"),
+                ("borderRadius", "14px"),
+                ("boxShadow", "rgb(203, 213, 225) 0px 0px 0px 1px"),
+            ],
+        );
+        d.set_rect(tile, 0.0, 0.0, 56.0, 56.0);
+        let svg = d.add(Some(tile), "svg");
+        d.set_rect(svg, 14.0, 14.0, 28.0, 28.0);
+        let h3 = d.add(Some(card), "h3");
+        d.add_text(h3, "Ring Tile");
+        d.set_rect(h3, 0.0, 72.0, 200.0, 24.0);
+        assert_eq!(check_element_icon_tile_dom(&d, h3).len(), 1);
+        d.set_style(tile, "boxShadow", "rgba(15, 23, 42, 0.18) 0px 8px 24px 0px");
+        assert!(check_element_icon_tile_dom(&d, h3).is_empty());
+    }
+
+    /// d3shop.ae, agora.co.il, hrsd.gov.sa: track words behind BEM separators,
+    /// in a camelCase id, and on a positioned child below the container.
+    #[test]
+    fn clipped_overflow_reads_track_words_past_bem_and_camel_case() {
+        fn clip_hits(child_class: &str, child_id: &str, deep: bool) -> usize {
+            let (mut d, body) = page();
+            let host = d.add(Some(body), "div");
+            d.set_attr(host, "class", "promo-window");
+            d.set_styles(host, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+            d.set_rect(host, 100.0, 100.0, 600.0, 55.0);
+            let parent = if deep { d.add(Some(host), "div") } else { host };
+            let layer = d.add(Some(parent), "div");
+            d.add_text(layer, "Hair Body Skincare");
+            d.set_style(layer, "position", "absolute");
+            d.set_rect(layer, 720.0, 100.0, 600.0, 55.0);
+            if !child_class.is_empty() {
+                d.set_attr(layer, "class", child_class);
+            }
+            if !child_id.is_empty() {
+                d.set_attr(layer, "id", child_id);
+            }
+            check_element_clipped_overflow_dom(&d, host).len()
+        }
+        assert_eq!(clip_hits("kitify-text-promo__text", "", false), 1);
+        assert_eq!(clip_hits("kitify-text-marquee__text text--clone", "", false), 0);
+        assert_eq!(clip_hits("", "hotStuffScroller", false), 0);
+        assert_eq!(clip_hits("promo__slider-next", "", true), 0);
+        assert_eq!(clip_hits("promo__panel-next", "", true), 1);
+        // A longer word is still not the word.
+        assert_eq!(clip_hits("jswiper-track", "", false), 1);
+    }
+
+    /// visiby.net's word rotator and dadastudio.framer.website's closing h1.
+    #[test]
+    fn oversized_h1_counts_painted_text_on_the_first_screen() {
+        let (mut d, body) = page();
+        let h1 = d.add(Some(body), "h1");
+        d.set_style(h1, "fontSize", "80px");
+        d.set_rect(h1, 0.0, 200.0, 1000.0, 260.0);
+        let shown = d.add(Some(h1), "span");
+        d.add_text(shown, "Claude AI");
+        let mut hidden = Vec::new();
+        for word in ["ChatGPT", "Perplexity", "Google AI"] {
+            let s = d.add(Some(h1), "span");
+            d.add_text(s, word);
+            d.set_style(s, "opacity", "0");
+            hidden.push(s);
+        }
+        d.add_text(h1, " picked you.");
+        assert!(check_element_oversized_h1_dom(&d, h1).is_empty());
+        for s in &hidden {
+            d.set_style(*s, "opacity", "1");
+        }
+        let hits = check_element_oversized_h1_dom(&d, h1);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "80px h1, 47 chars, 33vh \"Claude AIChatGPTPerplexityGoogle AI picked you.\""
+        );
+        d.set_rect(h1, 0.0, 6680.0, 1000.0, 260.0);
+        assert!(check_element_oversized_h1_dom(&d, h1).is_empty());
+    }
+
     #[test]
     fn glow_uses_parent_surface_and_ai_palette_reads_gradient() {
         let (mut d, body) = page();
@@ -5183,7 +5531,7 @@ mod tests {
         // same depth but not at the same index, and they are one repetition.
         let (mut d, body) = page();
         let stack = d.add(Some(body), "div");
-        let halo = "rgba(255, 255, 255, 0.04) 0px 1px 0px 0px inset, rgba(8, 33, 25, 0.6) 0px 30px 60px -40px";
+        let halo = "rgba(255, 255, 255, 0.04) 0px 1px 0px 0px inset, rgba(8, 33, 25, 0.6) 0px 30px 60px -12px";
         let mut panels = Vec::new();
         for flipped in [false, true, false] {
             let article = d.add(Some(stack), "article");

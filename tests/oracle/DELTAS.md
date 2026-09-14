@@ -2442,3 +2442,142 @@ captures each time, against run 16:
 10. **Tints over a photo.** Where gradient tints lie above a photo and the walk
    named a gradient, the tints decide and the verdict stands, whatever the
    photo does to the surface (hrsimple.app's subline).
+
+## Recorded 2026-09-14: structure read from computed boxes instead of class names (corpus/fix-card-heuristics)
+
+Corpus run 20 (cohort 2), observations-20 rows 7, 25, 28, 30, 36, 50, 51 and 57,
+and walkthroughs-20 miss 1 (the label collectors). Most of the changes are in
+the URL engine's rule pass, which no golden runs. The goldens move because the
+rule fixtures gained cases, and because a few shared checks are measured by
+both engines.
+
+- **nested-cards (URL engine).** A card is read from its computed box: it
+  paints an edge on at least three sides (a border at least half a pixel wide
+  that draws, or an outer shadow that reaches a pixel past the box on that
+  side; a zero-offset ring reaches all four) or a fill that differs from the
+  surface under it by more than 3 on a channel once composited, and it is
+  rounded or casts a shadow. No class name is read, so a `border-t` section, a
+  `border-b-[4px]` strip and a footer rule are not cards. An inner candidate is
+  skipped when it is a one-line label box (a pill whose rounding meets at its
+  ends, or a box whose content holds one line of its own text), a field box
+  whose children are all form controls, an inline run (`<mark>`), a frame
+  around a picture, a video, a canvas or an iframe covering 60% of it, or a
+  band along three edges of the card it sits in (a card's own header). A
+  surface that cannot be read (an ancestor paints an image or a gradient, or a
+  dark scheme with nothing painted) counts any fill that is not transparent, as
+  before.
+- **nested-cards (file engine).** A class counts as a four-sided border only as
+  the `border`, `border-N` or `border-[Npx]` utility, with any variant prefix.
+  `border-t`, `border-b-[4px]`, `border-black` and `border-dashed` no longer
+  make a card.
+- **clipped-overflow-container (both engines).** The viewport and decoration
+  words are read as whole words of a class list or an id, split on every
+  character that is not a letter or a digit and on camelCase:
+  `kitify-text-marquee__text` holds `marquee`, `#hotStuffScroller` holds
+  `scroller`. A positioned child whose own id or classes name a track word is
+  skipped wherever it sits under the container.
+- **buried-raster.** Both engines skip vector art: an `<img>` whose `src` is an
+  SVG, or a background whose every `url()` is one. The URL engine also skips
+  icon-sized boxes (48px or less on both axes), blurred placeholders
+  (`filter: blur()` of 4px or more), and a frame under a painted raster sibling
+  or a parent or grandparent painting a `url()` over half its box.
+- **gray-on-color (both engines).** The channel spread a background needs rises
+  with the square root of how far its luminance sits under 0.01, so `#04002d`
+  and `#1e002f` read as black; `#001c47`, `#002733` and `#21254a` still read as
+  colour. A utility behind a state variant (`hover:`, `focus:`, `group-*:`,
+  `peer-*:`, `aria-*:`, `data-*:` and similar) is not the resting fill.
+- **undersized-ui-text (both engines).** Text inside `sub` or `sup` is skipped,
+  so a footnote link in a marker no longer reports.
+- **flat-type-hierarchy (both engines).** An `h1` set at two sizes equally
+  often takes its larger size; any other tied role stays out of the ladder.
+- **oversized-h1 (URL engine).** A heading that starts below the first viewport
+  is not reported, and characters are counted from the text that paints (a
+  word rotator's hidden words are left out).
+- **first-viewport-column-overflow (URL engine).** A `nav`, a `tablist` or
+  `navigation` role and a sticky column are not measured, what sits inside an
+  absolute or fixed layer does not count toward a column's content, and a
+  column with nothing painted in its flow is skipped.
+- **gpt-thin-border-wide-shadow (both engines).** A halo's blur is its radius
+  less any negative spread, so `0 18px 40px -26px` and `0 30px 60px -40px` are
+  tight lifts. The URL engine also drops a halo that does not show over the
+  surface under the element and a hairline that does not show against the fill
+  it rims (a channel delta under 8).
+- **em-dash-overuse (URL engine).** `innerText` runs between tabs and line
+  breaks whose whole text is a dash (the cells of a pricing matrix) are not
+  counted.
+- **icon-tile-stack, kicker-above-heading, numbered-section-labels.** The tile
+  tint needs an alpha of 0.05, not above 0.1 (`bg-primary/10`), and a zero-blur
+  ring counts as the tile's border (both engines). A kicker may be up to 0.45 of
+  the heading's size, capped at 16px and never under the old 14px (13px for a
+  numbered label) (both engines). The URL engine's collectors climb up to four
+  wrappers while the heading leads its wrapper; past the first climb (the
+  second, for numbered labels, which already read one) the label has to sit
+  within 96px above or before the heading. The kicker and label type is read off
+  the only text-bearing child when the label has no text of its own, and an
+  icon tile resolves a `display: contents` wrapper and a paint-free container
+  of the same size, and accepts a masked box as its icon.
+
+Goldens, each re-recorded from the binary and reviewed line by line:
+
+- `detect-fixture-json-buried-raster-html`, `detect-fixture-text-buried-raster-html`:
+  5 to 9 counted. Added: the flag texture at opacity 0.04, and the file scan's
+  reports of three URL-only pass cases (a 24px icon, a blurred placeholder
+  canvas, a crossfade frame). The two SVG pass cases report in neither engine.
+- `detect-fixture-json-clipped-overflow-container-html`, `detect-fixture-text-clipped-overflow-container-html`:
+  12 to 13 advisory, the BEM tooltip flag case. The marquee, camelCase and
+  nested slide pass cases report nothing.
+- `detect-fixture-json-gpt-thin-border-wide-shadow-html`, `detect-fixture-text-gpt-thin-border-wide-shadow-html`:
+  15 to 18 advisory. The flag panels now carry a -12px spread and still report
+  at 60px; the file scan reports the new dark-surface pass row, which it cannot
+  measure. The negative-spread pass row reports nothing.
+- `detect-fixture-json-icon-tile-stack-html`, `detect-fixture-text-icon-tile-stack-html`:
+  7 to 9, the tinted tile and the ring tile. The Framer and `display: contents`
+  flag cases need the climb, which the file scan does not do.
+- `detect-fixture-json-kicker-above-heading-html`, `detect-fixture-text-kicker-above-heading-html`:
+  13 to 14, the 15px kicker over a 44px heading.
+- `detect-fixture-json-numbered-section-labels-html`, `detect-fixture-text-numbered-section-labels-html`:
+  4 to 5 advisory, the 15px index over a 44px heading, and every snippet's count
+  moves from `(4 on page)` to `(5 on page)`.
+- New cases: `detect-fixture-{json,text}-nested-cards-html` (3: the two flag
+  cases and the lip pass case, which a file scan reads as a shadowed, rounded
+  card), `-gray-on-color-html` (4 flag cases), `-footnote-markers-html` (1),
+  `-flat-type-hierarchy-h1-tie-html` (none), `-oversized-h1-rendered-html` (2,
+  both URL-only pass cases), `-first-viewport-column-overflow-outline-html` and
+  `-tabs-html` (none; the rule is URL-only), `-em-dash-pricing-matrix-html` and
+  `-em-dash-prose-with-matrix-html` (1 advisory each; the file scan counts every
+  dash).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`:
+  648 to 672 findings (568 to 585 counted, 80 to 87 advisory), exactly the
+  per-fixture changes above. `detect-no-advisory-json`, `detect-no-advisory-text`:
+  568 to 585. `detect-scope-type`: 160 to 165. `detect-scope-both`: 208 to 219.
+  `detect-scope-layout-text`: 32 to 37 counted, 16 to 17 advisory.
+
+`crates/browser/tests/card_heuristics.rs` pins the URL engine on every flag and
+pass case above. On the corpus replays (run 20, cohort 2, and run 19, cohort 1),
+nested-cards goes from 172 to 113 and 214 to 167, gray-on-color from 32 to 0 and
+65 to 35, buried-raster from 49 to 4 and 212 to 178, and the collectors add 38 and
+37 icon tiles, 30 and 28 kickers, and 25 numbered labels on run 20.
+
+### Known limits at merge
+
+1. **nested-cards adds un-judged findings.** A filled, rounded box with no edge
+   is a card now, so tinted stat tiles, FAQ items in a panel and chat bubbles
+   inside a card report where the class test missed them: 41 added on run 20
+   and 91 on run 19. The crops opened read as nested surfaces, but none has been
+   judged; chat bubbles are real, harmless nesting (taste call P12).
+2. **The static engine keeps class-driven cards.** It reads no box, so it cannot
+   tell a lip shadow or a one-line eyebrow from a card, and reports the fixture's
+   lip pass case.
+3. **Track words beyond the list.** `jswiper`, `scroll-news`, `deck` and `slide`
+   are not viewport words, so joongang.co.kr's swipers, news.cn's news ticker and
+   hrsd.gov.sa's hero deck still report.
+4. **Icon-sized rasters.** A deliberately buried raster no larger than 48px is
+   skipped with the icons.
+5. **gray-on-color's knee is a taste threshold.** It separates a near-black
+   `#1e002f` from a dark navy `#001c47` at a luminance of 0.01, where the judges
+   only split on `#04002d`.
+6. **Renamed snippets count as ratchet violations.** The 6 numbered-label and 2
+   of the 4 em-dash "confirmed-harmful removals" on run 20 are the same elements
+   re-reported with a new count; the other 2 em-dash removals are visiby.net's
+   pricing page, the row 57 target, whose prose holds 4 em dashes once the 78
+   matrix cells are left out.

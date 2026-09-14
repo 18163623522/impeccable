@@ -819,11 +819,116 @@ fn widest(widths: &[f64]) -> f64 {
 /// shadow is too tight to be one. One string parse and no per-side work, so
 /// the engines run it first when they walk a row of siblings.
 pub fn gpt_border_shadow_halo_blur_px(box_shadow: Option<&str>) -> Option<f64> {
-    let blur = shadow_max_outer_blur_px(box_shadow, Some(0.12));
-    if blur < GPT_BORDER_SHADOW_MIN_BLUR_PX {
-        return None;
+    gpt_border_shadow_halo_blur_px_over(box_shadow, None)
+}
+
+/// The words of a class list or an id, lowercased: every run of letters and
+/// digits (so `-`, `_` and any other punctuation separate words, which the
+/// ASCII `\b` did not do for `_`: `kitify-text-marquee__text` holds
+/// `marquee`), plus the camelCase pieces of each run (`hotStuffScroller`
+/// holds `scroller`). A whole run is kept as well, so `SlideShow` still reads
+/// as `slideshow`.
+pub fn ident_words(ident: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for run in ident.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if run.is_empty() {
+            continue;
+        }
+        words.push(run.to_ascii_lowercase());
+        let bytes = run.as_bytes();
+        let mut start = 0usize;
+        for i in 1..bytes.len() {
+            if bytes[i].is_ascii_uppercase() && bytes[i - 1].is_ascii_lowercase() {
+                if start > 0 || i < bytes.len() {
+                    words.push(run[start..i].to_ascii_lowercase());
+                }
+                start = i;
+            }
+        }
+        if start > 0 {
+            words.push(run[start..].to_ascii_lowercase());
+        }
     }
-    Some(blur)
+    words
+}
+
+/// Whether a URL names an SVG document: a `data:image/svg+xml` URI, or a path
+/// ending in `.svg` before any query or fragment.
+pub fn url_is_svg(url: &str) -> bool {
+    let url = js::trim(url).trim_matches(|c| c == '"' || c == '\'');
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("data:") {
+        return lower.starts_with("data:image/svg+xml");
+    }
+    let path = lower.split(['?', '#']).next().unwrap_or("");
+    path.ends_with(".svg")
+}
+
+/// Whether the raster a `buried-raster` candidate would report is vector art:
+/// an `<img>` whose `src` is an SVG, or a background whose every `url()` is
+/// one. An icon swapped by state (a copy button's glyph, a location marker's
+/// granted and denied states) is drawn in SVG and held at opacity 0 on purpose.
+pub fn raster_source_is_svg(is_img: bool, src: Option<&str>, background_image: &str) -> bool {
+    if is_img {
+        return src.is_some_and(url_is_svg);
+    }
+    let mut urls = 0usize;
+    let mut rest = background_image;
+    while let Some(start) = rest.to_ascii_lowercase().find("url(") {
+        let after = &rest[start + 4..];
+        let Some(end) = after.find(')') else {
+            return false;
+        };
+        if !url_is_svg(&after[..end]) {
+            return false;
+        }
+        urls += 1;
+        rest = &after[end + 1..];
+    }
+    urls > 0
+}
+
+/// Whether `ident` holds any of `words` as a whole word ([`ident_words`]), or
+/// any of `pairs` as two adjacent words (`demo-area`).
+pub fn ident_names_any(ident: &str, words: &[&str], pairs: &[(&str, &str)]) -> bool {
+    let tokens = ident_words(ident);
+    tokens.iter().any(|t| words.contains(&t.as_str()))
+        || tokens
+            .windows(2)
+            .any(|w| pairs.iter().any(|(a, b)| w[0] == *a && w[1] == *b))
+}
+
+/// The alpha a halo layer needs before it counts.
+const GPT_BORDER_SHADOW_HALO_MIN_ALPHA: f64 = 0.12;
+
+/// [`gpt_border_shadow_halo_blur_px`] over a known surface. A layer is a halo
+/// when it is drawn outside the box, at least
+/// [`GPT_BORDER_SHADOW_HALO_MIN_ALPHA`] opaque, wide once a negative spread
+/// has pulled it in ([`ShadowLayer::halo_blur`]), and, when the surface under
+/// the element is known and the layer names its colour, visible over that
+/// surface: a black halo on a near-black page draws nothing. The blur printed
+/// is the widest qualifying layer's own radius.
+pub fn gpt_border_shadow_halo_blur_px_over(
+    box_shadow: Option<&str>,
+    surface: Option<&Rgba>,
+) -> Option<f64> {
+    let box_shadow = box_shadow?;
+    let mut blur: Option<f64> = None;
+    for layer in parse_shadow_layers(box_shadow) {
+        if layer.inset
+            || layer.alpha < GPT_BORDER_SHADOW_HALO_MIN_ALPHA
+            || layer.halo_blur() < GPT_BORDER_SHADOW_MIN_BLUR_PX
+        {
+            continue;
+        }
+        if let (Some(surface), Some(color)) = (surface, layer.color.as_ref()) {
+            if !paint_shows_over(color, surface) {
+                continue;
+            }
+        }
+        blur = Some(blur.map_or(layer.blur, |b| math_max(b, layer.blur)));
+    }
+    blur
 }
 
 /// The hairline-and-halo pair on one element: the widest visible hairline and
@@ -1029,6 +1134,80 @@ pub fn text_wraps_to_multiple_lines(text_height_px: f64, line_height_px: Option<
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn ident_words_split_bem_and_camel_case() {
+        assert_eq!(
+            ident_words("kitify-text-marquee__text text--clone"),
+            vec!["kitify", "text", "marquee", "text", "text", "clone"]
+        );
+        assert_eq!(ident_words("hotStuffScroller"), vec!["hotstuffscroller", "hot", "stuff", "scroller"]);
+        assert_eq!(ident_words("SlideShow"), vec!["slideshow", "slide", "show"]);
+        assert!(ident_words("").is_empty());
+        let words = &["marquee", "scroller", "slideshow", "swiper"];
+        assert!(ident_names_any("kitify-text-marquee__text", words, &[]));
+        assert!(ident_names_any("hotStuffScroller", words, &[]));
+        assert!(ident_names_any("js-SlideShow", words, &[]));
+        // A longer word is still not the word.
+        assert!(!ident_names_any("jswiper jaswiper_controller", words, &[]));
+        assert!(!ident_names_any("marquees", words, &[]));
+        let pairs = &[("demo", "area")];
+        assert!(ident_names_any("hero__demo-area", &[], pairs));
+        assert!(!ident_names_any("demo hero area", &[], pairs));
+    }
+
+    #[test]
+    fn svg_sources_are_vector_art() {
+        assert!(url_is_svg("/dist/images/v2/svg/location-granted.svg"));
+        assert!(url_is_svg("\"icon.SVG?v=2#x\""));
+        assert!(url_is_svg("data:image/svg+xml,%3Csvg%3E"));
+        assert!(!url_is_svg("data:image/png;base64,AAAA"));
+        assert!(!url_is_svg("photo.jpg?w=40"));
+        assert!(raster_source_is_svg(true, Some("/icons/pin.svg"), "none"));
+        assert!(!raster_source_is_svg(true, Some("/photos/pin.png"), "none"));
+        assert!(!raster_source_is_svg(true, None, "none"));
+        assert!(raster_source_is_svg(
+            false,
+            None,
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E\")"
+        ));
+        assert!(!raster_source_is_svg(false, None, "url(a.svg), url(b.png)"));
+        assert!(!raster_source_is_svg(false, None, "linear-gradient(red, blue)"));
+    }
+
+    #[test]
+    fn shadow_layers_reach_past_the_box_by_blur_spread_and_offset() {
+        let layers = parse_shadow_layers(
+            "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.12) 0px 2px 4px -2px, rgb(34, 211, 238) 3px 3px 0px 0px inset",
+        );
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].alpha, 0.0);
+        assert_eq!(layers[1].outer_reach(), [-2.0, 0.0, 2.0, 0.0]);
+        assert!(layers[2].inset);
+        assert_eq!(parse_shadow_layers("none"), vec![]);
+        let halo = parse_shadow_layers("rgba(0, 0, 0, 0.95) 0px 18px 40px -26px");
+        assert_eq!(halo[0].halo_blur(), 14.0);
+    }
+
+    /// screencursor.com: `0 18px 40px -26px` is a tight lift, not a 40px halo.
+    #[test]
+    fn gpt_halo_takes_off_a_negative_spread() {
+        assert_eq!(gpt_border_shadow_halo_blur_px(Some("rgba(0, 0, 0, 0.95) 0px 18px 40px -26px")), None);
+        assert_eq!(gpt_border_shadow_halo_blur_px(Some("rgba(8, 33, 25, 0.6) 0px 30px 60px -40px")), None);
+        assert_eq!(
+            gpt_border_shadow_halo_blur_px(Some("rgba(8, 33, 25, 0.6) 0px 30px 60px -12px")),
+            Some(60.0)
+        );
+        assert_eq!(gpt_border_shadow_halo_blur_px(Some("rgba(15, 23, 42, 0.18) 0px 0px 40px 0px")), Some(40.0));
+        // Over a near-black surface a black halo draws nothing; over white it does.
+        let halo = Some("rgba(0, 0, 0, 0.18) 0px 0px 40px 0px");
+        let black = Rgba::new(10.0, 10.0, 11.0, 1.0);
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        assert_eq!(gpt_border_shadow_halo_blur_px_over(halo, Some(&black)), None);
+        assert_eq!(gpt_border_shadow_halo_blur_px_over(halo, Some(&white)), Some(40.0));
+        assert!(paint_shows_over(&Rgba::new(15.0, 126.0, 126.0, 0.35), &Rgba::new(11.0, 26.0, 26.0, 1.0)));
+        assert!(!paint_shows_over(&Rgba::new(28.0, 28.0, 31.0, 1.0), &Rgba::new(24.0, 24.0, 27.0, 1.0)));
+    }
 
     fn style(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

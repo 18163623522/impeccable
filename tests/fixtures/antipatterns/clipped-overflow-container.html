@@ -106,6 +106,11 @@
         <button>Sort</button>
         <div class="empty-menu" role="menu"></div>
       </div>
+      <!-- A BEM element name that names no track still reports. -->
+      <div class="box hero__panel flag-bem-tooltip" style="overflow: hidden">
+        <button>Details</button>
+        <span class="hero__badge-tooltip" style="position: absolute; top: -34px; left: 16px; width: 160px; background: #222; color: #fff; padding: 8px">A BEM tooltip clipped above the host</span>
+      </div>
     </section>
 
     <!-- PASS column: no clipping, no positioned child, real scroll region, or contained decorative positioning -->
@@ -182,6 +187,20 @@
       <div class="box pass-swap-reveal" style="overflow: hidden">
         <p>Label swap masked by the box.</p>
         <span class="swap-copy">Swapped label parked below by a transform.</span>
+      </div>
+      <!-- The words that name a moving track, read past BEM separators and
+           camelCase, and on the positioned child wherever it sits. -->
+      <div class="box kitify-m-content pass-bem-marquee" style="overflow: hidden">
+        <div class="kitify-text-marquee__text text--original">Hair Body Skincare</div>
+        <div class="kitify-text-marquee__text text--clone" style="position: absolute; top: 16px; left: 100%; width: 200px">Hair Body Skincare</div>
+      </div>
+      <div class="box pass-camel-host" id="hotStuffBox" style="overflow: hidden">
+        <div id="hotStuffScroller" style="position: absolute; top: 16px; left: -24px; width: 260px">Sofa, armchair and dining table listings</div>
+      </div>
+      <div class="box pass-nested-deck" style="overflow: hidden">
+        <div class="deck-track">
+          <span class="promo__slider-next" style="position: absolute; top: 0; left: 100%; width: 200px; height: 120px">The next promotion waits past the edge.</span>
+        </div>
       </div>
     </section>
   </div>

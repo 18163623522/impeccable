@@ -39,15 +39,10 @@ macro_rules! re {
 
 /// JS `\b` (ASCII word boundary).
 const B: &str = r"(?-u:\b)";
-const D: &str = "[0-9]";
 
 re!(WS_RE, format!("{}+", js::WS));
 re!(QUOTE_EDGE_START, r#"^['"]"#);
 re!(QUOTE_EDGE_END, r#"['"]$"#);
-re!(SHADOW_CLASS_RE, format!(r"{B}shadow(?:-sm|-md|-lg|-xl|-2xl)?{B}"));
-re!(BORDER_CLASS_RE, format!(r"{B}border{B}"));
-re!(ROUNDED_CLASS_RE, format!(r"{B}rounded(?:-sm|-md|-lg|-xl|-2xl|-full)?{B}"));
-re!(BG_CLASS_RE, format!(r"{B}bg-(?:white|gray-{D}+|slate-{D}+){B}"));
 // A popup layer named as a word of a class: `dropdown`, `nav-menu`, and the
 // BEM `mega-nav__dropdown-level2`. Any character that is not a letter or a
 // digit separates the words, so `_` does too, which the ASCII `\b` this
@@ -238,7 +233,12 @@ pub fn check_flat_type_hierarchy_from_dom(
     check_flat_type_hierarchy_samples(&samples)
 }
 
-/// JS: checks.mjs#isCardLikeDOM(el)
+/// Whether `el` is drawn as a card, read from its computed box rather than
+/// its class names. A card has an outline, a painted edge on at least three
+/// sides (borders, or shadows that reach past the box there) or a fill that
+/// differs from the surface under it, and it is rounded or casts a shadow. A
+/// `border-t` section, a footer rule and a `border-b-[4px]` band paint one
+/// edge, which is a divider, not a card.
 pub fn is_card_like_dom(dom: &dyn Dom, el: ElId) -> bool {
     let tag = tag_lower(dom, el);
     if SAFE_TAGS.contains(&tag.as_str())
@@ -249,14 +249,173 @@ pub fn is_card_like_dom(dom: &dyn Dom, el: ElId) -> bool {
     {
         return false;
     }
-    let cls = class_attr(dom, el);
-    let box_shadow = dom.style(el, "boxShadow");
-    let has_shadow = (!box_shadow.is_empty() && box_shadow != "none") || SHADOW_CLASS_RE.is_match(&cls);
-    let has_border = BORDER_CLASS_RE.is_match(&cls);
-    let has_radius = parse_float(&dom.style(el, "borderRadius")) > 0.0 || ROUNDED_CLASS_RE.is_match(&cls);
-    let bg = dom.style(el, "backgroundColor");
-    let has_bg = (!bg.is_empty() && bg != "rgba(0, 0, 0, 0)") || BG_CLASS_RE.is_match(&cls);
-    is_card_like_from_props(has_shadow, has_border, has_radius, has_bg)
+    let layers = crate::checks::measures::parse_shadow_layers(&dom.style(el, "boxShadow"));
+    let casts_shadow = layers.iter().any(|l| {
+        l.alpha >= crate::checks::measures::FAINT_PAINT_ALPHA
+            && (l.x != 0.0 || l.y != 0.0 || l.blur > 0.0 || l.spread != 0.0)
+    });
+    let rounded = has_corner_radius(&dom.style(el, "borderRadius"));
+    if !casts_shadow && !rounded {
+        return false;
+    }
+    card_edge_sides(dom, el, &layers) >= 3 || fill_differs_from_surface(dom, el)
+}
+
+/// Any corner of a computed `border-radius` above zero.
+fn has_corner_radius(value: &str) -> bool {
+    value
+        .split(|c: char| c.is_ascii_whitespace() || c == '/')
+        .any(|part| parse_float(part) > 0.0)
+}
+
+/// How many sides of `el` show a painted edge: a border at least half a pixel
+/// wide in a style that draws and a colour that is not transparent, or an
+/// outer shadow layer that reaches at least a pixel past the box on that side
+/// (a ring, `0 0 0 1px`, reaches all four).
+fn card_edge_sides(
+    dom: &dyn Dom,
+    el: ElId,
+    layers: &[crate::checks::measures::ShadowLayer],
+) -> usize {
+    let mut sides = [false; 4];
+    for (i, side) in ["Top", "Right", "Bottom", "Left"].iter().enumerate() {
+        let width = parse_float(&dom.style(el, &format!("border{side}Width")));
+        let style = dom.style(el, &format!("border{side}Style"));
+        let color = dom.style(el, &format!("border{side}Color"));
+        sides[i] = width >= 0.5
+            && style != "none"
+            && style != "hidden"
+            && crate::checks::measures::css_color_alpha(Some(&color))
+                >= crate::checks::measures::FAINT_PAINT_ALPHA;
+    }
+    for layer in layers {
+        if layer.inset || layer.alpha < crate::checks::measures::FAINT_PAINT_ALPHA {
+            continue;
+        }
+        for (i, reach) in layer.outer_reach().iter().enumerate() {
+            if *reach >= 1.0 {
+                sides[i] = true;
+            }
+        }
+    }
+    sides.iter().filter(|s| **s).count()
+}
+
+/// Whether `el` paints a fill a reader can tell from the surface it sits on:
+/// an image or a gradient, or a colour that, composited over that surface,
+/// moves a channel by more than 3. Where the surface cannot be read, any
+/// colour that is not transparent counts, as it did before.
+fn fill_differs_from_surface(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    if !image.is_empty() && image != "none" {
+        return true;
+    }
+    let raw = dom.style(el, "backgroundColor");
+    if crate::checks::measures::css_color_is_transparent(Some(&raw)) {
+        return false;
+    }
+    let Some(surface) = super::element_checks::painted_surface_under(dom, el) else {
+        return true;
+    };
+    let fill = super::element_checks::own_fill_over(dom, el, &surface);
+    math_max(
+        math_max((fill.r - surface.r).abs(), (fill.g - surface.g).abs()),
+        (fill.b - surface.b).abs(),
+    ) > 3.0
+}
+
+/// A label box, not a card: a pill whose rounding meets at its ends, or a box
+/// whose content holds a single line of its own text (a chip, an eyebrow, a
+/// badge drawn with a border and an offset shadow).
+fn is_single_line_label_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let radius = parse_float(&dom.style(el, "borderRadius"));
+    if radius.is_finite() && rect.height > 0.0 && radius >= rect.height / 2.0 - 0.5 {
+        return true;
+    }
+    let font_size = parse_float(&dom.style(el, "fontSize"));
+    let line_height = {
+        let raw = dom.style(el, "lineHeight");
+        if raw == "normal" {
+            font_size * 1.2
+        } else {
+            parse_float(&raw)
+        }
+    };
+    if !line_height.is_finite() || line_height <= 0.0 {
+        return false;
+    }
+    let chrome = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]
+        .iter()
+        .map(|p| {
+            let v = parse_float(&dom.style(el, p));
+            if v.is_finite() {
+                v
+            } else {
+                0.0
+            }
+        })
+        .sum::<f64>();
+    rect.height - chrome <= line_height * 1.5
+}
+
+/// A frame around embedded media: an image, a video, a canvas or an iframe
+/// inside it covers at least 60% of its box (a video thumbnail with a play
+/// button, a screenshot in a bordered frame).
+fn is_media_frame(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let area = rect.width * rect.height;
+    if !(area > 0.0) {
+        return false;
+    }
+    dom.query_all(Some(el), "img, picture, video, canvas, iframe")
+        .unwrap_or_default()
+        .into_iter()
+        .any(|media| {
+            let r = dom.rect(media);
+            let w = (rect.right.min(r.right) - rect.left.max(r.left)).max(0.0);
+            let h = (rect.bottom.min(r.bottom) - rect.top.max(r.top)).max(0.0);
+            w * h >= area * 0.6
+        })
+}
+
+/// A box whose element children are all form controls: the filled, rounded
+/// field Framer and most form kits draw around an input or a select. Its text
+/// is the select's options, not content of its own.
+fn is_field_box(dom: &dyn Dom, el: ElId) -> bool {
+    let children = dom.children(el);
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|&c| matches!(tag_lower(dom, c).as_str(), "input" | "select" | "textarea"))
+}
+
+/// Whether `inner` runs along at least three edges of `outer`'s padding box: a
+/// header band or a footer strip of the card itself, which reads as one card
+/// with a divided surface.
+fn shares_card_edges(dom: &dyn Dom, inner: ElId, outer: ElId) -> bool {
+    let a = dom.rect(inner);
+    let b = dom.rect(outer);
+    if a.width <= 0.0 || b.width <= 0.0 {
+        return false;
+    }
+    let border = |side: &str| {
+        let v = parse_float(&dom.style(outer, &format!("border{side}Width")));
+        if v.is_finite() {
+            v
+        } else {
+            0.0
+        }
+    };
+    let near = |x: f64, y: f64| (x - y).abs() <= 1.5;
+    [
+        near(a.top, b.top + border("Top")),
+        near(a.right, b.right - border("Right")),
+        near(a.bottom, b.bottom - border("Bottom")),
+        near(a.left, b.left + border("Left")),
+    ]
+    .iter()
+    .filter(|s| **s)
+    .count()
+        >= 3
 }
 
 /// `role="menu"` or `role="listbox"`: a popup panel, however card-like it is
@@ -292,12 +451,25 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
         if rect.width < 50.0 || rect.height < 30.0 {
             continue;
         }
+        // A chip, a pill or an eyebrow label drawn as a box is a control or a
+        // label inside the card, not a second card, and so is the field box a
+        // form draws around a single input or select. A highlight run inside a
+        // line (`<mark>`) is not a box at all, and a frame around a picture or
+        // a video is embedded media.
+        if is_single_line_label_box(dom, el, &rect)
+            || is_field_box(dom, el)
+            || matches!(dom.style(el, "display").as_str(), "inline" | "contents")
+            || is_media_frame(dom, el, &rect)
+        {
+            continue;
+        }
         let mut parent = dom.parent(el);
         while let Some(p) = parent {
             if is_card_like_dom(dom, p) {
                 // A panel not painted at capture (a closed mega-nav panel
-                // held at `visibility: hidden`) is not a card anyone sees.
-                if super::painted::painted_at_capture(dom, el) {
+                // held at `visibility: hidden`) is not a card anyone sees,
+                // and a band along the card's own edges is part of it.
+                if super::painted::painted_at_capture(dom, el) && !shares_card_edges(dom, el, p) {
                     flagged.push(el);
                 }
                 break;
@@ -1897,6 +2069,17 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
             if pos == "absolute" || pos == "fixed" {
                 continue;
             }
+            // A navigation rail, a tab list and a sticky outline are short by
+            // design; they are not the column the fold is measured against.
+            if pos == "sticky"
+                || tag_lower(dom, child) == "nav"
+                || dom.attr(child, "role").is_some_and(|r| {
+                    r.split_ascii_whitespace()
+                        .any(|t| matches!(js::to_lower_case(t).as_str(), "navigation" | "tablist"))
+                })
+            {
+                continue;
+            }
             let cr = dom.rect(child);
             let w_share = cr.width / rect.width;
             if w_share < 0.25 || w_share > 0.9 {
@@ -1906,9 +2089,17 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 continue;
             }
             let mut content_bottom = cr.top;
+            let mut lifted: Vec<ElId> = Vec::new();
             for d in dom.query_all(Some(child), "*").unwrap_or_default() {
                 let dpos = dom.style(d, "position");
                 if dpos == "absolute" || dpos == "fixed" {
+                    lifted.push(d);
+                    continue;
+                }
+                // What sits inside a layer lifted out of the flow is placed
+                // with that layer (a docs outline in a fixed container), not
+                // in the column.
+                if lifted.iter().any(|&layer| dom.contains(layer, d)) {
                     continue;
                 }
                 if dom.style(d, "display") == "none" || dom.style(d, "visibility") == "hidden" {
@@ -1918,6 +2109,12 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 if dr.width > 0.0 && dr.height > 0.0 {
                     content_bottom = math_max(content_bottom, dr.bottom);
                 }
+            }
+            // A column with nothing painted in its own flow (a collapsed
+            // accordion panel, an outline drawn by fixed layers) holds no
+            // content to measure the fold against.
+            if content_bottom - cr.top < 1.0 {
+                continue;
             }
             cols.push(Col {
                 top: cr.top,
@@ -2345,6 +2542,249 @@ mod tests {
         );
         d.set_rect(b_in, 640.0, 0.0, 600.0, 900.0);
         assert!(check_first_viewport_column_overflow_dom(&d).is_empty());
+    }
+
+    /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline
+    /// drawn by fixed layers are not columns the fold falls in.
+    #[test]
+    fn first_viewport_column_overflow_skips_rails_and_empty_columns() {
+        fn build(role: Option<&str>, empty: bool, sticky: bool) -> usize {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let grid = d.add(Some(body), "section");
+            d.set_styles(grid, &[("display", "grid")]);
+            d.set_rect(grid, 0.0, 0.0, 1280.0, 1400.0);
+            let a = d.add(Some(grid), "div");
+            d.set_styles(a, &[("display", "block"), ("position", "static")]);
+            d.set_rect(a, 0.0, 0.0, 640.0, 1400.0);
+            let a_in = d.add(Some(a), "p");
+            d.set_styles(a_in, &[("display", "block"), ("position", "static"), ("visibility", "visible")]);
+            d.set_rect(a_in, 0.0, 0.0, 600.0, 1300.0);
+            let b = d.add(Some(grid), "div");
+            d.set_styles(b, &[("display", "block"), ("position", if sticky { "sticky" } else { "static" })]);
+            if let Some(role) = role {
+                d.set_attr(b, "role", role);
+            }
+            d.set_rect(b, 640.0, 0.0, 640.0, 1400.0);
+            let b_in = d.add(Some(b), "p");
+            d.set_styles(
+                b_in,
+                &[("display", "block"), ("position", if empty { "fixed" } else { "static" }), ("visibility", "visible")],
+            );
+            d.set_rect(b_in, 640.0, 0.0, 600.0, 300.0);
+            if empty {
+                // The outline's items sit in flow inside the fixed layer.
+                let item = d.add(Some(b_in), "p");
+                d.set_styles(item, &[("display", "block"), ("position", "static"), ("visibility", "visible")]);
+                d.set_rect(item, 1024.0, 0.0, 224.0, 700.0);
+            }
+            mark_body_descendants(&mut d);
+            check_first_viewport_column_overflow_dom(&d).len()
+        }
+        assert_eq!(build(None, false, false), 1);
+        assert_eq!(build(Some("tablist"), false, false), 0);
+        assert_eq!(build(Some("navigation"), false, false), 0);
+        assert_eq!(build(None, true, false), 0);
+        assert_eq!(build(None, false, true), 0);
+    }
+
+    fn outlined(d: &mut FakeDom, el: ElId, radius: &str) {
+        let mut styles = vec![
+            ("borderRadius", radius),
+            ("backgroundColor", "rgb(255, 255, 255)"),
+            ("backgroundImage", "none"),
+            ("boxShadow", "none"),
+            ("position", "static"),
+        ];
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            let (w, s, c): (&'static str, &'static str, &'static str) = match side {
+                "Top" => ("borderTopWidth", "borderTopStyle", "borderTopColor"),
+                "Right" => ("borderRightWidth", "borderRightStyle", "borderRightColor"),
+                "Bottom" => ("borderBottomWidth", "borderBottomStyle", "borderBottomColor"),
+                _ => ("borderLeftWidth", "borderLeftStyle", "borderLeftColor"),
+            };
+            styles.push((w, "1px"));
+            styles.push((s, "solid"));
+            styles.push((c, "rgb(228, 228, 231)"));
+        }
+        d.set_styles(el, &styles);
+    }
+
+    fn outlined_card(d: &mut FakeDom, parent: ElId, rect: (f64, f64, f64, f64)) -> ElId {
+        let el = d.add(Some(parent), "div");
+        outlined(d, el, "12px");
+        d.set_rect(el, rect.0, rect.1, rect.2, rect.3);
+        d.set_styles(el, &[("fontSize", "16px"), ("lineHeight", "24px"), ("paddingTop", "16px"), ("paddingBottom", "16px")]);
+        d.add_text(el, "An inner card with copy of its own");
+        el
+    }
+
+    /// auradeballet.com's `border-t` footer, vibe-audit-lab.base44.app's
+    /// chips, demotv.lol's eyebrow, veeza.ai's header band, climatempo.com.br's
+    /// lip shadow.
+    #[test]
+    fn nested_cards_read_edges_fills_labels_and_bands() {
+        // A section with a top rule only is a divider.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let band = d.add(Some(body), "footer");
+        d.set_styles(
+            band,
+            &[
+                ("borderTopWidth", "1px"),
+                ("borderTopStyle", "solid"),
+                ("borderTopColor", "rgba(36, 36, 36, 0.5)"),
+                ("backgroundColor", "rgb(10, 10, 10)"),
+                ("backgroundImage", "none"),
+                ("borderRadius", "0px"),
+                ("boxShadow", "none"),
+            ],
+        );
+        d.set_rect(band, 0.0, 0.0, 1280.0, 400.0);
+        d.add_text(band, "Footer copy longer than ten");
+        let inner = outlined_card(&mut d, band, (256.0, 40.0, 768.0, 120.0));
+        assert!(check_layout(&d).is_empty(), "a one-sided rule");
+        // Outlined on every side and rounded, it is a card.
+        outlined(&mut d, band, "16px");
+        let f = check_layout(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].el, Some(inner));
+
+        // Chips and eyebrows inside a card are labels.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let card = d.add(Some(body), "div");
+        outlined(&mut d, card, "16px");
+        d.set_rect(card, 0.0, 0.0, 600.0, 400.0);
+        d.add_text(card, "A card with labels in it");
+        let label = outlined_card(&mut d, card, (24.0, 24.0, 200.0, 34.0));
+        d.set_style(label, "borderRadius", "9999px");
+        assert!(check_layout(&d).is_empty(), "a pill");
+        d.set_styles(
+            label,
+            &[
+                ("borderRadius", "0px"),
+                ("boxShadow", "rgb(89, 219, 234) 3px 3px 0px 0px"),
+                ("paddingTop", "5px"),
+                ("paddingBottom", "5px"),
+                ("lineHeight", "18px"),
+            ],
+        );
+        d.set_rect(label, 24.0, 24.0, 200.0, 30.0);
+        assert!(check_layout(&d).is_empty(), "a one-line eyebrow");
+        d.set_rect(label, 24.0, 24.0, 200.0, 90.0);
+        assert_eq!(check_layout(&d).len(), 1, "a box with room for lines");
+
+        // tempra.framer.website: a filled field around a select inside a form
+        // card.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let form = d.add(Some(body), "form");
+        outlined(&mut d, form, "16px");
+        d.set_rect(form, 672.0, 7632.0, 528.0, 687.0);
+        d.add_text(form, "Book a visit with our team");
+        let field = d.add(Some(form), "div");
+        d.set_styles(
+            field,
+            &[
+                ("backgroundColor", "rgb(233, 236, 239)"),
+                ("backgroundImage", "none"),
+                ("borderRadius", "10px"),
+                ("boxShadow", "none"),
+                ("position", "relative"),
+                ("fontSize", "16px"),
+                ("lineHeight", "normal"),
+            ],
+        );
+        d.set_rect(field, 692.0, 7978.0, 488.0, 50.0);
+        let select = d.add(Some(field), "select");
+        let option = d.add(Some(select), "option");
+        d.add_text(option, "Air Conditioning Installation");
+        assert!(check_layout(&d).is_empty(), "a field box");
+        let note = d.add(Some(field), "p");
+        d.add_text(note, "Pick the service you need");
+        assert_eq!(check_layout(&d).len(), 1, "a box with content beside the control");
+
+        // clipto.com: a tinted, rounded `<mark>` run; demotv.lol: a bordered
+        // frame around a video thumbnail.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let card = d.add(Some(body), "div");
+        outlined(&mut d, card, "16px");
+        d.set_rect(card, 0.0, 0.0, 600.0, 400.0);
+        d.add_text(card, "Sources linked to their moments");
+        let mark = outlined_card(&mut d, card, (24.0, 24.0, 210.0, 90.0));
+        d.set_style(mark, "display", "inline");
+        assert!(check_layout(&d).is_empty(), "an inline highlight");
+        d.set_style(mark, "display", "block");
+        assert_eq!(check_layout(&d).len(), 1, "a block box");
+        let video = d.add(Some(mark), "video");
+        d.set_rect(video, 25.0, 25.0, 208.0, 88.0);
+        assert!(check_layout(&d).is_empty(), "a media frame");
+
+        // A band along the card's own edges is part of the card.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let article = d.add(Some(body), "article");
+        outlined(&mut d, article, "24px");
+        d.set_rect(article, 32.0, 2423.0, 389.0, 511.0);
+        d.add_text(article, "Croatia full service");
+        let header = d.add(Some(article), "div");
+        d.set_styles(
+            header,
+            &[
+                ("backgroundColor", "rgba(248, 250, 252, 0.8)"),
+                ("backgroundImage", "none"),
+                ("borderBottomWidth", "1px"),
+                ("borderBottomStyle", "solid"),
+                ("borderBottomColor", "rgba(2, 6, 23, 0.1)"),
+                ("borderRadius", "24px 24px 0px 0px"),
+                ("boxShadow", "none"),
+                ("position", "static"),
+                ("fontSize", "16px"),
+                ("lineHeight", "24px"),
+            ],
+        );
+        d.set_rect(header, 33.0, 2424.0, 387.0, 237.0);
+        d.add_text(header, "CroatiaFull ServiceMost Popular");
+        assert!(check_layout(&d).is_empty(), "a band along the card's edges");
+        d.set_rect(header, 49.0, 2440.0, 355.0, 200.0);
+        assert_eq!(check_layout(&d).len(), 1, "inset, it is a card of its own");
+
+        // A white box on a white card with a 2px lip draws no second surface.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let outer = d.add(Some(body), "div");
+        d.set_styles(
+            outer,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("backgroundImage", "none"),
+                ("borderRadius", "28px"),
+                ("boxShadow", "rgba(0, 0, 0, 0.1) 0px 4px 8px -2px"),
+                ("position", "static"),
+            ],
+        );
+        d.set_rect(outer, 312.0, 376.0, 312.0, 456.0);
+        d.add_text(outer, "Plano Gratis feita para voce");
+        let inner = d.add(Some(outer), "div");
+        d.set_styles(
+            inner,
+            &[
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("backgroundImage", "none"),
+                ("borderRadius", "24px"),
+                ("boxShadow", "rgba(0, 0, 0, 0.12) 0px 2px 4px -2px"),
+                ("position", "static"),
+                ("fontSize", "16px"),
+                ("lineHeight", "24px"),
+            ],
+        );
+        d.set_rect(inner, 320.0, 384.0, 296.0, 440.0);
+        d.add_text(inner, "Feita para voce que precisa");
+        assert!(check_layout(&d).is_empty(), "a white box with a lip");
+        d.set_style(inner, "boxShadow", "rgba(0, 0, 0, 0.1) 0px 1px 3px 0px");
+        assert_eq!(check_layout(&d).len(), 1, "a shadow that draws three edges");
     }
 
     #[test]

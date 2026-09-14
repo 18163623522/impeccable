@@ -189,7 +189,9 @@ pub fn is_kicker_candidate(o: &KickerCandidateInput) -> bool {
     if !is_uppercased {
         return false;
     }
-    if !(o.kicker_font_size > 0.0 && o.kicker_font_size <= 14.0) {
+    if !(o.kicker_font_size > 0.0
+        && o.kicker_font_size <= label_size_ceiling(o.heading_font_size, KICKER_BASE_MAX_PX))
+    {
         return false;
     }
     let min_tracked_spacing = o.kicker_font_size * 0.06;
@@ -197,6 +199,30 @@ pub fn is_kicker_candidate(o: &KickerCandidateInput) -> bool {
         return false;
     }
     true
+}
+
+/// The size a kicker was always allowed, whatever the heading.
+pub const KICKER_BASE_MAX_PX: f64 = 14.0;
+/// The size a numbered label was always allowed, whatever the heading.
+pub const NUMBERED_LABEL_BASE_MAX_PX: f64 = 13.0;
+/// A label reads as a label beside a heading at most this share of the
+/// heading's size: a 15px eyebrow over a 44px h2 is as small, relative to it,
+/// as a 12px one over a 32px h2.
+pub const LABEL_HEADING_SIZE_RATIO: f64 = 0.45;
+/// The absolute cap on a label's size, whatever the heading: past it the text
+/// is a subheading.
+pub const LABEL_MAX_PX: f64 = 16.0;
+
+/// The largest size a label beside a heading of `heading_font_size` may be:
+/// the old fixed ceiling `base`, raised to [`LABEL_HEADING_SIZE_RATIO`] of the
+/// heading where that is larger, and never past [`LABEL_MAX_PX`].
+pub fn label_size_ceiling(heading_font_size: f64, base: f64) -> f64 {
+    let relative = if heading_font_size.is_finite() && heading_font_size > 0.0 {
+        heading_font_size * LABEL_HEADING_SIZE_RATIO
+    } else {
+        0.0
+    };
+    base.max(relative.min(LABEL_MAX_PX))
 }
 
 /// JS: checks.mjs#isNumberedSectionLabelCandidate.
@@ -214,7 +240,9 @@ pub fn is_numbered_section_label_candidate(o: &NumberedLabelCandidateInput) -> b
     if o.label_index.is_none() || o.label_text.is_empty() {
         return false;
     }
-    if !(o.label_font_size > 0.0 && o.label_font_size <= 13.0) {
+    if !(o.label_font_size > 0.0
+        && o.label_font_size <= label_size_ceiling(o.heading_font_size, NUMBERED_LABEL_BASE_MAX_PX))
+    {
         return false;
     }
     if o.heading_font_size > 0.0 && o.heading_font_size < o.label_font_size * 1.3 {
@@ -413,6 +441,57 @@ pub fn is_repeated_text_container(style: Option<&dyn StyleMap>) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn label_ceilings_follow_the_heading_up_to_a_cap() {
+        assert_eq!(label_size_ceiling(32.0, KICKER_BASE_MAX_PX), 14.4);
+        assert_eq!(label_size_ceiling(24.0, KICKER_BASE_MAX_PX), 14.0);
+        assert_eq!(label_size_ceiling(44.0, KICKER_BASE_MAX_PX), 16.0);
+        assert_eq!(label_size_ceiling(0.0, NUMBERED_LABEL_BASE_MAX_PX), 13.0);
+        assert_eq!(label_size_ceiling(f64::NAN, NUMBERED_LABEL_BASE_MAX_PX), 13.0);
+    }
+
+    /// opentrailpaper.com: 15.04px tracked kickers above 44px h2s.
+    #[test]
+    fn a_fifteen_pixel_kicker_counts_above_a_display_heading() {
+        let input = |heading: f64, kicker: f64| KickerCandidateInput {
+            heading_level: 2.0,
+            heading_text: "Device walkthrough",
+            heading_font_size: heading,
+            kicker_tag: "p",
+            kicker_text: "01 — Device controls",
+            kicker_text_transform: "uppercase",
+            kicker_font_variant: "normal normal",
+            kicker_font_size: kicker,
+            kicker_letter_spacing: kicker * 0.2,
+        };
+        assert!(is_kicker_candidate(&input(44.0, 15.04)));
+        assert!(!is_kicker_candidate(&input(24.0, 15.04)));
+        assert!(!is_kicker_candidate(&input(64.0, 17.0)));
+        assert!(is_kicker_candidate(&input(20.0, 14.0)));
+    }
+
+    /// v0-optimus-delta.vercel.app: 14px mono "01" beside 36px h3s.
+    #[test]
+    fn a_numbered_label_ceiling_follows_the_heading() {
+        let input = |heading: f64, label: f64| NumberedLabelCandidateInput {
+            heading_tag: "h3",
+            heading_text: "Instant Deployment",
+            heading_font_size: heading,
+            label_tag: "div",
+            label_index: Some(1.0),
+            label_text: "01",
+            label_font_size: label,
+            label_letter_spacing: 0.0,
+            label_font_weight: "400",
+            label_font_family: "\"JetBrains Mono\", monospace",
+            label_text_transform: "none",
+            label_color: "rgb(113, 113, 122)",
+        };
+        assert!(is_numbered_section_label_candidate(&input(36.0, 14.0)));
+        assert!(!is_numbered_section_label_candidate(&input(24.0, 14.0)));
+        assert!(is_numbered_section_label_candidate(&input(24.0, 13.0)));
+    }
 
     fn style(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

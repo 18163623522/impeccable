@@ -383,12 +383,44 @@ re!(TW_BG_CLIP_TEXT, format!(r"{B}bg-clip-text{B}"));
 pub fn find_solid_chromatic_bg(s: &str) -> Option<&str> {
     let mut from = 0usize;
     while let Some(m) = TW_COLOR_BG.find_at(s, from) {
-        if s.as_bytes().get(m.end()) != Some(&b'/') {
+        if s.as_bytes().get(m.end()) != Some(&b'/') && !in_state_variant(s, m.start()) {
             return Some(m.as_str());
         }
         from = m.start() + 1;
     }
     None
+}
+
+/// The first gray text utility that applies at rest.
+fn find_resting_gray_text(s: &str) -> Option<regex::Match<'_>> {
+    TW_GRAY_TEXT
+        .find_iter(s)
+        .find(|m| !in_state_variant(s, m.start()))
+}
+
+/// Whether the utility starting at `start` sits behind a state variant
+/// (`hover:bg-emerald-400`, `group-focus:text-gray-500`): it paints only in
+/// that state, so it says nothing about the resting colours. Breakpoint and
+/// theme variants (`md:`, `dark:`) apply at rest and still count.
+fn in_state_variant(s: &str, start: usize) -> bool {
+    let token_start = s[..start]
+        .rfind(|c: char| c.is_ascii_whitespace())
+        .map_or(0, |i| i + 1);
+    let prefix = &s[token_start..start];
+    if !prefix.ends_with(':') {
+        return false;
+    }
+    prefix.trim_end_matches(':').split(':').any(|variant| {
+        let v = variant.trim_start_matches('!');
+        matches!(
+            v,
+            "hover" | "focus" | "focus-visible" | "focus-within" | "active" | "visited"
+                | "disabled" | "checked" | "open" | "enabled" | "invalid" | "placeholder"
+        ) || v.starts_with("group-")
+            || v.starts_with("peer-")
+            || v.starts_with("aria-")
+            || v.starts_with("data-")
+    })
 }
 re!(TW_BG_GRADIENT_TO, format!(r"{B}bg-gradient-to-"));
 re!(
@@ -526,7 +558,7 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     }
 
     if let Some(class_str) = opts.class_list.as_deref().filter(|s| !s.is_empty()) {
-        let gray_match = TW_GRAY_TEXT.find(class_str);
+        let gray_match = find_resting_gray_text(class_str);
         let color_bg_match = find_solid_chromatic_bg(class_str);
         if let (Some(g), Some(c)) = (gray_match, color_bg_match) {
             findings.push(RuleHit::new(
@@ -690,6 +722,29 @@ pub(crate) const TRANSPARENT_INK_FLOOR: f64 = 0.02;
 /// before it is scored and printed (`rgba(255, 255, 255, 0.7)` is not
 /// `#ffffff` on the page). Without it `text_color` is scored as declared,
 /// which is what the recorded call vectors pin.
+/// The channel spread a background needs before gray text on it reads as
+/// gray on colour, at a luminance of 0.01 or more.
+const GRAY_ON_COLOR_BG_SPREAD: f64 = 40.0;
+/// Below this luminance (a CIELAB lightness of about 9, where a colour reads
+/// as black) the spread needed grows as the colour darkens.
+const GRAY_ON_COLOR_DARK_LUMINANCE: f64 = 0.01;
+
+/// Whether a background reads as colour. The spread bar rises with the square
+/// root of how far the colour sits under a luminance of 0.01: a near-black
+/// navy (`#04002d`, luminance 0.002, spread 45) and a near-black purple
+/// (`#1e002f`, 0.005, spread 47) read as black, while a dark navy (`#001c47`,
+/// 0.013), a dark petrol (`#002733`, 0.017) and a very dark blue with a wide
+/// spread (`#00004d`, 0.005, spread 77) still read as colour.
+fn background_reads_as_colour(bg: &Rgba) -> bool {
+    let lum = relative_luminance(bg);
+    let scale = if lum >= GRAY_ON_COLOR_DARK_LUMINANCE {
+        1.0
+    } else {
+        (GRAY_ON_COLOR_DARK_LUMINANCE / math_max(lum, 1e-4)).sqrt()
+    };
+    has_chroma(Some(bg), Some(GRAY_ON_COLOR_BG_SPREAD * scale))
+}
+
 fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
     // Glyphs inked at (nearly) zero alpha paint nothing: a `color:
     // transparent` label over a sprite, a letter-by-letter reveal at its
@@ -711,7 +766,7 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
     let mut findings = Vec::new();
     let text_lum = relative_luminance(text_color);
     let is_gray = !has_chroma(Some(text_color), Some(20.0)) && text_lum > 0.05 && text_lum < 0.85;
-    if is_gray && bgs.iter().all(|b| has_chroma(Some(b), Some(40.0))) {
+    if is_gray && bgs.iter().all(background_reads_as_colour) {
         let bg_label = match opts.effective_bg {
             Some(bg) => color_to_hex(Some(&bg)),
             None => format!(
@@ -874,6 +929,9 @@ pub fn is_card_like_from_props(
     has_radius || has_bg
 }
 
+/// The background alpha at which an icon tile's tint is drawn.
+pub const ICON_TILE_MIN_BG_ALPHA: f64 = 0.05;
+
 /// JS: checks.mjs#checkIconTile
 pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
     if !is_heading_tag(&opts.heading_tag) {
@@ -898,9 +956,11 @@ pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
     if ratio < 0.7 || ratio > 1.4 {
         return Vec::new();
     }
+    // Tailwind's `/10` tint computes to an alpha of exactly 0.1, and a tint
+    // that faint still draws the tile.
     let bg_visible = opts
         .sibling_bg_color
-        .map_or(false, |c| c.a.map_or(false, |a| a > 0.1))
+        .map_or(false, |c| c.a.map_or(false, |a| a >= ICON_TILE_MIN_BG_ALPHA))
         || opts
             .sibling_bg_image
             .as_deref()
@@ -1471,7 +1531,7 @@ pub fn type_hierarchy_role(tag: &str) -> String {
 }
 
 /// JS: checks.mjs#dominantTypeRoleSize
-fn dominant_type_role_size(samples: &[f64]) -> Option<f64> {
+fn dominant_type_role_size(role: &str, samples: &[f64]) -> Option<f64> {
     // `new Map()` keeps insertion order; the JS sorts by count desc then size asc.
     let mut counts: Vec<(f64, f64)> = Vec::new();
     for size in samples {
@@ -1490,7 +1550,20 @@ fn dominant_type_role_size(samples: &[f64]) -> Option<f64> {
             .then(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
     });
     if ranked.len() > 1 && ranked[0].1 == ranked[1].1 {
-        return None;
+        // A page whose h1 is set at two sizes equally often (a 66px page title
+        // and a 48px closing title) still has a top of its ladder, at the
+        // larger size. Every other role with no dominant size stays out, as
+        // before: which size stands for an h3 used once at 15px, once at 17px
+        // and once at 22px is not something the samples say.
+        if role != "h1" {
+            return None;
+        }
+        let top = ranked[0].1;
+        return ranked
+            .iter()
+            .take_while(|(_, count)| *count == top)
+            .map(|(size, _)| *size)
+            .reduce(math_max);
     }
     ranked.first().map(|(size, _)| *size)
 }
@@ -1512,7 +1585,7 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 
     let mut roles: Vec<(String, f64)> = by_role
         .into_iter()
-        .filter_map(|(role, sizes)| dominant_type_role_size(&sizes).map(|size| (role, size)))
+        .filter_map(|(role, sizes)| dominant_type_role_size(&role, &sizes).map(|size| (role, size)))
         .collect();
 
     if roles.len() < TYPE_HIERARCHY_MIN_ROLES {
@@ -1553,6 +1626,125 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(r: f64, g: f64, b: f64) -> Rgba {
+        Rgba::new(r, g, b, 1.0)
+    }
+
+    /// swipeloan.in: light gray on #04002d, a navy that reads as black.
+    #[test]
+    fn gray_on_color_bar_rises_as_the_background_darkens() {
+        assert!(!background_reads_as_colour(&rgb(4.0, 0.0, 45.0)));
+        assert!(!background_reads_as_colour(&rgb(30.0, 0.0, 47.0)));
+        assert!(!background_reads_as_colour(&rgb(48.0, 0.0, 0.0)));
+        assert!(!background_reads_as_colour(&rgb(15.0, 23.0, 42.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 0.0, 77.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 28.0, 71.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 39.0, 51.0)));
+        assert!(background_reads_as_colour(&rgb(33.0, 37.0, 74.0)));
+        assert!(background_reads_as_colour(&rgb(30.0, 58.0, 138.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 0.0, 255.0)));
+        assert!(background_reads_as_colour(&rgb(17.0, 94.0, 89.0)));
+        // At or above a luminance of 0.01 the bar is the old 40.
+        assert!(background_reads_as_colour(&rgb(16.0, 185.0, 129.0)));
+        assert!(!background_reads_as_colour(&rgb(120.0, 140.0, 150.0)));
+    }
+
+    #[test]
+    fn gray_on_color_scores_the_near_black_navy_as_gray_on_black() {
+        let opts = |bg: Rgba| ColorOpts {
+            tag: "div".to_string(),
+            text_color: Some(rgb(209.0, 209.0, 209.0)),
+            effective_bg: Some(bg),
+            font_size: 16.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            ..Default::default()
+        };
+        let ids = |bg: Rgba| {
+            check_colors(&opts(bg))
+                .into_iter()
+                .map(|h| h.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(!ids(rgb(4.0, 0.0, 45.0)).contains(&"gray-on-color".to_string()));
+        assert!(ids(rgb(30.0, 58.0, 138.0)).contains(&"gray-on-color".to_string()));
+    }
+
+    /// veeza.ai: `hover:bg-emerald-400` read as the resting fill.
+    #[test]
+    fn gray_on_color_classes_skip_state_variants() {
+        assert_eq!(find_solid_chromatic_bg("text-slate-500 hover:bg-emerald-400"), None);
+        assert_eq!(find_solid_chromatic_bg("group-hover:bg-blue-500 bg-red-600"), Some("bg-red-600"));
+        assert_eq!(find_solid_chromatic_bg("md:bg-blue-600"), Some("bg-blue-600"));
+        assert_eq!(find_solid_chromatic_bg("dark:bg-indigo-700"), Some("bg-indigo-700"));
+        assert!(find_resting_gray_text("focus:text-gray-500 bg-blue-600").is_none());
+        assert_eq!(
+            find_resting_gray_text("text-gray-400 bg-blue-600").map(|m| m.as_str()),
+            Some("text-gray-400")
+        );
+    }
+
+    /// ai-pact.com and podprime.ai: Tailwind's `bg-primary/10` computes to an
+    /// alpha of exactly 0.1.
+    #[test]
+    fn icon_tile_counts_a_ten_percent_tint() {
+        let opts = |a: f64| IconTileOpts {
+            heading_tag: "h3".to_string(),
+            heading_text: Some("Guest CRM".to_string()),
+            heading_top: 706.0,
+            sibling_tag: Some("div".to_string()),
+            sibling_width: 40.0,
+            sibling_height: 40.0,
+            sibling_bottom: 694.0,
+            sibling_bg_color: Some(Rgba::new(53.0, 80.0, 212.0, a)),
+            sibling_bg_image: Some("none".to_string()),
+            sibling_border_width: 0.0,
+            sibling_border_radius: 8.0,
+            has_icon_child: true,
+            icon_child_width: 20.0,
+        };
+        assert_eq!(check_icon_tile(&opts(0.1)).len(), 1);
+        assert_eq!(check_icon_tile(&opts(0.05)).len(), 1);
+        assert!(check_icon_tile(&opts(0.04)).is_empty());
+    }
+
+    fn samples(pairs: &[(&str, f64)]) -> Vec<TypeSample> {
+        pairs
+            .iter()
+            .map(|(role, size)| TypeSample {
+                role: role.to_string(),
+                size: *size,
+            })
+            .collect()
+    }
+
+    /// copperhead.sh: a 66px title and a 48px closing title, both h1.
+    #[test]
+    fn flat_type_hierarchy_keeps_a_tied_h1_at_its_larger_size() {
+        let mut page = vec![("h1", 66.56), ("h1", 48.64)];
+        page.extend([("p", 17.0); 6].iter().map(|(_, s)| ("body", *s)));
+        page.extend([("h2", 18.4); 4]);
+        page.extend([("h3", 20.8); 8]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&page)).is_empty());
+
+        // A tie between two sizes close to the rest still reads as flat.
+        let mut flat = vec![("h1", 22.0), ("h1", 21.0)];
+        flat.extend([("body", 17.0); 6]);
+        flat.extend([("h2", 18.4); 4]);
+        flat.extend([("h3", 20.8); 8]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&flat));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("h1 22px"), "{hits:?}");
+
+        // Any other tied role stays out of the ladder, as before.
+        let mut h3_tie = vec![("h1", 18.0), ("h1", 18.0)];
+        h3_tie.extend([("body", 16.0); 4]);
+        h3_tie.extend([("h2", 16.0); 3]);
+        h3_tie.extend([("h3", 15.0), ("h3", 22.0)]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&h3_tie));
+        assert!(hits.is_empty() || !hits[0].snippet.contains("h3"), "{hits:?}");
+    }
 
     #[test]
     fn declared_corners_apply_in_order() {

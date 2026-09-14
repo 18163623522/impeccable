@@ -23,19 +23,21 @@ use crate::checks::measures::{
     GptBorderShadowRowTree, OversizedH1Input, RadialSpotlightInput, SrOnlyMetrics,
 };
 use crate::checks::rules::{
-    check_borders, check_colors, check_colors_deduped, check_glow, check_hero_eyebrow,
-    check_icon_tile, check_italic_serif, check_motion, check_placeholder_colors,
-    is_emoji_only_text, is_glyph_only_text, is_rounded_away_from_side, text_fill_is_transparent,
-    BorderOpts, ColorOpts, Corners, GlowOpts, HeroEyebrowOpts, IconTileOpts, ItalicSerifOpts,
-    MotionOpts, RuleHit, SafeTagTextSeen, Sides, HEADING_TAGS,
+    check_borders, check_colors, check_colors_deduped, check_colors_deduped_claiming, check_glow,
+    check_hero_eyebrow, check_icon_tile, check_italic_serif, check_motion,
+    check_placeholder_colors, is_close_letter_text, is_emoji_only_text, is_glyph_only_text,
+    is_icon_ligature_text, is_rounded_away_from_side, names_close_control,
+    text_fill_is_transparent, BorderOpts, ColorOpts, Corners, GlowOpts, HeroEyebrowOpts,
+    IconTileOpts, ItalicSerifOpts, MotionOpts, PairClaim, RuleHit, SafeTagTextSeen, Sides,
+    HEADING_TAGS,
 };
 use crate::checks::text_rules::{
     CURSOR_FIRST_VIEWPORT_PX, CURSOR_GLYPH_RE, POPOVER_LAYER_SELECTOR,
     POSITIONED_CHILD_INTERACTIVE_SELECTOR, TEXT_OVERFLOW_SKIP_TAGS,
 };
 use crate::color::{
-    get_hue, has_chroma, parse_any_color, parse_gradient_colors, parse_rgb, relative_luminance,
-    Rgba,
+    color_to_hex, get_hue, has_chroma, parse_any_color, parse_gradient_colors, parse_rgb,
+    relative_luminance, Rgba,
 };
 use crate::constants::{BORDER_SAFE_TAGS, SAFE_TAGS};
 use crate::js::{self, math_round, number_to_string, parse_float, parse_int, WS};
@@ -444,13 +446,81 @@ pub fn read_pseudo_surface_dom(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<R
 /// `<a><span>Read more</span> →</a>` has to report the span, because nothing
 /// reports the anchor.
 fn ancestor_scores_its_text(dom: &dyn Dom, el: ElId, direct: &str) -> bool {
-    if is_emoji_only_text(direct) || is_glyph_only_text(direct) {
+    if is_emoji_only_text(direct) || is_icon_text(dom, el, direct) {
         return false;
     }
     if !SAFE_TAGS.contains(&tag_lower(dom, el).as_str()) {
         return true;
     }
     !is_visually_hidden(dom, el)
+}
+
+/// Text a reader sees as an icon rather than words: no letter or digit at
+/// all (an arrow, braces, a private-use glyph), a ligature an icon font draws
+/// as a glyph (`arrow_forward` in Material Symbols), or a Latin `x` in a
+/// control that names itself a close or dismiss button.
+pub(crate) fn is_icon_text(dom: &dyn Dom, el: ElId, direct: &str) -> bool {
+    if is_glyph_only_text(direct) {
+        return true;
+    }
+    let ink = dom.text_slot(el).unwrap_or(el);
+    if is_icon_ligature_text(direct, &dom.style(ink, "fontFamily")) {
+        return true;
+    }
+    is_close_letter_text(direct) && names_close_control_dom(dom, el)
+}
+
+/// Whether the element, its parent, or the button or link it sits in names
+/// itself a close or dismiss control.
+fn names_close_control_dom(dom: &dyn Dom, el: ElId) -> bool {
+    let mut boxes = vec![el];
+    if let Some(p) = dom.parent(el) {
+        boxes.push(p);
+    }
+    if let Some(control) = closest_or_none(dom, el, "button, [role=\"button\"], a") {
+        boxes.push(control);
+    }
+    boxes.into_iter().any(|b| {
+        let values: Vec<String> = ["class", "id", "aria-label", "title"]
+            .iter()
+            .filter_map(|name| dom.attr(b, name))
+            .collect();
+        names_close_control(&values.iter().map(String::as_str).collect::<Vec<_>>())
+    })
+}
+
+/// Whether the element lies wholly within the page's width, give or take a
+/// pixel. A marquee's first copy starting past the left edge, or a card cut
+/// by a carousel's right edge, is only partly readable.
+fn wholly_within_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
+    let width = dom.inner_width();
+    if !num_truthy(width) {
+        return true;
+    }
+    rect.left >= -1.0 && rect.left + rect.width <= width + 1.0
+}
+
+/// Whether a surface walk may have passed a component's shadow tree unseen:
+/// the capture recorded no shadow trees, the text belongs to a custom element
+/// (a host carrying its own text, or a light child of one), and the walk
+/// ended on the page ground. `tcg-promo` paints its dark promo band inside
+/// its shadow tree, and a recording that could not see it scores the white
+/// heading on the page's own fill.
+fn surface_hidden_in_unrecorded_shadow_tree(dom: &dyn Dom, el: ElId, host: Option<ElId>) -> bool {
+    if dom.shadow_trees_recorded() {
+        return false;
+    }
+    let custom = |n: ElId| tag_lower(dom, n).contains('-');
+    if !(custom(el) || dom.parent(el).is_some_and(custom)) {
+        return false;
+    }
+    on_page_ground(dom, host)
+}
+
+/// Whether the box that ended a surface walk is the page ground: `html`,
+/// `body`, or the canvas past them (`None`).
+fn on_page_ground(dom: &dyn Dom, host: Option<ElId>) -> bool {
+    host.map_or(true, |h| matches!(tag_lower(dom, h).as_str(), "html" | "body"))
 }
 
 /// Whether this element's `color` comes from an ancestor the contrast pass
@@ -717,7 +787,7 @@ fn fold_surface_opacity(
             opacity
         };
         layers.push((fill, opacity));
-        cur = dom.parent(c);
+        cur = dom.flat_parent(c);
     }
     if !reached {
         return None;
@@ -751,23 +821,38 @@ pub fn check_element_colors_dom(
 ) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
     let rect = dom.rect(el);
-    if rect.width < 10.0 || rect.height < 10.0 {
+    let direct = direct_text(dom, el);
+    let has_direct_text = !js::trim(&direct).is_empty();
+    // Under 10px tall nothing here is text a reader is asked to read, and
+    // under 10px wide a box is a mark: a bullet, a step numeral in a circle,
+    // one bit of a decorative bit field. A single digit inside a run of text
+    // is read (joongang.co.kr's carousel counter `1/8`, whose total is 8px
+    // wide), so a narrow box is scored where its parent carries text of its
+    // own beside it.
+    let narrow_run = has_direct_text
+        && rect.width >= 1.0
+        && dom
+            .parent(el)
+            .is_some_and(|p| !js::trim(&direct_text(dom, p)).is_empty());
+    if rect.height < 10.0 || (rect.width < 10.0 && !narrow_run) {
         return Vec::new();
     }
     if dom.style(el, "visibility") == "hidden" || effective_opacity_dom(dom, el) <= 0.02 {
         return Vec::new();
     }
-    let direct = direct_text(dom, el);
-    let has_direct_text = !js::trim(&direct).is_empty();
-    let text_color = parse_rgb_or_any(&dom.style(el, "color"));
+    // A shadow host whose own text is slotted into its shadow tree paints
+    // that text in the slot's colour and font, over the shadow tree's fills.
+    let ink_el = dom.text_slot(el).unwrap_or(el);
+    let text_color = parse_rgb_or_any(&dom.style(ink_el, "color"));
+    let icon_text = has_direct_text && is_icon_text(dom, el, &direct);
     // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
     // walk and the hidden-text selector run only for those tags.
     let paints_own_text = has_direct_text
         && SAFE_TAGS.contains(&tag.as_str())
         && !is_emoji_only_text(&direct)
-        && !is_glyph_only_text(&direct)
+        && !icon_text
         && !is_visually_hidden(dom, el)
-        && !text_fill_is_transparent(&dom.style(el, "webkitTextFillColor"))
+        && !text_fill_is_transparent(&dom.style(ink_el, "webkitTextFillColor"))
         && !text_clipped_by_an_ancestor(dom, el)
         && overlaps_page_width(dom, &rect)
         // `closest` starts at the element, so the control itself is covered.
@@ -783,7 +868,7 @@ pub fn check_element_colors_dom(
         Vec::new()
     };
     let font_size = {
-        let n = parse_float(&dom.style(el, "fontSize"));
+        let n = parse_float(&dom.style(ink_el, "fontSize"));
         if num_truthy(n) {
             n
         } else {
@@ -794,7 +879,7 @@ pub fn check_element_colors_dom(
         let r = dom.direct_text_rect(el).unwrap_or(rect);
         Box2::new(r.left, r.top, r.width, r.height)
     };
-    let surface = resolve_text_surface(dom, el, &|n| icons.contains(&n), text_box, font_size);
+    let surface = resolve_text_surface(dom, ink_el, &|n| icons.contains(&n), text_box, font_size);
     let mut effective_bg = surface.info.color;
     let mut surface_unresolved = surface.info.unresolved;
     let mut own_bg = read_own_background_color(dom, el);
@@ -808,7 +893,7 @@ pub fn check_element_colors_dom(
         }
     }
     let font_weight = {
-        let n = parse_int(&dom.style(el, "fontWeight"), 10);
+        let n = parse_int(&dom.style(ink_el, "fontWeight"), 10);
         if num_truthy(n) {
             n
         } else {
@@ -830,14 +915,14 @@ pub fn check_element_colors_dom(
             let stops = surface
                 .samples
                 .clone()
-                .or_else(|| resolve_text_gradient_stops(dom, el, &surface));
+                .or_else(|| resolve_text_gradient_stops(dom, ink_el, &surface));
             let host = stops.as_ref().and(surface.gradient_host);
             let source = host.map(|host| format!("gradient on {}", surface_label(dom, host)));
             (stops, source, host.map(|host| host.to_string()))
         };
     let visible_text = match text_color {
         Some(ink) if !pseudo_surface_read && !surface_unresolved => {
-            fold_surface_opacity(dom, el, &ink, &surface, &mut effective_bg)
+            fold_surface_opacity(dom, ink_el, &ink, &surface, &mut effective_bg)
         }
         _ => None,
     }
@@ -849,6 +934,35 @@ pub fn check_element_colors_dom(
     } else {
         dom.style(el, "backgroundImage")
     };
+    let resolved_surface = if surface_unresolved { None } else { effective_bg };
+    let surface_host = if pseudo_surface_read { Some(el) } else { surface.host };
+    let layers = std::cell::OnceCell::new();
+    let layers_at = || {
+        *layers.get_or_init(|| {
+            crate::browser::text_layers::layers_at_text(dom, el, surface_host, resolved_surface)
+        })
+    };
+    // A surface in exactly the text's own colour. Where the hit-test stacks
+    // confirm the text sits on the surface the walk named, the `1.0:1` is
+    // real: text painted in its own background (ynet.co.il's title on its
+    // white header). Where they cannot say, it is the walk landing on a fill
+    // the text does not sit on, and no verdict is printed: when the walk
+    // reached the page ground, or when something other than that ancestor's
+    // own fill lies under the text (a photo beside the caption). A card whose
+    // own opaque fill is the first paint under its text keeps the verdict.
+    let same_hex = text_color.is_some_and(|ink| {
+        let hex = color_to_hex(Some(&ink));
+        match (resolved_surface, effective_bg_stops.as_deref()) {
+            (Some(bg), _) => color_to_hex(Some(&bg)) == hex,
+            (None, Some(stops)) => stops.iter().any(|s| color_to_hex(Some(s)) == hex),
+            _ => false,
+        }
+    });
+    let same_color_surface_is_unread = same_hex
+        && layers_at() != crate::browser::text_layers::TextLayers::Consistent
+        && (on_page_ground(dom, surface_host)
+            || crate::browser::visual::layer_under_text(dom, el)
+                != crate::browser::visual::LayerUnder::Ancestor);
     let color_opts = ColorOpts {
         tag: tag.clone(),
         text_color,
@@ -863,7 +977,7 @@ pub fn check_element_colors_dom(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct),
-        is_glyph_only: is_glyph_only_text(&direct),
+        is_glyph_only: icon_text,
         paints_own_text,
         bg_clip: Some(bg_clip),
         bg_image: Some(own_image),
@@ -872,6 +986,7 @@ pub fn check_element_colors_dom(
         visible_text,
         bg_source,
         bg_source_host,
+        same_color_surface_is_unread,
     };
     let resolved = color_opts.effective_bg;
     // A contrast verdict is about the surface the walk resolved. Where the
@@ -883,17 +998,20 @@ pub fn check_element_colors_dom(
     // per element, late, and only for an element the rule failed; the
     // SAFE_TAGS path asks before the page claims the colour pair, so the
     // first uncovered link wearing it reports instead.
-    let surface_host = if pseudo_surface_read { Some(el) } else { surface.host };
-    let layers = std::cell::OnceCell::new();
     let verdict_stands = |h: &RuleHit| {
         h.id != "low-contrast"
-            || layers
-                .get_or_init(|| {
-                    crate::browser::text_layers::layers_at_text(dom, el, surface_host, resolved)
-                })
-                .verdict_stands()
+            || (!(!pseudo_surface_read
+                && surface_hidden_in_unrecorded_shadow_tree(dom, el, surface_host))
+                && layers_at().verdict_stands())
     };
-    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
+    // The page's one report of a colour pair goes to a readable copy: an
+    // element cut by the page's edge claims it only until a copy wholly on
+    // screen wears it.
+    let claim = PairClaim {
+        owner: u64::from(el),
+        on_screen: wholly_within_page_width(dom, &rect),
+    };
+    let mut findings = check_colors_deduped_claiming(&color_opts, seen, Some(claim), &mut |h: &RuleHit| {
         safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h)
     });
     findings.retain(|h| verdict_stands(h));
@@ -5407,6 +5525,212 @@ mod tests {
     }
 
     #[test]
+    fn copy_on_a_surface_in_its_own_colour_prints_no_verdict_on_any_tag() {
+        // nike.com and exxonmobil.com: white headings over photos the walk
+        // never reads, scored `#ffffff on #ffffff` against the page ground.
+        let (mut d, body) = page();
+        let hero = bare_box(&mut d, body, "section", (0.0, 1200.0, 1280.0, 400.0));
+        let white = faint_copy(&mut d, hero, "rgb(255, 255, 255)", (16.0, 1300.0, 300.0, 28.0));
+        assert!(!reports_contrast(&colors(&d, white)), "{:?}", colors(&d, white));
+        let near = faint_copy(&mut d, hero, "rgb(253, 253, 253)", (16.0, 1340.0, 300.0, 28.0));
+        assert!(reports_contrast(&colors(&d, near)));
+    }
+
+    #[test]
+    fn a_card_whose_own_fill_is_under_its_white_caption_keeps_the_verdict() {
+        // ynet.co.il: a white caption on a white slot card, nothing between.
+        let (mut d, body) = page();
+        let card = bare_box(&mut d, body, "div", (0.0, 1200.0, 400.0, 200.0));
+        d.set_styles(card, &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)")]);
+        let caption = faint_copy(&mut d, card, "rgb(255, 255, 255)", (16.0, 1300.0, 300.0, 28.0));
+        assert!(reports_contrast(&colors(&d, caption)), "{:?}", colors(&d, caption));
+        // A photo laid over the card's fill under the caption: no verdict.
+        let (mut d, body) = page();
+        let card = bare_box(&mut d, body, "div", (0.0, 1200.0, 400.0, 200.0));
+        d.set_styles(card, &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)")]);
+        let photo = bare_box(&mut d, card, "img", (0.0, 1200.0, 400.0, 200.0));
+        d.set_style(photo, "position", "absolute");
+        let caption = faint_copy(&mut d, card, "rgb(255, 255, 255)", (16.0, 1300.0, 300.0, 28.0));
+        assert!(!reports_contrast(&colors(&d, caption)), "{:?}", colors(&d, caption));
+    }
+
+    #[test]
+    fn a_contents_root_is_not_the_surface() {
+        let (mut d, body) = page();
+        let root = bare_box(&mut d, body, "div", (0.0, 0.0, 0.0, 0.0));
+        d.set_styles(root, &[("display", "contents"), ("backgroundColor", "rgb(0, 0, 0)")]);
+        let dark = faint_copy(&mut d, root, "rgb(33, 34, 36)", (16.0, 1300.0, 300.0, 28.0));
+        assert!(!reports_contrast(&colors(&d, dark)), "{:?}", colors(&d, dark));
+        let gold = faint_copy(&mut d, root, "rgb(212, 149, 34)", (16.0, 1340.0, 300.0, 28.0));
+        let hits = colors(&d, gold);
+        assert!(hits.iter().any(|h| h.snippet.contains("on #ffffff")), "{hits:?}");
+    }
+
+    /// A `tcg-promo` host at (0, 1200) whose shadow tree paints `band_fill`
+    /// behind a slot.
+    fn shadow_band(d: &mut FakeDom, body: ElId, band_fill: &str) -> (ElId, ElId, ElId) {
+        let host = bare_box(d, body, "tcg-promo", (0.0, 1200.0, 600.0, 80.0));
+        let band = d.add_shadow_child(host, "div");
+        visible(d, band);
+        d.set_rect(band, 0.0, 1200.0, 600.0, 80.0);
+        d.set_style(band, "backgroundColor", band_fill);
+        let slot = d.add(Some(band), "slot");
+        visible(d, slot);
+        d.set_styles(slot, &[("display", "contents"), ("backgroundColor", "rgba(0, 0, 0, 0)")]);
+        (host, band, slot)
+    }
+
+    #[test]
+    fn a_slotted_heading_is_read_on_its_shadow_band() {
+        let (mut d, body) = page();
+        let (host, band, slot) = shadow_band(&mut d, body, "rgb(11, 58, 102)");
+        let h3 = faint_copy(&mut d, host, "rgb(255, 255, 255)", (16.0, 1220.0, 300.0, 28.0));
+        d.set_assigned_slot(h3, slot);
+        assert!(!reports_contrast(&colors(&d, h3)), "{:?}", colors(&d, h3));
+        d.set_style(band, "backgroundColor", "rgb(244, 244, 244)");
+        let hits = colors(&d, h3);
+        assert!(hits.iter().any(|h| h.snippet.contains("on #f4f4f4")), "{hits:?}");
+    }
+
+    #[test]
+    fn a_host_s_own_text_takes_its_ink_from_the_slot() {
+        // thecignagroup.com's `leaf-button`: the host computes a pale colour,
+        // and the label paints blue on white inside the shadow tree.
+        let (mut d, body) = page();
+        let host = bare_box(&mut d, body, "tcg-button", (16.0, 1200.0, 140.0, 40.0));
+        d.set_styles(host, &[("color", "rgb(229, 231, 235)"), ("fontSize", "16px"), ("fontWeight", "400")]);
+        d.add_text(host, "Read more");
+        let button = d.add_shadow_child(host, "button");
+        visible(&mut d, button);
+        d.set_rect(button, 16.0, 1200.0, 140.0, 40.0);
+        d.set_styles(button, &[("backgroundColor", "rgb(255, 255, 255)"), ("color", "rgb(10, 91, 211)")]);
+        let slot = d.add(Some(button), "slot");
+        visible(&mut d, slot);
+        d.set_styles(
+            slot,
+            &[
+                ("display", "contents"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(10, 91, 211)"),
+                ("fontSize", "16px"),
+                ("fontWeight", "400"),
+            ],
+        );
+        assert!(reports_contrast(&colors(&d, host)), "unslotted: the host's pale ink");
+        d.set_text_slot(host, slot);
+        assert!(!reports_contrast(&colors(&d, host)), "{:?}", colors(&d, host));
+    }
+
+    #[test]
+    fn a_recording_without_shadow_trees_stands_down_on_the_page_ground_under_a_component() {
+        let run = |recorded: bool, section_fill: Option<&str>| {
+            let (mut d, body) = page();
+            d.shadow_trees_unrecorded = !recorded;
+            let section = bare_box(&mut d, body, "section", (0.0, 1200.0, 1280.0, 200.0));
+            if let Some(fill) = section_fill {
+                d.set_style(section, "backgroundColor", fill);
+            }
+            let host = bare_box(&mut d, section, "tcg-promo", (0.0, 1200.0, 600.0, 80.0));
+            let h3 = faint_copy(&mut d, host, "rgb(240, 240, 240)", (16.0, 1220.0, 300.0, 28.0));
+            reports_contrast(&colors(&d, h3))
+        };
+        assert!(run(true, None), "a recording that walked shadow trees found none");
+        assert!(!run(false, None), "the walk ended on the page ground under a component");
+        assert!(run(false, Some("rgb(244, 244, 244)")), "the section's own fill keeps the verdict");
+    }
+
+    #[test]
+    fn a_single_digit_is_scored_under_ten_pixels_wide() {
+        // joongang.co.kr's carousel counter: `span.total` is 7.86px wide.
+        let (mut d, body) = page();
+        let pagination = bare_box(&mut d, body, "div", (1090.0, 1300.0, 30.0, 20.0));
+        d.set_style(pagination, "color", "rgb(51, 51, 51)");
+        let current = bare_box(&mut d, pagination, "strong", (1090.0, 1300.0, 8.0, 20.0));
+        d.add_text(current, "1");
+        d.add_text(pagination, "/");
+        let span = bare_box(&mut d, pagination, "span", (1104.0, 1300.0, 7.86, 20.0));
+        d.add_text(span, "8");
+        d.set_styles(span, &[("color", "rgb(153, 153, 153)"), ("fontSize", "14px"), ("fontWeight", "400")]);
+        assert!(reports_contrast(&colors(&d, span)), "{:?}", colors(&d, span));
+        // A numeral alone in its circle, or one bit of a bit field, is a mark.
+        let circle = bare_box(&mut d, body, "div", (80.0, 1400.0, 28.0, 28.0));
+        let numeral = bare_box(&mut d, circle, "span", (87.0, 1400.0, 7.9, 28.0));
+        d.add_text(numeral, "1");
+        d.set_styles(numeral, &[("color", "rgb(153, 153, 153)"), ("fontSize", "14px"), ("fontWeight", "400")]);
+        assert!(!reports_contrast(&colors(&d, numeral)), "{:?}", colors(&d, numeral));
+        let empty = bare_box(&mut d, body, "div", (0.0, 1300.0, 8.0, 20.0));
+        d.set_styles(empty, &[("color", "rgb(153, 153, 153)")]);
+        assert!(colors(&d, empty).is_empty());
+        let short = bare_box(&mut d, body, "span", (0.0, 1340.0, 40.0, 9.0));
+        d.add_text(short, "12");
+        d.set_styles(short, &[("color", "rgb(153, 153, 153)"), ("fontSize", "14px")]);
+        assert!(!reports_contrast(&colors(&d, short)));
+    }
+
+    #[test]
+    fn icon_ligatures_and_close_letters_are_not_read() {
+        let (mut d, body) = page();
+        let icon = bare_box(&mut d, body, "span", (340.0, 1300.0, 24.0, 24.0));
+        d.add_text(icon, "arrow_forward");
+        d.set_styles(
+            icon,
+            &[("color", "rgb(164, 167, 174)"), ("fontSize", "24px"), ("fontFamily", "\"Material Symbols Outlined\"")],
+        );
+        assert!(!reports_contrast(&colors(&d, icon)), "{:?}", colors(&d, icon));
+        d.set_style(icon, "fontFamily", "Arial, sans-serif");
+        assert!(reports_contrast(&colors(&d, icon)), "the same word in a text face is read");
+        let close = bare_box(&mut d, body, "div", (976.0, 1340.0, 28.0, 24.0));
+        d.set_attr(close, "class", "closeButton");
+        d.add_text(close, "x");
+        d.set_styles(
+            close,
+            &[("backgroundColor", "rgb(118, 184, 53)"), ("color", "rgb(255, 255, 255)"), ("fontSize", "18px")],
+        );
+        assert!(!reports_contrast(&colors(&d, close)), "{:?}", colors(&d, close));
+        d.set_attr(close, "class", "tag");
+        assert!(reports_contrast(&colors(&d, close)), "an `x` that names no close control is read");
+    }
+
+    #[test]
+    fn a_copy_cut_by_the_page_edge_claims_its_pair_until_a_readable_copy_wears_it() {
+        // d3shop.ae: the marquee's first copy starts past the left edge.
+        let (mut d, body) = page();
+        let track = bare_box(&mut d, body, "div", (-30.0, 1300.0, 1400.0, 40.0));
+        let word = |d: &mut FakeDom, x: f64, text: &str| {
+            let s = bare_box(d, track, "span", (x, 1300.0, 80.0, 40.0));
+            d.add_text(s, text);
+            d.set_styles(s, &[("color", "rgb(201, 163, 200)"), ("fontSize", "20px"), ("fontWeight", "400")]);
+            s
+        };
+        let hair = word(&mut d, -30.0, "Hair");
+        let body_copy = word(&mut d, 100.0, "Body");
+        let skincare = word(&mut d, 240.0, "Skincare");
+        let mut seen = SafeTagTextSeen::default();
+        let hair_hits = check_element_colors_dom(&d, hair, &mut seen);
+        assert!(reports_contrast(&hair_hits), "a cut copy with nobody else reports");
+        assert!(reports_contrast(&check_element_colors_dom(&d, body_copy, &mut seen)));
+        let snippet = hair_hits.iter().find(|h| h.id == "low-contrast").unwrap().snippet.clone();
+        assert_eq!(seen.take_superseded(), vec![(u64::from(hair), snippet)]);
+        assert!(!reports_contrast(&check_element_colors_dom(&d, skincare, &mut seen)));
+    }
+
+    #[test]
+    fn a_title_cut_by_the_viewport_edge_is_answered_from_what_is_visible() {
+        let run = |left: f64| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1600.0, 300.0));
+            let photo = bare_box(&mut d, hero, "img", (left - 20.0, 20.0, 700.0, 100.0));
+            d.set_style(photo, "position", "absolute");
+            let title = faint_copy(&mut d, hero, "rgb(240, 240, 240)", (left, 50.0, 500.0, 28.0));
+            reports_contrast(&colors(&d, title))
+        };
+        // 22 of the grid's 30 columns lie inside the 1280px viewport, over the photo.
+        assert!(!run(900.0), "most of the run is visible over the photo");
+        // 10 of 30: too little of the run to answer for it.
+        assert!(run(1100.0), "most of the run is past the edge: the verdict stands");
+    }
+
+    #[test]
     fn text_under_a_fixed_banner_is_not_scored() {
         let run = |banner_rect: (f64, f64, f64, f64), opacity: &str, copy_top: f64| {
             let (mut d, body) = page();
@@ -5447,12 +5771,12 @@ mod tests {
             text,
             &[
                 ("backgroundColor", "rgba(0, 0, 0, 0)"),
-                ("color", "rgb(255, 255, 255)"),
+                ("color", "rgb(250, 250, 250)"),
                 ("fontSize", "25px"),
                 ("fontWeight", "400"),
             ],
         );
-        assert!(reports_contrast(&colors(&d, text)), "no photo: white on white");
+        assert!(reports_contrast(&colors(&d, text)), "no photo: pale on white");
         let img = bare_box(&mut d, avatar, "img", (758.0, 400.0, 25.0, 25.0));
         d.set_style(img, "zIndex", "10");
         assert!(!reports_contrast(&colors(&d, text)), "{:?}", colors(&d, text));
@@ -5621,7 +5945,7 @@ mod tests {
             d.set_rect(text, 106.0, 105.0, 12.0, 15.0);
             d.set_styles(
                 text,
-                &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgb(255, 255, 255)"), ("fontSize", "25px")],
+                &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgb(250, 250, 250)"), ("fontSize", "25px")],
             );
             colors(&d, text)
         };

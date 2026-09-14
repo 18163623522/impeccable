@@ -130,6 +130,12 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
 
     let mut current = Some(el);
     while let Some(cur) = current {
+        // A `display: contents` box paints nothing (Framer's page root at
+        // `#000`), so its fill neither ends the walk nor adds a reason.
+        if super::background::paints_no_box(dom, cur) {
+            current = dom.flat_parent(cur);
+            continue;
+        }
         let tag = tag_lower(dom, cur);
         let bg_image = dom.style(cur, "backgroundImage");
         let is_document_surface = tag == "body" || tag == "html";
@@ -152,16 +158,27 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
         if !filter.is_empty() && filter != "none" {
             add(&mut reasons, "filter");
         }
+        let solid_bg = parse_rgb_or_any(&dom.style(cur, "backgroundColor"))
+            // JS `solidBg.a >= 0.95` (parseRgb always sets a).
+            .filter(|bg| bg.a.unwrap_or(f64::NAN) >= 0.95 && (bg_image.is_empty() || bg_image == "none"));
+        // A box whose own fill is at least 0.95 opaque shows at most a
+        // twentieth of what its backdrop blur produces, and that fill is the
+        // surface that ends this walk: shadcn's `bg-background/95
+        // backdrop-blur` sticky header. Its backdrop filter blocks nothing,
+        // so it keeps the candidate under a reason no pass refuses.
         let backdrop = dom.style(cur, "backdropFilter");
         if !backdrop.is_empty() && backdrop != "none" {
-            add(&mut reasons, "backdrop filter");
+            add(
+                &mut reasons,
+                if solid_bg.is_some() {
+                    "backdrop filter under an opaque fill"
+                } else {
+                    "backdrop filter"
+                },
+            );
         }
-        let solid_bg = parse_rgb_or_any(&dom.style(cur, "backgroundColor"));
-        if let Some(bg) = solid_bg {
-            // JS `solidBg.a >= 0.95` (parseRgb always sets a).
-            if bg.a.unwrap_or(f64::NAN) >= 0.95 && (bg_image.is_empty() || bg_image == "none") {
-                break;
-            }
+        if solid_bg.is_some() {
+            break;
         }
         current = dom.parent(cur);
     }
@@ -895,9 +912,13 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
         }
         let direct = direct_text(dom, el);
         let has_direct_text = !js::trim(&direct).is_empty();
-        // Text with no letter and no digit (a lone circle, a pair of braces)
-        // is not read, on this path as on every other.
-        if !has_direct_text || is_emoji_only_text(&direct) || is_glyph_only_text(&direct) {
+        // Text with no letter and no digit (a lone circle, a pair of braces),
+        // an icon font's ligature or a close control's `x` is not read, on
+        // this path as on every other.
+        if !has_direct_text
+            || is_emoji_only_text(&direct)
+            || super::element_checks::is_icon_text(dom, el, &direct)
+        {
             continue;
         }
         let bg_color = super::background::read_own_background_color(dom, el);
@@ -1850,6 +1871,25 @@ pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
     }
 }
 
+/// The ratio the sampled pass stands behind, over its sorted per-point
+/// ratios. It is their median, the way the pixel pass reads its glyph cores:
+/// the 10th percentile took one point over a bright patch of a photo, or a
+/// sample off the image's edge, as the verdict for the whole line (vorelios.com
+/// printed 4.0:1 against a median of 8.3:1, climatempo.com.br 4.4:1 against
+/// 10.0:1). Where the points read two surfaces, the median more than
+/// [`VERDICT_MEDIAN_DIVERGENCE`] times the 10th percentile, the words over the
+/// light part are really there and the line is scored at that percentile as
+/// before.
+pub fn sampled_verdict(sorted: &[f64]) -> f64 {
+    let low = percentile(sorted, 10.0);
+    let median = percentile(sorted, 50.0);
+    if median > low * VERDICT_MEDIAN_DIVERGENCE {
+        low
+    } else {
+        median
+    }
+}
+
 /// JS: index.mjs#analyzeVisualContrastCandidate — after the sampling loop:
 /// `samples` is one `{ status, color?, method?, reason? }` per point.
 pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], points_len: usize) -> Value {
@@ -1892,13 +1932,8 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
     }
     ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = ratios.len();
-    let pick = |pct: f64| -> f64 {
-        let idx = ((pct / 100.0) * n as f64).floor();
-        let idx = math_min((n - 1) as f64, math_max(0.0, idx)) as usize;
-        ratios[idx]
-    };
-    let measured = pick(10.0);
-    let median = pick(50.0);
+    let median = percentile(&ratios, 50.0);
+    let measured = sampled_verdict(&ratios);
     let threshold = candidate.get("threshold").and_then(Value::as_f64).unwrap_or(f64::NAN);
     let status = if measured < threshold { "fail" } else { "pass" };
     let mut sorted_methods = methods.clone();
@@ -2206,15 +2241,59 @@ mod tests {
         let out = finish_analysis(&candidate, &tc, &dark, 3);
         assert_eq!(out["status"], "fail");
         assert_eq!(out["finding"]["snippet"], "browser contrast 4.49:1 median 4.49:1 (need 4.5:1) via solid-background \"Plans\"");
-        // A median above the bar prints one decimal.
+        // Four points over black beside three over #070707: one surface, and
+        // its median passes where the 10th percentile used to fail.
         let mut mixed = dark.clone();
-        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
-        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
-        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
-        mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        for _ in 0..4 {
+            mixed.push(json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "solid-background" }));
+        }
         let out = finish_analysis(&candidate, &tc, &mixed, 7);
+        assert_eq!(out["status"], "pass", "{out}");
+        assert!(out["finding"].is_null(), "{out}");
+        // White over a grey band and over black reads two surfaces; the words
+        // over the grey keep the low reading, and a median above the bar
+        // prints one decimal.
+        let white = rgba(255.0, 255.0, 255.0, 1.0);
+        let grey = json!({ "status": "sampled", "color": { "r": 119, "g": 119, "b": 119, "a": 1 }, "method": "canvas-img-underlay" });
+        let black = json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "canvas-img-underlay" });
+        let banded: Vec<Value> = vec![grey.clone(), grey.clone(), grey, black.clone(), black.clone(), black.clone(), black];
+        let out = finish_analysis(&candidate, &white, &banded, 7);
+        assert_eq!(out["status"], "fail", "{out}");
         let snippet = out["finding"]["snippet"].as_str().unwrap();
-        assert!(snippet.starts_with("browser contrast 4.49:1 median 4.7:1 (need 4.5:1)"), "{snippet}");
+        assert!(snippet.starts_with("browser contrast 4.48:1 median 21.0:1 (need 4.5:1)"), "{snippet}");
+    }
+
+    #[test]
+    fn the_sampled_verdict_is_the_median_unless_the_points_read_two_surfaces() {
+        // vorelios.com: one bright patch under a hero line.
+        assert_eq!(sampled_verdict(&[4.0, 7.9, 8.1, 8.3, 8.4, 8.6, 9.0]), 8.3);
+        // A line half over a light band and half over a dark one.
+        assert_eq!(sampled_verdict(&[2.0, 2.1, 2.2, 12.0, 12.5, 13.0, 13.5]), 2.0);
+        assert_eq!(sampled_verdict(&[3.0]), 3.0);
+    }
+
+    #[test]
+    fn a_frosted_header_whose_own_fill_is_opaque_blocks_nothing() {
+        // bookerapp.replit.app: shadcn's `bg-background/95 backdrop-blur`.
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let wrap = d.add(Some(body), "div");
+        d.set_style(wrap, "backgroundImage", "url(\"/booker_bg.jpg\")");
+        let header = d.add(Some(wrap), "header");
+        d.set_styles(header, &[("backgroundColor", "rgba(22, 24, 29, 0.95)"), ("backdropFilter", "blur(8px)")]);
+        let p = d.add(Some(header), "p");
+        d.set_style(p, "backgroundColor", "rgba(0, 0, 0, 0)");
+        let reasons = collect_visual_contrast_reasons(&d, p);
+        assert_eq!(reasons, vec!["backdrop filter under an opaque fill".to_string()]);
+        assert!(pixel_contrast_blocked(&reasons).is_none());
+        d.set_style(header, "backgroundColor", "rgba(22, 24, 29, 0.5)");
+        let reasons = collect_visual_contrast_reasons(&d, p);
+        assert!(reasons.iter().any(|r| r == "backdrop filter"), "{reasons:?}");
+        assert!(reasons.iter().any(|r| r == "image background"), "{reasons:?}");
+        // A contents box's fill ends nothing.
+        d.set_styles(header, &[("backgroundColor", "rgb(0, 0, 0)"), ("backdropFilter", "none"), ("display", "contents")]);
+        let reasons = collect_visual_contrast_reasons(&d, p);
+        assert!(reasons.iter().any(|r| r == "image background"), "{reasons:?}");
     }
 
     #[test]

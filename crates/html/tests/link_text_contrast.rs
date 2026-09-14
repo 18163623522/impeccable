@@ -353,24 +353,22 @@ a.lang { color: #ffffff; font-size: 14px; }
 
 #[test]
 fn text_painted_in_its_own_background_is_the_cost_of_that_guard() {
-    // The documented cost of the guard above: a link genuinely set in its own
-    // surface colour is invisible, and this path stays quiet about it. Every
-    // other tag still reports it, which is why the guard is worth its cost.
+    // The documented cost of the guard above: text genuinely set in its own
+    // surface colour is invisible, and no path reports it. The paragraph used
+    // to report, and so did every white heading over a photo the walk cannot
+    // see. One shade off its surface still reports.
     let html = r#"<!DOCTYPE html>
 <html><head><style>
 body { background: #ffffff; }
 a.ghost { color: #ffffff; font-size: 14px; }
 p.ghost { color: #ffffff; font-size: 14px; }
+p.near { color: #fdfdfd; font-size: 14px; }
 </style></head>
-<body><a class="ghost" href="/x">Invisible link</a><p class="ghost">Invisible paragraph</p></body></html>
+<body><a class="ghost" href="/x">Invisible link</a><p class="ghost">Invisible paragraph</p><p class="near">Nearly invisible paragraph</p></body></html>
 "#;
     let snippets = low_contrast_snippets(html, Path::new("/tmp/ghost.html"));
-    assert_eq!(
-        snippets.len(),
-        1,
-        "the paragraph reports, the link does not: {snippets:?}"
-    );
-    assert!(snippets[0].contains("#ffffff on #ffffff"), "{snippets:?}");
+    assert_eq!(snippets.len(), 1, "only the near-white paragraph reports: {snippets:?}");
+    assert!(snippets[0].contains("#fdfdfd on #ffffff"), "{snippets:?}");
 }
 
 #[test]

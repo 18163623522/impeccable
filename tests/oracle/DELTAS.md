@@ -2715,3 +2715,188 @@ sweep), the text summaries reading 577 to 591 here against 568 to 582 there.
 2. **Faded by its own animation.** An element an animation holds at opacity 0
    is judged by the moment of capture, so one caught faded out is silent and
    one caught faded in reports.
+
+## Recorded 2026-09-14: low-contrast resolves the surfaces cohort 2 misread (corpus/fix-surface-resolution)
+
+Corpus run 20, `observations-20.md` rows 17, 22, 38, 42 and 43, and the
+low-contrast misses in `walkthroughs-20.md`. Fortune-stratum precision was 0.37
+on thecignagroup.com, nike.com and exxonmobil.com, all surface misreads.
+
+- **A `display: contents` box paints nothing (row 17).** The contrast walk,
+  the gradient-stops walk and the visual pass's reasons walk read past it, in
+  both engines. Framer writes its page root that way with `background-color:
+  #000`, so dark copy on a white page scored `1.3:1 on #000000` and gold copy
+  on white passed against black (dadastudio.framer.website, 61 findings, and
+  the walkthrough's "Hear from our client" miss).
+- **White on white (row 22).** The full pass in `check_colors` stands down on a
+  surface in exactly the text's own colour, as the SAFE_TAGS path already did.
+  `ColorOpts` gains `same_color_surface_is_unread`; the frozen call vectors
+  leave it false and replay as recorded. The static engine sets it always. The
+  URL engine sets it only where it cannot confirm the surface: the hit-test
+  stacks are not `Consistent`, and either the walk reached the page ground or
+  the structural layer climb finds something other than that ancestor's own
+  fill under the text. White copy on a white card with nothing between keeps
+  its `1.0:1` (ynet.co.il's slot captions), and so does a title whose stacks
+  confirm it sits on its white header.
+- **The layer check answers partly visible boxes (row 22).** `layers_at_text`
+  asks the grid points inside the viewport and decides where at least half of
+  the run's grid lies inside it, instead of requiring the whole box inside.
+- **Open shadow trees are captured and walked (row 38).** `15-snapshot.js`
+  records every open shadow tree after the light DOM (light ids do not move),
+  with `sh` (the host of a top-level node), `as` (`assignedSlot`), `ts` (the
+  slot a host's own text is assigned to) and `shadow: true` on the snapshot.
+  Shadow elements are nobody's child, so document walks and selectors never
+  reach them. `Dom` gains `flat_parent`, `text_slot` and
+  `shadow_trees_recorded`, defaulting to the light tree; the contrast walk, the
+  opacity fold and the layer check's host containment follow the flat tree,
+  and a host whose own text is slotted takes its ink and font from the slot. A
+  recording made before this capture, where the text belongs to a custom
+  element and the walk ended on the page ground, prints no verdict.
+- **The page's one report of a colour pair goes to a readable copy (row 42).**
+  An element cut by the page's left or right edge claims its pair
+  provisionally (`SafeTagTextSeen::keep_first_keyed_claiming`, `PairClaim`); the
+  first later copy wholly on screen reports instead, and the driver withdraws
+  the cut copy's finding. A cut copy nobody replaces stands.
+- **Icon ligatures and close letters are not read (row 43).** A one-word
+  lowercase ligature set in an icon font (`arrow_forward` in Material Symbols)
+  and a Latin `x` in a control whose class, id, `aria-label` or `title` names a
+  close or dismiss control count as glyph-only text, in both engines and in
+  the visual collector.
+- **Walkthrough misses.** A box under 10px wide is scored where its parent
+  carries text of its own (joongang.co.kr's `1/8` counter total, 7.86px wide);
+  a numeral alone in a circle and a decorative bit field stay marks. The
+  gradient dedupe key carries a translucent ink's alpha, so `text-blue-100/70`
+  and `/80` on one box are two pairs; the walkthrough blamed the inherited
+  wrapper colour for veeza.ai's caption, and the replay shows the key. The
+  visual pass records `backdrop filter under an opaque fill` for a box whose
+  own fill is at least 95% opaque, a reason no pass refuses, so shadcn's
+  frosted header is measured instead of blocked.
+- **The sampled pass reads the median.** `sampled_verdict` takes the median of
+  the per-point ratios, as the pixel pass reads its glyph cores; where the
+  median is more than 3 times the 10th percentile the points read two surfaces
+  and the 10th percentile stands, as before.
+
+Not changed: row 11. Exion's pricing labels have no fill under them in the
+snapshot, and fabadda.com's 90% badge gradient sits over a sibling photo whose
+pixels the capture does not carry; compositing over white is the worst case,
+so its 2.8:1 is a bound, and the verdict holds.
+
+Goldens re-recorded from the binary and read finding by finding:
+
+- `detect-fixture-json-covered-text-contrast-html`,
+  `detect-fixture-text-covered-text-contrast-html`: 15 to 13, the two
+  `1.0:1 (need 4.5:1) — text #ffffff on #ffffff` initials, should-pass copy the
+  static engine scored against the page white.
+- `detect-fixture-json-text-occlusion-html`, `detect-fixture-text-text-occlusion-html`:
+  2 to 1, `1.0:1 (need 3:1) — text #ffffff on #ffffff`, the pass hero caption.
+- `detect-fixture-json-gradient-surface-contrast-html`,
+  `detect-fixture-text-gradient-surface-contrast-html`: 15 to 14,
+  `1.0:1 (need 4.5:1) — text #0f172a on #0f172a (gradient on a.underline-link)`,
+  the collapsed underline marked "URL engine".
+- `detect-fixture-json-surface-resolution-contrast-html`,
+  `detect-fixture-text-surface-resolution-contrast-html`: new, 11 low-contrast
+  and 2 cramped-padding. The flag column's readable cases: `#c8c8c8`,
+  `#d49522`, `#fdfdfd`, `#9ca3af on #ffffff` (the shadow band it cannot see),
+  `#c9a3c8`, `#a4a7ae`, `#ffffff on #76b835`, `#999999`. The pass cases the
+  header marks: `#f0f0f0` (the edge photo title), `#e5e7eb` (the slotted
+  button label) and `#ffffff on #ffaa01` (the lone step numeral). Neither
+  translucent ink on the blue band reports here (the static engine stands
+  down on translucent text over a gradient), and `cramped-padding` reads the
+  black contents root as a box with flush children.
+- `detect-dir-json-all-fixtures`, `detect-no-advisory-json`: exactly the 4
+  removed above and the new fixture's 13; `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text` the same, 568 to
+  577 anti-patterns. `detect-scope-both` and `detect-scope-layout-text` gain
+  the two cramped-padding findings.
+
+`crates/html/tests/link_text_contrast.rs` pinned the `<p>` printing `#ffffff on
+#ffffff`; it now pins that no path prints it and a `#fdfdfd` paragraph still
+reports. The generated browser asset was regenerated with `cargo xtask bundle`.
+
+The URL behavior is pinned by `crates/browser/tests/surface_resolution.rs`:
+every should-flag case reports and no should-pass case does. Scanned with the
+base binary (5ce750e5), the same fixture reports eight should-pass cases (the
+edge photo title, the cut marquee copy, the contents-root copy, the photo
+heading, the shadow dark band, the slotted button label, the icon ligature
+and the close `x`), misses the gold eyebrow, the on-screen marquee copy, the
+counter total, the 0.8 caption and the frosted tagline, and scores the light
+shadow band on `#ffffff`.
+
+Corpus:
+
+- **Ratchet over run 20 (cohort 2, 244 captures).** low-contrast 1,411 to
+  1,304: 117 removed (pattern-absent 111, real-harmless 5, confirmed-harmful
+  1), 10 added. The removals are dadastudio.framer.website's black root (61),
+  white on white on nike.com (27), thecignagroup.com (8), exxonmobil.com (6),
+  simplybudget.framer.ai (5) and v0-mono-six.vercel.app (3), the three pair
+  moves on v0-optimus-delta.vercel.app, agora.co.il's close `x` (2),
+  climatempo.com.br's ligature and d3shop.ae's cut marquee copy. The one
+  violation, 108253, is that copy ('IR' of 'HAIR'): its pair now reports on
+  'Body'. The additions are those moves (3 on v0-optimus-delta, 1 on d3shop),
+  the gold eyebrow (2), veeza.ai's caption (2) and joongang.co.kr's counter (2).
+- **Ratchet over run 19 (cohort 1, 342 captures).** low-contrast 3,685 to
+  3,643: 42 removed (unjudged 38, confirmed-harmful 4), 0 added. All are white
+  on white: zid.sa, nubank.com.br and aajtak.in (8 each), context.dev (6),
+  ynet.co.il and te.eg (4 each), sapo.vn and shipthatcode.com (2 each). The 4
+  violations are ynet.co.il slot captions (94298, 94305, 94313, 94318) whose
+  walk ended on the page ground; their crops show dark copy on white, so the
+  `#ffffff` ink the snapshot recorded was not what painted, and they inherit
+  the label of their cluster's representatives. An earlier revision guarded
+  every same-hex surface and removed 8 ynet.co.il findings there, including
+  the title confirmed by its stacks; the narrowed guard keeps those 4.
+- **Live, run 24** (thecignagroup.com, nike.com, exxonmobil.com,
+  dadastudio.framer.website, 24 captures) against run 20 on the same pages:
+  low-contrast 139 to 26. Replaying run 24's captures with the base engine
+  isolates the engine: 129 scan-path findings base, 17 branch, differing in
+  exactly dadastudio's black root (and the added eyebrow), thecignagroup's
+  promo bands, white on white on nike.com and exxonmobil.com. The new snapshots
+  carry shadow trees (thecignagroup.com's home page: 60 shadow top-level
+  nodes, 97 slotted children, one slotted host text), and every promo band
+  finding is gone because the walk reads the band's own fill. The sampled
+  verdicts on exxonmobil.com print their median (`1.7:1 median 2.6:1` is now
+  `2.6:1 median 2.6:1`), and one subline at `3.6:1 median 8.3:1` passes.
+
+### Known limits at merge
+
+1. **Invisible text on the page ground.** Text really painted in its own
+   colour on the page ground, below the fold or where hit tests do not find
+   it, prints no verdict. On run 19 that is 4 ynet.co.il findings whose crops
+   show legible copy.
+2. **Closed shadow roots.** `el.shadowRoot` is null for them, so their fills
+   are unread, as before; the old-capture fail-safe does not apply to new
+   captures.
+3. **Live probe.** `10-probe.js` implements no flat tree, so the live overlay
+   walks the light DOM as before; only snapshot-based scans read shadow trees.
+4. **Harness element counts.** The corpus inventory counts `snap.els`, which
+   now includes shadow-tree elements on new captures.
+5. **Icon fonts by name.** Only families whose first name is a known icon font
+   or contains the word `icons` or `icon` are read as icon fonts; a ligature
+   face with another name is scored.
+6. **Provisional claims below the fold.** Only horizontal cuts are
+   provisional; a copy parked above the page is not.
+7. **Row 11 numbers.** Panels the snapshot does not describe, and translucent
+   fills over photos, keep the numbers base prints.
+8. **API.** `Dom` gains `flat_parent`, `text_slot`, `shadow_trees_recorded`;
+   `SnapNode` gains `shadow_host`, `assigned_slot`, `text_slot`; `Snapshot`
+   gains `shadow_trees_recorded`; `FakeDom` gains `add_shadow_child`,
+   `set_assigned_slot`, `set_text_slot`, `shadow_trees_unrecorded`;
+   `ColorOpts` gains `same_color_surface_is_unread`; `SafeTagTextSeen` gains
+   `keep_first_keyed_claiming` and `take_superseded`; `check_colors_deduped_claiming`,
+   `PairClaim`, `sampled_verdict`, `occlusion_grid_size` and the icon-font
+   predicates are new.
+9. **The sampled median can hide a partly unreadable line.** Where up to about
+   4 of 9 samples fall over a light patch, the median still reads the passing
+   surface and the line prints no verdict; only a spread past 3 times the 10th
+   percentile keeps the low end.
+
+At merge into `corpus/integration`, after `corpus/fix-evidence-origin` and
+`corpus/fix-painted-gate-coverage`, the source merged cleanly beside
+painted-gate-coverage's edits to `element_checks.rs`, `page_checks.rs` and
+`driver.rs`. The generated browser asset conflicted and was regenerated with
+`cargo xtask bundle`. The JS and Rust snapshot lists still match, 117 style
+and 16 pseudo properties, each once. The branch's re-recorded fixture goldens
+(covered-text, gradient-surface, text-occlusion, scope-layout-text) replay as
+recorded. The six conflicted sweeps were re-recorded from the integrated
+binary and moved by exactly the branch's delta (13 added and 4 removed in the
+JSON sweeps, 2 added in `detect-scope-both`), the text summaries reading 591
+to 600 here against 577 there.

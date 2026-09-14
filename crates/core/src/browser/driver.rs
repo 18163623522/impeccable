@@ -1502,8 +1502,19 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
             }
         }
     }
+    // A colour pair first claimed by a copy cut by the page's edge goes to the
+    // copy wholly on screen that wore it later; the partial copy's report is
+    // withdrawn where it was grouped.
+    for (owner, snippet) in color_seen.take_superseded() {
+        let Ok(owner) = ElId::try_from(owner) else { continue };
+        if let Some(g) = groups.iter_mut().find(|g| g.el == owner) {
+            g.findings
+                .retain(|f| !(f.type_ == "low-contrast" && f.detail == snippet));
+        }
+    }
+    groups.retain(|g| !g.findings.is_empty());
 
-    let page_pass = |groups: &mut Vec<FindingGroup>, page_level: &mut Vec<BrowserFinding>, list: Vec<BrowserFinding>| {
+    let page_pass =|groups: &mut Vec<FindingGroup>, page_level: &mut Vec<BrowserFinding>, list: Vec<BrowserFinding>| {
         let list: Vec<BrowserFinding> = list.into_iter().filter(|f| rule_ok(&f.type_)).collect();
         if !list.is_empty() {
             page_level.extend(list.iter().cloned());

@@ -1487,14 +1487,27 @@ pub fn occlusion_probe_rect(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<Rect
     })
 }
 
+/// The occlusion grid's columns and rows over a painted text rect.
+fn occlusion_grid(rect: &Rect) -> (f64, f64) {
+    let cols = math_max(6.0, math_min(30.0, math_round(rect.width / 12.0)));
+    let rows = math_max(1.0, math_min(4.0, math_round(rect.height / 14.0)));
+    (cols, rows)
+}
+
+/// How many points the occlusion grid holds over a rect, inside the viewport
+/// or not.
+pub fn occlusion_grid_size(rect: &Rect) -> usize {
+    let (cols, rows) = occlusion_grid(rect);
+    (cols * rows) as usize
+}
+
 /// The points the occlusion grid asks about a painted text rect, column by
 /// column, skipping those outside the viewport: up to 30 columns by 4 rows.
 /// Other checks that need a hit-test stack over a run of text ask these same
 /// points, so a page answers each of them once and a recording made for this
 /// check answers them too.
 pub fn occlusion_probe_points(rect: &Rect, vw: f64, vh: f64) -> Vec<(f64, f64)> {
-    let cols = math_max(6.0, math_min(30.0, math_round(rect.width / 12.0)));
-    let rows = math_max(1.0, math_min(4.0, math_round(rect.height / 14.0)));
+    let (cols, rows) = occlusion_grid(rect);
     let mut points = Vec::new();
     let mut i = 0.0;
     while i < cols {

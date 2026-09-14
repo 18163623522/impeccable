@@ -160,10 +160,22 @@ pub fn resolve_text_surface(
     walk_surface(dom, el, &query)
 }
 
+/// Whether a box generates no box of its own (`display: contents`): it paints
+/// no background, so its computed fill describes nothing a reader sees.
+/// Framer writes its page root this way with `background-color: #000`, and
+/// every slot is `display: contents` by default.
+pub fn paints_no_box(dom: &dyn Dom, el: ElId) -> bool {
+    js::trim(&dom.style(el, "display")) == "contents"
+}
+
 fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
     let mut out = TextSurface::default();
     let mut current = Some(el);
     while let Some(cur) = current {
+        if paints_no_box(dom, cur) {
+            current = dom.flat_parent(cur);
+            continue;
+        }
         let bg_image = if (q.skip_image)(cur) {
             String::from("none")
         } else {
@@ -213,7 +225,7 @@ fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
             match gradient_under_text(dom, cur, &bg_image, q) {
                 Some(UnderText::Misses) => {
                     out.skipped_images.push(cur);
-                    current = dom.parent(cur);
+                    current = dom.flat_parent(cur);
                     continue;
                 }
                 Some(UnderText::Paint(samples)) => {
@@ -271,7 +283,7 @@ fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
             };
             return out;
         }
-        current = dom.parent(cur);
+        current = dom.flat_parent(cur);
     }
     let canvas = Rgba::new(255.0, 255.0, 255.0, 1.0);
     out.info = BackgroundInfo {
@@ -344,7 +356,7 @@ fn flatten_samples(
     let backdrops: Vec<Rgba> = if !translucent {
         vec![canvas; samples.len()]
     } else {
-        match dom.parent(host) {
+        match dom.flat_parent(host) {
             None => vec![canvas; samples.len()],
             Some(parent) => {
                 let behind = walk_surface(dom, parent, q);
@@ -392,7 +404,7 @@ fn composite_gradient_stops(
     if !has_alpha {
         return Some(stops);
     }
-    let base_el = dom.parent(gradient_el).unwrap_or(gradient_el);
+    let base_el = dom.flat_parent(gradient_el).unwrap_or(gradient_el);
     let base = walk_surface(dom, base_el, q).info.color;
     let mut out = Vec::new();
     for s in stops {
@@ -441,6 +453,10 @@ fn gradient_stops_walk(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> Option<Vec<Rgb
     let mut current = Some(el);
     let mut overlays: Vec<(ElId, Rgba)> = Vec::new();
     while let Some(cur) = current {
+        if paints_no_box(dom, cur) {
+            current = dom.flat_parent(cur);
+            continue;
+        }
         let bg_image = if (q.skip_image)(cur) {
             String::from("none")
         } else {
@@ -473,7 +489,7 @@ fn gradient_stops_walk(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> Option<Vec<Rgb
                 overlays.push((cur, b));
             }
         }
-        current = dom.parent(cur);
+        current = dom.flat_parent(cur);
     }
     None
 }
@@ -656,5 +672,47 @@ mod tests {
         assert_eq!(surface_label(&d, a), "a#cta");
         let s = d.add(Some(body), "section");
         assert_eq!(surface_label(&d, s), "section");
+    }
+
+    #[test]
+    fn a_contents_box_paints_no_surface() {
+        // Framer's page root: `display: contents` with `background-color: #000`.
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(body, "backgroundImage", "none");
+        let root = d.add(Some(body), "div");
+        d.set_styles(root, &[("display", "contents"), ("backgroundColor", "rgb(0, 0, 0)"), ("backgroundImage", "none")]);
+        let p = d.add(Some(root), "p");
+        clear(&mut d, p);
+        let s = resolve_text_surface(&d, p, &|_| false, Box2::new(0.0, 0.0, 200.0, 20.0), 16.0);
+        assert_eq!(s.info.color, Some(Rgba::new(255.0, 255.0, 255.0, 1.0)));
+        assert_eq!(s.host, Some(body));
+        assert_eq!(resolve_background(&d, p), Some(Rgba::new(255.0, 255.0, 255.0, 1.0)));
+        d.set_style(root, "display", "block");
+        assert_eq!(resolve_background(&d, p), Some(Rgba::new(0.0, 0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn the_walk_reads_a_fill_inside_a_shadow_tree() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(body, "backgroundImage", "none");
+        let host = d.add(Some(body), "tcg-promo");
+        clear(&mut d, host);
+        let band = d.add_shadow_child(host, "div");
+        d.set_styles(band, &[("backgroundColor", "rgb(11, 58, 102)"), ("backgroundImage", "none")]);
+        let slot = d.add(Some(band), "slot");
+        d.set_styles(slot, &[("display", "contents"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("backgroundImage", "none")]);
+        let h3 = d.add(Some(host), "h3");
+        clear(&mut d, h3);
+        assert_eq!(resolve_background(&d, h3), Some(Rgba::new(255.0, 255.0, 255.0, 1.0)));
+        d.set_assigned_slot(h3, slot);
+        assert_eq!(resolve_background(&d, h3), Some(Rgba::new(11.0, 58.0, 102.0, 1.0)));
+        // Document queries never reach the shadow tree.
+        assert!(!d.query_all(None, "*").unwrap().contains(&band));
     }
 }

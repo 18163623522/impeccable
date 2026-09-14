@@ -339,6 +339,7 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 effective_bg: rgba(f(0, "effectiveBg")),
                 element_opacity: (!opacity.is_nan()).then_some(opacity),
                 element_size: (!width.is_nan() && !height.is_nan()).then_some((width, height)),
+                surface: None,
             };
             hits_to_js(&rules::check_glow(&opts))
         }

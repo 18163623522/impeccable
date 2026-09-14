@@ -487,4 +487,10 @@ pub struct GlowOpts {
     /// The element's border-box size in CSS px; `None` without layout.
     #[serde(default)]
     pub element_size: Option<(f64, f64)>,
+    /// The fill behind the element as the background walk resolved it, used
+    /// to measure how far a glow lifts it. `None` where the walk named no
+    /// single fill (an image, a gradient, a surface it could not read), and
+    /// on the engines that pass no surface.
+    #[serde(default)]
+    pub surface: Option<Rgba>,
 }

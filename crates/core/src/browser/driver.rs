@@ -781,6 +781,29 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
 /// pulsing-dot hero promotion. Returns `{ type, detail, severity? }`; the
 /// caller applies `_ruleOk`.
 pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
+    html_pattern_items(dom, &crate::checks::html_patterns::PatternContext::default())
+        .0
+        .into_iter()
+        .map(|item| item.finding)
+        .collect()
+}
+
+/// One finding of the pattern pass with what the pass resolved about it.
+struct PatternItem {
+    finding: BrowserFinding,
+    /// The CSS selector the finding names, as the style text spells it.
+    selector: Option<String>,
+    /// The live elements `selector` resolves to (hosts for a pseudo-element
+    /// selector); `None` when the finding names no selector.
+    matches: Option<Vec<ElId>>,
+}
+
+/// [`scoped_html_pattern_findings`] keeping each finding's selector and the
+/// elements it resolves to, plus the style corpus the pass read.
+fn html_pattern_items(
+    dom: &dyn Dom,
+    context: &crate::checks::html_patterns::PatternContext,
+) -> (Vec<PatternItem>, String) {
     let html = dom.document_html_for_patterns();
     // Linked stylesheets are absent from the page's outerHTML, so the probe
     // hands their readable, live-resolving rules to the style corpus (#709).
@@ -790,7 +813,8 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
         corpora.style_text.push('\n');
         corpora.style_text.push_str(&linked_css);
     }
-    let all = crate::checks::html_patterns::check_html_patterns(&html, Some(&corpora));
+    let all =
+        crate::checks::html_patterns::check_html_patterns_with(&html, Some(&corpora), context);
     let mut out = Vec::new();
     // Computed lazily: the accent check below is the only caller and it is
     // rare, so an unrelated page never pays for the sweep.
@@ -809,6 +833,7 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
                 continue;
             }
         }
+        let mut resolved: Option<Vec<ElId>> = None;
         if let Some(selector) = f.selector.as_deref().filter(|s| !s.is_empty()) {
             let Some(matches) = selector_nodes_for_live_dom(dom, selector) else {
                 continue;
@@ -840,6 +865,7 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
                     continue;
                 }
             }
+            resolved = Some(matches);
         }
         let mut item = BrowserFinding::new(f.id.clone(), f.snippet.clone());
         if let Some(sev) = f.severity.as_ref().filter(|s| !s.is_empty()) {
@@ -855,9 +881,382 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
                 }
             }
         }
-        out.push(item);
+        out.push(PatternItem {
+            finding: item,
+            selector: f.selector.clone().filter(|s| !s.is_empty()),
+            matches: resolved,
+        });
+    }
+    (out, corpora.style_text)
+}
+
+// ─── One report per declaration ─────────────────────────────────────────────
+//
+// Several rules read one declaration twice: off the element's computed style
+// and off the stylesheet text (or the class attribute). In the URL engine the
+// element forms run first and read every element, so a text form stands only
+// where no element form already speaks for the same declaration, and, where
+// the rule is about paint, only where an element it names could show it.
+
+/// The class-attribute findings' snippet suffix.
+const CLASS_FORM_SUFFIX: &str = "(Tailwind)";
+
+/// The utility-class form of gradient text and bounce easing names the
+/// treatment the computed form reads off the same element. Once the computed
+/// form has reported the rule on that element, the class form is a second
+/// report of one declaration.
+fn drop_covered_class_forms(findings: &mut Vec<BrowserFinding>) {
+    let computed: Vec<String> = findings
+        .iter()
+        .filter(|f| {
+            (f.type_ == "gradient-text" || f.type_ == "bounce-easing")
+                && !f.detail.ends_with(CLASS_FORM_SUFFIX)
+        })
+        .map(|f| f.type_.clone())
+        .collect();
+    if computed.is_empty() {
+        return;
+    }
+    findings.retain(|f| !(f.detail.ends_with(CLASS_FORM_SUFFIX) && computed.contains(&f.type_)));
+}
+
+/// Whether the page's painted root background is dark: the first of `html`
+/// and `body` with an opaque fill, which is what the canvas shows. `None`
+/// where that cannot be read off the root (neither paints a fill, or the
+/// fill sits under an image or a gradient), which leaves the decision to the
+/// stylesheet text.
+fn painted_root_is_dark(dom: &dyn Dom) -> Option<bool> {
+    for el in [dom.document_element(), dom.body()].into_iter().flatten() {
+        let image = dom.style(el, "backgroundImage");
+        let paints_image = !image.is_empty() && image != "none";
+        match crate::color::parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+            Some(fill) if fill.alpha_or_one() > 0.5 => {
+                return if paints_image {
+                    None
+                } else {
+                    Some(crate::color::relative_luminance(&fill) < 0.1)
+                };
+            }
+            _ if paints_image => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a resolved surface is light (the dark-background forms' threshold).
+fn is_light_surface(surface: &crate::color::Rgba) -> bool {
+    crate::color::relative_luminance(surface) >= 0.1
+}
+
+/// Whether a page form that claims a dark page stands, from the painted root
+/// and the surfaces the engine read under the elements it names (`None` for
+/// a surface it could not read). A dark surface makes it stand whatever the
+/// root is: a halo in the dark band of a light page is on a dark surface.
+/// Surfaces all read as light drop it. With no element to read, the painted
+/// root decides, and an unread root keeps the stylesheet's decision. A
+/// surface the walk could not read (a gradient, an image) keeps the finding.
+fn dark_claim_stands(root_dark: Option<bool>, surfaces: &[Option<crate::color::Rgba>]) -> bool {
+    if surfaces
+        .iter()
+        .any(|s| s.as_ref().map_or(false, |c| !is_light_surface(c)))
+    {
+        return true;
+    }
+    if surfaces.is_empty() {
+        return root_dark != Some(false);
+    }
+    !surfaces.iter().all(|s| s.as_ref().map_or(false, is_light_surface))
+}
+
+/// The page-level forms of gradient-text, bounce-easing, dark-glow,
+/// radial-halo, layout-transition and marquee, reconciled with the element
+/// findings already on the page. Other rules pass through unchanged.
+fn reconcile_page_level_forms(
+    dom: &dyn Dom,
+    groups: &[FindingGroup],
+    items: Vec<PatternItem>,
+    style_text: &str,
+    root_dark: Option<bool>,
+) -> Vec<BrowserFinding> {
+    let element_findings = |rule: &str| -> Vec<&BrowserFinding> {
+        groups
+            .iter()
+            .flat_map(|g| g.findings.iter())
+            .filter(|f| f.type_ == rule)
+            .collect()
+    };
+    let mut marquees: Vec<(Vec<ElId>, Vec<ElId>)> = Vec::new();
+    let mut out = Vec::new();
+    for item in items {
+        let stands = match item.finding.type_.as_str() {
+            // Both page forms describe one treatment, text clipped to a
+            // gradient, and the element forms read it off every element.
+            "gradient-text" => element_findings("gradient-text").is_empty(),
+            "bounce-easing" => {
+                let page = bounce_declarations(&item.finding.detail);
+                !element_findings("bounce-easing").iter().any(|f| {
+                    let own = bounce_declarations(&f.detail);
+                    page.iter().any(|p| own.iter().any(|o| o.same_as(p)))
+                })
+            }
+            "dark-glow" => {
+                dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, root_dark)
+            }
+            "radial-halo" => radial_halo_page_form_stands(dom, &item, root_dark),
+            "layout-transition" => {
+                element_findings("layout-transition").is_empty()
+                    && layout_transition_page_form_stands(dom, style_text)
+            }
+            "marquee" => marquee_page_form_stands(dom, &item, &mut marquees),
+            _ => true,
+        };
+        if stands {
+            out.push(item.finding);
+        }
     }
     out
+}
+
+/// One bounce declaration as a finding names it.
+#[derive(Debug, Clone, PartialEq)]
+enum BounceDeclaration {
+    /// An animation name, lowercased.
+    Name(String),
+    /// An overshooting timing function's four numbers.
+    Bezier([f64; 4]),
+}
+
+impl BounceDeclaration {
+    fn same_as(&self, other: &BounceDeclaration) -> bool {
+        match (self, other) {
+            (Self::Name(a), Self::Name(b)) => a == b,
+            (Self::Bezier(a), Self::Bezier(b)) => {
+                a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6)
+            }
+            _ => false,
+        }
+    }
+}
+
+static BOUNCE_NAME_SPLIT_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(&format!("[,{}]+", crate::js::WS_CHARS)).expect("BOUNCE_NAME_SPLIT_RE")
+    });
+
+/// The declarations a bounce-easing snippet names: `animation: <names>`,
+/// `animate-bounce (Tailwind)` (Tailwind's `bounce` keyframes) or
+/// `cubic-bezier(a, b, c, d)`. The text form's spelling of the numbers
+/// (`.34`) and the computed form's (`0.34`) compare equal.
+fn bounce_declarations(detail: &str) -> Vec<BounceDeclaration> {
+    if let Some(names) = detail.strip_prefix("animation: ") {
+        return BOUNCE_NAME_SPLIT_RE
+            .split(names)
+            .filter(|n| !n.is_empty())
+            .map(|n| BounceDeclaration::Name(crate::js::to_lower_case(n)))
+            .collect();
+    }
+    if detail.starts_with("animate-bounce") {
+        return vec![BounceDeclaration::Name("bounce".to_string())];
+    }
+    if let Some(m) = crate::checks::rules::BEZIER_RE.captures(detail) {
+        let n = |i: usize| crate::js::parse_float(&m[i]);
+        return vec![BounceDeclaration::Bezier([n(1), n(2), n(3), n(4)])];
+    }
+    Vec::new()
+}
+
+static GLOW_DECLARATION_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"(box-shadow|text-shadow) glow \((#[0-9a-fA-F]+)\)")
+            .expect("GLOW_DECLARATION_RE")
+    });
+
+/// A dark-glow snippet's shadow property and colour.
+fn glow_declaration(detail: &str) -> Option<(String, String)> {
+    GLOW_DECLARATION_RE
+        .captures(detail)
+        .map(|m| (m[1].to_string(), crate::js::to_lower_case(&m[2])))
+}
+
+/// The dark-glow page form stands where the element form cannot speak for
+/// it. An element finding of the same shadow and colour already reports it.
+/// A selector that names elements (no pseudo-element) is answered by the
+/// element form, which read those elements' computed shadows, their size,
+/// opacity and surface: it either reported them or measured no glow (an
+/// override such as a later `text-shadow: none`, a box with no area, a light
+/// surface). A pseudo-element's shadow is not in its host's computed style,
+/// so that form stands, and where it claims a dark page the hosts' surfaces
+/// and the painted root decide ([`dark_claim_stands`]). A form with no
+/// selector (a keyframe step, an inline `style` attribute) stands as before,
+/// unless it claims a dark page and the painted root is light.
+fn dark_glow_page_form_stands(
+    dom: &dyn Dom,
+    element_findings: &[&BrowserFinding],
+    item: &PatternItem,
+    root_dark: Option<bool>,
+) -> bool {
+    if let Some(page) = glow_declaration(&item.finding.detail) {
+        if element_findings
+            .iter()
+            .any(|f| glow_declaration(&f.detail).as_ref() == Some(&page))
+        {
+            return false;
+        }
+    }
+    let claims_dark = item.finding.detail.ends_with("on dark page");
+    let (Some(selector), Some(hosts)) = (item.selector.as_deref(), item.matches.as_ref()) else {
+        if !claims_dark {
+            return true;
+        }
+        // No rule to name (a keyframe step, an inline `style` attribute):
+        // read the surfaces under the elements that cast the shadow.
+        let surfaces: Vec<Option<crate::color::Rgba>> = glow_declaration(&item.finding.detail)
+            .map(|(prop, hex)| elements_casting_glow(dom, &prop, &hex))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|el| dom.parent(el).and_then(|p| super::background::resolve_background_info(dom, p).color))
+            .collect();
+        return dark_claim_stands(root_dark, &surfaces);
+    };
+    if pseudo_element_host_selector(selector).is_none() {
+        return false;
+    }
+    if claims_dark {
+        let surfaces: Vec<Option<crate::color::Rgba>> = hosts
+            .iter()
+            .map(|&host| super::background::resolve_background_info(dom, host).color)
+            .collect();
+        return dark_claim_stands(root_dark, &surfaces);
+    }
+    true
+}
+
+/// The radial-halo page form claims a dark page. The surface under each
+/// element its selector names (its own opaque fill, else what lies behind
+/// it) and the painted root decide ([`dark_claim_stands`]).
+fn radial_halo_page_form_stands(dom: &dyn Dom, item: &PatternItem, root_dark: Option<bool>) -> bool {
+    let surface = |el: ElId| -> Option<crate::color::Rgba> {
+        if let Some(fill) = crate::color::parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+            if fill.alpha_or_one() > 0.5 {
+                return Some(fill);
+            }
+        }
+        dom.parent(el)
+            .and_then(|p| super::background::resolve_background_info(dom, p).color)
+    };
+    // With no rule to name (an inline `style` attribute), the elements whose
+    // computed background paints the halo's colour are the ones it names.
+    let elements: Vec<ElId> = match item.matches.as_ref() {
+        Some(elements) => elements.clone(),
+        None => HALO_COLOR_RE
+            .captures(&item.finding.detail)
+            .map(|m| elements_painting_halo(dom, &crate::js::to_lower_case(&m[1])))
+            .unwrap_or_default(),
+    };
+    let surfaces: Vec<Option<crate::color::Rgba>> = elements.iter().map(|&el| surface(el)).collect();
+    dark_claim_stands(root_dark, &surfaces)
+}
+
+static HALO_COLOR_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"halo \((#[0-9a-fA-F]+) ").expect("HALO_COLOR_RE"));
+
+/// The elements whose computed background draws a radial gradient with a
+/// stop in `hex` (lowercase `#rrggbb`).
+fn elements_painting_halo(dom: &dyn Dom, hex: &str) -> Vec<ElId> {
+    dom.query_all(None, "*")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&el| {
+            let image = dom.style(el, "backgroundImage");
+            image.contains("radial-gradient")
+                && crate::color::parse_gradient_colors(Some(&image))
+                    .iter()
+                    .any(|c| crate::color::color_to_hex(Some(c)) == hex)
+        })
+        .collect()
+}
+
+/// The elements whose computed `prop` (`box-shadow` / `text-shadow`) has a
+/// layer in `hex` (lowercase `#rrggbb`).
+fn elements_casting_glow(dom: &dyn Dom, prop: &str, hex: &str) -> Vec<ElId> {
+    let computed = if prop == "text-shadow" { "textShadow" } else { "boxShadow" };
+    dom.query_all(None, "*")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&el| {
+            let value = dom.style(el, computed);
+            value != "none"
+                && crate::js_ext_a::split_commas_outside_parens(&value).into_iter().any(|layer| {
+                    crate::checks::rules::find_shadow_color(layer)
+                        .and_then(|info| info.color)
+                        .map_or(false, |c| crate::color::color_to_hex(Some(&c)) == hex)
+                })
+        })
+        .collect()
+}
+
+/// The layout-transition page form carries no selector of its own, and the
+/// element form reads every element's computed `transition-property`. The
+/// form stands only where the declaration it names matches an element that
+/// is painted at capture and computes one of the properties it names; for a
+/// pseudo-element selector, whose transition the host does not compute, a
+/// painted host is enough. A declaration with no rule to name (a keyframe
+/// step, an inline `style` attribute) or whose rule matches nothing painted
+/// is not reported from the text alone.
+fn layout_transition_page_form_stands(dom: &dyn Dom, style_text: &str) -> bool {
+    let Some(declaration) = crate::checks::html_patterns::first_layout_transition(style_text) else {
+        return false;
+    };
+    let Some(selector) = crate::checks::css_scan::enclosing_css_selector(style_text, declaration.index)
+    else {
+        return false;
+    };
+    let Some(elements) = selector_nodes_for_live_dom(dom, &selector) else {
+        return false;
+    };
+    let pseudo = pseudo_element_host_selector(&selector).is_some();
+    elements.into_iter().any(|el| {
+        element_is_scanned(dom, el)
+            && !scoped_ignore_active(dom, el, "layout-transition")
+            && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none()
+            && (pseudo
+                || dom
+                    .style(el, "transitionProperty")
+                    .split(',')
+                    .map(|p| crate::js::to_lower_case(crate::js::trim(p)))
+                    .any(|p| declaration.properties.contains(&p)))
+    })
+}
+
+/// One strip, one report. Rule blocks that name the same elements (a base
+/// rule and a page builder's more specific copy), and the copy of a track
+/// that loops with it (`text--clone`, animated by `...-clone` keyframes)
+/// beside the original under one parent, are one marquee. A form whose
+/// selector names no element stands as before.
+fn marquee_page_form_stands(
+    dom: &dyn Dom,
+    item: &PatternItem,
+    seen: &mut Vec<(Vec<ElId>, Vec<ElId>)>,
+) -> bool {
+    let Some(elements) = item.matches.as_ref().filter(|m| !m.is_empty()) else {
+        return true;
+    };
+    let root_like = |el: ElId| Some(el) == dom.body() || Some(el) == dom.document_element();
+    let parents: Vec<ElId> = elements
+        .iter()
+        .filter_map(|&el| dom.parent(el))
+        .filter(|&p| !root_like(p))
+        .collect();
+    let duplicate = seen.iter().any(|(seen_elements, seen_parents)| {
+        elements.iter().any(|el| seen_elements.contains(el))
+            || parents.iter().any(|p| seen_parents.contains(p))
+    });
+    if duplicate {
+        return false;
+    }
+    seen.push((elements.clone(), parents));
+    true
 }
 
 /// JS: index.mjs#serializeFindings(allFindings)
@@ -1482,6 +1881,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         // scroller cell past its edge, a crossfade layer) has nothing for
         // them to score.
         super::painted::retain_painted(dom, el, &mut findings);
+        drop_covered_class_forms(&mut findings);
         // Rule-pack element rules run last, so the built-in findings for this
         // element keep their order and their position in the group.
         if let Some(pack) = config.rule_pack {
@@ -1555,7 +1955,19 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
 
     page_pass(&mut groups, &mut page_level, q::check_page_quality_dom(dom));
     page_pass(&mut groups, &mut page_level, hits(pc::check_cream_palette(dom)));
-    page_pass(&mut groups, &mut page_level, scoped_html_pattern_findings(dom));
+    // The stylesheet-text forms go last among the built-in passes because
+    // they defer to what the element forms above have already read.
+    // A dark root settles the scan's "dark page". A light or unread root
+    // leaves the candidates to the stylesheet as before, and each claim is
+    // then decided against the surfaces its elements sit on.
+    let root_dark = painted_root_is_dark(dom);
+    let pattern_context = crate::checks::html_patterns::PatternContext {
+        dark_page: root_dark.filter(|dark| *dark),
+    };
+    let (pattern_items, pattern_style_text) = html_pattern_items(dom, &pattern_context);
+    let page_forms =
+        reconcile_page_level_forms(dom, &groups, pattern_items, &pattern_style_text, root_dark);
+    page_pass(&mut groups, &mut page_level, page_forms);
 
     // Rule-pack page rules run after every built-in page pass, through the
     // same attribution as the built-in checks that name their own element.
@@ -2280,5 +2692,350 @@ mod pseudo_host_tests {
         assert_eq!(host(r"\:esc::before"), Some(r"\:esc".to_string()));
         assert_eq!(host("a::before("), Some("a".to_string()));
         assert_eq!(host("div::first-line"), Some("div".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod page_level_form_tests {
+    use super::*;
+    use crate::browser::fake_dom::FakeDom;
+
+    /// Every finding of `rule` as `(element, snippet)`, in group order.
+    fn details(out: &CollectResult, rule: &str) -> Vec<(ElId, String)> {
+        out.groups
+            .iter()
+            .flat_map(|g| {
+                g.findings
+                    .iter()
+                    .filter(|f| f.type_ == rule)
+                    .map(move |f| (g.el, f.detail.clone()))
+            })
+            .collect()
+    }
+
+    fn page(style: &str) -> (FakeDom, ElId) {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        d.html_for_patterns = format!("<html><head><style>{style}</style></head><body></body></html>");
+        (d, body)
+    }
+
+    fn scan(d: &FakeDom) -> CollectResult {
+        collect_browser_findings(d, &BrowserConfig::default())
+    }
+
+    #[test]
+    fn a_class_form_defers_to_the_computed_form_on_its_element() {
+        let mut findings = vec![
+            BrowserFinding::new("gradient-text", "background-clip: text + gradient"),
+            BrowserFinding::new("gradient-text", "bg-clip-text + bg-gradient (Tailwind)"),
+            BrowserFinding::new("bounce-easing", "animate-bounce (Tailwind)"),
+        ];
+        drop_covered_class_forms(&mut findings);
+        let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
+        // The bounce class form has no computed twin on this element and stays.
+        assert_eq!(kept, vec!["background-clip: text + gradient", "animate-bounce (Tailwind)"]);
+    }
+
+    #[test]
+    fn gradient_text_reports_once_on_the_element() {
+        let (mut d, body) = page(
+            ".title{background-image:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;background-clip:text;color:transparent}",
+        );
+        d.html_for_patterns.push_str("<h1 class=\"title bg-clip-text bg-gradient-to-r\">Ship</h1>");
+        let h1 = d.add(Some(body), "h1");
+        d.add_selector(h1, ".title");
+        d.set_attr(h1, "class", "title bg-clip-text bg-gradient-to-r");
+        d.add_text(h1, "Ship faster");
+        d.set_rect(h1, 0.0, 0.0, 400.0, 60.0);
+        d.set_styles(
+            h1,
+            &[
+                ("backgroundImage", "linear-gradient(90deg, rgb(255, 0, 255), rgb(0, 255, 255))"),
+                ("webkitBackgroundClip", "text"),
+                ("backgroundClip", "text"),
+                ("fontSize", "48px"),
+            ],
+        );
+        // Base reports four: the computed and class forms on the h1, and the
+        // stylesheet and class-attribute forms on body.
+        assert_eq!(
+            details(&scan(&d), "gradient-text"),
+            vec![(h1, "background-clip: text + gradient".to_string())]
+        );
+
+        // Text clipped to a gradient on a pseudo-element: no element computes
+        // it, so the stylesheet form stands.
+        let (mut d, body) = page(
+            ".logo::after{content:'AI';background:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;color:transparent}",
+        );
+        let logo = d.add(Some(body), "div");
+        d.add_selector(logo, ".logo");
+        d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        assert_eq!(
+            details(&scan(&d), "gradient-text"),
+            vec![(body, "background-clip: text + gradient".to_string())]
+        );
+    }
+
+    #[test]
+    fn bounce_easing_page_forms_defer_to_the_same_declaration_on_an_element() {
+        let (mut d, body) = page(
+            ".animate-bounce{animation:bounce 1s infinite}.pop{transition:transform .2s cubic-bezier(.34,1.3,.64,1)}",
+        );
+        let arrow = d.add(Some(body), "div");
+        d.add_selector(arrow, ".animate-bounce");
+        d.set_attr(arrow, "class", "animate-bounce");
+        d.set_rect(arrow, 0.0, 0.0, 24.0, 24.0);
+        d.set_style(arrow, "animationName", "bounce");
+        let pop = d.add(Some(body), "div");
+        d.add_selector(pop, ".pop");
+        d.set_rect(pop, 0.0, 40.0, 120.0, 40.0);
+        d.set_style(pop, "transitionTimingFunction", "cubic-bezier(0.34, 1.3, 0.64, 1)");
+        assert_eq!(
+            details(&scan(&d), "bounce-easing"),
+            vec![
+                (arrow, "animation: bounce".to_string()),
+                (pop, "cubic-bezier(0.34, 1.3, 0.64, 1)".to_string()),
+            ]
+        );
+
+        // The motion check skips a span, so the stylesheet form speaks for it.
+        let (mut d, body) = page(".badge{animation:wobble 2s infinite}");
+        let badge = d.add(Some(body), "span");
+        d.add_selector(badge, ".badge");
+        d.set_rect(badge, 0.0, 0.0, 60.0, 20.0);
+        d.set_style(badge, "animationName", "wobble");
+        assert_eq!(
+            details(&scan(&d), "bounce-easing"),
+            vec![(body, "animation: wobble".to_string())]
+        );
+    }
+
+    #[test]
+    fn dark_glow_page_form_defers_to_the_element_form() {
+        // Reported on the element: the stylesheet form is the same shadow.
+        let (mut d, body) = page(".cta{box-shadow:0 0 24px rgba(59,130,246,.6)}");
+        d.set_style(body, "backgroundColor", "rgb(10, 10, 12)");
+        let cta = d.add(Some(body), "div");
+        d.add_selector(cta, ".cta");
+        d.set_rect(cta, 0.0, 0.0, 197.0, 40.0);
+        d.set_style(cta, "boxShadow", "rgba(59, 130, 246, 0.6) 0px 0px 24px 0px");
+        assert_eq!(
+            details(&scan(&d), "dark-glow"),
+            vec![(cta, "Zero-offset box-shadow glow (#3b82f6)".to_string())]
+        );
+
+        // Overridden by a later rule: the element computes no shadow.
+        let (mut d, body) = page(".hud{text-shadow:0 0 12px #d9ff66}.hud{text-shadow:none}");
+        let hud = d.add(Some(body), "div");
+        d.add_selector(hud, ".hud");
+        d.set_rect(hud, 0.0, 0.0, 300.0, 40.0);
+        d.set_style(hud, "textShadow", "none");
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // A pseudo-element's shadow is not in its host's computed style.
+        let (mut d, body) = page(".orb::after{content:'';box-shadow:0 0 30px rgba(168,85,247,.5)}");
+        let orb = d.add(Some(body), "div");
+        d.add_selector(orb, ".orb");
+        d.set_rect(orb, 0.0, 0.0, 80.0, 80.0);
+        assert_eq!(
+            details(&scan(&d), "dark-glow"),
+            vec![(body, "Zero-offset box-shadow glow (#a855f7)".to_string())]
+        );
+
+        // A custom property named after a shadow declares a token.
+        let (d, _body) = page(":root{--bprogress-box-shadow:0 0 10px #29d,0 0 5px #29d}");
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+    }
+
+    #[test]
+    fn dark_page_is_read_off_the_painted_root() {
+        // A glow in a keyframe step names no rule, so only the page decides.
+        let style = ".player{background-color:#000}@keyframes lift{50%{box-shadow:0 8px 24px rgba(99,102,241,.6)}}";
+        let on_dark = vec![(0, "Colored box-shadow glow (#6366f1) on dark page".to_string())];
+        let with_body = |body: ElId| -> Vec<(ElId, String)> {
+            on_dark.iter().map(|(_, s)| (body, s.clone())).collect()
+        };
+
+        // A dark player box in the stylesheet does not make a light page dark.
+        let (mut d, body) = page(style);
+        d.set_style(body, "backgroundColor", "rgb(235, 240, 250)");
+        assert_eq!(painted_root_is_dark(&d), Some(false));
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // The same stylesheet on a page painted dark.
+        let (mut d, body) = page(style);
+        d.set_style(body, "backgroundColor", "rgb(10, 10, 12)");
+        assert_eq!(painted_root_is_dark(&d), Some(true));
+        assert_eq!(details(&scan(&d), "dark-glow"), with_body(body));
+
+        // A root with no fill of its own, or a fill under an image, is not
+        // read: the stylesheet decides as before.
+        let (d, body) = page(style);
+        assert_eq!(painted_root_is_dark(&d), None);
+        assert_eq!(details(&scan(&d), "dark-glow"), with_body(body));
+        let (mut d, body) = page(style);
+        d.set_styles(
+            body,
+            &[("backgroundColor", "rgb(255, 255, 255)"), ("backgroundImage", "url(\"a.png\")")],
+        );
+        assert_eq!(painted_root_is_dark(&d), None);
+    }
+
+    #[test]
+    fn radial_halo_needs_a_dark_page_and_a_dark_surface() {
+        let halo = ".hero{background:radial-gradient(circle at 50% 0%,#8fd8f2 0%,transparent 70%)}";
+        let reported = "radial-gradient halo (#8fd8f2 → transparent) on dark page".to_string();
+
+        // Light root: a dark box elsewhere in the stylesheet is not a dark page.
+        let (mut d, body) = page(&format!(".player{{background:#000}}{halo}"));
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let hero = d.add(Some(body), "section");
+        d.add_selector(hero, ".hero");
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 600.0);
+        assert!(details(&scan(&d), "radial-halo").is_empty());
+
+        // Dark root, but the hero sits on a white panel.
+        let (mut d, body) = page(halo);
+        d.set_style(body, "backgroundColor", "rgb(8, 8, 10)");
+        let panel = d.add(Some(body), "div");
+        d.set_rect(panel, 0.0, 0.0, 1280.0, 800.0);
+        d.set_style(panel, "backgroundColor", "rgb(255, 255, 255)");
+        let hero = d.add(Some(panel), "section");
+        d.add_selector(hero, ".hero");
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 600.0);
+        assert!(details(&scan(&d), "radial-halo").is_empty());
+
+        // Dark root and a dark surface.
+        let (mut d, body) = page(halo);
+        d.set_style(body, "backgroundColor", "rgb(8, 8, 10)");
+        let hero = d.add(Some(body), "section");
+        d.add_selector(hero, ".hero");
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 600.0);
+        assert_eq!(details(&scan(&d), "radial-halo"), vec![(body, reported.clone())]);
+
+        // Light root, but the halo sits in a near-black band: a dark surface.
+        let (mut d, body) = page(&format!(".band{{background:#040406}}{halo}"));
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let band = d.add(Some(body), "footer");
+        d.set_rect(band, 0.0, 0.0, 1280.0, 400.0);
+        d.set_style(band, "backgroundColor", "rgb(4, 4, 6)");
+        let hero = d.add(Some(band), "div");
+        d.add_selector(hero, ".hero");
+        d.set_rect(hero, 1093.0, 8.0, 142.0, 142.0);
+        assert_eq!(details(&scan(&d), "radial-halo"), vec![(body, reported)]);
+    }
+
+    #[test]
+    fn a_halo_with_no_rule_reads_the_elements_that_paint_it() {
+        let reported = "radial-gradient halo (#211dff → transparent) on dark page".to_string();
+        let build = |band_fill: &str| {
+            let mut d = FakeDom::new();
+            let (_html, body) = d.with_page();
+            // A dark declaration elsewhere keeps the stylesheet's candidate.
+            d.html_for_patterns = "<html><head><style>.band{background-color:#040406}</style></head><body>\
+<div style=\"background: radial-gradient(50% 50%, rgba(33, 29, 255, 0.8) 0%, rgba(171, 171, 171, 0) 100%)\"></div></body></html>"
+                .to_string();
+            d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+            let band = d.add(Some(body), "footer");
+            d.set_rect(band, 0.0, 0.0, 1280.0, 400.0);
+            d.set_style(band, "backgroundColor", band_fill);
+            let orb = d.add(Some(band), "div");
+            d.set_rect(orb, 1093.0, 8.0, 142.0, 142.0);
+            d.set_style(
+                orb,
+                "backgroundImage",
+                "radial-gradient(50% 50%, rgba(33, 29, 255, 0.8) 0%, rgba(171, 171, 171, 0) 100%)",
+            );
+            (d, body)
+        };
+        let (d, body) = build("rgb(4, 4, 6)");
+        assert_eq!(details(&scan(&d), "radial-halo"), vec![(body, reported)]);
+        let (d, _body) = build("rgb(246, 246, 246)");
+        assert!(details(&scan(&d), "radial-halo").is_empty());
+    }
+
+    #[test]
+    fn a_dark_claim_reads_the_surface_before_the_root() {
+        let dark = Some(crate::color::Rgba::new(4.0, 4.0, 6.0, 1.0));
+        let light = Some(crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0));
+        // A dark surface stands on any root; every surface light drops.
+        assert!(dark_claim_stands(Some(false), &[light, dark]));
+        assert!(!dark_claim_stands(Some(false), &[light, light]));
+        assert!(!dark_claim_stands(Some(true), &[light]));
+        // An unread surface keeps the finding (an orb inside a gradient button).
+        assert!(dark_claim_stands(Some(false), &[light, None]));
+        assert!(dark_claim_stands(Some(true), &[None]));
+        // Nothing to read: the painted root decides, an unread root keeps it.
+        assert!(!dark_claim_stands(Some(false), &[]));
+        assert!(dark_claim_stands(Some(true), &[]));
+        assert!(dark_claim_stands(None, &[]));
+    }
+
+    #[test]
+    fn layout_transition_text_form_needs_a_painted_element_that_computes_it() {
+        // The rule's element computes another transition: nothing to report.
+        let (mut d, body) = page(".tray{transition:height .3s ease}");
+        let tray = d.add(Some(body), "div");
+        d.add_selector(tray, ".tray");
+        d.set_rect(tray, 0.0, 0.0, 300.0, 200.0);
+        d.set_style(tray, "transitionProperty", "all");
+        assert!(details(&scan(&d), "layout-transition").is_empty());
+
+        // An element form on the page speaks for the rule.
+        d.set_style(tray, "transitionProperty", "height");
+        assert_eq!(
+            details(&scan(&d), "layout-transition"),
+            vec![(tray, "transition: height".to_string())]
+        );
+
+        // A link, which the motion check skips, paints and computes it.
+        let (mut d, body) = page(".more{transition:width .2s}");
+        let more = d.add(Some(body), "a");
+        d.add_selector(more, ".more");
+        d.set_rect(more, 0.0, 0.0, 120.0, 20.0);
+        d.set_style(more, "transitionProperty", "width");
+        assert_eq!(
+            details(&scan(&d), "layout-transition"),
+            vec![(body, "transition: width".to_string())]
+        );
+        // The same link collapsed to nothing is not painted.
+        d.set_rect(more, 0.0, 0.0, 0.0, 0.0);
+        assert!(details(&scan(&d), "layout-transition").is_empty());
+
+        // An inline style names no rule, and `border-width` is not `width`.
+        let (mut d, _body) = page(".frame{transition:border-width .2s}");
+        d.html_for_patterns.push_str("<span style=\"transition: max-height .4s\"></span>");
+        assert!(details(&scan(&d), "layout-transition").is_empty());
+    }
+
+    #[test]
+    fn one_marquee_strip_reports_once() {
+        let style = "@keyframes m{0%{transform:translateX(0%)}100%{transform:translateX(-100%)}}\
+@keyframes m-clone{0%{transform:translateX(100%)}100%{transform:translateX(0%)}}\
+.t--original{animation:20s linear 0s infinite normal none running m}\
+.t--clone{animation:10s linear 0s infinite normal none running m-clone}\
+.page .t--original{animation:50s linear 0s infinite normal none running m}\
+.logos{animation:scroll 30s linear infinite}\
+@keyframes scroll{to{transform:translateX(calc(-50% - 16px))}}";
+        let (mut d, body) = page(style);
+        let strip = d.add(Some(body), "div");
+        let original = d.add(Some(strip), "div");
+        d.add_selector(original, ".t--original");
+        d.add_selector(original, ".page .t--original");
+        let clone = d.add(Some(strip), "div");
+        d.add_selector(clone, ".t--clone");
+        let band = d.add(Some(body), "div");
+        let logos = d.add(Some(band), "div");
+        d.add_selector(logos, ".logos");
+        let snippets: Vec<String> = details(&scan(&d), "marquee").into_iter().map(|(_, s)| s).collect();
+        assert_eq!(
+            snippets,
+            vec![
+                ".t--original — infinite horizontal loop animation \"m\"".to_string(),
+                ".logos — infinite horizontal loop animation \"scroll\"".to_string(),
+            ]
+        );
     }
 }

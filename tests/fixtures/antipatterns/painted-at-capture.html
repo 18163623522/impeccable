@@ -12,8 +12,11 @@
        same measurement as its should-flag twin; only its paint differs.
 
        Covered here: tight-leading, undersized-ui-text, low-contrast,
-       buried-raster. The gate also covers the other text measurements
-       (see PAINT_GATED_TEXT_RULES).
+       buried-raster, layout-transition. The gate also covers the other text
+       measurements (see PAINT_GATED_TEXT_RULES). The same predicate runs
+       inside clipped-overflow-container (on the positioned child it names)
+       and nested-cards (on the inner card), which also skips popup layers
+       named by BEM classes or by role="menu" / role="listbox".
 
        The static HTML engine measures no boxes, so it reports the
        should-pass cases as well. The URL behavior is pinned by
@@ -94,6 +97,34 @@
     .smooth-frame { height: 100vh; overflow: hidden; }
     .smooth-content { transform: translate3d(0, 0, 0); }
     .smooth-filler { height: 110vh; margin: 0; }
+
+    /* Screen-reader text: a 1px box whose clip removes it (video.js control
+       text, .sr-only, .visually-hidden). */
+    .player-bar { position: relative; width: 270px; height: 32px; background: #7384a8; }
+    .player-bar-twin { background: #7485a9; }
+    .sr-box { display: block; position: absolute; top: 0; left: 28px; width: 1px; height: 1px; padding: 0; border: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); font-size: 10px; line-height: 10px; }
+    .control-label { display: inline-block; font-size: 10px; line-height: 10px; color: #ffffff; }
+
+    /* A paragraph collapsed to no height that hides its overflow. */
+    .collapsed-copy { height: 0; overflow: hidden; }
+
+    /* A tray that animates max-height, open and collapsed. */
+    .tray { width: 400px; max-height: 0; overflow: hidden; transition: max-height 0.3s ease; }
+    .tray.open { max-height: 200px; }
+    .volume-panel { width: 40px; height: 30px; transition: width 0.2s ease; }
+    .seek-bar { width: 140px; height: 2px; background: #ccc; transition: height 0.2s ease; }
+
+    /* A clipping host with a positioned menu under it. */
+    .clip-host { position: relative; width: 300px; height: 40px; overflow: hidden; margin-bottom: 120px; }
+    .clip-menu { position: absolute; top: 100%; left: 0; width: 200px; padding: 8px; background: #222; color: #fff; }
+    .clip-host-cb { transform: translateZ(0); }
+    .clip-fixed { position: fixed; right: 8px; bottom: 8px; width: 120px; padding: 8px; background: #222; color: #fff; }
+    .clip-fixed-cb { position: fixed; top: 100%; left: 0; width: 200px; padding: 8px; background: #222; color: #fff; }
+
+    /* Cards inside cards, and popup panels that look like cards. */
+    .card { background: #ffffff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2); padding: 16px; margin-bottom: 16px; }
+    .card .card { width: 320px; }
+    .hidden-panel { visibility: hidden; }
   </style>
 </head>
 <body>
@@ -176,6 +207,32 @@
           <p class="faint" id="flag-smooth-below-fold">Case studies</p>
         </div>
       </div>
+
+      <h3>Visible control label</h3>
+      <div class="player-bar player-bar-twin"><span class="control-label" id="flag-sr-twin-copy">Loaded</span></div>
+
+      <h3>Paragraph with room</h3>
+      <p class="tight" id="flag-open-copy">This paragraph has its full height, so its cramped leading is on screen and worth reporting at every width it wraps to.</p>
+
+      <h3>Open tray</h3>
+      <div class="tray open" id="flag-open-tray"><p>Plans, pricing and the questions people ask most often before they sign up.</p></div>
+
+      <h3>Menu escaping a clipping host</h3>
+      <div class="clip-host" id="flag-clip-menu-host">
+        <button>Playback speed</button>
+        <div class="clip-menu"><a href="#rate">1.5x speed</a></div>
+      </div>
+
+      <h3>Fixed menu inside its containing block</h3>
+      <div class="clip-host clip-host-cb" id="flag-clip-fixed-cb-host">
+        <button>Share</button>
+        <div class="clip-fixed-cb"><a href="#share">Copy link</a></div>
+      </div>
+
+      <h3>Card inside a card</h3>
+      <div class="card">
+        <div class="card" id="flag-nested-card">A card nested inside another card, with its own shadow and radius.</div>
+      </div>
     </section>
 
     <section class="col" data-col="pass">
@@ -242,6 +299,51 @@
       <h3>Fixed drawer past the viewport</h3>
       <div class="parked">
         <a class="micro" id="pass-parked-link" href="#parked">Close drawer</a>
+      </div>
+
+      <h3>Screen-reader control text</h3>
+      <div class="player-bar"><span class="sr-box"><span class="control-label" id="pass-sr-copy">Loaded</span>: <span class="control-label" id="pass-sr-percentage">24.53%</span></span></div>
+
+      <h3>Paragraph collapsed to no height</h3>
+      <p class="tight collapsed-copy" id="pass-collapsed-copy">This paragraph is collapsed to no height and hides its overflow, so none of its cramped leading reaches the screen.</p>
+
+      <h3>Collapsed tray</h3>
+      <div class="tray" id="pass-collapsed-tray"><p>Frequently asked questions about plans, billing, and cancelling.</p></div>
+
+      <h3>Controls of a player with no control bar</h3>
+      <div style="display: none"><div class="volume-panel" id="pass-hidden-volume"></div></div>
+
+      <h3>Seek bar of a parked player</h3>
+      <div class="offcanvas"><div class="seek-bar" id="pass-parked-seek-bar"></div></div>
+
+      <h3>Menu that never renders</h3>
+      <div class="clip-host" id="pass-clip-hidden-menu-host">
+        <button>Playback speed</button>
+        <div class="clip-menu" style="display: none"><a href="#rate">2x speed</a></div>
+      </div>
+
+      <h3>Fixed layer inside a host that is not its containing block</h3>
+      <div class="clip-host" id="pass-clip-fixed-host">
+        <button>Listen</button>
+        <div class="clip-fixed"><a href="#player">Audio player</a></div>
+      </div>
+
+      <h3>Mega-nav panel named with BEM classes</h3>
+      <div class="card">
+        <div class="card site-nav__dropdown-level2" id="pass-bem-dropdown">Solutions for aerospace, defense and commercial aviation teams.</div>
+      </div>
+
+      <h3>Panels with a popup role</h3>
+      <div class="card">
+        <ul class="card" role="menu" id="pass-role-menu"><li role="menuitem">Engines and propulsion systems</li></ul>
+      </div>
+      <div class="card">
+        <ul class="card" role="listbox" id="pass-role-listbox"><li role="option">Avionics and connected aircraft</li></ul>
+      </div>
+
+      <h3>Closed card panel</h3>
+      <div class="card">
+        <div class="card hidden-panel" id="pass-hidden-card">Missiles, radars and the sensors that guide them.</div>
       </div>
     </section>
   </div>

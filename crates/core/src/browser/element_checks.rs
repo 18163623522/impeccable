@@ -558,8 +558,9 @@ fn safe_tag_text_hit_stands(
 ) -> bool {
     !crate::browser::driver::scoped_ignore_active(dom, el, &hit.id)
         && crate::browser::visual::resolved_surface_is_under_text(dom, el, resolved)
-        && (crate::browser::painted::paint_gate(&hit.id).is_none()
-            || crate::browser::painted::painted_at_capture(dom, el))
+        && crate::browser::painted::paint_gate(&hit.id).map_or(true, |gate| {
+            crate::browser::painted::unpainted_for(dom, el, gate).is_none()
+        })
 }
 
 /// JS: checks.mjs#checkElementColorsDOM(el)
@@ -1834,6 +1835,11 @@ fn clipped_axes(dom: &dyn Dom, el: ElId) -> Option<(bool, bool)> {
 /// container-level exemptions are the caller's; this is the per-child half,
 /// so an ancestor can ask the same question about the same child.
 fn clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: bool) -> bool {
+    if dom.style(child, "position") == "fixed"
+        && !crate::browser::painted::fixed_box_clippable_by(dom, child, el)
+    {
+        return false;
+    }
     let escapes = positioned_child_escapes_clip(dom, el, child, clip_x, clip_y);
     if escapes == Some(false) {
         return false;
@@ -1909,6 +1915,13 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             continue;
         }
         if nearer_clip_traps_child(dom, el, child) {
+            continue;
+        }
+        // A layer that never renders (a player's menu under a control bar at
+        // `display: none`, a closed floating player parked past the viewport)
+        // is not cut by anything. What this container's clip does to it is
+        // the finding, so only the rest of the predicate is asked.
+        if crate::browser::painted::unpainted_inside(dom, child, el).is_some() {
             continue;
         }
         return vec![RuleHit::new(
@@ -4346,6 +4359,56 @@ mod tests {
         // A block row that ellipsizes still ends the run at its marker.
         d.set_styles(row, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis"), ("whiteSpace", "nowrap")]);
         assert!(check_element_text_overflow_dom(&d, run).is_empty());
+    }
+
+    /// zigzag.kr: the rate menu of a player whose control bar is at
+    /// `display: none`. ynet.co.il: a floating player, `position: fixed`,
+    /// inside a card that hides overflow.
+    #[test]
+    fn clipped_overflow_skips_children_it_cannot_cut() {
+        let snippets = |d: &FakeDom, el: ElId| -> Vec<String> {
+            check_element_clipped_overflow_dom(d, el).into_iter().map(|h| h.snippet).collect()
+        };
+        let (mut d, body) = page();
+        let tile = clipping_box(&mut d, body, 356.0, 4016.0, 400.0, 550.0);
+        d.set_attr(tile, "class", "tile");
+        let controls = d.add(Some(tile), "div");
+        d.set_attr(controls, "class", "controls");
+        let menu = positioned_child(&mut d, controls, 356.0, 4566.0, 120.0, 90.0);
+        d.set_attr(menu, "class", "rate-menu");
+        d.add_text(menu, "1.5x speed");
+        assert_eq!(snippets(&d, tile), vec!["div.tile clips positioned div.rate-menu"]);
+        d.set_style(controls, "display", "none");
+        assert!(snippets(&d, tile).is_empty());
+
+        let (mut d, body) = page();
+        let slot = clipping_box(&mut d, body, 1070.0, 400.0, 190.0, 222.0);
+        d.set_attr(slot, "class", "slot");
+        let floating = positioned_child(&mut d, slot, 20.0, 700.0, 1240.0, 60.0);
+        d.set_style(floating, "position", "fixed");
+        d.set_attr(floating, "class", "floating-player");
+        d.add_text(floating, "Now playing");
+        // A capture that did not record the slot's containment keeps it.
+        assert_eq!(snippets(&d, slot), vec!["div.slot clips positioned div.floating-player"]);
+        // The slot is not the player's containing block, so it cannot clip it.
+        d.set_styles(
+            slot,
+            &[
+                ("transform", "none"),
+                ("translate", "none"),
+                ("scale", "none"),
+                ("rotate", "none"),
+                ("perspective", "none"),
+                ("filter", "none"),
+                ("backdropFilter", "none"),
+                ("willChange", "auto"),
+                ("contain", "none"),
+            ],
+        );
+        assert!(snippets(&d, slot).is_empty());
+        // A transform makes it one.
+        d.set_style(slot, "transform", "matrix(1, 0, 0, 1, 0, 0)");
+        assert_eq!(snippets(&d, slot), vec!["div.slot clips positioned div.floating-player"]);
     }
 
     /// A clipping box with a real rect, the shape every case below shares.

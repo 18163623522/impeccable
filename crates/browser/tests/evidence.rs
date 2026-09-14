@@ -243,8 +243,43 @@ fn the_rule_pass_skips_what_is_not_painted() {
         ("undersized-ui-text", "#flag-cb-rotate-link"),
         ("undersized-ui-text", "#flag-cb-perspective-link"),
         ("undersized-ui-text", "#flag-cb-backdrop-link"),
+        // The visible twins of the leak cases below.
+        ("undersized-ui-text", "#flag-sr-twin-copy"),
+        ("low-contrast", "#flag-sr-twin-copy"),
+        ("tight-leading", "#flag-open-copy"),
+        ("layout-transition", "#flag-open-tray"),
+        ("clipped-overflow-container", "#flag-clip-menu-host"),
+        // A fixed layer is clipped by a host that is its containing block.
+        ("clipped-overflow-container", "#flag-clip-fixed-cb-host"),
+        ("nested-cards", "#flag-nested-card"),
     ] {
         assert!(flagged.contains(&want), "missing {want:?} in {flagged:?}");
+    }
+    for (rule, unwanted) in [
+        // Screen-reader text inside a 1px box its clip removes.
+        ("undersized-ui-text", "#pass-sr-copy"),
+        ("undersized-ui-text", "#pass-sr-percentage"),
+        ("low-contrast", "#pass-sr-copy"),
+        ("low-contrast", "#pass-sr-percentage"),
+        // A paragraph with no height that hides its overflow.
+        ("tight-leading", "#pass-collapsed-copy"),
+        // Motion on boxes that paint nothing.
+        ("layout-transition", "#pass-collapsed-tray"),
+        ("layout-transition", "#pass-hidden-volume"),
+        ("layout-transition", "#pass-parked-seek-bar"),
+        // A menu that never renders, and a fixed layer the host cannot clip.
+        ("clipped-overflow-container", "#pass-clip-hidden-menu-host"),
+        ("clipped-overflow-container", "#pass-clip-fixed-host"),
+        // Popup panels and a closed panel are not nested cards.
+        ("nested-cards", "#pass-bem-dropdown"),
+        ("nested-cards", "#pass-role-menu"),
+        ("nested-cards", "#pass-role-listbox"),
+        ("nested-cards", "#pass-hidden-card"),
+    ] {
+        assert!(
+            !flagged.contains(&(rule, unwanted)),
+            "{rule} on {unwanted} was flagged in {flagged:?}"
+        );
     }
     for unwanted in [
         "#pass-submenu-link",

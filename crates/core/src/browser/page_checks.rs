@@ -48,10 +48,14 @@ re!(SHADOW_CLASS_RE, format!(r"{B}shadow(?:-sm|-md|-lg|-xl|-2xl)?{B}"));
 re!(BORDER_CLASS_RE, format!(r"{B}border{B}"));
 re!(ROUNDED_CLASS_RE, format!(r"{B}rounded(?:-sm|-md|-lg|-xl|-2xl|-full)?{B}"));
 re!(BG_CLASS_RE, format!(r"{B}bg-(?:white|gray-{D}+|slate-{D}+){B}"));
+// A popup layer named as a word of a class: `dropdown`, `nav-menu`, and the
+// BEM `mega-nav__dropdown-level2`. Any character that is not a letter or a
+// digit separates the words, so `_` does too, which the ASCII `\b` this
+// replaced did not: it never matched a BEM element name.
 re!(
     POPOVER_CLASS_RE,
     format!(
-        "{B}(?:{}){B}",
+        "(?:^|[^A-Za-z0-9])(?:{})(?:[^A-Za-z0-9]|$)",
         ["dropdown", "popover", "tooltip", "menu", "modal", "dialog"]
             .iter()
             .map(|w| js::ci(w))
@@ -255,6 +259,15 @@ pub fn is_card_like_dom(dom: &dyn Dom, el: ElId) -> bool {
     is_card_like_from_props(has_shadow, has_border, has_radius, has_bg)
 }
 
+/// `role="menu"` or `role="listbox"`: a popup panel, however card-like it is
+/// drawn.
+fn has_popup_role(dom: &dyn Dom, el: ElId) -> bool {
+    dom.attr(el, "role").is_some_and(|role| {
+        role.split_ascii_whitespace()
+            .any(|token| matches!(js::to_lower_case(token).as_str(), "menu" | "listbox"))
+    })
+}
+
 /// JS: checks.mjs#checkLayout() — `{ type, detail, el }`.
 pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -269,7 +282,7 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
         if pos == "absolute" || pos == "fixed" {
             continue;
         }
-        if POPOVER_CLASS_RE.is_match(&cls) {
+        if POPOVER_CLASS_RE.is_match(&cls) || has_popup_role(dom, el) {
             continue;
         }
         if utf16_len(js::trim(&dom.text_content(el))) < 10 {
@@ -282,7 +295,11 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
         let mut parent = dom.parent(el);
         while let Some(p) = parent {
             if is_card_like_dom(dom, p) {
-                flagged.push(el);
+                // A panel not painted at capture (a closed mega-nav panel
+                // held at `visibility: hidden`) is not a card anyone sees.
+                if super::painted::painted_at_capture(dom, el) {
+                    flagged.push(el);
+                }
                 break;
             }
             parent = dom.parent(p);
@@ -2010,6 +2027,48 @@ mod tests {
         d.add_text(h1, "text");
         d.set_style(h1, "fontSize", "18px");
         assert!(check_typography(&d).is_empty());
+    }
+
+    /// rtx.com: closed mega-nav panels, `ul.esds-mega-nav__dropdown-level2`
+    /// with `role="menu"`, at `visibility: hidden`.
+    #[test]
+    fn nested_cards_skip_popup_panels_and_unpainted_cards() {
+        fn nested(class: Option<&str>, role: Option<&str>, visibility: &str) -> usize {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let outer = d.add(Some(body), "div");
+            card_styles(&mut d, outer, "rgb(255, 255, 255)");
+            d.set_rect(outer, 0.0, 0.0, 400.0, 300.0);
+            let inner = d.add(Some(outer), "ul");
+            card_styles(&mut d, inner, "rgb(250, 250, 250)");
+            d.set_rect(inner, 10.0, 10.0, 200.0, 100.0);
+            d.set_style(inner, "visibility", visibility);
+            if let Some(class) = class {
+                d.set_attr(inner, "class", class);
+            }
+            if let Some(role) = role {
+                d.set_attr(inner, "role", role);
+            }
+            d.add_text(inner, "Some card body text");
+            d.add_text(outer, "Outer text longer than ten");
+            check_layout(&d).len()
+        }
+        assert_eq!(nested(None, None, "visible"), 1);
+        // BEM element names and underscores separate words too.
+        assert_eq!(nested(Some("esds-mega-nav__dropdown-level2"), None, "visible"), 0);
+        assert_eq!(nested(Some("site_menu"), None, "visible"), 0);
+        // What matched before still matches, and a longer word still is not
+        // the word.
+        assert_eq!(nested(Some("nav-dropdown"), None, "visible"), 0);
+        assert_eq!(nested(Some("Popover"), None, "visible"), 0);
+        assert_eq!(nested(Some("menuitem-card"), None, "visible"), 1);
+        assert_eq!(nested(Some("dropdown2"), None, "visible"), 1);
+        // A popup role.
+        assert_eq!(nested(None, Some("menu"), "visible"), 0);
+        assert_eq!(nested(None, Some("listbox"), "visible"), 0);
+        assert_eq!(nested(None, Some("region"), "visible"), 1);
+        // A panel not painted at capture.
+        assert_eq!(nested(None, None, "hidden"), 0);
     }
 
     #[test]

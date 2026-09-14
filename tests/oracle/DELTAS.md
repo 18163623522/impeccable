@@ -1596,3 +1596,46 @@ review, which approved it.
    and `a.truncate` inside a 140px block; the branch did not. The integration
    commit after this merge applies the self-check only to an element that
    generates a box, and the parent walk passes over inline ancestors.
+
+## Recorded 2026-09-13: painted-gate leaks (corpus/fix-painted-leaks)
+
+Recorded from the binary. The branch closes leaks in the URL engine's
+painted-at-capture gate and applies it to three rules that reported elements
+that never render: screen-reader text inside a 1px box whose `clip` or
+`clip-path: inset()` removes it, text rules on an element with no text or no
+area, `layout-transition` on a collapsed tray, a player's hidden volume panel
+or a seek bar parked off the canvas, `clipped-overflow-container` naming a
+child that never renders or a `position: fixed` layer the host is not the
+containing block of, and `nested-cards` on a closed mega-nav panel (a BEM
+`__dropdown` class, `role="menu"` / `role="listbox"`, `visibility: hidden`).
+Every change is in the browser rule pass, which none of these goldens runs;
+they move only because `painted-at-capture.html` gained the twin cases the URL
+test (`the_rule_pass_skips_what_is_not_painted` in
+`crates/browser/tests/evidence.rs`) pins. The static HTML engine measures no
+boxes, so it reports both columns.
+
+- `detect-fixture-json-painted-at-capture-html`, `detect-fixture-text-painted-at-capture-html`: 31 to 52 findings (45 counted, 7 advisory in the text form). The 21 added: `clipped-overflow-container` 3 (`div.clip-host clips positioned div.clip-menu` twice, `div.clip-host.clip-host-cb clips positioned div.clip-fixed-cb`; the fixed layer in `#pass-clip-fixed-host` is not reported by the static engine), `cramped-padding` 2 (the two `player-bar` strips), `layout-transition` 4 (`max-height` twice, `width`, `height`), `low-contrast` 2 (`#ffffff on #7485a9` and `#7384a8`), `nested-cards` 5 (three `div`, two `ul`), `tight-leading` 2, `undersized-ui-text` 3 (`Loaded` twice, `24.53%`). Nothing removed.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`: the same 21 findings, 570 to 591 (500 to 514 counted, 70 to 77 advisory). No other fixture moves.
+- `detect-no-advisory-json`, `detect-no-advisory-text`: the 14 counted ones, 500 to 514.
+- `detect-scope-type`: the 5 type findings (`tight-leading` 2, `undersized-ui-text` 3), 150 to 155.
+- `detect-scope-layout-text`, `detect-scope-both`: the layout findings (`cramped-padding` 2, `nested-cards` 5, `clipped-overflow-container` 3), 25 to 32 counted and 13 to 16 advisory in the text form, 188 to 203 in `both`.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its regression
+review, which approved it. The merge conflicted only in adjacent test additions
+in `element_checks.rs` (both kept), in this file, and in the generated asset
+(regenerated). Every golden the branch recorded replays against the integrated
+binary, since the evidence fixes moved none.
+
+1. **A transient typewriter span.** Finding 70404, a typewriter hero's span,
+   is transient state caught between cycles rather than a leak, and it stays
+   dropped.
+2. **Motion on boxes that grow on interaction.** A zero-size box that grows
+   when used (a progress fill, a hover underline, a collapsed accordion) is not
+   painted at capture, so its `layout-transition` is no longer reported.
+3. **Fade-in children.** A child that is transparent at rest, such as a
+   dropdown that fades in, no longer counts as the named child of
+   `clipped-overflow-container`.
+4. **Static engine unchanged.** The file engine measures no boxes and reports
+   both columns of `painted-at-capture.html`, as the goldens above record.

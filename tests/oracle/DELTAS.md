@@ -1879,12 +1879,29 @@ because `covered-text-contrast.html` joins the fixture directory.
   hrsimple.app's fixed consent banner, a photo avatar over an SVG initial.
 - **No verdict against a surface the walk never read.** Between the text and
   the box that ended the background walk, the same stacks name paint that is
-  nobody's ancestor: a picture, a gradient, an SVG shape, or a fill that
-  differs from the named surface by more than 24 summed over the channels.
-  Where every deciding point has such paint, or a layer above, no verdict is
-  printed. Paint at an alpha times opacity of 0.1 or less is a wash and is
-  read past, and so is a detached fill in the named colour. A candidate of
-  the pixel pass is still measured there; nothing is added to its candidates.
+  nobody's ancestor. Where every deciding point has such paint that could
+  really change what the text sits on, or a layer above, no verdict is
+  printed. That paint is a picture (an `img`, `video`, `canvas` or SVG
+  `image`, or a `url()` background drawn `no-repeat`, `cover`, `contain`, at a
+  percentage or larger than 256px), a gradient or fill that moves the named
+  colour by more than 24 summed over the channels once composited over it,
+  or, where the walk named no single colour or only reached the page ground
+  (`html`, `body`, the canvas), a gradient, fill or SVG shape it cannot
+  compare. A candidate of the pixel pass is still measured there; nothing is
+  added to its candidates.
+- **Texture is not a surface.** A layer under the text is read past, and the
+  walk's surface stands, where it is decoration: a gradient drawn in cells of
+  64px or less on both axes, a `repeating-*` gradient, a gradient whose stops
+  are mostly transparent or that pairs a transparent stop with a stop within
+  3px (dot grids, hairline grid lines), a `url()` repeated at a drawn size of
+  256px or less (a grain tile), anything with a `mask-image`, and a picture,
+  gradient or shape at an effective opacity of 0.3 or less. Paint at an alpha
+  times opacity of 0.1 or less is a wash and is read past too, and so is a
+  detached fill in the named colour. A layer this cannot place (a remote
+  image tiled at its own size, an `image-set`) keeps the verdict.
+- **Two capture columns.** `STYLE_PROPS` and `browser-bundle/15-snapshot.js`
+  gain `maskImage` and `webkitMaskImage`. A recording made before them reads
+  both as empty, so on replay a masked layer is placed by its other styles.
 - **Covered text is no visual candidate either.** The visual-contrast
   collector skips a candidate the stacks say is covered. Without that, text
   the element pass stood down on reached the sampled pass, because the visual
@@ -1913,37 +1930,41 @@ Goldens, recorded from the binary and read by hand:
 
 - `detect-fixture-json-covered-text-contrast-html`,
   `detect-fixture-text-covered-text-contrast-html`: new. The static engine runs
-  no hit tests and no script, so it reports the should-pass copy too: ten
-  `low-contrast` (`#aaaaaa` four times and `#9a9a9a` once in the should-flag
-  column, the covered link, the two white initials, the two `#f0f0f0` lines
-  and the banner copy) plus one `flat-type-hierarchy`.
-- `detect-dir-json-all-fixtures`, `detect-no-advisory-json` (620 to 631, 540
-  to 551), `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
-  `detect-no-advisory-text` (540 to 551 anti-patterns),
+  no hit tests and no script, so it reports the should-pass copy too:
+  fourteen `low-contrast` plus one `flat-type-hierarchy`. In the should-flag
+  column: `#aaaaaa` four times, `#475569` on the dot grid's `#0f172a`,
+  `#52525b` on the grain section's `#18181b`, and `#9a9a9a` once for both
+  links, since the static engine claims the pair on the covered one. From the
+  should-pass copy: the two white initials, the two `#f0f0f0` lines, the white
+  hero title on `#f6f7f8`, the banner copy (`#aaaaaa`) and the `#ffffff` on
+  `#ff7145` CTA under the banner. The hierarchy snippet lists the h3 at 22px.
+- `detect-dir-json-all-fixtures`, `detect-no-advisory-json` (620 to 635, 540
+  to 555), `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+  `detect-no-advisory-text` (540 to 555 anti-patterns),
   `detect-scope-type`, `detect-scope-both` (159 to 160, 207 to 208, the
   `flat-type-hierarchy`): exactly the new fixture's findings, nothing removed.
 
 The URL behavior is pinned by `crates/browser/tests/covered_text.rs`, and the
 fixture joins `REPLAY_FIXTURES` in `crates/browser/tests/evidence.rs`. Scanned
-live, the base binary (edfe602b) reports `low-contrast` on all six should-pass
-copies and `text-occlusion` on both advancing captions, and misses
-`#flag-uncovered-link`. The branch reports every should-flag case and none of
-the should-pass ones.
+live, the base binary (edfe602b) reports `low-contrast` on all eight
+should-pass copies (the covered link and CTA, both initials, the photo and
+dark-layer lines, the hero title over the photo and the banner copy) and
+`text-occlusion` on both advancing captions, and misses
+`#flag-uncovered-link`. The branch reports every should-flag case, the dot
+grid and grain copy included, and none of the should-pass ones.
 
-Corpus, replay of run 16 (344 captures): `low-contrast` 4,039 to 3,945 (94
+Corpus, replay of run 16 (344 captures): `low-contrast` 4,039 to 3,955 (84
 removed, 0 added), `text-occlusion` 49 to 46 (3 removed, all pattern-absent).
 Every removal was read against its capture's recorded stacks:
 
-- 14 confirmed-harmful, all hrsimple.app. Nine are the covered findings named
-  in issue 6 (85560 to 85562, 85616, 85618 to 85620, 85929, 86059), and 85617
-  is the mobile CTA under the same banner. The other four (85736, 85928,
-  85980, 86058, the 4.1:1 hero subline) sit over a hero photo at opacity 0.4
-  and two gradient tints, where the walk scored only the section's gradient.
+- 10 confirmed-harmful, all hrsimple.app text under its fixed consent banner:
+  the nine covered findings named in issue 6 (85560 to 85562, 85616, 85618 to
+  85620, 85929, 86059), and 85617, the mobile CTA under the same banner.
 - 14 pattern-absent: donckelektro.nl hero copy over the hero photo (83479,
   83510, 83936, 84067), and yungching.com.tw key-visual titles over the
   slideshow images (81352 to 81355, 81396 to 81399, 81631, 81763).
-- 66 unjudged. Read against their stacks:
-  - donckelektro.nl's hero title and eyebrow over the hero photo (6);
+- 60 unjudged. Read against their stacks:
+  - donckelektro.nl's hero title over the hero photo (4);
   - yungching.com.tw's large key-visual line over the slideshow (2);
   - zigzag.kr's banner slide titles over their photos (6), and two prices
     under the white bottom app bar;
@@ -1951,15 +1972,58 @@ Every removal was read against its capture's recorded stacks:
     slider copy under the cookie modal (2);
   - thairath.co.th's copy under a full-viewport fixed video layer (4);
   - billia.app's section title under the fixed mobile bar (1);
-  - bt.cn's tab label over the green gradient pill the walk read as grey (2),
-    and hero copy over a banner image at opacity 0.2 (4).
+  - bt.cn's tab label over the green gradient pill the walk read as grey (2).
 
   Not read one by one, all white text scored 1.0:1 on a named white:
   shipthatcode.com (10), ynet.co.il's consent-dialog link text (6), te.eg's
   cards (4), ktb.gov.tr's slider (4), aisupply.framer.website (3), att.com,
   nubank.com.br and samsung.com (2 each).
 
-Live, the six sites of the issues recaptured with the branch engine, 34
+### Revised after review: texture is not a surface
+
+At 27c60971 any hit-testable detached layer that painted a gradient or an
+image set the verdict aside. A `position: absolute; inset: 0` dot grid, grid
+lines, masked grid or grain tile under failing text therefore suppressed the
+verdict even where the walk had named the right surface, the section's own
+fill. That is the common shape of an AI-built landing page, and the corpus is
+weighted toward it. The texture rules and the page-ground-or-differs test
+above are the revision. Review pages served locally and scanned with release
+binaries (`low-contrast` only):
+
+| Page | base (edfe602b) | 27c60971 | revised |
+|---|---|---|---|
+| a-dot-grid: `#475569` over a 24px dot layer on `#0f172a` | 2.4:1 | none | 2.4:1 |
+| l-dark-grid: `#ffffff26` 40px grid lines over `#020617` | 2.7:1 | none | 2.7:1 |
+| n-masked-grid: masked light grid at `z-index: -1` on white | 2.5:1 | none | 2.5:1 |
+| d-noise: grain tile at 0.2 on `#18181b` | 2.3:1 | none | 2.3:1 |
+| o-link-dots: a link over dots | 1.7:1 | none | 1.7:1 |
+| f-faint-image: `img` at 0.2 | 3.5:1 | pixel 2.0:1 | 3.5:1 |
+| b-svg-pattern: SVG grid pattern, walk on the page ground | 2.5:1 | pixel 2.5:1 | pixel 2.5:1 |
+| e-card-layer, j-dark-overlay-card: opaque panel, walk on the page ground | 2.1:1, 2.3:1 | none | none |
+| c-blur-blob, g-svg-ring, i-control, k-ibelick-light-dots, m-dots-pe-none | as base | as base | as base |
+
+Against 27c60971 the replay of run 16 returns ten findings and removes none
+more:
+
+- bt.cn's hero copy over a banner image at opacity 0.2 (80545, 80546, 80664,
+  80665): texture by opacity, and the walk's `#fdfbfe` stands.
+- donckelektro.nl's orange eyebrow (83229, 83279). It sits on the left of a
+  `from-background` gradient whose opaque stops are the section's own
+  `#f6f7f8`, so the walk named what it reads on. The pixel pass measured it at
+  the same 2.5:1 live. The white hero title and subline over the photo stay
+  removed.
+- hrsimple.app's 4.1:1 subline (85736, 85928, 85980, 86058, confirmed-harmful).
+  Two gradient tints lie above the 0.4 photo, and the walk named a gradient
+  that they cannot be compared with, so the verdict stands. The pixel pass
+  measured the subline at 4.2 to 4.3:1 live.
+
+Violations drop from 14 to 10, and all ten are covered text. The review's live
+scans were repeated with the revised binary: hrsimple.app 37 findings as at
+27c60971 (base 40); usebidflow.com, overdrive.health, stroq.dev and
+useautumn.com unchanged; co-trip.jp 69, differing only in the order of four
+same-snippet findings that base reports too.
+
+Live, the six sites of the issues recaptured with the engine at 27c60971, 34
 captures each time, against run 16:
 
 - **Run 17** exposed the visual-pass leak. hrsimple.app's stat labels under
@@ -1972,9 +2036,10 @@ captures each time, against run 16:
   over the 0.4 photo four times. donckelektro.nl has 10: hero copy over the
   hero photo. Every other site's element pass is identical to base on the
   same captures.
-- **Pixel pass on dropped verdicts.** hrsimple.app's subline is now measured
-  by pixels (4.3:1 desktop, 4.2:1 mobile), and donckelektro.nl's orange
-  eyebrow is measured at 2.5:1 on its img underlay. In run 17 the pixel pass
+- **Pixel pass on dropped verdicts.** hrsimple.app's subline was measured by
+  pixels (4.3:1 desktop, 4.2:1 mobile), and donckelektro.nl's orange eyebrow
+  at 2.5:1 on its img underlay. The revision gives both their element
+  verdicts back (above). In run 17 the pixel pass
   measured haraj.com.sa's circle initials at 1.9:1 where the element pass had
   scored them on the card.
 - **text-occlusion:** co-trip.jp 3 to 0 in both runs, hrsimple.app unchanged.
@@ -2005,3 +2070,16 @@ captures each time, against run 16:
    would answer, since FakeDom lists elements in document order. One of them
    now also asserts that a later photo at the text's layer, in the viewport,
    covers the link.
+7. **Texture is read from style.** A hero photo faded out under a
+   `mask-image`, or ghosted at 0.3 or less, counts as decoration and keeps
+   the walk's verdict. A scrim whose stops are mostly transparent is read past
+   to what lies under it. A remote image tiled at its own size is undecided.
+   Captures older than the two mask columns read no mask.
+8. **Opaque panels on the page ground.** Where the walk only reached the page
+   ground, an opaque detached panel in another colour still sets the verdict
+   aside, even where the text fails against the panel as well (the review's
+   e-card-layer and j-dark-overlay-card), and the pixel pass does not measure
+   either page's copy.
+9. **Tints over a photo.** Where gradient tints lie above a photo and the walk
+   named a gradient, the tints decide and the verdict stands, whatever the
+   photo does to the surface (hrsimple.app's subline).

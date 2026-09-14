@@ -5,9 +5,11 @@
 //! - low-contrast does not score text a layer covers at capture (a fixed
 //!   banner, a photo avatar), and prints no verdict where paint the walk never
 //!   read lies under the text (a photo, a dark gradient layer, an SVG circle).
-//!   Part of a run under a layer, a detached panel in the named colour and a
-//!   faint wash keep their verdict, and a link colour covered once reports on
-//!   its first uncovered copy.
+//!   Part of a run under a layer, a detached panel in the named colour, a
+//!   faint wash, and texture over a section's own fill (a dot grid, a grain
+//!   tile) keep their verdict, and a link colour covered once reports on its
+//!   first uncovered copy. A CTA under the banner and a hero title over a photo
+//!   laid on its section's own fill are not scored.
 //! - text-occlusion does not count a box the page answered with where the
 //!   capture did not put it.
 
@@ -91,6 +93,8 @@ fn covered_text_and_unread_surfaces_are_not_scored() {
         ("low-contrast", "#flag-half-covered-copy"),
         ("low-contrast", "#flag-white-panel-copy"),
         ("low-contrast", "#flag-wash-copy"),
+        ("low-contrast", "#flag-dot-grid-copy"),
+        ("low-contrast", "#flag-grain-copy"),
         ("low-contrast", "#flag-uncovered-link"),
         ("text-occlusion", "#flag-covered-caption"),
     ] {
@@ -103,6 +107,8 @@ fn covered_text_and_unread_surfaces_are_not_scored() {
         ("low-contrast", "#pass-photo-copy"),
         ("low-contrast", "#pass-dark-layer-copy"),
         ("low-contrast", "#pass-circle-initial"),
+        ("low-contrast", "#pass-covered-cta"),
+        ("low-contrast", "#pass-hero-photo-title"),
         ("text-occlusion", "#pass-advancing-caption"),
     ] {
         assert!(!has(rule, selector), "{rule} on {selector} was flagged in {flagged:#?}");

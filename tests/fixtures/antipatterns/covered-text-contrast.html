@@ -16,10 +16,12 @@
        nobody's ancestor makes the verdict about the wrong surface: a photo, a
        dark gradient layer, an SVG circle, all laid under the text while the
        walk lands on the page white. No verdict is printed there; a candidate
-       of the pixel pass is still measured by it. Part of a run under a layer,
-       a detached panel in the colour the walk named, and a faint wash keep
-       their verdict, and a link colour covered once reports on its first
-       uncovered copy.
+       of the pixel pass is still measured by it. A photo laid over a section's
+       own fill sets the verdict aside too, and so does a CTA under the banner.
+       Part of a run under a layer, a detached panel in the colour the walk
+       named, a faint wash, and texture over a section's own fill (a dot grid
+       in 24px cells, a grain tile at 0.2) keep their verdict, and a link
+       colour covered once reports on its first uncovered copy.
 
        text-occlusion. The engine captures the page, then asks the live page
        what is at each probe point. A carousel that advances in between
@@ -53,6 +55,16 @@
     .layer-white { background: #ffffff; }
     .layer-wash { background: rgba(0, 0, 0, 0.03); }
     .layer-dark { background: linear-gradient(#0f172a, #1e293b); }
+    /* Texture over a section's own fill, which stays the surface. */
+    .dark-section { background: #0f172a; }
+    .dot-grid { background-image: radial-gradient(#334155 1px, transparent 1px); background-size: 24px 24px; }
+    .zinc-section { background: #18181b; }
+    .grain { opacity: 0.2; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='1' height='1' fill='%23fff'/%3E%3C/svg%3E"); }
+    .slate { margin: 0; font-size: 14px; line-height: 28px; color: #475569; }
+    .zinc { margin: 0; font-size: 14px; line-height: 28px; color: #52525b; }
+    /* A hero photo over a section's own light fill. */
+    .light-section { background: #f6f7f8; }
+    .hero-title { margin: 0; font: 600 22px/1.3 system-ui; color: #ffffff; }
     .photo { position: absolute; inset: 0; width: 100%; height: 100%; }
     .layer-content { position: relative; padding: 14px 16px; }
     /* A sticker laid over a link. */
@@ -75,6 +87,9 @@
     .consent { position: fixed; left: 640px; bottom: 0; width: 640px; height: 150px; padding: 16px;
       background: rgba(255, 255, 255, 0.95); border-top: 1px solid #d0d7de; color: #111; font-size: 14px; }
     .banner-copy { position: absolute; top: 700px; left: 680px; width: 400px; }
+    .cta { display: inline-block; padding: 8px 16px; border-radius: 6px; background: #ff7145; color: #ffffff;
+      font-size: 15px; font-weight: 500; text-decoration: none; }
+    .banner-cta { position: absolute; top: 742px; left: 680px; }
   </style>
 </head>
 <body>
@@ -103,6 +118,20 @@
         <div class="layer layer-wash"></div>
         <div class="layer-content">
           <p class="faint" id="flag-wash-copy">Faint copy over a three percent wash.</p>
+        </div>
+      </div>
+
+      <div class="case dark-section">
+        <div class="layer dot-grid"></div>
+        <div class="layer-content">
+          <p class="slate" id="flag-dot-grid-copy">Slate copy over a dot grid on its section's own fill.</p>
+        </div>
+      </div>
+
+      <div class="case zinc-section">
+        <div class="layer grain"></div>
+        <div class="layer-content">
+          <p class="zinc" id="flag-grain-copy">Zinc copy over a grain texture at twenty percent.</p>
         </div>
       </div>
 
@@ -153,6 +182,13 @@
         <svg width="25" height="25" viewBox="0 0 25 25"><circle cx="12.5" cy="12.5" r="12.5" fill="#1e3a5f"></circle><g class="initial"><text id="pass-circle-initial" x="12.5" y="19" text-anchor="middle" font-size="18" fill="currentColor">M</text></g></svg>
       </div>
 
+      <div class="case light-section">
+        <img class="photo" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='64'%3E%3Crect width='600' height='64' fill='%23304050'/%3E%3C/svg%3E">
+        <div class="layer-content">
+          <h3 class="hero-title" id="pass-hero-photo-title">Homes sold with care</h3>
+        </div>
+      </div>
+
       <div class="case">
         <div class="slides">
           <div class="slides-track" id="advancing-track">
@@ -166,6 +202,7 @@
   </div>
 
   <p class="faint banner-copy" id="pass-banner-copy">Faint copy under the consent banner.</p>
+  <a href="#" class="cta banner-cta" id="pass-covered-cta">Start free trial</a>
   <div class="consent">We use cookies to count visits. You can change this at any time.</div>
 
   <script>

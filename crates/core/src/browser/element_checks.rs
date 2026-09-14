@@ -5266,6 +5266,97 @@ mod tests {
     }
 
     #[test]
+    fn texture_under_the_text_leaves_the_walk_verdict() {
+        // `section > (layer, content > p)`. With `dark`, the section paints
+        // its own #0f172a and the walk names it; without, the walk reaches the
+        // page white.
+        let run = |dark: bool, tag: &str, styles: &[(&str, &str)]| {
+            let (mut d, body) = page();
+            let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1280.0, 600.0));
+            d.set_style(hero, "position", "relative");
+            if dark {
+                d.set_style(hero, "backgroundColor", "rgb(15, 23, 42)");
+            }
+            let el = bare_box(&mut d, hero, tag, (0.0, 0.0, 1280.0, 600.0));
+            d.set_styles(el, &[("position", "absolute")]);
+            d.set_styles(el, styles);
+            let content = bare_box(&mut d, hero, "div", (0.0, 300.0, 1280.0, 100.0));
+            d.set_style(content, "position", "relative");
+            let ink = if dark { "rgb(71, 85, 105)" } else { "rgb(156, 163, 175)" };
+            let p = faint_copy(&mut d, content, ink, (20.0, 320.0, 600.0, 28.0));
+            colors(&d, p)
+        };
+        const DOTS: &str = "radial-gradient(rgb(51, 65, 85) 1px, rgba(0, 0, 0, 0) 1px)";
+        const LINES: &str = "linear-gradient(to right, rgb(229, 231, 235) 1px, rgba(0, 0, 0, 0) 1px), linear-gradient(rgb(229, 231, 235) 1px, rgba(0, 0, 0, 0) 1px)";
+        const GRAIN: &str = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='1' height='1' fill='%23fff'/%3E%3C/svg%3E\")";
+        let stands = |dark: bool, tag: &str, styles: &[(&str, &str)], what: &str| {
+            let hits = run(dark, tag, styles);
+            assert!(reports_contrast(&hits), "{what}: {hits:?}");
+        };
+        let set_aside = |dark: bool, tag: &str, styles: &[(&str, &str)], what: &str| {
+            let hits = run(dark, tag, styles);
+            assert!(!reports_contrast(&hits), "{what}: {hits:?}");
+        };
+        stands(true, "div", &[("backgroundImage", DOTS), ("backgroundSize", "24px 24px")], "a dot grid in 24px cells");
+        stands(false, "div", &[("backgroundImage", LINES), ("backgroundSize", "64px 64px, 64px 64px")], "grid lines in 64px cells on the page ground");
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(to right, rgba(255, 255, 255, 0.15) 1px, rgba(0, 0, 0, 0) 1px)")],
+            "hairline lines at the box's size",
+        );
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "repeating-linear-gradient(45deg, rgb(30, 41, 59) 0px, rgb(30, 41, 59) 10px, rgb(15, 23, 42) 10px, rgb(15, 23, 42) 20px)")],
+            "a repeating gradient",
+        );
+        stands(true, "div", &[("backgroundImage", GRAIN), ("opacity", "0.2")], "a grain tile at 0.2");
+        stands(true, "div", &[("backgroundImage", GRAIN)], "a grain tile at full opacity");
+        stands(
+            false,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(10, 20, 30), rgb(40, 50, 60))"), ("maskImage", "radial-gradient(rgb(0, 0, 0), rgba(0, 0, 0, 0))")],
+            "a masked layer",
+        );
+        stands(false, "img", &[("opacity", "0.3")], "a photo ghosted at 0.3");
+        stands(
+            false,
+            "div",
+            &[("backgroundImage", "url(\"https://example.test/tile.png\")")],
+            "a remote image tiled at its own size is undecided",
+        );
+        stands(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(15, 23, 42), rgb(20, 28, 46))")],
+            "a gradient in the section's own colour",
+        );
+        stands(true, "div", &[("backgroundColor", "rgb(17, 24, 39)")], "a panel in the section's own colour");
+        // Paint that could really change what the text sits on still sets the
+        // verdict aside, whatever surface the walk named.
+        set_aside(true, "img", &[], "a photo over the section's own fill");
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", "url(\"https://example.test/hero.jpg\")"), ("backgroundSize", "cover")],
+            "a cover photo background",
+        );
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", "linear-gradient(rgb(255, 255, 255), rgb(240, 240, 240))")],
+            "a light gradient over the dark section",
+        );
+        set_aside(
+            true,
+            "div",
+            &[("backgroundImage", DOTS), ("backgroundSize", "24px 24px"), ("backgroundColor", "rgb(255, 255, 255)")],
+            "a dot grid over a white panel of its own",
+        );
+    }
+
+    #[test]
     fn a_shape_under_svg_text_is_a_surface_the_walk_never_read() {
         let run = |with_circle: bool| {
             let (mut d, body) = page();

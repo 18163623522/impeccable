@@ -1327,13 +1327,40 @@ fn glow_extent_px(blur: f64, spread: f64) -> f64 {
     blur / 2.0 + spread
 }
 
+/// How far a glow has to move the surface it lands on, in 0..255 channel
+/// units, at its brightest point. A blurred shadow is densest at the box's
+/// edge, where it carries about half the shadow colour's alpha, so each
+/// chromatic layer lifts the surface there by half its ink times the largest
+/// channel difference between its colour and the surface, and the layers of
+/// one shadow add up.
+///
+/// Measured on the site corpus (runs 2 to 20): the glows both judges called
+/// imperceptible lift their surface by 14 or less (a 20px green halo at 15%
+/// alpha around avatars on a near-black page, which sits exactly on
+/// [`GLOW_MIN_STRENGTH_PX`]); the glows they could find lift it by 28 or
+/// more (a 12px teal button glow at 40% alpha, 20px text glows at 28%, a
+/// three-layer blue elevation ramp). One judged glow falls under the floor:
+/// a pricing card's 30px halo at 15% alpha (lift 10), whose crop shows no
+/// light past the card's edge while the call-to-action glow inside it (lift
+/// 28) is still reported.
+pub const GLOW_MIN_LIFT: f64 = 20.0;
+
+/// The share of the shadow colour's alpha a blurred shadow carries at the
+/// edge of its box.
+const GLOW_EDGE_DENSITY: f64 = 0.5;
+
 /// Whether one qualifying shadow layer renders as a glow a reader can see.
 /// `element_opacity` and `element_size` are `None` on the engines with no
 /// layout, which leaves the blur and the alpha to carry the decision.
+/// `surface_lift` is how far the whole shadow lifts the surface it lands on
+/// (see [`GLOW_MIN_LIFT`]); the lift test runs only where the engine measured
+/// the element (`element_size` is known) and resolved that surface, and the
+/// declaration floor decides alone everywhere else.
 pub(crate) fn glow_is_perceptible(
     blur: f64,
     spread: f64,
     alpha: f64,
+    surface_lift: Option<f64>,
     element_opacity: Option<f64>,
     element_size: Option<(f64, f64)>,
 ) -> bool {
@@ -1342,7 +1369,8 @@ pub(crate) fn glow_is_perceptible(
         // A negative spread that swallows the blur keeps the light in the box.
         return false;
     }
-    if blur * alpha * element_opacity.unwrap_or(1.0) < GLOW_MIN_STRENGTH_PX {
+    let ink = alpha * element_opacity.unwrap_or(1.0);
+    if blur * ink < GLOW_MIN_STRENGTH_PX {
         return false;
     }
     let Some((width, height)) = element_size else {
@@ -1354,13 +1382,36 @@ pub(crate) fn glow_is_perceptible(
         return false;
     }
     let lit_area = (width + 2.0 * extent) * (height + 2.0 * extent) - element_area;
-    lit_area <= element_area * GLOW_MAX_AREA_RATIO
+    if lit_area > element_area * GLOW_MAX_AREA_RATIO {
+        return false;
+    }
+    surface_lift.map_or(true, |lift| lift >= GLOW_MIN_LIFT)
+}
+
+/// How far the chromatic layers of one shadow value lift `surface` at the
+/// edge of the box (see [`GLOW_MIN_LIFT`]). Neutral layers are elevation, not
+/// glow light, and do not count.
+fn glow_surface_lift(value: &str, surface: &Rgba, element_opacity: Option<f64>) -> f64 {
+    let opacity = element_opacity.unwrap_or(1.0);
+    split_commas_outside_parens(value)
+        .into_iter()
+        .filter_map(|layer| find_shadow_color(layer).and_then(|info| info.color))
+        .filter(|color| has_chroma(Some(color), Some(30.0)))
+        .map(|color| {
+            let difference = (color.r - surface.r)
+                .abs()
+                .max((color.g - surface.g).abs())
+                .max((color.b - surface.b).abs());
+            GLOW_EDGE_DENSITY * color.alpha_or_one() * opacity * difference
+        })
+        .sum()
 }
 
 fn glow_scan(
     value: Option<&str>,
     prop: &str,
     on_dark_bg: bool,
+    surface: Option<Rgba>,
     element_opacity: Option<f64>,
     element_size: Option<(f64, f64)>,
 ) -> Option<RuleHit> {
@@ -1368,6 +1419,7 @@ fn glow_scan(
         None | Some("") | Some("none") => return None,
         Some(v) => v,
     };
+    let surface_lift = surface.map(|s| glow_surface_lift(value, &s, element_opacity));
     for layer in split_commas_outside_parens(value) {
         let info = match find_shadow_color(layer) {
             Some(i) => i,
@@ -1388,6 +1440,7 @@ fn glow_scan(
             vals[2],
             vals.get(3).copied().unwrap_or(0.0),
             color.alpha_or_one(),
+            surface_lift,
             element_opacity,
             element_size,
         ) {
@@ -1425,6 +1478,7 @@ pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
         opts.box_shadow.as_deref(),
         "box-shadow",
         on_dark_bg,
+        opts.surface,
         opacity,
         size,
     )
@@ -1433,6 +1487,7 @@ pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
             opts.text_shadow.as_deref(),
             "text-shadow",
             on_dark_bg,
+            opts.surface,
             opacity,
             size,
         )
@@ -1715,6 +1770,7 @@ mod tests {
                 effective_bg: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
                 element_opacity: Some(opacity),
                 element_size: size,
+                surface: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
             })
         };
         // A 24px halo at 60% alpha around a 197x40 button: the treatment the
@@ -1761,6 +1817,32 @@ mod tests {
                     rgba(64, 120, 168, 0.31) 0px 6.87px 6.87px -2.67px, \
                     rgba(64, 120, 168, 0.247) 0px 13.65px 13.65px -3.33px";
         assert_eq!(glow(ramp, 1.0, Some((96.0, 96.0))).len(), 1);
+        // A 20px green halo at 15% alpha around an 80px avatar sits exactly
+        // on the strength floor, but lifts a near-black page by 14: nobody
+        // sees it. The same halo at 40% alpha lifts it by 36.
+        let avatar = |alpha: f64| {
+            check_glow(&GlowOpts {
+                box_shadow: Some(format!("rgba(33, 196, 93, {alpha}) 0px 0px 20px 0px")),
+                text_shadow: None,
+                effective_bg: Some(Rgba::new(10.0, 10.0, 12.0, 1.0)),
+                element_opacity: Some(1.0),
+                element_size: Some((80.0, 80.0)),
+                surface: Some(Rgba::new(10.0, 10.0, 12.0, 1.0)),
+            })
+        };
+        assert!(avatar(0.15).is_empty());
+        assert_eq!(avatar(0.4).len(), 1);
+        // With no resolved fill behind it (a gradient, an image) the lift is
+        // not measured, and the strength floor decides as before.
+        let unresolved = check_glow(&GlowOpts {
+            box_shadow: Some("rgba(33, 196, 93, 0.15) 0px 0px 20px 0px".to_string()),
+            text_shadow: None,
+            effective_bg: Some(Rgba::new(128.0, 88.0, 0.0, 1.0)),
+            element_opacity: Some(1.0),
+            element_size: Some((80.0, 80.0)),
+            surface: None,
+        });
+        assert_eq!(unresolved.len(), 1);
     }
 
     #[test]

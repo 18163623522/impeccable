@@ -107,7 +107,12 @@ re!(
 
 /// JS: checks.mjs#cssTextHasDarkRootBg
 pub fn css_text_has_dark_root_bg(content: &str, custom_props: &CustomProps) -> bool {
-    if DARK_BG_RE.is_match(content) || TW_DARK_BG_RE.is_match(content) {
+    // A token such as `--color-background: #0a0a0a` is not a background.
+    if DARK_BG_RE
+        .find_iter(content)
+        .any(|m| starts_css_property_token(content, m.start()))
+        || TW_DARK_BG_RE.is_match(content)
+    {
         return true;
     }
     let mut root_scopes: Vec<&str> = Vec::new();
@@ -119,6 +124,9 @@ pub fn css_text_has_dark_root_bg(content: &str, custom_props: &CustomProps) -> b
     }
     for scope in root_scopes {
         for bm in BG_DECL_RE.captures_iter(scope) {
+            if !starts_css_property_token(scope, bm.get(0).unwrap().start()) {
+                continue;
+            }
             let resolved = resolve_var_refs(js::trim(&bm[1]), custom_props);
             if let Some(c) = parse_any_color(Some(&resolved)) {
                 if c.alpha_or_one() > 0.5 && relative_luminance(&c) < 0.1 {
@@ -143,10 +151,23 @@ re!(
 
 /// JS: checks.mjs#scanCssTextForGlow
 pub fn scan_css_text_for_glow(content: &str) -> Vec<IndexedHit> {
+    scan_css_text_for_glow_with(content, None)
+}
+
+/// [`scan_css_text_for_glow`] with the page's own answer to "is the page
+/// dark": `Some` where an engine read the painted root background, `None` to
+/// decide from the stylesheet text as the file engines do.
+pub fn scan_css_text_for_glow_with(content: &str, dark_page: Option<bool>) -> Vec<IndexedHit> {
     let custom_props = collect_css_custom_props(content);
-    let has_dark_bg = css_text_has_dark_root_bg(content, &custom_props);
+    let has_dark_bg =
+        dark_page.unwrap_or_else(|| css_text_has_dark_root_bg(content, &custom_props));
     let mut results = Vec::new();
     for m in SHADOW_DECL_RE.captures_iter(content) {
+        // A custom property named after a shadow (`--bprogress-box-shadow`)
+        // declares a token, not a shadow on anything.
+        if !starts_css_property_token(content, m.get(1).unwrap().start()) {
+            continue;
+        }
         let prop = js::to_lower_case(&m[1]);
         let value = resolve_var_refs(js::trim(&m[2]), &custom_props);
         for layer in split_commas_outside_parens(&value) {
@@ -171,6 +192,7 @@ pub fn scan_css_text_for_glow(content: &str) -> Vec<IndexedHit> {
                 vals[2],
                 vals.get(3).copied().unwrap_or(0.0),
                 color.alpha_or_one(),
+                None,
                 None,
                 None,
             ) {
@@ -315,13 +337,25 @@ re!(TRANSPARENT_EXACT_RE, format!(r"^{}$", ci("transparent")));
 
 /// JS: checks.mjs#scanCssTextForRadialHalo
 pub fn scan_css_text_for_radial_halo(content: &str) -> Vec<IndexedHit> {
+    scan_css_text_for_radial_halo_with(content, None)
+}
+
+/// [`scan_css_text_for_radial_halo`] with the page's own answer to "is the
+/// page dark" (see [`scan_css_text_for_glow_with`]).
+pub fn scan_css_text_for_radial_halo_with(
+    content: &str,
+    dark_page: Option<bool>,
+) -> Vec<IndexedHit> {
     let custom_props = collect_css_custom_props(content);
-    if !css_text_has_dark_root_bg(content, &custom_props) {
+    if !dark_page.unwrap_or_else(|| css_text_has_dark_root_bg(content, &custom_props)) {
         return Vec::new();
     }
     let mut findings = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for m in HALO_DECL_RE.captures_iter(content) {
+        if !starts_css_property_token(content, m.get(0).unwrap().start()) {
+            continue;
+        }
         let value = resolve_var_refs(js::trim(&m[1]), &custom_props);
         if URL_FN_RE.is_match(&value) {
             continue;
@@ -2426,6 +2460,62 @@ mod tests {
             ramp[0].snippet,
             "Colored box-shadow glow (#4078a8) on dark page"
         );
+    }
+
+    #[test]
+    fn property_tokens_start_their_own_name() {
+        let at = |s: &str, needle: &str| starts_css_property_token(s, s.find(needle).unwrap());
+        assert!(at("box-shadow:0", "box-shadow"));
+        assert!(at(".a{box-shadow:0}", "box-shadow"));
+        assert!(!at(".a{--bprogress-box-shadow:0 0 10px #29d}", "box-shadow"));
+        assert!(at(".a{-webkit-box-shadow:0 0 8px red}", "box-shadow"));
+        assert!(!at(".a{--x-webkit-box-shadow:0}", "box-shadow"));
+        assert!(!at("border-width .2s", "width"));
+        assert!(!at("line-height .2s", "height"));
+        assert!(at("color .2s, width .2s", "width"));
+    }
+
+    #[test]
+    fn glow_and_dark_page_read_properties_not_tokens() {
+        assert!(scan_css_text_for_glow(":root{--bprogress-box-shadow:0 0 10px #29d,0 0 5px #29d}")
+            .is_empty());
+        assert_eq!(
+            scan_css_text_for_glow(".a{-webkit-box-shadow:0 0 12px rgba(59,130,246,.6)}")[0].snippet,
+            "Zero-offset box-shadow glow (#3b82f6)"
+        );
+        // A dark token is not a dark background.
+        let token_dark = ".dark{--color-background:#0a0a0a}.c{box-shadow:0 8px 24px rgba(99,102,241,.6)}";
+        assert!(scan_css_text_for_glow(token_dark).is_empty());
+        let real_dark = "body{background:#0a0a0a}.c{box-shadow:0 8px 24px rgba(99,102,241,.6)}";
+        assert_eq!(scan_css_text_for_glow(real_dark).len(), 1);
+        // A rendering engine's answer replaces the stylesheet's.
+        assert!(scan_css_text_for_glow_with(real_dark, Some(false)).is_empty());
+        assert_eq!(scan_css_text_for_glow_with(token_dark, Some(true)).len(), 1);
+        let halo = "body{background:#050505}.h{background:radial-gradient(circle,#8fd8f2 0%,transparent 70%)}";
+        assert_eq!(scan_css_text_for_radial_halo(halo).len(), 1);
+        assert!(scan_css_text_for_radial_halo_with(halo, Some(false)).is_empty());
+        assert!(scan_css_text_for_radial_halo(
+            ".dark{--hero-background:#050505}.h{--x-background-image:radial-gradient(circle,#8fd8f2 0%,transparent 70%)}"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn marquee_keyframes_read_a_percentage_inside_calc() {
+        assert_eq!(
+            collect_marquee_keyframes(
+                "@keyframes ticker{from{transform:translateX(0)}to{transform:translateX(calc(-100% - 32px))}}"
+            ),
+            vec!["ticker".to_string()]
+        );
+        assert_eq!(
+            collect_marquee_keyframes("@keyframes t3d{to{transform:translate3d(calc(-50% + 1rem),0,0)}}"),
+            vec!["t3d".to_string()]
+        );
+        assert!(collect_marquee_keyframes(
+            "@keyframes nudge{to{transform:translateX(calc(-10% - 4px))}}"
+        )
+        .is_empty());
     }
 
     #[test]

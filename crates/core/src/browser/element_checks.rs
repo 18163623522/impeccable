@@ -1122,6 +1122,9 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         return Vec::new();
     }
     let parent_bg_info = resolve_background_info(dom, parent.unwrap_or(el));
+    // The lift test reads only a fill the walk resolved: the gradient average
+    // below ignores the stops' alpha, so a 5% amber wash would read as amber.
+    let surface = parent_bg_info.color;
     let mut parent_bg = parent_bg_info.color;
     if parent_bg.is_none() && !parent_bg_info.unresolved {
         parent_bg = gradient_ancestor_average(dom, parent);
@@ -1133,6 +1136,7 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         effective_bg: parent_bg,
         element_opacity: Some(element_opacity(dom, el)),
         element_size: Some((rect.width, rect.height)),
+        surface,
     })
 }
 

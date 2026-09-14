@@ -2442,3 +2442,152 @@ captures each time, against run 16:
 10. **Tints over a photo.** Where gradient tints lie above a photo and the walk
    named a gradient, the tints decide and the verdict stands, whatever the
    photo does to the surface (hrsimple.app's subline).
+
+## Recorded 2026-09-14: one report per declaration, and dark pages read off the page (corpus/fix-page-level-forms)
+
+Corpus run 20, `reports/observations-20.md` rows 5, 9, 44 and 45, and two
+misses from `reports/walkthroughs-20.md` (marquee travel inside `calc()`, the
+property-name boundary). Several rules read one declaration twice: off an
+element's computed style, off its class attribute, and off the stylesheet
+text, which lands on `body`. In the URL engine the element forms run first
+and read every element, so a stylesheet form now stands only where no element
+form speaks for the same declaration.
+
+URL engine only (`crates/core/src/browser/driver.rs`, which no golden runs):
+
+- **A class form defers to its computed twin (row 5).** On one element,
+  `bg-clip-text + bg-gradient (Tailwind)` and `animate-bounce (Tailwind)` are
+  dropped once the computed form of the same rule reported it.
+- **A page form defers to the element forms (rows 5 and 45).**
+  - gradient-text: both page forms are dropped when any element carries
+    gradient-text.
+  - bounce-easing: a page form is dropped when an element finding reports the
+    same declaration: an animation name, or an overshooting `cubic-bezier`
+    compared by its numbers (`.34` equals `0.34`).
+  - dark-glow: a page form is dropped when an element finding reports the
+    same shadow property and colour, and when its selector names elements (no
+    pseudo-element), because the element form read their computed shadows,
+    size, opacity and surface and measured no glow: a later
+    `text-shadow: none` (demotv.lol `.tv-hud`), a box with no area. A
+    pseudo-element selector, and a form with no rule to name (a keyframe
+    step, an inline `style` attribute), stand.
+- **layout-transition's page form needs a painted element (row 9).** It stands
+  only where no element form exists on the page and the first declaration's
+  rule matches an element painted at capture (the Box gate) that computes one
+  of the properties it names; for a pseudo-element selector a painted host is
+  enough. A declaration with no rule to name is not reported from the text.
+- **One strip, one marquee report (row 5).** Page forms whose selectors name
+  the same elements (a base rule and a builder's more specific copy), or
+  elements under one parent (the `text--clone` track looping beside the
+  original), merge into the first.
+- **Dark page from the page (row 44).** The painted root is the first of
+  `html` and `body` with an opaque fill; a fill under an image, or no fill,
+  is unread. A dark root settles the scan's "dark page"; otherwise the
+  stylesheet decides the candidates as before, and a form that claims a dark
+  page (radial-halo, an offset dark-glow) is decided against the surfaces
+  under the elements it names (its own opaque fill or the walk behind it; for
+  a form with no rule, the elements whose computed background or shadow
+  paints its colour). A dark surface makes it stand on any root (a halo in a
+  dark band of a light page), surfaces all read as light drop it, with no
+  element the root decides, and an unread surface (an orb inside a gradient
+  button) keeps it.
+- **A glow has to lift its surface (row 45).** `glow_is_perceptible` gains a
+  floor, `GLOW_MIN_LIFT` of 20 channel units: half the ink of each chromatic
+  layer times its largest channel difference from the resolved surface,
+  summed over the layers. It runs only where the engine measured the element
+  and the walk resolved a fill (never from the gradient average, which
+  ignores stop alpha), so the static engine, the text engine and the frozen
+  `checkGlow` vectors are unchanged. `GlowOpts` gains `surface`.
+
+All engines:
+
+- **A property name has to start its own token.**
+  `starts_css_property_token` (foundation `css/scan.rs`) refuses a match
+  after a hyphen or an identifier character, and allows a clean vendor
+  prefix. It gates the shadow declarations of the glow scan
+  (`--bprogress-box-shadow` on hrsd.gov.sa, cisco.com's hover token), the
+  dark-background declarations and root scopes (`--color-background: #0a0a0a`),
+  the halo declarations, the `transition` declarations, and the layout
+  properties inside them (`border-width`, `line-height`, `scroll-margin`),
+  in the core pattern pass and the text engine's matchers.
+- **Marquee travel inside `calc()`.** `TRANSLATE_X_PCT_RE` reads the first
+  percentage inside a `calc()` (`translateX(calc(-100% - 32px))`).
+
+Goldens recorded from the binary and read by hand:
+
+- `detect-fixture-json-page-level-forms-html`,
+  `detect-fixture-text-page-level-forms-html`: new. The static engine keeps
+  base behavior, thirteen findings: gradient-text four times (the computed
+  and class forms on the heading, and both page forms), dark-glow three times
+  (the amber CTA, the avatar at 15% alpha, and `Colored box-shadow glow
+  (#6366f1) on dark page` decided from the player box's `#000000`),
+  `cubic-bezier(0.34, 1.56, 0.64, 1)`, `transition: height` for the collapsed
+  drawer, the three ticker rule blocks, and the halo `on dark page`. The
+  token shadow and the two hyphenated transitions report nothing, and neither
+  does the painted link's width transition, which the static pattern pass
+  leaves to the element rules.
+- `detect-fixture-json-page-level-forms-dark-html`,
+  `detect-fixture-text-page-level-forms-dark-html`: new, two findings, the
+  orb's `Zero-offset box-shadow glow (#22c55e)` and the hero's
+  `radial-gradient halo (#8fd8f2 → transparent) on dark page`. The two
+  tokens report nothing; base reported them instead (`#ec4899`, `#fdba74`).
+- `detect-dir-json-all-fixtures` (648 to 663), `detect-no-advisory-json` (568
+  to 581), and the text forms `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-text` (568 to 581
+  anti-patterns, 80 to 82 advisory notes): exactly the fifteen findings
+  above, nothing removed or rewritten. No other golden moved: no existing
+  fixture holds a hyphenated property token or a `calc()` marquee.
+
+The URL behavior is pinned by
+`each_declaration_reports_once_where_it_paints`
+(`crates/browser/tests/page_level_forms.rs`): the light fixture reports five
+findings (the heading once, the button once, the CTA once, the link's
+`transition: width` on body, the ticker once) where base (5ce750e5) reports
+twelve, and the dark fixture reports the orb and the hero halo.
+
+Corpus ratchets (scan path), base and candidate findings:
+
+| Rule | Run 20 | Removed / added | Run 19 | Removed / added |
+|---|---|---|---|---|
+| gradient-text | 148 to 88 | 60 / 0 | 172 to 124 | 48 / 0 |
+| bounce-easing | 128 to 102 | 26 / 0 | 167 to 146 | 21 / 0 |
+| dark-glow | 91 to 46 | 45 / 0 | 182 to 127 | 55 / 0 |
+| layout-transition | 223 to 110 | 113 / 0 | 296 to 175 | 121 / 0 |
+| marquee | 20 to 16 | 6 / 2 | 16 to 18 | 0 / 2 |
+| radial-halo | 6 to 2 | 4 / 0 | 12 to 7 | 5 / 0 |
+
+Run 20 counts 62 violations, every one a duplicate whose twin still reports:
+56 gradient-text class and body forms on fabadda.com and ai-pact.com, each
+with the computed form on the same element or page, and six dark-glow body
+forms with element findings of the same colour (zoptron.framer.ai 103795,
+104125; codecanary.org 106627, 106950, 107027, 107172). Run 19 has no
+judged removals. The two marquee additions per run are the `calc()` loops
+(d3shop.ae's shipping ticker, context.dev's logo strip).
+
+The generated browser asset was regenerated with `cargo xtask bundle`.
+
+### Known limits at merge
+
+1. **First hit only.** The page glow and halo forms still report the first
+   qualifying declaration. Where the gate drops it, a later declaration is
+   not considered, as base never reported it either.
+2. **A judged glow under the lift floor.** kraflio.com's pricing card, a 30px
+   halo at 15% alpha (lift 10), was labeled visible by both judges in run 2
+   (11788, 12398); its run 19 findings (97012, 97151, 97512, 97603) are
+   removed. The crop shows no light past the card's edge, and the card's
+   call-to-action glow is still reported.
+3. **Inline transitions.** A painted element whose own `style` attribute
+   transitions a layout property the motion check skips by tag (onlinetest.tw's
+   AdSense span) no longer reports from the text form.
+4. **Dead declarations elsewhere keep base.** gradient-text and bounce-easing
+   page forms with no element twin still report a declaration nothing paints;
+   the painted gate for page forms belongs to `corpus/fix-painted-gate-coverage`,
+   which edits the same driver pass.
+5. **An unread surface keeps a dark claim.** A halo inside a gradient box on a
+   light page (framai.framer.website's orbs) stands.
+6. **Static engine unchanged.** It keeps the duplicates, the stylesheet's dark
+   decision and no lift floor; it gains the token boundary and `calc()`.
+7. **API.** `GlowOpts.surface`; `glow_is_perceptible` takes the summed lift;
+   new `PatternContext`, `check_html_patterns_with`, `first_layout_transition`,
+   `scan_css_text_for_glow_with`, `scan_css_text_for_radial_halo_with` and
+   `starts_css_property_token`.

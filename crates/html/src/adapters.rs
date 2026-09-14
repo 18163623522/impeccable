@@ -1198,6 +1198,7 @@ pub fn check_element_glow(
         effective_bg,
         element_opacity: opacity,
         element_size: None,
+        surface: None,
     })
 }
 

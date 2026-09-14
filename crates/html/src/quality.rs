@@ -16,7 +16,7 @@ use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
     is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, SR_ONLY_SELECTOR,
+    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
 };
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
@@ -143,14 +143,29 @@ pub fn is_visually_hidden(el: &StaticElement<'_>, style: &StyleValues) -> bool {
 }
 
 /// Whether this element carries heading text, for the tight-leading floor:
-/// the element is a heading (or takes the ARIA role), or it is one of the
-/// inline tags a heading's text sits in. A block of body copy nested inside a
-/// heading is not heading text and keeps the floor.
+/// the element is a heading (or takes the ARIA role), one of the inline tags
+/// a heading's text sits in, or any other box under a heading (the `div` a
+/// design system wraps heading copy in). A reading block nested inside a
+/// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
+/// keeps the floor.
 pub fn is_heading_text(el: &StaticElement<'_>, tag: &str) -> bool {
-    match el.closest(LEADING_HEADING_CONTEXT) {
-        None => false,
-        Some(found) => found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag),
+    let Some(found) = el.closest(LEADING_HEADING_CONTEXT) else {
+        return false;
+    };
+    if found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag) {
+        return true;
     }
+    let mut cur = Some(*el);
+    while let Some(c) = cur {
+        if c.node.id() == found.node.id() {
+            break;
+        }
+        if QUALITY_TEXT_TAGS.contains(&c.tag_lower().as_str()) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    true
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)

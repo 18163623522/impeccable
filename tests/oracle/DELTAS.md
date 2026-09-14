@@ -3265,3 +3265,187 @@ reports 25 em dashes where it reported 48 (105822, 106312). visiby.net/pricing
 dashes. Both judges labeled 106370 itself pattern-absent; its confirmed-harmful
 label is inherited from the site cluster, whose representative 105822 on the
 home page still reports.
+
+## Recorded 2026-09-13: geometry rules measure the text, not the box (corpus/fix-text-geometry)
+
+Corpus run 20 (cohort 2), observations-20 rows 8, 29, 31, 33, 40, 41 and 56,
+and walkthroughs-20 misses 2 and 4a. Every change is in the URL engine's rule
+pass except the heading exemption, which both engines share. A new module,
+`impeccable_core::browser::text_geometry`, holds what the rules read: the
+extent of a block's text (the union of the Range client rects of its own text
+and of its inline phrasing children), the line pitch of an inline run, the
+x axis of `overflow`, and whether a clipping ancestor cuts a line. A Dom that
+cannot measure text answers `None`, and each rule then keeps the box it read
+before.
+
+- **line-length** reads the text where it can. Text that renders as one line
+  is not reported. Lines are counted from the line-height: a text rect spans
+  one content area (taken as 1.2em) plus one pitch per extra line, so two
+  lines at `line-height: 2.4` count as two (`normal` is taken as 1.2em).
+  Wrapped lines that fill at least 80% of the box keep the box estimate,
+  since the half-em advance runs 10 to 20% over a narrow sans; lines short of
+  it (a float beside them, centred) are estimated from the widest line, and
+  when all the block's text sits in those lines, from at least the average
+  count per line. Lines ended by a `<br>` are read from the widest line up to
+  90% fill. No line holds more characters than the block. Full-width CJK
+  glyphs count a whole em each, weighted by how many the text holds, on every
+  path. A `p`, `li`, `dd` or `blockquote` whose words sit wholly in inline
+  children (`<i>`, `<b>`, `<span>`, links) is measured on the block;
+  unmeasurable, it stays silent as before.
+- **body-text-viewport-edge** measures the glyphs: wrapped lines that fill the
+  content box sit on its edges (padding excluded), other text on its own
+  extent, and a list item's start side reaches its content edge, where an
+  inside marker paints. Text a horizontal scroller cuts (a track at
+  `overflow-x: auto` or `scroll` whose `scrollWidth` runs past its box, the
+  root and body excluded) is not reported: scrolling brings it into view. A
+  box that only hides its overflow proves no track, so text an
+  `overflow-hidden` section or card, or an `overflow-x-hidden` wrapper, cuts
+  at the screen edge reports as it did before. Prose in inline children is
+  measured as above. The printed distances are the measured ones.
+- **text-overflow** reads a scroll region from `overflow-x` (the shorthand's
+  first value when no longhand was recorded), so a Tailwind
+  `overflow-x-hidden` wrapper no longer exempts every line under it. An
+  overflow of 16px or more is reported only when painted content reaches past
+  the box by 15px or more: the element's text, a descendant's text, a replaced
+  element, or a descendant that paints a fill, image or border. Empty or
+  absolutely positioned descendants with no text add nothing, a descendant
+  that clips keeps its content in its own box, and text an overflow-hidden
+  box pushes wholly outside itself (`text-indent: -9999px`) paints nothing.
+  An element whose own text cannot be measured keeps the overflow, and so
+  does one that carries generated content no text rect covers, on itself or
+  a descendant: a `::before` or `::after` with text, or in flow an image or
+  an empty box given a width. One positioned out of flow with no text (an
+  arrow icon parked past a link) adds nothing, as a child with none adds
+  nothing.
+- **tight-leading** judges an inline run on the taller of its own line-height
+  and its containing block's (an 11px run at `line-height: 11px` in a 14px
+  block prints `1.27x`, not `1.00x`). The heading exemption now covers any box
+  under a heading, not only inline tags, unless it is or sits inside a reading
+  block (`p`, `li`, `td`, `th`, `dd`, `blockquote`, `figcaption`), so the
+  fixture's paragraph nested in an `h3` still reports.
+- **cramped-padding** gates an inline box on the height of one line fragment
+  (its box divided by the lines its text spans), so a two-line highlight span
+  is two 21px lines, not one 43px box.
+- **edge-flush-cards** skips the root and body, reads `overflow-x`, and needs a
+  row: two card-shaped boxes side by side in the scroller.
+
+Fixtures: `line-length.html` is new (browser only; the static engine reports
+none of it). `body-text-viewport-edge.html`, `text-overflow.html`,
+`tight-leading.html`, `cramped-padding.html` and `edge-flush-cards.html` gain
+flag and pass cases, pinned against a real browser by
+`crates/browser/tests/text_geometry.rs`. After review, `flag-cut-by-wrapper`
+(a paragraph an `overflow-x: hidden` wrapper cuts at the screen edge),
+`flag-pseudo-suffix` (a spill from `::after` text) and `flag-tall-leading`
+(two lines at `line-height: 2.4`) were added, and `pass-clipped-slide` now
+sits in a track at `overflow-x: auto`. The static engine reports none of the
+revised cases, so no golden changed with the revision.
+
+Goldens recorded from the binary and read finding by finding:
+
+- New: `detect-fixture-json-line-length-html`,
+  `detect-fixture-text-line-length-html` (no findings, exit 0).
+- `detect-fixture-json-tight-leading-html`,
+  `detect-fixture-text-tight-leading-html`: 6 to 7. The added finding is
+  `tight-leading` `line-height 0.95x` on the new inline run inside a 22px
+  block, which the browser engine passes and the static engine, with no
+  layout to find the block that sets the pitch, still reports (documented in
+  the fixture, beside the single-line case). The new div inside a heading is
+  exempt in both engines.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-both`: the
+  same one finding (568 to 569 counted). Nothing removed.
+
+### Known limits at merge
+
+1. **Centred lines near 90% fill.** Wrapped lines that fill 80% of their box or
+   more keep line-length's box estimate (90% for lines ended by a `<br>`, and
+   for body-text-viewport-edge's content edges). That brings back ai-pact.com's
+   centred lines (105480, 105968: about 84 characters on lines at 90% of their
+   box, printed `~88`), which a crop called right to drop. Measurement cannot
+   tell them from a real long line at 88% fill: veeza.ai 106327, about 86
+   characters in a narrow sans, which base reported and should.
+2. **Carousels that only hide overflow report partial slides.** A track at
+   `overflow: hidden` or `clip` cannot be told from a layout bug, so a slide it
+   partly cuts reports as base did (tempra.framer.website, zoptron.framer.ai
+   and exxonmobil.com on run 20). A scrolling track, `overflow-x: auto` with
+   slides to scroll to (nike.com's `ul.slider`), still exempts what it cuts,
+   and a slide wholly outside its track is still dropped by the paint gate.
+   The review's seven confirmed-harmful findings, text cut at the screen edge
+   by v0-optimus-delta.vercel.app's `overflow-hidden` section (104197, 104200,
+   104202, 104206) and simplybudget.framer.ai's card (104222, 104431, 104577),
+   report again.
+3. **Text measured past a clipping card.** The rules measure the text wherever
+   it runs, so a nowrap line a card cuts inside the viewport can add a finding
+   the box never gave. Recall grows the same way: prose in inline children and
+   pages under `overflow-x-hidden` wrappers now report. Run 20 adds centene.com
+   and mckesson.com paragraphs and list items, swipeloan.in paragraphs with
+   10px gutters, and text-overflow on v0-optimus-delta.vercel.app's stats; run
+   19 adds 18 bt.cn footer lines past a 169px column. One of the additions is
+   v0-compute-11.vercel.app's ASCII texture at 2% ink, clipped on purpose.
+4. **Approximations.** text-overflow keeps a pseudo-element spill by parsing
+   the `content` value (text, `url()`, empty, `none`) with the pseudo's
+   `display`, `position` and `width`, not by measuring the generated box. The
+   80% fill threshold is a band, not a measurement of the face's advance, and
+   a line's content area and `line-height: normal` are both taken as 1.2em
+   when counting lines. The static engine has no layout and keeps base's
+   estimates: line-length and the geometry gates stay browser only, and it
+   still reports the inline run and the single-line label in
+   `tight-leading.html`.
+5. **Heading exemption.** Content a heading may not hold still counts as
+   heading text: a `div` of copy nested in an `h2` stays exempt from
+   tight-leading. Only a reading block (`p`, `li`, `td`, `th`, `dd`,
+   `blockquote`, `figcaption`), or a box inside one, reports under a heading.
+6. **Harmful-cluster removals on cohort 2.** Distances and counts print what
+   is measured, so a finding that stays can print a new number, and the
+   ratchet counts it as one removal and one addition.
+   - **line-length: 76.** The cluster key collapses a site's paragraphs into
+     one cluster, so every member of a cluster with one harmful representative
+     counts as confirmed harmful: the 76 come from 2 cluster labels spread over
+     15 sites (glassbox.codecanary.org 16, progressive.com 15, ai-pact.com 8,
+     demotv.lol 7, joongang.co.kr 8 and more). By the review, 75 are really not
+     failures: 63 render one line, 6 are lines well short of their box (floats,
+     `<br>`) and 5 are CJK or Hangul.
+   - **body-text-viewport-edge: 13**, in 3 clusters (so-net.ne.jp 7,
+     simplybudget.framer.ai 3, centene.com 2, v0-optimus-delta.vercel.app 1).
+     Each still reports on the same element with a new measurement:
+     v0-optimus-delta.vercel.app `right -61px` to `right -19px`,
+     simplybudget.framer.ai `right -314px` to `right -216px`, so-net.ne.jp
+     `right -306px` to `right -297px`, centene.com `right -95px` to
+     `right -23px`.
+
+At merge into `corpus/integration`, after `corpus/fix-evidence-origin`,
+`corpus/fix-painted-gate-coverage`, `corpus/fix-surface-resolution`,
+`corpus/fix-page-level-forms` and `corpus/fix-card-heuristics`, all source
+merged without conflict: `element_checks.rs`, `page_checks.rs`, `quality.rs`,
+`text_rules.rs`, `html/src/quality.rs` and `evidence_findings.rs` auto-merged,
+and `driver.rs`, `painted.rs` and `text_collectors.rs` were not touched by this
+branch. This branch adds no snapshot property; it reads `overflowX`,
+`overflow` and the pseudo `content`, `display`, `position` and `width`, all
+already recorded, and the JS and Rust lists still match (117 style
+properties, 16 pseudo properties, each once). The generated browser asset
+conflicted and was regenerated with `cargo xtask bundle`. The seven conflicted
+sweeps were re-recorded from the integrated binary and moved by exactly this
+branch's delta, the one `tight-leading` `line-height 0.95x` finding and nothing
+else: `detect-dir-json-all-fixtures` 722 to 723, `detect-no-advisory-json` 630
+to 631, the text and quiet summaries 630 to 631 anti-patterns,
+`detect-scope-type` 175 to 176, `detect-scope-both` 231 to 232.
+
+The horizontal-scroller tests agree. The painted predicate lets a scroller
+bring content into its box when `overflow-x` is `auto` or `scroll` and its
+`scrollWidth` runs past `clientWidth` by more than 1px, and
+`scrolling_ancestor_cuts` counts exactly that box as a track. They differ only
+where the capture recorded no scroll metric (the painted predicate answers
+yes, the text rules no, so such text keeps reporting) and in how a legacy
+shorthand is read (the painted predicate reads `overflow` only when both
+longhands are empty, `overflow_x` reads the longhand and then the shorthand's
+first value). The ratchets below show no interaction from either on the two
+cohorts.
+
+The corpus ratchets equal the previous integration plus this branch, rule for
+rule, with no interaction gap, and the removed and added sets are the branch's
+own: run 20 counts 180 violations (91 plus 89), run 19 still 4. The rules this
+branch moves (line-length, body-text-viewport-edge, text-overflow,
+tight-leading, cramped-padding, edge-flush-cards) are moved by no earlier
+merge. Every new run 20 violation is one of the branch ratchet's 89 (76
+line-length and 13 body-text-viewport-edge above).

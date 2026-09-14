@@ -16,8 +16,13 @@ use crate::checks::measures::{
     resolve_length_px, text_wraps_to_multiple_lines, TRACKED_LABEL_MAX_CHARS,
 };
 use crate::checks::rules::RuleHit;
+use super::text_geometry::{
+    holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent,
+    scrolling_ancestor_cuts, text_line_count,
+};
 use crate::checks::text_rules::{
-    is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
+    average_glyph_advance_em, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
+    ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
     LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
     SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
@@ -287,15 +292,82 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// Whether this element carries heading text, for the tight-leading floor:
-/// the element is a heading (or takes the ARIA role), or it is one of the
-/// inline tags a heading's text sits in. A block of body copy nested inside a
-/// heading is not heading text and keeps the floor.
+/// the element is a heading (or takes the ARIA role), one of the inline tags
+/// a heading's text sits in, or any other box under a heading (the `div` a
+/// design system wraps heading copy in). A reading block nested inside a
+/// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
+/// keeps the floor.
 pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
     if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
         return true;
     }
-    LEADING_HEADING_TEXT_TAGS.contains(&tag)
-        && closest_or_none(dom, el, LEADING_HEADING_CONTEXT).is_some()
+    let Some(heading) = closest_or_none(dom, el, LEADING_HEADING_CONTEXT) else {
+        return false;
+    };
+    if LEADING_HEADING_TEXT_TAGS.contains(&tag) {
+        return true;
+    }
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if c == heading {
+            break;
+        }
+        if QUALITY_TEXT_TAGS.contains(&tag_lower(dom, c).as_str()) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
+}
+
+/// The tags whose prose is measured for `line-length` when its words sit
+/// wholly in inline children (`<p><i>…</i></p>`).
+const LINE_PROSE_TAGS: &[&str] = &["p", "li", "dd", "blockquote"];
+
+/// The line-height `normal` stands for when counting line boxes: a text rect
+/// one line tall is at most about 1.5em, two lines at least about 2.3em.
+const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
+
+/// How much of its content box a block's widest line fills before
+/// `body-text-viewport-edge` takes the box's edges as the text's. A wrapped
+/// paragraph's ragged right is under a word short of its column, and the box
+/// is what an author sets.
+const TEXT_FILLS_MEASURE: f64 = 0.9;
+
+/// How much of its box a block's widest line fills before `line-length`
+/// takes the box as the measure. The widest line's count is estimated at half
+/// an em a glyph, which runs 10 to 20% over a narrow sans, so a line within
+/// that of its box may hold as many characters as the box estimate says.
+const LINE_FILLS_MEASURE: f64 = 0.8;
+
+/// Characters on a line `width_px` wide at `font_size_px`, with glyphs
+/// `advance_em` wide on average.
+fn chars_per_line_at(width_px: f64, font_size_px: f64, advance_em: f64) -> f64 {
+    width_px / (font_size_px * advance_em)
+}
+
+/// The height of one line box of an element's own box. An inline box that
+/// wraps reports the union of its fragments, two 21px highlight lines as one
+/// 43px box, while each fragment a reader sees is one line tall. Blocks, and
+/// an inline box whose lines cannot be counted, keep their box height.
+fn own_line_box_height(
+    dom: &dyn Dom,
+    el: ElId,
+    rect: &Rect,
+    own_line_height: Option<f64>,
+    font_size: f64,
+) -> f64 {
+    if dom.style(el, "display") != "inline" {
+        return rect.height;
+    }
+    let (Some(own), Some(t)) = (own_line_height, dom.direct_text_rect(el)) else {
+        return rect.height;
+    };
+    if !(own > 0.0) || !t.all_finite() || t.height <= 0.0 {
+        return rect.height;
+    }
+    let lines = text_line_count(t.height, line_pitch_px(dom, el, own), font_size);
+    rect.height / lines
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -472,13 +544,65 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Line length too long ---
-    if has_direct_text
+    // Measured on the text where it can be. Text that renders as one line
+    // never sends the eye back across a column, however wide its box; a
+    // centred line, or one ended by a `<br>`, is as long as its glyphs rather
+    // than its box; and a line holds no more characters than the block does.
+    // Full-width CJK glyphs take an em each. Prose whose words sit wholly in
+    // inline children is measured on the block that sets its lines. Where the
+    // text cannot be measured the box stands in, as before.
+    let prose_in_phrasing =
+        !has_direct_text && LINE_PROSE_TAGS.contains(&tag) && holds_only_phrasing(dom, el);
+    if (has_direct_text || prose_in_phrasing)
         && QUALITY_TEXT_TAGS.contains(&tag)
         && rect.width > 0.0
         && (text_len as f64) > line_max
     {
-        let cpl = chars_per_line(rect.width, font_size);
-        if cpl > line_max + 5.0 {
+        let text = collapse_ws(js::trim(&dom.text_content(el)));
+        let advance = average_glyph_advance_em(&text);
+        let estimate = match phrasing_text_extent(dom, el) {
+            Some(t) => {
+                let pitch = q
+                    .line_height_px
+                    .filter(|lh| *lh > 0.0)
+                    .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
+                let lines = text_line_count(t.height, pitch, font_size);
+                if lines >= 2.0 {
+                    let chars = utf16_len(&text) as f64;
+                    // The half-em advance runs 10 to 20% wide of a real face,
+                    // so a line within that of its box cannot be told from
+                    // one that fills it in a narrow sans (veeza.ai's lines
+                    // at 88%), and the box estimate stands. Lines broken by
+                    // a `<br>` are short where the author ended them, and
+                    // keep the widest line up to the 90% a wrapped column
+                    // fills.
+                    let fill = if phrasing_holds_break(dom, el) {
+                        TEXT_FILLS_MEASURE
+                    } else {
+                        LINE_FILLS_MEASURE
+                    };
+                    let estimate = if t.width >= rect.width * fill {
+                        chars_per_line_at(rect.width, font_size, advance)
+                    } else {
+                        // The widest line from its glyphs. However narrow the
+                        // face, some line holds at least the average count
+                        // when all of the block's text sits in these lines.
+                        let from_width = chars_per_line_at(t.width, font_size, advance);
+                        if holds_only_phrasing(dom, el) {
+                            js::math_max(from_width, chars / lines)
+                        } else {
+                            from_width
+                        }
+                    };
+                    Some(js::math_min(estimate, chars))
+                } else {
+                    None
+                }
+            }
+            None if has_direct_text => Some(chars_per_line_at(rect.width, font_size, advance)),
+            None => None,
+        };
+        if let Some(cpl) = estimate.filter(|cpl| *cpl > line_max + 5.0) {
             findings.push(RuleHit::new(
                 "line-length",
                 format!(
@@ -492,7 +616,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
 
     // --- Cramped padding ---
     let is_inline_code = tag == "code" && closest_or_none(dom, el, "pre").is_none();
-    if !is_inline_code && has_direct_text && text_len > 20 && rect.width > 100.0 && rect.height > 30.0 {
+    if !is_inline_code
+        && has_direct_text
+        && text_len > 20
+        && rect.width > 100.0
+        && own_line_box_height(dom, el, rect, q.line_height_px, font_size) > 30.0
+    {
         let borders = [
             spx("borderTopWidth"),
             spx("borderRightWidth"),
@@ -747,11 +876,16 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Body text touching viewport edge ---
-    if has_direct_text
-        && text_len > 40
-        && matches!(js::to_upper_case(tag).as_str(), "P" | "LI")
-        && viewport_width > 0.0
-    {
+    // Measured on the text where it can be: a centred or padded paragraph
+    // spans the viewport with its box while its glyphs keep a gutter, and a
+    // paragraph a horizontal scroller cuts (a slide in a swiped track) meets
+    // that track's clip rather than the page edge. A box that only hides its
+    // overflow proves no track, so text it cuts at the screen edge reports.
+    // Prose whose words sit wholly in inline children is measured the same
+    // way. Where the text cannot be measured the box stands in, as before.
+    let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
+    let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
+    if (has_direct_text || edge_prose) && text_len > 40 && is_edge_tag && viewport_width > 0.0 {
         let in_nav_header =
             closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
         let bg = st("backgroundColor");
@@ -759,11 +893,48 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let pos = st("position");
         let is_positioned = pos == "fixed" || pos == "absolute";
         let width_ratio = rect.width / viewport_width;
-        let left_close = rect.left < 16.0;
-        let right_close = rect.right > viewport_width - 16.0;
-        if !in_nav_header && !has_own_bg && !is_positioned && width_ratio > 0.5 && (left_close || right_close) {
-            let l = number_to_string(math_round(rect.left));
-            let r = number_to_string(math_round(viewport_width - rect.right));
+        let span = if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
+            None
+        } else {
+            match phrasing_text_extent(dom, el) {
+                Some(t) if scrolling_ancestor_cuts(dom, el, &t) => None,
+                Some(t) => {
+                    let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
+                    let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
+                    let pitch = q
+                        .line_height_px
+                        .filter(|lh| *lh > 0.0)
+                        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
+                    if text_line_count(t.height, pitch, font_size) >= 2.0
+                        && t.width >= (content_right - content_left) * TEXT_FILLS_MEASURE
+                    {
+                        // Wrapped lines that fill the column reach its edges;
+                        // how ragged the longest line happens to be is not
+                        // the gutter.
+                        Some((content_left, content_right))
+                    } else if st("display") == "list-item" {
+                        // A list item's marker is painted, not a text node:
+                        // an `inside` bullet sits at the content edge ahead of
+                        // the text, so the start side reaches that edge.
+                        if st("direction") == "rtl" {
+                            Some((t.left, js::math_max(t.right, content_right)))
+                        } else {
+                            Some((js::math_min(t.left, content_left), t.right))
+                        }
+                    } else {
+                        Some((t.left, t.right))
+                    }
+                }
+                None if has_direct_text => Some((rect.left, rect.right)),
+                None => None,
+            }
+        };
+        let (left, right) = span.unwrap_or((f64::NAN, f64::NAN));
+        let left_close = left < 16.0;
+        let right_close = right > viewport_width - 16.0;
+        if left_close || right_close {
+            let l = number_to_string(math_round(left));
+            let r = number_to_string(math_round(viewport_width - right));
             let which = if left_close && right_close {
                 format!("left {}px / right {}px", l, r)
             } else if left_close {
@@ -802,7 +973,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         && font_size > 0.0
         && font_size < LEADING_DISPLAY_TYPE_PX
     {
-        if let Some(lh) = q.line_height_px {
+        if let Some(own_lh) = q.line_height_px {
+            // An inline run's lines are set on the block around it, whose
+            // strut is the pitch when it is taller than the run's own value.
+            let lh = line_pitch_px(dom, el, own_lh);
             let ratio = lh / font_size;
             // Compare on the ratio the snippet prints, so a page that sets
             // line-height: 1.3 exactly is never flagged for hitting the floor
@@ -1690,6 +1864,368 @@ mod tests {
         d.set_rect(boxless, 0.0, 0.0, 0.0, 0.0);
         d.el_mut(boxless).direct_text_rect = None;
         assert!(leading(&d, boxless).is_empty(), "zero-area box");
+    }
+
+    fn snippets(d: &FakeDom, el: ElId, rule: &str) -> Vec<String> {
+        check_element_quality_dom(d, el, &BrowserConfig::default())
+            .into_iter()
+            .filter(|h| h.id == rule)
+            .map(|h| h.snippet)
+            .collect()
+    }
+
+    /// observations-20 row 8: the estimate read the box, so a one-line note
+    /// in a wide box, a centred footer line and a block that never fills its
+    /// column reported. Where the text is measured, the text decides.
+    #[test]
+    fn line_length_measures_the_rendered_text() {
+        let long = "word ".repeat(40);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = text_el(&mut d, body, "p", &long, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 40.0, 100.0, 1200.0, 48.0);
+
+        // Two lines that fill their 1,200px box keep the box estimate.
+        d.set_text_rect(p, 40.0, 102.0, 1180.0, 44.0);
+        assert_eq!(snippets(&d, p, "line-length"), vec!["~150 chars/line (aim for <80)"]);
+        // One line in the same box sends the eye nowhere.
+        d.set_text_rect(p, 40.0, 102.0, 1180.0, 20.0);
+        assert!(snippets(&d, p, "line-length").is_empty(), "one line");
+        // Centred lines well short of the box: 119 characters on two lines of
+        // at most 600px of glyphs is ~75 chars a line.
+        let centred = text_el(&mut d, body, "p", &"word ".repeat(24), "16px");
+        d.set_style(centred, "lineHeight", "24px");
+        d.set_rect(centred, 40.0, 200.0, 1200.0, 48.0);
+        d.set_text_rect(centred, 340.0, 202.0, 600.0, 44.0);
+        assert!(snippets(&d, centred, "line-length").is_empty(), "centred block");
+        // With no text rect the box stands in, as before.
+        d.el_mut(p).direct_text_rect = None;
+        assert_eq!(snippets(&d, p, "line-length"), vec!["~150 chars/line (aim for <80)"]);
+
+        // `line-height: normal` counts lines at 1.2em.
+        d.set_style(p, "lineHeight", "normal");
+        d.set_text_rect(p, 40.0, 102.0, 1180.0, 19.0);
+        assert!(snippets(&d, p, "line-length").is_empty(), "one line at normal");
+        d.set_text_rect(p, 40.0, 102.0, 1180.0, 38.0);
+        assert_eq!(snippets(&d, p, "line-length").len(), 1, "two lines at normal");
+
+        // A line holds no more characters than the block: 94 of them on two
+        // lines, not the 150 the box would fit.
+        let short = text_el(&mut d, body, "p", &"word ".repeat(19), "16px");
+        d.set_style(short, "lineHeight", "24px");
+        d.set_rect(short, 40.0, 300.0, 1200.0, 48.0);
+        d.set_text_rect(short, 40.0, 302.0, 1180.0, 44.0);
+        assert_eq!(snippets(&d, short, "line-length"), vec!["~94 chars/line (aim for <80)"]);
+
+        // hnmatchmaker.com: 175 characters on two lines of a narrow 12px face.
+        // The widest line is 486px, 89% of its box, within what the half-em
+        // advance runs wide of a narrow face: the box estimate stands, as
+        // base printed it.
+        let teaser = text_el(&mut d, body, "p", &"word ".repeat(35), "12px");
+        d.set_style(teaser, "lineHeight", "16px");
+        d.set_rect(teaser, 73.0, 500.0, 544.0, 32.0);
+        d.set_text_rect(teaser, 73.0, 500.0, 486.0, 32.0);
+        assert_eq!(snippets(&d, teaser, "line-length"), vec!["~91 chars/line (aim for <80)"]);
+        // Lines well short of the box (beside a float) are read from the
+        // widest line, ~67 half-em glyphs here; but some line holds at least
+        // the average of 87 when all of the block's text sits in these lines.
+        d.set_text_rect(teaser, 73.0, 500.0, 400.0, 32.0);
+        assert_eq!(snippets(&d, teaser, "line-length"), vec!["~87 chars/line (aim for <80)"]);
+        // A block holding a component: its text is not all in these lines,
+        // so only the widest line counts.
+        let card = d.add(Some(teaser), "div");
+        d.set_style(card, "display", "block");
+        assert!(snippets(&d, teaser, "line-length").is_empty());
+
+        // simplybudget.framer.ai: 94 characters on two lines ended by a
+        // `<br>`, 660px of glyphs in a 760px box. The author broke them, so
+        // the widest line decides however much of the box it fills.
+        let broken = text_el(&mut d, body, "p", &"word ".repeat(19), "16px");
+        d.set_style(broken, "lineHeight", "28.8px");
+        d.set_rect(broken, 260.0, 900.0, 760.0, 57.6);
+        d.set_text_rect(broken, 260.0, 904.0, 660.0, 49.0);
+        assert_eq!(snippets(&d, broken, "line-length"), vec!["~94 chars/line (aim for <80)"], "no break");
+        let br = d.add(Some(broken), "br");
+        d.set_style(br, "display", "inline");
+        assert!(snippets(&d, broken, "line-length").is_empty(), "~83 on the line the break ends");
+        // A broken block whose lines fill 90% of the box is a column the
+        // breaks never shortened, and the box estimate stands.
+        d.set_text_rect(broken, 260.0, 904.0, 700.0, 49.0);
+        assert_eq!(snippets(&d, broken, "line-length"), vec!["~94 chars/line (aim for <80)"], "a full column");
+    }
+
+    /// Review of observations-20 row 8. A Range rect spans one content area
+    /// plus a pitch per extra line, so two lines at `line-height: 2.4` are
+    /// shorter than 1.5 pitches and read as one. And a narrow sans fills 80
+    /// to 90% of its box with as many characters as the box estimate says.
+    #[test]
+    fn line_length_counts_lines_by_the_line_height_and_keeps_nearly_full_lines() {
+        let copy = "A long reading paragraph set with a very airy line-height of 2.4, set across a very wide column with no max-width at all, so the lines run far past a comfortable measure and the eye has a long way to travel back to the start of the next line every single time it reaches the end of one of them.";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        // prose.html `pl-lh`: Georgia at 16px on 38.4px lines, 1,100px wide.
+        let airy = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(airy, "lineHeight", "38.4px");
+        d.set_rect(airy, 24.0, 100.0, 1100.0, 76.8);
+        d.set_text_rect(airy, 24.0, 110.0, 1090.0, 56.6);
+        assert_eq!(snippets(&d, airy, "line-length"), vec!["~138 chars/line (aim for <80)"], "two lines");
+        d.set_text_rect(airy, 24.0, 110.0, 1090.0, 18.2);
+        assert!(snippets(&d, airy, "line-length").is_empty(), "one line at the same pitch");
+
+        // veeza.ai 106327: DM Sans at 16px on 26px lines, 621.6px of glyphs
+        // (88% of a 704px box) that really hold about 86 characters.
+        let item = text_el(
+            &mut d,
+            body,
+            "li",
+            "Our AI fills the official application and prepares your supporting documents. You book your own appointment.",
+            "16px",
+        );
+        d.set_style(item, "lineHeight", "26px");
+        d.set_rect(item, 288.0, 670.5, 704.0, 52.0);
+        d.set_text_rect(item, 288.0, 672.5, 621.578125, 47.0);
+        assert_eq!(snippets(&d, item, "line-length"), vec!["~88 chars/line (aim for <80)"]);
+    }
+
+    /// observations-20 row 29: a full-width CJK glyph is an em wide, so the
+    /// half-em estimate doubled so-net.ne.jp's count.
+    #[test]
+    fn line_length_counts_cjk_glyphs_at_an_em() {
+        let copy = "戸建/マンションは、NTTから送付される「開通のご案内」に記載の「ご利用サービス名」など、回線事業者からの案内をご確認のうえタイプに合ったコースをお選びください。".repeat(2);
+        assert!(utf16_len(&copy) > 80);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = text_el(&mut d, body, "p", &copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 110.0, 100.0, 1060.0, 72.0);
+        d.set_text_rect(p, 110.0, 104.0, 1048.0, 64.0);
+        assert!(snippets(&d, p, "line-length").is_empty(), "~68 glyphs a line");
+        // The box estimate reads the script too.
+        d.el_mut(p).direct_text_rect = None;
+        assert!(snippets(&d, p, "line-length").is_empty());
+        // A wider CJK column still reports, at its own count.
+        d.set_rect(p, 0.0, 100.0, 1600.0, 72.0);
+        let hits = snippets(&d, p, "line-length");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].starts_with("~10"), "{hits:?}");
+    }
+
+    /// walkthroughs-20 miss 2: prose whose words sit wholly in `<b>`, `<i>` or
+    /// `<span>` was never measured, because the paragraph has no direct text.
+    #[test]
+    fn prose_in_inline_children_is_measured_on_its_paragraph() {
+        let long = "word ".repeat(40);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        let intro = text_el(&mut d, body, "p", "", "16px");
+        d.set_styles(intro, &[("lineHeight", "24px"), ("display", "block")]);
+        d.set_rect(intro, 0.0, 100.0, 1280.0, 72.0);
+        let b = d.add(Some(intro), "b");
+        d.set_style(b, "display", "inline");
+        d.add_text(b, "Opening words ");
+        d.set_text_rect(b, 0.0, 102.0, 120.0, 20.0);
+        let i = d.add(Some(intro), "i");
+        d.set_style(i, "display", "inline");
+        d.add_text(i, &long);
+        d.set_text_rect(i, 0.0, 102.0, 1270.0, 68.0);
+        assert_eq!(snippets(&d, intro, "line-length"), vec!["~160 chars/line (aim for <80)"]);
+        let len = utf16_len(js::trim(&d.text_content(intro)));
+        assert_eq!(
+            snippets(&d, intro, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px / right 0px)")]
+        );
+        // The inline children report neither rule themselves.
+        for child in [b, i] {
+            let hits = check_element_quality_dom(&d, child, &BrowserConfig::default());
+            assert!(
+                !hits.iter().any(|h| h.id == "line-length" || h.id == "body-text-viewport-edge"),
+                "{hits:?}"
+            );
+        }
+        // Inline prose the Dom cannot measure stays silent, as before.
+        d.el_mut(b).direct_text_rect = None;
+        d.el_mut(i).direct_text_rect = None;
+        assert!(snippets(&d, intro, "line-length").is_empty());
+        assert!(snippets(&d, intro, "body-text-viewport-edge").is_empty());
+        // A paragraph holding a block component is not inline prose.
+        d.set_text_rect(i, 0.0, 102.0, 1270.0, 68.0);
+        let card = d.add(Some(intro), "div");
+        d.set_style(card, "display", "block");
+        assert!(snippets(&d, intro, "line-length").is_empty());
+    }
+
+    /// observations-20 row 31: a centred or padded paragraph spans the
+    /// viewport with its box while its glyphs keep a gutter, and a slide cut
+    /// by its carousel track meets the track's clip, not the page edge.
+    #[test]
+    fn viewport_edge_measures_the_text_not_the_box() {
+        let copy = "Two sides. One rivalry. Zero middle ground. Show them where you stand today.";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        let p = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 0.0, 100.0, 1280.0, 24.0);
+        // Centred glyphs, 300px off both edges.
+        d.set_text_rect(p, 300.0, 102.0, 680.0, 20.0);
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "centred");
+        // Padded: the glyphs start 32px in.
+        d.set_text_rect(p, 32.0, 102.0, 680.0, 20.0);
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "padded");
+        // Glyphs at the edge report, with the text's own distances.
+        d.set_text_rect(p, 0.0, 102.0, 680.0, 20.0);
+        assert_eq!(
+            snippets(&d, p, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px)")]
+        );
+        // With no text rect the box stands in, as before.
+        d.el_mut(p).direct_text_rect = None;
+        assert_eq!(
+            snippets(&d, p, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px / right 0px)")]
+        );
+
+        // Text a box that only hides overflow cuts at 1,270px: an
+        // `overflow-hidden` section (v0-optimus-delta.vercel.app) cannot be
+        // told from a carousel track, and the text reports as base did. Its
+        // two lines fill the paragraph, so the paragraph's edge is the one
+        // printed.
+        let track = d.add(Some(body), "div");
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden")]);
+        d.set_rect(track, 10.0, 300.0, 1260.0, 200.0);
+        d.el_mut(track).client_width = 1260.0;
+        d.el_mut(track).scroll_width = 1590.0;
+        let slide = text_el(&mut d, track, "p", copy, "16px");
+        d.set_style(slide, "lineHeight", "24px");
+        d.set_rect(slide, 900.0, 320.0, 700.0, 48.0);
+        d.set_text_rect(slide, 900.0, 322.0, 690.0, 44.0);
+        let cut = vec![format!("<p> with {len}-char body bleeds to viewport edge (right -320px)")];
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow: hidden");
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden auto")]);
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow-x-hidden");
+        // A track that scrolls on x, with the slide to scroll to, brings the
+        // text into view: its clip is the track's, not the page's gutter.
+        d.set_styles(track, &[("overflowX", "auto"), ("overflow", "auto")]);
+        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "a swiped track");
+        // Out of the track, the same text runs off the page and reports.
+        d.set_styles(track, &[("overflowX", "visible"), ("overflow", "visible")]);
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut);
+
+        // Wrapped lines that fill a padded paragraph sit on its content box.
+        let padded = text_el(&mut d, body, "p", copy, "16px");
+        d.set_styles(padded, &[("lineHeight", "24px"), ("paddingLeft", "24px"), ("paddingRight", "24px")]);
+        d.set_rect(padded, 0.0, 700.0, 1280.0, 48.0);
+        d.set_text_rect(padded, 24.0, 702.0, 1220.0, 44.0);
+        assert!(snippets(&d, padded, "body-text-viewport-edge").is_empty(), "24px padding");
+        d.set_styles(padded, &[("paddingLeft", "8px"), ("paddingRight", "8px")]);
+        d.set_text_rect(padded, 8.0, 702.0, 1230.0, 44.0);
+        assert_eq!(
+            snippets(&d, padded, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 8px / right 8px)")]
+        );
+
+        // A list item's `inside` marker paints at the content edge ahead of
+        // its text, so the start side reaches that edge.
+        let li = text_el(&mut d, body, "li", copy, "16px");
+        d.set_styles(li, &[("lineHeight", "24px"), ("display", "list-item"), ("paddingLeft", "0px"), ("borderLeftWidth", "0px")]);
+        d.set_rect(li, 0.0, 600.0, 1280.0, 24.0);
+        d.set_text_rect(li, 18.0, 602.0, 700.0, 20.0);
+        assert_eq!(
+            snippets(&d, li, "body-text-viewport-edge"),
+            vec![format!("<li> with {len}-char body bleeds to viewport edge (left 0px)")]
+        );
+        // Given a gutter of its own, the item keeps off the edge.
+        d.set_style(li, "paddingLeft", "24px");
+        d.set_text_rect(li, 42.0, 602.0, 700.0, 20.0);
+        assert!(snippets(&d, li, "body-text-viewport-edge").is_empty());
+    }
+
+    /// observations-20 row 40: an inline run at `line-height: 11px` inside a
+    /// 14px block sits on 14px lines, and a label at 18px inside a 22.4px
+    /// block sits on 22.4px ones.
+    #[test]
+    fn tight_leading_reads_the_block_an_inline_run_sits_on() {
+        const COPY: &str = "Free furniture, free books, free clothes, free computers, and more besides.";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let block = d.add(Some(body), "div");
+        d.set_styles(block, &[("display", "inline-block"), ("fontSize", "14px"), ("lineHeight", "14px")]);
+        let run = text_el(&mut d, block, "span", COPY, "11px");
+        d.set_styles(run, &[("display", "inline"), ("lineHeight", "11px")]);
+        d.set_rect(run, 46.0, 100.0, 298.0, 40.0);
+        d.set_text_rect(run, 46.0, 100.0, 280.0, 40.0);
+        assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.27x (need >=1.3)"]);
+        d.set_style(block, "lineHeight", "22.4px");
+        assert!(snippets(&d, run, "tight-leading").is_empty(), "set on the block's 22.4px");
+        // A block strut that cannot be resolved leaves the run's own value.
+        d.set_style(block, "lineHeight", "normal");
+        assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.00x (need >=1.3)"]);
+    }
+
+    /// walkthroughs-20 note 13: tchibo.de sets its teaser headlines as
+    /// `<h5><div>…</div></h5>`. Any box inside a heading carries heading text,
+    /// unless it is a reading block nested there.
+    #[test]
+    fn tight_leading_exempts_heading_copy_in_a_block_wrapper() {
+        const COPY: &str = "Jede Woche neu! Lassen Sie sich von unseren Kollektionen immer wieder neu inspirieren";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let h5 = d.add(Some(body), "h5");
+        let wrapper = text_el(&mut d, h5, "div", COPY, "19px");
+        d.set_style(wrapper, "lineHeight", "24px");
+        d.set_rect(wrapper, 12.0, 100.0, 366.0, 72.0);
+        d.set_text_rect(wrapper, 12.0, 100.0, 330.0, 71.0);
+        assert!(snippets(&d, wrapper, "tight-leading").is_empty(), "div in a heading");
+        // A paragraph of body copy in a heading keeps the floor, and so does
+        // what sits inside it.
+        let para = text_el(&mut d, h5, "p", COPY, "16px");
+        d.set_style(para, "lineHeight", "17.6px");
+        d.set_rect(para, 12.0, 200.0, 300.0, 70.4);
+        d.set_text_rect(para, 12.0, 200.0, 300.0, 70.4);
+        assert_eq!(snippets(&d, para, "tight-leading"), vec!["line-height 1.10x (need >=1.3)"]);
+        let inner = text_el(&mut d, para, "div", COPY, "16px");
+        d.set_style(inner, "lineHeight", "17.6px");
+        d.set_rect(inner, 12.0, 300.0, 300.0, 70.4);
+        d.set_text_rect(inner, 12.0, 300.0, 300.0, 70.4);
+        assert_eq!(snippets(&d, inner, "tight-leading").len(), 1, "a box inside the paragraph");
+    }
+
+    /// observations-20 row 41: a two-line inline highlight reports the union
+    /// of its fragments, 43px, while each fragment is one 21px line.
+    #[test]
+    fn cramped_padding_judges_an_inline_box_per_line() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let hl = text_el(&mut d, body, "span", "carrier's own estimating guide", "14px");
+        d.set_styles(
+            hl,
+            &[
+                ("display", "inline"),
+                ("lineHeight", "25.9px"),
+                ("backgroundColor", "rgb(254, 240, 138)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "5px"),
+                ("paddingRight", "5px"),
+            ],
+        );
+        d.set_rect(hl, 55.0, 100.0, 234.0, 42.9);
+        d.set_text_rect(hl, 55.0, 100.0, 234.0, 42.9);
+        assert!(snippets(&d, hl, "cramped-padding").is_empty(), "two one-line fragments");
+        // A box one 43px line tall is past the gate.
+        d.set_style(hl, "display", "inline-block");
+        assert_eq!(
+            snippets(&d, hl, "cramped-padding"),
+            vec!["0px vertical padding (need ≥4.2px for 14px text)"]
+        );
     }
 
     #[test]

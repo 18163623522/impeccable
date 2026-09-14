@@ -37,6 +37,10 @@
     .mobile-only-blurb { display: none; width: 240px; font-size: 14px; line-height: 15px; }
     .sr-only-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0px, 0px, 0px, 0px); font-size: 12px; line-height: 12px; }
     .single-line-note { display: block; width: 900px; white-space: nowrap; font-size: 12px; line-height: 13.8px; }
+    .col h2.teaser-heading { font-size: 19px; line-height: 24px; margin: 0; text-transform: none; letter-spacing: normal; color: #1a1a1a; }
+    .teaser-copy { width: 300px; font-size: 19px; line-height: 24px; text-transform: none; letter-spacing: normal; }
+    .links-block { width: 280px; font-size: 14px; line-height: 22px; }
+    .link-run { font-size: 12px; line-height: 11.4px; }
   </style>
   <!-- SHOULD PASS: stylesheet source is text the browser never typesets. -->
   <style id="theme-overrides">
@@ -115,6 +119,18 @@
            has no layout and cannot see that, so it still reports this one;
            the wrap test is pinned by the unit tests in crates/core. -->
       <span class="single-line-note">This utility class sets tight leading on a label that renders as one single line.</span>
+
+      <h3>Heading copy in a block wrapper</h3>
+      <!-- SHOULD PASS: a design system wraps the headline's text in a div
+           inside the h2. It is heading text, as a span there would be. -->
+      <h2 class="teaser-heading"><div class="teaser-copy">New every week: let our latest collections inspire you again and again this season.</div></h2>
+
+      <h3>Inline run on its block's line boxes (browser engine only)</h3>
+      <!-- SHOULD PASS in the browser engine: the 12px run declares an 11.4px
+           line-height, but its lines sit on the 22px line boxes of the block
+           around it. The static engine has no layout to find the block that
+           sets the pitch, so it still reports this one. -->
+      <div class="links-block"><span class="link-run">Free furniture, free books, free clothes, free computers, free phones, free fridges and much more besides.</span></div>
     </div>
 
   </div>

@@ -195,10 +195,13 @@ pub fn has_meaningful_direct_text(dom: &dyn Dom, el: ElId) -> bool {
     has_direct_text_longer_than(dom, el, 4)
 }
 
-/// The tallest box `cramped-padding` measures by its glyphs rather than by the
-/// content area of its text. Chips run 24 to 28px; the price and step chips
-/// the r3-20 evidence rests on measure exactly 28 and 24.
-pub const SMALL_CHIP_MAX_HEIGHT_PX: f64 = 28.0;
+/// `cramped-padding` measures a box by its glyphs rather than by the content
+/// area of its text when the box is strictly under this height. Taste call
+/// r3-20 reads "chips under 28px tall", and a 28px chip is not under 28px:
+/// the bound sits at 27.5px so a 28px box, or one a subpixel layout puts at
+/// 27.6px, keeps the content-area measure. yungching.com.tw's 24px step chip
+/// is inside it; haraj.com.sa's 28px price chip is not.
+pub const SMALL_CHIP_HEIGHT_UNDER_PX: f64 = 27.5;
 
 /// The band of `t`, a text rect of `node`, that its glyphs occupy: each line's
 /// em box, one font size tall and centred on the line's content area. A Range
@@ -232,14 +235,14 @@ pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
 /// in while their glyphs stay well inside it, and it is the glyphs a reader
 /// sees crowding the boundary.
 ///
-/// In a chip at most [`SMALL_CHIP_MAX_HEIGHT_PX`] tall the text is measured by
+/// In a chip under [`SMALL_CHIP_HEIGHT_UNDER_PX`] tall the text is measured by
 /// its glyphs ([`glyph_band`]) rather than by the content area its rect spans:
 /// the line box there already holds the glyphs off the edge, and two pixels
 /// of declared padding read as enough. Taste call r3-20 (2026-09-18).
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
     const TEXT_EDGE_THRESHOLD: f64 = 4.0;
-    let small_chip = rect.height > 0.0 && rect.height <= SMALL_CHIP_MAX_HEIGHT_PX;
+    let small_chip = rect.height > 0.0 && rect.height < SMALL_CHIP_HEIGHT_UNDER_PX;
     let candidates = dom.query_all(Some(el), TEXT_EDGE_QUERY).unwrap_or_default();
     for node in candidates {
         let tag_name = dom.tag_name(node);
@@ -2107,28 +2110,45 @@ mod tests {
             .collect()
     }
 
-    /// Taste call r3-20: a chip at most 28px tall is measured by its glyphs,
-    /// half-leading included. yungching.com.tw's 24px step chip sets a 14px
+    /// Taste call r3-20: a chip under 28px tall is measured by its glyphs,
+    /// half-leading included, and a 28px chip is not under 28px: the bound is
+    /// strictly under 27.5px. yungching.com.tw's 24px step chip sets a 14px
     /// label on a 20px `normal` line 2px off its edges; the glyphs' em box
     /// sits 5px off. haraj.com.sa's 28px price chip holds a 19px content
-    /// area 4px off on a 24px line; its em box is 5.5px off.
+    /// area 4px off inside a 24px line box 2px off and keeps the content-area
+    /// measure, so it reports as it did before the decision (its em box, 5.5px
+    /// off, would not).
     #[test]
     fn cramped_padding_measures_small_chips_by_their_glyphs() {
         let mut d = FakeDom::new();
         let (step, _) = chip(&mut d, 24.0, "14px", "normal", (2.0, 20.0));
         assert!(cramped(&d, step).is_empty(), "{:?}", cramped(&d, step));
 
-        let mut d = FakeDom::new();
-        let (price, _) = chip(&mut d, 28.0, "16px", "24px", (4.0, 19.0));
-        assert!(cramped(&d, price).is_empty(), "28px is still a small chip");
+        let top = vec!["<div> \"faq-content__step\": children flush against bg on top (no inset)"];
+        let price = |height: f64| -> Vec<String> {
+            let mut d = FakeDom::new();
+            let (c, label) = chip(&mut d, height, "16px", "24px", (2.0, 24.0));
+            d.set_text_rect(label, 628.0, 104.0, 41.0, 19.0);
+            cramped(&d, c)
+        };
+        assert_eq!(price(28.0), top, "28px is not under 28px");
 
-        // The same label geometry past 28px keeps the content-area measure.
+        // The bound is strictly under 27.5px: 27.4px is a small chip, while
+        // 27.5px and a subpixel 27.6px keep the content-area measure.
+        for (height, small) in [(27.4, true), (27.5, false), (27.6, false)] {
+            let c = price(height);
+            if small {
+                assert!(c.is_empty(), "{height}px is a small chip: {c:?}");
+            } else {
+                assert_eq!(c, top, "{height}px is not a small chip");
+            }
+        }
+
+        // The step chip's label geometry past the bound keeps the
+        // content-area measure.
         let mut d = FakeDom::new();
         let (tall, _) = chip(&mut d, 30.0, "14px", "normal", (2.0, 20.0));
-        assert_eq!(
-            cramped(&d, tall),
-            vec!["<div> \"faq-content__step\": children flush against bg on top (no inset)"]
-        );
+        assert_eq!(cramped(&d, tall), top);
 
         // A chip whose glyphs really do touch its edges still reports: a 16px
         // label on a 16px line in a 20px chip, its 19px content area 0.5px

@@ -3886,14 +3886,15 @@ What changed:
   compared in thousandths of a pixel: text at 10.9px or below (9.9px for
   smallprint) reports, 10.9688px and 10.944px no longer do. Both engines.
 - **cramped-padding.** In the wrapper path ("children flush against"), a box
-  at most 28px tall measures each text child by its glyphs: each line's em
+  strictly under 27.5px tall measures each text child by its glyphs: each line's em
   box, one font size tall and centred on the content area its Range rect
   spans, which adds the room a face keeps above its capitals and below its
   descenders to the padding and CSS half-leading the rect already sat inside.
   Only the vertical edges move, and the 4px edge threshold is unchanged. The
-  28px bound is inclusive: the price chips the decision rests on
-  (haraj.com.sa) measure exactly 28px. The first path (own text) is gated at a
-  30px line box and cannot see a chip. URL engine only: the static wrapper
+  bound was first inclusive at 28px; Paul's follow-up (below) made it strictly
+  under 27.5px, so haraj.com.sa's 28px price chip keeps the content-area
+  measure. The first path (own text) is gated at a 30px line box and cannot
+  see a chip. URL engine only: the static wrapper
   path reads declared padding, not text.
 
 Fixtures: `tight-leading.html` gains four flag cases (bold body text over
@@ -3954,7 +3955,7 @@ in the directory sweeps).
 5. **The em box is centred on the content area.** Faces with a tall ascent
    and a short descent sit their glyphs higher than that; the edge threshold
    stays 4px.
-6. **API.** `glyph_band`, `SMALL_CHIP_MAX_HEIGHT_PX` (core);
+6. **API.** `glyph_band`, `SMALL_CHIP_HEIGHT_UNDER_PX` (core);
    `LEADING_BOLD_TITLE_WEIGHT`, `LEADING_BOLD_TITLE_MAX_LINES`,
    `font_weight_number`, `is_line_clamp_display`, `is_line_clamp`,
    `is_bold_title_leading`,
@@ -3989,7 +3990,8 @@ confirm:
 1. **The chip bound is inclusive.** r3-20 exempts chips up to and including
    28px tall (`<= 28`), while the option text says "under 28px". The entry's
    problem text says "24 to 28px chips" and haraj.com.sa's evidence chip
-   measures exactly 28, so the inclusive bound is defensible.
+   measures exactly 28, so the inclusive bound is defensible. Paul ruled
+   against it: see the follow-up below.
 2. **Glyphs are the em box, not ink.** With Arial 16px in a 24px chip (2px
    padding, 20px line) the capitals sit about 6px from the top, yet the chip
    still reports "flush on top" (em band 3.99px from the edge). Base already
@@ -4006,6 +4008,36 @@ confirm:
 5. **The UI floor rounds to thousandths.** `is_under_ui_text_floor` rounds the
    shortfall, so 10.9000 up to about 10.9005px still reports though it is
    under 0.1px short of the floor. Not practically significant.
+
+### Follow-up: the chip bound is strictly under 27.5px (r3-20)
+
+Paul, on review item 1: a 28px chip is not under 28px. `cramped-padding`
+measures a box by its glyphs only when it is strictly under 27.5px tall
+(`SMALL_CHIP_HEIGHT_UNDER_PX`, renamed from `SMALL_CHIP_MAX_HEIGHT_PX`, and
+compared with `<`). A 28px chip, or one a subpixel layout puts at 27.6px,
+goes back to the content-area measure it had before r3-20. The 24px step
+chips stay inside the bound.
+
+- **Fixture.** `cramped-padding.html` gains a 28px price chip and the same
+  chip at 27.6px (flag, "on top") and at 27px (pass, browser only): a 14px
+  label on a 20px line 2px from the top, its content area about 3px off the
+  edge and its em box 4.5px off. `crates/browser/tests/text_geometry.rs`
+  pins all three; the unit test in `crates/core/src/browser/quality.rs`
+  pins 28, 27.6 and 27.5px reporting and 27.4px passing, on haraj.com.sa's
+  geometry (a 19px content area 4px off inside a 24px line box).
+- **Goldens.** The static engine reads declared padding, so all three new
+  chips report there ("top/bottom"). Re-recorded and reviewed:
+  `detect-fixture-{json,text}-cramped-padding-html` (3 to 6 in the text
+  form), `detect-dir-{json,text,quiet}-all-fixtures` (683 to 686),
+  `detect-scope-layout-text` (51 to 54), `detect-scope-both` and
+  `detect-no-advisory-{json,text}`. Each gains only the three chip findings
+  and the counts.
+- **Run 25** (`integration-25-premise3b-chip`, against
+  `integration-25-premise3`): cramped-padding 109 to 110. One finding comes
+  back, haraj.com.sa's 28px price chip (capture 2688, `<div> "flex": children
+  flush against bg on top`, labelled pattern-absent). The yungching.com.tw
+  step chips (4), people.com.cn's `i.gray` chips (4) and context.dev's
+  moved `Auto-fill` chip are unchanged. No other rule moves.
 
 ## Recorded 2026-09-18: viewport edges and overflow (corpus/premise3-edges-and-overflow)
 

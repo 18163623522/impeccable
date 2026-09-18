@@ -191,16 +191,24 @@ fn the_text_geometry_rules_measure_the_text() {
     );
     assert_eq!(leading.len(), 9, "the nine flag cases: {leading:?}");
 
-    // A chip at most 28px tall is measured by its glyphs (taste call r3-20):
+    // A chip under 27.5px tall is measured by its glyphs (taste call r3-20):
     // the step chip's line box holds them 5px off its edges, the 20px chip's
-    // glyphs still reach within 2px.
+    // glyphs still reach within 2px. The price chip passes at 27px and
+    // reports at 28px and 27.6px, where the content area measures it.
     let cramped = findings(&engine, port, "cramped-padding.html", "cramped-padding");
     assert_cases(
         &cramped,
-        &["flag-card-4", "flag-touching-chip"],
-        &["pass-highlight", "pass-step-chip"],
+        &["flag-card-4", "flag-touching-chip", "flag-price-chip", "flag-price-chip-subpixel"],
+        &["pass-highlight", "pass-step-chip", "pass-price-chip"],
         "cramped-padding",
     );
+    for chip in ["flag-price-chip", "flag-price-chip-subpixel"] {
+        let (snippet, _) = cramped
+            .iter()
+            .find(|(_, sel)| sel.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).any(|t| t == chip))
+            .expect(chip);
+        assert!(snippet.ends_with("on top (no inset)"), "{chip}: {snippet}");
+    }
 }
 
 #[test]

@@ -4089,7 +4089,8 @@ of the new phone fixture, which report nothing.
     14 blocks` (centene.com), naming the widest box among the paragraphs and
     their ancestors. A box elsewhere that reaches past the edge on such a
     page is held by a clip the walk cannot see, so it is not named. This
-    second wording is a reading of the decision, flagged for review.
+    second wording is a reading of the decision, flagged for review; Paul
+    kept it, and the follow-up below sets when each wording applies.
   - In both, the paragraph is named when its own text reaches further than
     any box.
 - **r4-p19-text-overflow-free-space.** Decision: "Report only when a clipping
@@ -4186,7 +4187,8 @@ issues, for Paul to confirm:
    `overflow-x: hidden` wrapper, or text is past the left edge of an ltr
    page) the message says the text "is cut off" rather than that the page
    scrolls sideways, since that would be false on centene, agora, optimus
-   and simplybudget.
+   and simplybudget. Paul kept both wordings; the follow-up below makes the
+   message follow the page.
 2. **hrsd.gov.sa's 12px phone gutters go.** The seven confirmed-harmful
    "right 12px" findings are removed because the r3-34 floor is 12px. This
    follows the decision as written and contradicts the judges' labels.
@@ -4199,10 +4201,66 @@ issues, for Paul to confirm:
    may have meant it.
 5. **Bare `div` names.** The page-level finding names `div` on some pages
    (centene: "div reaches 120px past it") when `class_selector` has nothing
-   more to use, which is weak guidance for the fix.
+   more to use, which is weak guidance for the fix. Addressed in the
+   follow-up below.
 6. **Parked carousel cards** (microsoft.com `store-layout-column`,
    becomeautonomous.com `proto-acard`) show up as one page-level finding
    each, inherited from issue 24 (item 1 above).
+
+### Follow-up: the page-level message follows the page (r4-p20)
+
+Paul, on review items 1 and 5: the message says what happens on the page.
+
+- **Page scrolls sideways.** The root's recorded `scrollWidth` exceeds its
+  `clientWidth` by more than 1px, the viewport does not clip x (root, then
+  body), the text is past the side the page scrolls to, and at least one
+  paragraph on that side is not cut by a box that hides overflow: `page
+  scrolls sideways at <vw>px: ...`, naming the widest box that sets the
+  page's width, as before.
+- **Text is cut off.** html or body hides or clips x; or, for every
+  paragraph on that side, the paragraph or an ancestor below the body at
+  `overflow-x: hidden` or `clip`, whose own edge on that side is inside the
+  viewport, is passed by the text (`clip_cuts_text`); or the text is past the
+  side a page never scrolls to (left of a left-to-right page); or the root's
+  recorded scroll width shows the page does not scroll. The last two are
+  readings: the engine can tell the page cannot scroll to the text, so
+  saying it scrolls sideways would be false, though the clip itself may be
+  one the walk cannot see (microsoft.com's parked card in a shadow root).
+  A page that scrolls for another reason (a wide banner) while a wrapper cuts
+  every paragraph now reads "cut off"; before, it read "scrolls sideways".
+- **The engine cannot tell.** Nothing it can see clips the text and the root
+  recorded no scroll width: the sideways wording, naming the widest box
+  around the text.
+- **Bare `div` names** (`overflow_element_name`). A `div` with no class is
+  named `div#<id>`, else after its nearest ancestor below the body with an
+  id or a class (`div in div#member-portal`, `div in section.hero.dark.wide-gutter`,
+  at most three classes), else by up to 40 characters of its text, cut at a
+  word (`div ("A column of a fixed-width desktop layout…")`). Other elements
+  keep their `class_selector`.
+
+Fixtures and tests: the desktop `body-text-viewport-edge.html` scrolls
+sideways (wrappers cut three of its five past-the-edge paragraphs, the page
+scrolls to two) and its 3800px row, a bare `div` under the body, is now named
+by its text; the phone fixture keeps its body-clip "cut off" finding.
+`crates/browser/tests/text_geometry.rs` pins both. New unit tests in
+`quality.rs` pin the wording on one page as it moves through a cutting
+wrapper, a wrapper wider than the viewport, a paragraph clipping itself, one
+reachable paragraph, a non-scrolling root, no scroll metric and a body clip,
+and the bare-`div` names. `docs/CLI-CONTRACT.md` describes both wordings.
+No golden moves: the static engine has no page-level form.
+
+Run 25 (`integration-25-premise3b`, against `integration-25-premise3`, and
+the same two engines replayed with every finding listed): body-text-viewport-edge
+is 161 in both, with the same 360 removed and 39 added; the 14 page-level
+findings keep their wording, 5 "scrolls sideways" (drom.ru, dograh.com,
+news.cn at both widths, so-net.ne.jp, all with a root that scrolls) and 9
+"cut off" (html or body clips: centene.com, agora.co.il,
+becomeautonomous.com; a wrapper cuts every paragraph:
+simplybudget.framer.ai 3, tempra.framer.website,
+v0-optimus-delta.vercel.app; a root that does not scroll: microsoft.com).
+None took the cannot-tell path: every capture records the root's scroll
+width. One message changes, centene.com's `div reaches 120px` to `div in
+div.news-desc reaches 120px`. No other rule moves.
 
 ## Recorded 2026-09-18: nested-cards reads fill-only boxes and embedded content (corpus/premise3-nested-cards-premise)
 

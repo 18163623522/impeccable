@@ -158,10 +158,15 @@ fn the_text_geometry_rules_measure_the_text() {
     assert!(gutter.0.ends_with("(left 8px)"), "only the gutter side: {gutter:?}");
     assert_eq!(
         page.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
-        vec!["page scrolls sideways at 1280px: div reaches 2520px past the right edge, and text in 5 blocks runs past it"],
+        vec![
+            "page scrolls sideways at 1280px: div (\"A column of a fixed-width desktop layout…\") reaches 2520px past \
+             the right edge, and text in 5 blocks runs past it"
+        ],
         "one page-level finding: the paragraph an overflow-x-hidden wrapper cuts, the column running past the \
          window, the paragraph in a transformed wrapper, the non-wrapping row's second column and the \
-         gutter case, naming the 3800px row that sets the page's width"
+         gutter case. Wrappers that hide overflow cut three of them, and the page scrolls to the other \
+         two, so it scrolls sideways. It names the 3800px row that sets the page's width, a bare div \
+         under the body, by the start of its text"
     );
 
     // Bold titles of two lines or fewer, or in a -webkit-box line clamp, are

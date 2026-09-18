@@ -57,8 +57,11 @@
        PAGE OVERFLOW CASES — body text that runs past the window's edge.
        That is not a missing gutter but a page wider than its window, and
        the paragraphs report no gutter finding. They count toward one
-       page-level finding: this page scrolls sideways, and the widest box
-       that sets its width is the 3800px column row further down.
+       page-level finding. Wrappers that hide overflow cut three of them,
+       but the page scrolls to the other two, so the message says it scrolls
+       sideways. The widest box that sets its width is the 3800px column row
+       further down, a div with no class or id and no identifying ancestor,
+       named by the start of its text.
        ═══════════════════════════════════════════════════════════ -->
   <!-- A wrapper that only hides sideways overflow (Tailwind's
        overflow-x-hidden) cuts the words off at the screen edge. Nothing

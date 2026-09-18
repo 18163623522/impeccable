@@ -573,6 +573,103 @@ fn filter_blur_px(filter: &str) -> f64 {
     max
 }
 
+/// The viewport width at or under which a phone's gutter floor applies.
+pub const BODY_TEXT_PHONE_VIEWPORT_MAX_PX: f64 = 480.0;
+
+/// The gutter body text keeps from the side of a phone's window: a
+/// consistent 12px (rtx.com at 390px) is a common mobile setting.
+pub const BODY_TEXT_GUTTER_PHONE_PX: f64 = 12.0;
+
+/// The gutter body text keeps from the side of a wider window.
+pub const BODY_TEXT_GUTTER_PX: f64 = 16.0;
+
+/// The gutter floor of `body-text-viewport-edge` at `viewport_width`: 12px at
+/// 480px or less, 16px above.
+pub fn body_text_gutter_floor(viewport_width: f64) -> f64 {
+    if viewport_width <= BODY_TEXT_PHONE_VIEWPORT_MAX_PX {
+        BODY_TEXT_GUTTER_PHONE_PX
+    } else {
+        BODY_TEXT_GUTTER_PX
+    }
+}
+
+/// Where a paragraph's body text starts and ends on the x axis, as
+/// `body-text-viewport-edge` reads it, or `None` when the rule does not
+/// measure it: not a `<p>` or `<li>` of more than 40 characters, inside a
+/// `<nav>` or `<header>`, on its own fill, positioned, half the viewport wide
+/// or less, cut by a scroller or a moving track rather than the page, or
+/// wholly past either side of the viewport.
+///
+/// Measured on the text where it can be: a centred or padded paragraph
+/// spans the viewport with its box while its glyphs keep a gutter, and a
+/// paragraph a horizontal scroller cuts (a slide in a swiped track) meets
+/// that track's clip rather than the page edge. A box that only hides its
+/// overflow proves no track, so text it cuts at the screen edge counts.
+/// Prose whose words sit wholly in inline children is measured the same
+/// way. Where the text cannot be measured the box stands in, as before.
+fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
+    let el = q.el;
+    let tag = q.tag.as_str();
+    let viewport_width = q.viewport_width;
+    let has_direct_text = q.has_direct_text;
+    let rect = &q.rect;
+    let st = |k: &str| dom.style(el, k);
+    let spx = |k: &str| style_px(dom, el, k);
+    let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
+    let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
+    if !((has_direct_text || edge_prose) && q.text_len > 40 && is_edge_tag && viewport_width > 0.0) {
+        return None;
+    }
+    let in_nav_header = closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
+    let bg = st("backgroundColor");
+    let has_own_bg = !bg.is_empty() && bg != "rgba(0, 0, 0, 0)" && bg != "transparent";
+    let pos = st("position");
+    let is_positioned = pos == "fixed" || pos == "absolute";
+    let width_ratio = rect.width / viewport_width;
+    if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
+        return None;
+    }
+    let (left, right) = match phrasing_text_extent(dom, el) {
+        Some(t) if scrolling_ancestor_cuts(dom, el, &t) => return None,
+        Some(t) => {
+            let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
+            let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
+            let pitch = q
+                .line_height_px
+                .filter(|lh| *lh > 0.0)
+                .unwrap_or(q.font_size * NORMAL_LINE_HEIGHT_EM);
+            if text_line_count(t.height, pitch, q.font_size) >= 2.0
+                && t.width >= (content_right - content_left) * TEXT_FILLS_MEASURE
+            {
+                // Wrapped lines that fill the column reach its edges; how
+                // ragged the longest line happens to be is not the gutter.
+                (content_left, content_right)
+            } else if st("display") == "list-item" {
+                // A list item's marker is painted, not a text node: an
+                // `inside` bullet sits at the content edge ahead of the text,
+                // so the start side reaches that edge.
+                if st("direction") == "rtl" {
+                    (t.left, js::math_max(t.right, content_right))
+                } else {
+                    (js::math_min(t.left, content_left), t.right)
+                }
+            } else {
+                (t.left, t.right)
+            }
+        }
+        None if has_direct_text => (rect.left, rect.right),
+        None => return None,
+    };
+    // Text wholly past either side of the viewport meets no edge a reader
+    // sees: a desktop column laid out past a phone viewport, a list parked
+    // 800px to the right.
+    if right > 0.0 && left < viewport_width {
+        Some((left, right))
+    } else {
+        None
+    }
+}
+
 /// JS: checks.mjs#checkQuality(opts), browser adapter inputs (`rect` set,
 /// `win` = window).
 pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
@@ -964,69 +1061,20 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Body text touching viewport edge ---
-    // Measured on the text where it can be: a centred or padded paragraph
-    // spans the viewport with its box while its glyphs keep a gutter, and a
-    // paragraph a horizontal scroller cuts (a slide in a swiped track) meets
-    // that track's clip rather than the page edge. A box that only hides its
-    // overflow proves no track, so text it cuts at the screen edge reports.
-    // Prose whose words sit wholly in inline children is measured the same
-    // way. Where the text cannot be measured the box stands in, as before.
-    let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
-    let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
-    if (has_direct_text || edge_prose) && text_len > 40 && is_edge_tag && viewport_width > 0.0 {
-        let in_nav_header =
-            closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
-        let bg = st("backgroundColor");
-        let has_own_bg = !bg.is_empty() && bg != "rgba(0, 0, 0, 0)" && bg != "transparent";
-        let pos = st("position");
-        let is_positioned = pos == "fixed" || pos == "absolute";
-        let width_ratio = rect.width / viewport_width;
-        let span = if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
-            None
-        } else {
-            match phrasing_text_extent(dom, el) {
-                Some(t) if scrolling_ancestor_cuts(dom, el, &t) => None,
-                Some(t) => {
-                    let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
-                    let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
-                    let pitch = q
-                        .line_height_px
-                        .filter(|lh| *lh > 0.0)
-                        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-                    if text_line_count(t.height, pitch, font_size) >= 2.0
-                        && t.width >= (content_right - content_left) * TEXT_FILLS_MEASURE
-                    {
-                        // Wrapped lines that fill the column reach its edges;
-                        // how ragged the longest line happens to be is not
-                        // the gutter.
-                        Some((content_left, content_right))
-                    } else if st("display") == "list-item" {
-                        // A list item's marker is painted, not a text node:
-                        // an `inside` bullet sits at the content edge ahead of
-                        // the text, so the start side reaches that edge.
-                        if st("direction") == "rtl" {
-                            Some((t.left, js::math_max(t.right, content_right)))
-                        } else {
-                            Some((js::math_min(t.left, content_left), t.right))
-                        }
-                    } else {
-                        Some((t.left, t.right))
-                    }
-                }
-                None if has_direct_text => Some((rect.left, rect.right)),
-                None => None,
-            }
-        };
-        let (left, right) = span.unwrap_or((f64::NAN, f64::NAN));
-        // Text wholly past either side of the viewport meets no edge a reader
-        // sees: a desktop column laid out past a phone viewport, a list
-        // parked 800px to the right.
-        let in_viewport = right > 0.0 && left < viewport_width;
-        let left_close = in_viewport && left < 16.0;
-        let right_close = in_viewport && right > viewport_width - 16.0;
+    // The gutter a paragraph keeps from the side of the window. Text that
+    // runs past that side is not a missing gutter but a page wider than its
+    // viewport: the page-level form reports it once, in
+    // `check_page_overflow_dom`, so a paragraph past an edge reports only the
+    // gutter it keeps on the other side.
+    if let Some((left, right)) = body_text_edge_span(dom, q) {
+        let floor = body_text_gutter_floor(viewport_width);
+        let l = math_round(left);
+        let r = math_round(viewport_width - right);
+        let left_close = l >= 0.0 && left < floor;
+        let right_close = r >= 0.0 && right > viewport_width - floor;
         if left_close || right_close {
-            let l = number_to_string(math_round(left));
-            let r = number_to_string(math_round(viewport_width - right));
+            let l = number_to_string(l);
+            let r = number_to_string(r);
             let which = if left_close && right_close {
                 format!("left {}px / right {}px", l, r)
             } else if left_close {
@@ -1263,6 +1311,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
 
 /// JS: checks.mjs#checkElementQualityDOM(el)
 pub fn check_element_quality_dom(dom: &dyn Dom, el: ElId, config: &BrowserConfig) -> Vec<RuleHit> {
+    check_quality(dom, &quality_input(dom, el, config.line_max()))
+}
+
+/// The inputs `checkQuality` reads for `el`, as the browser adapter builds
+/// them.
+fn quality_input(dom: &dyn Dom, el: ElId, line_max: f64) -> QualityInput {
     let tag = tag_lower(dom, el);
     let has_direct_text = has_direct_text_longer_than(dom, el, 10);
     let text_len = utf16_len(js::trim(&dom.text_content(el)));
@@ -1277,7 +1331,6 @@ pub fn check_element_quality_dom(dom: &dyn Dom, el: ElId, config: &BrowserConfig
     let line_height_px = resolve_length_px(Some(&dom.style(el, "lineHeight")), font_size);
     let letter_spacing_px = resolve_length_px(Some(&dom.style(el, "letterSpacing")), font_size);
     let rect = dom.rect(el);
-    let line_max = config.line_max();
     let viewport_width = {
         let w = dom.inner_width();
         if crate::js_ext_a::num_truthy(w) {
@@ -1286,21 +1339,18 @@ pub fn check_element_quality_dom(dom: &dyn Dom, el: ElId, config: &BrowserConfig
             0.0
         }
     };
-    check_quality(
-        dom,
-        &QualityInput {
-            el,
-            tag,
-            has_direct_text,
-            text_len,
-            font_size,
-            line_height_px,
-            letter_spacing_px,
-            rect,
-            line_max,
-            viewport_width,
-        },
-    )
+    QualityInput {
+        el,
+        tag,
+        has_direct_text,
+        text_len,
+        font_size,
+        line_height_px,
+        letter_spacing_px,
+        rect,
+        line_max,
+        viewport_width,
+    }
 }
 
 /// JS: checks.mjs#checkPageQualityFromDoc(doc)
@@ -1339,6 +1389,233 @@ pub fn check_page_quality_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
         .iter()
         .map(BrowserFinding::from_hit)
         .collect()
+}
+
+/// The side of the viewport text runs past.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    fn name(self) -> &'static str {
+        match self {
+            Side::Left => "left",
+            Side::Right => "right",
+        }
+    }
+
+    /// How far an x extent reaches past this side of a viewport `vw` wide.
+    fn past(self, left: f64, right: f64, vw: f64) -> f64 {
+        match self {
+            Side::Left => -left,
+            Side::Right => right - vw,
+        }
+    }
+}
+
+/// Whether the viewport clips horizontal overflow: the root's `overflow-x`,
+/// or body's when the root's is `visible`, since body's then propagates to
+/// the viewport. Such a page cannot be scrolled sideways, and what runs past
+/// its edge is cut off.
+fn viewport_clips_x(dom: &dyn Dom) -> bool {
+    let root = dom
+        .document_element()
+        .map(|r| super::text_geometry::overflow_x(dom, r))
+        .unwrap_or_default();
+    let ox = if root.is_empty() || root == "visible" {
+        dom.body().map(|b| super::text_geometry::overflow_x(dom, b)).unwrap_or_default()
+    } else {
+        root
+    };
+    matches!(ox.as_str(), "hidden" | "clip")
+}
+
+/// The side a page scrolls to when it is wider than the viewport: right, or
+/// left under `direction: rtl`. Overflow on the other side is unreachable.
+fn scroll_side(dom: &dyn Dom) -> Side {
+    let dir = dom
+        .document_element()
+        .map(|r| dom.style(r, "direction"))
+        .filter(|d| !d.is_empty())
+        .or_else(|| dom.body().map(|b| dom.style(b, "direction")))
+        .unwrap_or_default();
+    if dir == "rtl" {
+        Side::Left
+    } else {
+        Side::Right
+    }
+}
+
+/// On a page that scrolls sideways, the element whose box reaches furthest
+/// past `side` of the viewport among those that set the page's width: every
+/// box under the root that no ancestor below the root clips or scrolls on the
+/// x axis and that is not fixed to the viewport, reaching no further than
+/// the page scrolls (`limit`). The root and body pass their overflow to the
+/// viewport and are walked through. Ties go to the outer box, which holds
+/// the rest. Returns the element and how far past the edge it reaches.
+fn widest_past_edge(dom: &dyn Dom, side: Side, vw: f64, limit: f64) -> Option<(ElId, f64)> {
+    let root = dom.document_element()?;
+    let body = dom.body();
+    let mut best: Option<(ElId, f64)> = None;
+    let mut stack: Vec<ElId> = dom.children(root).into_iter().rev().collect();
+    while let Some(el) = stack.pop() {
+        let display = dom.style(el, "display");
+        if display == "none" || dom.style(el, "position") == "fixed" {
+            continue;
+        }
+        if NON_RENDERED_TAGS.contains(&tag_lower(dom, el).as_str()) {
+            continue;
+        }
+        let r = dom.rect(el);
+        if display != "contents" && r.all_finite() && (r.width > 0.0 || r.height > 0.0) {
+            let d = side.past(r.left, r.right, vw);
+            if d >= 1.0 && d <= limit && best.map_or(true, |(_, b)| d > b + 0.5) {
+                best = Some((el, d));
+            }
+        }
+        let is_body = Some(el) == body;
+        let descends = is_body
+            || (!super::text_geometry::clips_x(dom, el)
+                && dom.namespace_uri(el) != "http://www.w3.org/2000/svg");
+        if descends {
+            stack.extend(dom.children(el).into_iter().rev());
+        }
+    }
+    best
+}
+
+/// On a page that cannot scroll to what runs past `side`, the widest box that
+/// holds text past it: the box reaching furthest past the edge among the
+/// paragraphs in `past` and their ancestors below the root. Whatever else
+/// reaches past the edge there is held by a clip the walk above may not see
+/// (a clip path, paint containment, a shadow root), so only the boxes around
+/// the text count. Ties go to the outer box.
+fn widest_holding_text(dom: &dyn Dom, past: &[(ElId, Side, f64)], side: Side, vw: f64) -> Option<(ElId, f64)> {
+    let root = dom.document_element();
+    let mut best: Option<(ElId, f64)> = None;
+    for &(el, s, _) in past {
+        if s != side {
+            continue;
+        }
+        let mut chain: Option<(ElId, f64)> = None;
+        let mut cur = Some(el);
+        while let Some(c) = cur {
+            if Some(c) == root {
+                break;
+            }
+            let r = dom.rect(c);
+            if r.all_finite() && (r.width > 0.0 || r.height > 0.0) {
+                let d = side.past(r.left, r.right, vw);
+                if d >= 1.0 && chain.map_or(true, |(_, b)| d + 0.5 >= b) {
+                    chain = Some((c, d));
+                }
+            }
+            cur = dom.parent(c);
+        }
+        if let Some((c, d)) = chain {
+            if best.map_or(true, |(_, b)| d > b + 0.5) {
+                best = Some((c, d));
+            }
+        }
+    }
+    best
+}
+
+/// `body-text-viewport-edge`, page-level form: body text that runs past the
+/// side of the viewport. That is not a missing gutter but a page wider than
+/// its window, and one overflowing layout would otherwise report once per
+/// paragraph with advice to add padding. It reports once per page, attributed
+/// to the page, and names the widest element: the box reaching furthest past
+/// that side among those that set the page's width, or the text itself when
+/// it reaches further than any box. When the page scrolls sideways (wider
+/// than the viewport on the side it scrolls to, and the viewport does not
+/// clip) the message says so; otherwise the text is cut off at the edge, by
+/// the viewport or by a box that hides overflow. The paragraphs are the ones
+/// the element form measures, through the same gates, with the Text paint
+/// gate and inline ignores applied to each.
+pub fn check_page_overflow_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
+    const RULE: &str = "body-text-viewport-edge";
+    let vw = dom.inner_width();
+    if !(vw.is_finite() && vw > 0.0) {
+        return Vec::new();
+    }
+    // (element, side, how far its text reaches past that side)
+    let mut past: Vec<(ElId, Side, f64)> = Vec::new();
+    for el in dom.query_all(None, "p, li").unwrap_or_default() {
+        if !super::driver::element_is_scanned(dom, el) {
+            continue;
+        }
+        let q = quality_input(dom, el, 0.0);
+        let Some((left, right)) = body_text_edge_span(dom, &q) else {
+            continue;
+        };
+        let sides: Vec<Side> = [Side::Left, Side::Right]
+            .into_iter()
+            .filter(|s| math_round(s.past(left, right, vw)) > 0.0)
+            .collect();
+        if sides.is_empty() {
+            continue;
+        }
+        if super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
+            || super::driver::scoped_ignore_active(dom, el, RULE)
+        {
+            continue;
+        }
+        for s in sides {
+            past.push((el, s, s.past(left, right, vw)));
+        }
+    }
+    let Some(&(first, side, text_reach)) = past
+        .iter()
+        .fold(None, |acc: Option<&(ElId, Side, f64)>, p| match acc {
+            Some(a) if a.2 >= p.2 => Some(a),
+            _ => Some(p),
+        })
+    else {
+        return Vec::new();
+    };
+    let blocks = past.iter().filter(|p| p.1 == side).count();
+    // How far the page scrolls past the viewport, when it scrolls to `side`.
+    let scroll_reach = (!viewport_clips_x(dom) && side == scroll_side(dom))
+        .then(|| dom.document_element())
+        .flatten()
+        .map(|root| {
+            let (scroll, client) = (dom.scroll_width(root), dom.client_width(root));
+            let client = if client.is_finite() && client > 0.0 { client } else { vw };
+            if scroll.is_finite() {
+                scroll - client
+            } else {
+                0.0
+            }
+        })
+        .filter(|d| *d > 1.0);
+    let scrolls = scroll_reach.is_some();
+    let widest_box = match scroll_reach {
+        Some(limit) => widest_past_edge(dom, side, vw, limit + 1.0),
+        None => widest_holding_text(dom, &past, side, vw),
+    };
+    let (widest, reach) = match widest_box {
+        Some((el, d)) if d + 0.5 >= text_reach => (el, d),
+        _ => (first, text_reach),
+    };
+    let name = super::element_checks::class_selector(dom, widest);
+    let reach = number_to_string(math_round(reach));
+    let blocks = format!("{} {}", blocks, if blocks == 1 { "block" } else { "blocks" });
+    let vw = number_to_string(math_round(vw));
+    let detail = if scrolls {
+        format!(
+            "page scrolls sideways at {vw}px: {name} reaches {reach}px past the {} edge, and text in {blocks} runs past it",
+            side.name()
+        )
+    } else {
+        format!(
+            "text runs past the {} edge of the {vw}px viewport and is cut off: {name} reaches {reach}px past it, with text in {blocks}",
+            side.name()
+        )
+    };
+    vec![BrowserFinding::new(RULE, detail)]
 }
 
 #[cfg(test)]
@@ -2318,9 +2595,9 @@ mod tests {
 
         // Text a box that only hides overflow cuts at 1,270px: an
         // `overflow-hidden` section (v0-optimus-delta.vercel.app) cannot be
-        // told from a carousel track, and the text reports as base did. Its
-        // two lines fill the paragraph, so the paragraph's edge is the one
-        // printed.
+        // told from a carousel track. Text past the window's edge is the
+        // page's overflow, which the page-level form reports once; the
+        // paragraph reports no gutter on that side.
         let track = d.add(Some(body), "div");
         d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden")]);
         d.set_rect(track, 10.0, 300.0, 1260.0, 200.0);
@@ -2330,17 +2607,31 @@ mod tests {
         d.set_style(slide, "lineHeight", "24px");
         d.set_rect(slide, 900.0, 320.0, 700.0, 48.0);
         d.set_text_rect(slide, 900.0, 322.0, 690.0, 44.0);
-        let cut = vec![format!("<p> with {len}-char body bleeds to viewport edge (right -320px)")];
-        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow: hidden");
+        let past = |d: &FakeDom| -> Vec<String> {
+            check_page_overflow_dom(d).into_iter().map(|f| f.detail).collect()
+        };
+        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "cut by overflow: hidden");
+        let cut = vec![
+            "text runs past the right edge of the 1280px viewport and is cut off: p reaches 320px past it, with text in 1 block"
+                .to_string(),
+        ];
+        assert_eq!(past(&d), cut, "cut by overflow: hidden");
         d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden auto")]);
-        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow-x-hidden");
+        assert_eq!(past(&d), cut, "cut by overflow-x-hidden");
         // A track that scrolls on x, with the slide to scroll to, brings the
-        // text into view: its clip is the track's, not the page's gutter.
+        // text into view: its clip is the track's, not the page's.
         d.set_styles(track, &[("overflowX", "auto"), ("overflow", "auto")]);
-        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "a swiped track");
-        // Out of the track, the same text runs off the page and reports.
+        assert!(past(&d).is_empty(), "a swiped track");
+        // Out of the track, the same text runs off the page, and the track is
+        // the widest box.
         d.set_styles(track, &[("overflowX", "visible"), ("overflow", "visible")]);
-        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut);
+        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty());
+        assert_eq!(
+            past(&d),
+            vec!["text runs past the right edge of the 1280px viewport and is cut off: p reaches 320px past it, with text in 1 block".to_string()],
+            "a root that does not scroll"
+        );
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden")]);
 
         // Wrapped lines that fill a padded paragraph sit on its content box.
         let padded = text_el(&mut d, body, "p", copy, "16px");
@@ -2369,6 +2660,179 @@ mod tests {
         d.set_style(li, "paddingLeft", "24px");
         d.set_text_rect(li, 42.0, 602.0, 700.0, 20.0);
         assert!(snippets(&d, li, "body-text-viewport-edge").is_empty());
+    }
+
+    /// Taste call r3-34: at 480px or less the gutter floor is 12px, above it
+    /// 16px. rtx.com keeps a consistent 12px at 390px; text 8px from a
+    /// phone's edge still reports.
+    #[test]
+    fn viewport_edge_floor_is_12px_on_phones() {
+        let copy = "Our engineers build the systems that keep aircraft flying safely on every continent.";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        let at = |d: &mut FakeDom, vw: f64, gutter: f64| -> Vec<String> {
+            d.inner_width = vw;
+            let pad = format!("{gutter}px");
+            d.set_styles(p, &[("paddingLeft", pad.as_str()), ("paddingRight", pad.as_str())]);
+            d.set_rect(p, 0.0, 100.0, vw, 48.0);
+            d.set_text_rect(p, gutter, 102.0, vw - 2.0 * gutter, 44.0);
+            snippets(d, p, "body-text-viewport-edge")
+        };
+        assert!(at(&mut d, 390.0, 12.0).is_empty(), "12px at 390px");
+        assert!(at(&mut d, 480.0, 12.0).is_empty(), "12px at 480px");
+        assert_eq!(
+            at(&mut d, 390.0, 8.0),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 8px / right 8px)")]
+        );
+        assert_eq!(
+            at(&mut d, 390.0, 11.0),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 11px / right 11px)")]
+        );
+        assert_eq!(
+            at(&mut d, 481.0, 12.0),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 12px / right 12px)")],
+            "16px above 480px"
+        );
+        assert_eq!(at(&mut d, 1280.0, 12.0).len(), 1);
+        assert!(at(&mut d, 1280.0, 16.0).is_empty());
+    }
+
+    /// Taste call r4-p20 (observations-25 issue 8): text past the viewport
+    /// edge is the page's overflow, reported once per page with a message
+    /// that says the page scrolls sideways and names the widest element.
+    /// The per-paragraph findings go; gutters between 0 and the floor still
+    /// report as gutters.
+    #[test]
+    fn text_past_the_viewport_reports_once_as_page_overflow() {
+        let copy = "Бесплатные объявления о продаже автомобилей, запчастей и шин по всей стране.";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.inner_width = 390.0;
+        d.set_rect(html, 0.0, 0.0, 390.0, 2400.0);
+        d.el_mut(html).client_width = 390.0;
+        d.el_mut(html).scroll_width = 1024.0;
+        // drom.ru: a fixed 1024px desktop page at a phone's width.
+        d.set_rect(body, 0.0, 0.0, 1024.0, 2400.0);
+        let page = d.add(Some(body), "div");
+        d.set_attr(page, "class", "b-wrapper");
+        d.set_rect(page, 0.0, 0.0, 1024.0, 2400.0);
+        let mut paras = Vec::new();
+        for (i, right) in [731.0, 646.0, 380.0].into_iter().enumerate() {
+            let p = text_el(&mut d, page, "p", copy, "16px");
+            d.set_style(p, "lineHeight", "24px");
+            d.set_rect(p, 20.0, 100.0 + 60.0 * i as f64, 1000.0, 24.0);
+            d.set_text_rect(p, 20.0, 102.0 + 60.0 * i as f64, right - 20.0, 20.0);
+            paras.push(p);
+        }
+        // Past the edge, no gutter finding: a 20px left gutter holds.
+        for &p in &paras[..2] {
+            assert!(snippets(&d, p, "body-text-viewport-edge").is_empty());
+        }
+        // The one that ends 10px short of the edge keeps a gutter under 12px.
+        assert_eq!(
+            snippets(&d, paras[2], "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (right 10px)")]
+        );
+        let past = |d: &FakeDom| -> Vec<String> {
+            check_page_overflow_dom(d).into_iter().map(|f| f.detail).collect()
+        };
+        // One finding for the page, naming the outermost of the widest boxes.
+        assert_eq!(
+            past(&d),
+            vec!["page scrolls sideways at 390px: body reaches 634px past the right edge, and text in 2 blocks runs past it"
+                .to_string()]
+        );
+        // The body at the viewport's width, the wrapper sets the page's width.
+        d.set_rect(body, 0.0, 0.0, 390.0, 2400.0);
+        assert_eq!(
+            past(&d),
+            vec!["page scrolls sideways at 390px: div.b-wrapper reaches 634px past the right edge, and text in 2 blocks runs past it"
+                .to_string()]
+        );
+        // A wider box inside a box that clips it does not set the page's width.
+        let strip = d.add(Some(page), "div");
+        d.set_styles(strip, &[("overflowX", "hidden")]);
+        d.set_rect(strip, 0.0, 400.0, 1024.0, 40.0);
+        let banner = d.add(Some(strip), "div");
+        d.set_rect(banner, 0.0, 400.0, 3000.0, 40.0);
+        assert!(past(&d)[0].contains("div.b-wrapper reaches 634px"), "{:?}", past(&d));
+        d.set_style(strip, "overflowX", "visible");
+        // No box reaches further than the page scrolls: one that does is held
+        // by a clip the walk cannot see.
+        assert!(past(&d)[0].contains("div.b-wrapper reaches 634px"), "{:?}", past(&d));
+        d.el_mut(html).scroll_width = 3000.0;
+        assert!(past(&d)[0].contains("div reaches 2610px"), "{:?}", past(&d));
+        d.set_style(banner, "position", "fixed");
+        assert!(past(&d)[0].contains("div.b-wrapper reaches 634px"), "a fixed box sets no width");
+        d.el_mut(html).scroll_width = 1024.0;
+
+        // A viewport that clips (centene.com's body at overflow-x: hidden)
+        // cannot be scrolled: the text is cut off.
+        d.set_style(body, "overflowX", "hidden");
+        assert_eq!(
+            past(&d),
+            vec!["text runs past the right edge of the 390px viewport and is cut off: div.b-wrapper reaches 634px past it, with text in 2 blocks"
+                .to_string()]
+        );
+        // A page that cannot scroll names the widest box around the text,
+        // not a box elsewhere that a clip the walk cannot see holds.
+        d.set_style(banner, "position", "static");
+        assert!(past(&d)[0].contains("div.b-wrapper reaches 634px"), "{:?}", past(&d));
+        d.set_style(banner, "position", "fixed");
+        // The root's own overflow wins over body's.
+        d.set_style(html, "overflowX", "auto");
+        assert!(past(&d)[0].starts_with("page scrolls sideways"), "{:?}", past(&d));
+        d.set_style(html, "overflowX", "hidden");
+        assert!(past(&d)[0].starts_with("text runs past"), "{:?}", past(&d));
+        d.set_style(html, "overflowX", "visible");
+        d.set_style(body, "overflowX", "visible");
+
+        // An inline ignore on a paragraph leaves it out of the count.
+        d.set_attr(paras[1], "data-impeccable-ignore", "body-text-viewport-edge");
+        assert!(past(&d)[0].ends_with("text in 1 block runs past it"), "{:?}", past(&d));
+        d.set_attr(paras[0], "data-impeccable-ignore", "body-text-viewport-edge");
+        assert!(past(&d).is_empty(), "every paragraph waived");
+    }
+
+    /// agora.co.il at 390px: a right-to-left page scrolls to the left, and
+    /// text past the right edge of such a page, or past the left edge of a
+    /// left-to-right one, cannot be scrolled to.
+    #[test]
+    fn page_overflow_reads_the_scroll_side() {
+        let copy = "תודה שנרשמת לאתר. נשלח אליך הודעה עם כל הפרטים ברגע שהמודעה שלך תאושר ותפורסם.";
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.inner_width = 390.0;
+        d.set_rect(html, 0.0, 0.0, 390.0, 1400.0);
+        d.el_mut(html).client_width = 390.0;
+        d.el_mut(html).scroll_width = 639.0;
+        d.set_rect(body, 0.0, 0.0, 390.0, 1400.0);
+        let p = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_attr(p, "id", "thanks");
+        d.set_rect(p, -249.0, 300.0, 625.0, 24.0);
+        d.set_text_rect(p, -249.0, 302.0, 625.0, 20.0);
+        let past = |d: &FakeDom| -> Vec<String> {
+            check_page_overflow_dom(d).into_iter().map(|f| f.detail).collect()
+        };
+        // The right side keeps 14px, over the phone floor.
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty());
+        assert_eq!(
+            past(&d),
+            vec!["text runs past the left edge of the 390px viewport and is cut off: p reaches 249px past it, with text in 1 block"
+                .to_string()],
+            "left of a left-to-right page"
+        );
+        d.set_style(html, "direction", "rtl");
+        assert_eq!(
+            past(&d),
+            vec!["page scrolls sideways at 390px: p reaches 249px past the left edge, and text in 1 block runs past it"
+                .to_string()],
+        );
     }
 
     /// observations-20 row 40: an inline run at `line-height: 11px` inside a

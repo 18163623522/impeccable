@@ -2637,22 +2637,34 @@ fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, unme
     }
 }
 
-/// Whether the content that makes `el`'s `scrollWidth` exceed its box is
-/// content a reader sees reach past it. `scrollWidth` also counts what paints
-/// nothing there: the empty, absolutely positioned ripple span a Material
-/// button carries, a `min-width` reserve held for a rotating word, text an
+/// How far the content that makes `el`'s `scrollWidth` exceed its box reaches
+/// on the x axis, `(left, right)`, when a reader sees it reach past the box,
+/// or `None` when it does not. `scrollWidth` also counts what paints nothing
+/// there: the empty, absolutely positioned ripple span a Material button
+/// carries, a `min-width` reserve held for a rotating word, text an
 /// overflow-hidden box pushes wholly outside itself (`text-indent: -9999px`
 /// image replacement). When the element's own text cannot be measured, or
 /// the element or a descendant carries generated content (a `::before` or
-/// `::after` no text rect covers), the overflow is taken as read, as before.
-fn overflow_is_painted(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
-    let Some(own) = dom.direct_text_rect(el) else {
-        return true;
-    };
+/// `::after` no text rect covers), the overflow is taken as read, as before,
+/// and its reach is the scroll extent: the content box plus `scrollWidth`
+/// from the start edge.
+fn painted_overflow_extent(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<(f64, f64)> {
     let left = rect.left + dom.client_left(el);
     let right = left + dom.client_width(el);
+    let scroll_extent = || {
+        let scroll = dom.scroll_width(el);
+        let scroll = if scroll.is_finite() { scroll } else { dom.client_width(el) };
+        if dom.style(el, "direction") == "rtl" {
+            (right - scroll, right)
+        } else {
+            (left, left + scroll)
+        }
+    };
+    let Some(own) = dom.direct_text_rect(el) else {
+        return Some(scroll_extent());
+    };
     if !own.all_finite() || !left.is_finite() || !right.is_finite() {
-        return true;
+        return Some(scroll_extent());
     }
     let clips = generates_box(dom, el)
         && matches!(crate::browser::text_geometry::overflow_x(dom, el).as_str(), "hidden" | "clip");
@@ -2662,16 +2674,210 @@ fn overflow_is_painted(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
     }
     let mut unmeasured = generated_content_unmeasured(dom, el);
     painted_descendant_extents(dom, el, &mut extents, &mut unmeasured);
-    unmeasured || extents.iter().any(|r| {
-        // A box that clips paints none of what lies wholly outside it.
-        if clips && (r.right <= left || r.left >= right) {
-            return false;
+    if unmeasured {
+        return Some(scroll_extent());
+    }
+    // A box that clips paints none of what lies wholly outside it.
+    let seen: Vec<&Rect> = extents
+        .iter()
+        .filter(|r| !(clips && (r.right <= left || r.left >= right)))
+        .collect();
+    // `scrollWidth` and `clientWidth` are whole pixels while text rects are
+    // not, so a 16px overflow can come from 15.75px of glyphs.
+    let min = TEXT_OVERFLOW_MIN_PX - 1.0;
+    if !seen.iter().any(|r| r.right - right >= min || left - r.left >= min) {
+        return None;
+    }
+    let reach_left = seen.iter().map(|r| r.left).fold(left, js::math_min);
+    let reach_right = seen.iter().map(|r| r.right).fold(right, js::math_max);
+    Some((reach_left, reach_right))
+}
+
+/// How close, in ems of the spilling text, a spill has to come to another
+/// box or to the viewport edge to meet it: a quarter em, under a word space,
+/// where two runs read as one ("99.99%<50ms").
+const SPILL_MEETS_EM: f64 = 0.25;
+
+/// Whether a spill a reader sees does harm: text past `box_` (the content
+/// box it overflows, `(left, right)`) out to `reach` is reported only when a
+/// clipping ancestor (or `el`'s own clip) cuts it, when it runs into another
+/// box, or when it reaches the viewport edge. Text that runs past its own box
+/// into free space (a `white-space: pre` contact line in a wide footer, a
+/// nowrap headline line with empty space beside it) is left alone.
+fn spill_does_harm(dom: &dyn Dom, el: ElId, box_: (f64, f64), reach: (f64, f64)) -> bool {
+    let (box_left, box_right) = box_;
+    let (reach_left, reach_right) = reach;
+    let spills_right = reach_right > box_right + 1.0;
+    let spills_left = reach_left < box_left - 1.0;
+    if !spills_right && !spills_left {
+        return false;
+    }
+    let font_size = {
+        let n = style_px(dom, el, "fontSize");
+        if n.is_finite() && n > 0.0 {
+            n
+        } else {
+            16.0
         }
-        // `scrollWidth` and `clientWidth` are whole pixels while text rects
-        // are not, so a 16px overflow can come from 15.75px of glyphs.
-        let min = TEXT_OVERFLOW_MIN_PX - 1.0;
-        r.right - right >= min || left - r.left >= min
-    })
+    };
+    let tolerance = font_size * SPILL_MEETS_EM;
+    spill_is_clipped(dom, el, reach)
+        || spill_reaches_viewport_edge(dom, (spills_left, spills_right), reach, tolerance)
+        || spill_meets_another_box(dom, el, box_, reach, (spills_left, spills_right), tolerance)
+}
+
+/// Whether a box that hides or clips x overflow, `el` itself or an ancestor
+/// below the body, cuts the spill: the text reaches past its padding box.
+/// The root and body stand for the viewport, which the edge test covers.
+fn spill_is_clipped(dom: &dyn Dom, el: ElId, reach: (f64, f64)) -> bool {
+    let root = dom.document_element();
+    let body = dom.body();
+    let mut cur = if generates_box(dom, el) { Some(el) } else { dom.parent(el) };
+    while let Some(c) = cur {
+        if Some(c) == root || Some(c) == body {
+            break;
+        }
+        if generates_box(dom, c)
+            && matches!(crate::browser::text_geometry::overflow_x(dom, c).as_str(), "hidden" | "clip")
+        {
+            let r = dom.rect(c);
+            // A clip with no area hides the text outright, which the paint
+            // gate decides.
+            if !(r.all_finite() && r.width > 0.0 && r.height > 0.0) {
+                cur = dom.parent(c);
+                continue;
+            }
+            let client = dom.client_width(c);
+            let (left, right) = if client.is_finite() && client > 0.0 {
+                let l = r.left + dom.client_left(c);
+                (l, l + client)
+            } else {
+                (r.left, r.right)
+            };
+            if left.is_finite() && right.is_finite() && (reach.1 > right + 1.0 || reach.0 < left - 1.0) {
+                return true;
+            }
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
+/// Whether the spill reaches within `tolerance` of the viewport's side, or
+/// past it.
+fn spill_reaches_viewport_edge(dom: &dyn Dom, spills: (bool, bool), reach: (f64, f64), tolerance: f64) -> bool {
+    let vw = dom.inner_width();
+    if !(vw.is_finite() && vw > 0.0) {
+        return false;
+    }
+    (spills.1 && reach.1 >= vw - tolerance) || (spills.0 && reach.0 <= tolerance)
+}
+
+/// Whether the spill runs into another box: comes within `tolerance` of the
+/// text or the painted box of an element that is neither `el`, nor one of its
+/// ancestors or descendants, on the lines `el` sets. A box that holds `el`'s
+/// whole box is a backdrop the text sits on (a hero video, a gradient
+/// scrim), and a positioned decoration layer (a grid line, a faint wash)
+/// is not a collision either. A positioned image, svg or filled box the
+/// spill runs under is. A wrapper that paints nothing counts only through
+/// the text and boxes inside it.
+fn spill_meets_another_box(
+    dom: &dyn Dom,
+    el: ElId,
+    box_: (f64, f64),
+    reach: (f64, f64),
+    spills: (bool, bool),
+    tolerance: f64,
+) -> bool {
+    let own = dom.rect(el);
+    if !(own.all_finite() && own.height > 0.0) {
+        return false;
+    }
+    // The spilled parts, on the lines the element sets.
+    let mut regions: Vec<(f64, f64)> = Vec::new();
+    if spills.1 {
+        regions.push((box_.1, reach.1 + tolerance));
+    }
+    if spills.0 {
+        regions.push((reach.0 - tolerance, box_.0));
+    }
+    for other in dom.query_all(None, "*").unwrap_or_default() {
+        if other == el || dom.contains(other, el) || dom.contains(el, other) {
+            continue;
+        }
+        let r = dom.rect(other);
+        if !(r.all_finite() && r.width > 0.0 && r.height > 0.0) {
+            continue;
+        }
+        // Lines that only touch share no line.
+        if js::math_min(r.bottom, own.bottom) - js::math_max(r.top, own.top) <= 1.0 {
+            continue;
+        }
+        let holds_el = r.left <= own.left + 1.0
+            && r.right >= own.right - 1.0
+            && r.top <= own.top + 1.0
+            && r.bottom >= own.bottom - 1.0;
+        if holds_el {
+            continue;
+        }
+        let tag = tag_lower(dom, other);
+        let svg = dom.namespace_uri(other) == "http://www.w3.org/2000/svg";
+        if svg && tag != "svg" {
+            continue;
+        }
+        let has_text = has_direct_text_longer_than(dom, other, 0);
+        let replaced = REPLACED_TAGS.contains(&tag.as_str());
+        let position = dom.style(other, "position");
+        if !has_text && !replaced && (position == "absolute" || position == "fixed") && is_decoration_layer(dom, other, &r) {
+            continue;
+        }
+        let paints = has_text || replaced || paints_own_box(dom, other);
+        if !paints {
+            continue;
+        }
+        let (mut left, mut right) = (r.left, r.right);
+        if has_text {
+            if let Some(t) = dom.direct_text_rect(other).filter(|t| t.all_finite() && t.width > 0.0) {
+                left = js::math_min(left, t.left);
+                right = js::math_max(right, t.right);
+            }
+        }
+        let meets = regions.iter().any(|&(a, b)| right > a && left < b);
+        if meets && is_rendered_for_browser_rule(dom, other) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Thickness at or under which a positioned box with no text is a rule line
+/// (v0-compute-11.vercel.app's 1px grid line), not a box.
+const DECORATION_HAIRLINE_PX: f64 = 2.0;
+
+/// Alpha under which a positioned fill with no text is a wash the text
+/// reads through (the same grid line paints white at 10%).
+const DECORATION_FAINT_ALPHA: f64 = 0.25;
+
+/// Whether a positioned box with no text is a decoration layer a spill may
+/// run over: a hairline, or a plain fill (no image, no border) faint enough
+/// to read text through. A filled badge, a panel, or anything with a
+/// background image or a border is a box the text collides with.
+fn is_decoration_layer(dom: &dyn Dom, el: ElId, r: &Rect) -> bool {
+    if r.width <= DECORATION_HAIRLINE_PX || r.height <= DECORATION_HAIRLINE_PX {
+        return true;
+    }
+    let image = dom.style(el, "backgroundImage");
+    if !image.is_empty() && image != "none" {
+        return false;
+    }
+    if ["Top", "Right", "Bottom", "Left"]
+        .iter()
+        .any(|s| style_px(dom, el, &format!("border{s}Width")) > 0.0)
+    {
+        return false;
+    }
+    let fill = measures::css_color_alpha(Some(&dom.style(el, "backgroundColor")));
+    fill * opacity_of(dom, el) < DECORATION_FAINT_ALPHA
 }
 
 /// A clipping box that marks or clamps its own truncation: `text-overflow`
@@ -2752,7 +2958,11 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
     let client_width = dom.client_width(el);
     let delta = dom.scroll_width(el) - client_width;
     if client_width > 0.0 && delta >= TEXT_OVERFLOW_MIN_PX {
-        if !overflow_is_painted(dom, el, &rect) {
+        let Some(reach) = painted_overflow_extent(dom, el, &rect) else {
+            return Vec::new();
+        };
+        let content_left = rect.left + dom.client_left(el);
+        if !spill_does_harm(dom, el, (content_left, content_left + client_width), reach) {
             return Vec::new();
         }
         return vec![RuleHit::new(
@@ -2804,7 +3014,8 @@ pub fn check_element_text_overflow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> 
         let content_right =
             c_rect.left + dom.client_left(container) + dom.client_width(container);
         let spill = rect.right - content_right;
-        if spill >= 16.0 {
+        let content_left = c_rect.left + dom.client_left(container);
+        if spill >= 16.0 && spill_does_harm(dom, el, (content_left, content_right), (rect.left, rect.right)) {
             return vec![RuleHit::new(
                 "text-overflow",
                 format!(
@@ -2996,6 +3207,18 @@ mod tests {
             );
         }
         (d, body)
+    }
+
+    /// A block of text on the same line as a spill, `w` wide at `x`: the
+    /// box the spill runs into.
+    fn neighbor(d: &mut FakeDom, parent: ElId, x: f64, y: f64, w: f64, h: f64, text: &str) -> ElId {
+        let el = d.add(Some(parent), "div");
+        visible(d, el);
+        d.set_styles(el, &[("position", "static"), ("fontSize", "16px")]);
+        d.add_text(el, text);
+        d.set_rect(el, x, y, w, h);
+        d.set_text_rect(el, x, y, w, h);
+        el
     }
 
     fn visible(d: &mut FakeDom, el: ElId) {
@@ -5301,6 +5524,10 @@ mod tests {
         d.el_mut(cell).client_height = 20.0;
         d.el_mut(cell).scroll_width = 140.0;
         d.set_styles(cell, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible"), ("position", "static"), ("fontSize", "16px"), ("width", "100px"), ("height", "20px")]);
+        // Into free space, nothing is cut or covered.
+        assert!(check_element_text_overflow_dom(&d, cell).is_empty(), "free space");
+        // Into the next cell, the words run together.
+        neighbor(&mut d, body, 110.0, 0.0, 90.0, 20.0, "Next cell");
         let hits = check_element_text_overflow_dom(&d, cell);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "div.cell overflows its box by 40px");
@@ -5334,9 +5561,12 @@ mod tests {
         // A capture that recorded neither property still measures the box.
         d.set_styles(author, &[("webkitLineClamp", ""), ("textOverflow", "")]);
         assert_eq!(check_element_text_overflow_dom(&d, author).len(), 1);
-        // An ellipsis on a visible box marks nothing.
+        // An ellipsis on a visible box marks nothing, and the byline runs
+        // into the date beside it.
         d.set_styles(author, &[("overflow", "visible"), ("overflowX", "visible"), ("textOverflow", "ellipsis")]);
+        let date = neighbor(&mut d, body, 70.0, 0.0, 80.0, 16.0, "Posted today");
         assert_eq!(check_element_text_overflow_dom(&d, author).len(), 1);
+        d.set_style(date, "display", "none");
 
         // An inline run with no box of its own, inside an ellipsizing row.
         let row = d.add(Some(body), "div");
@@ -5374,6 +5604,8 @@ mod tests {
         d.add_text(span, "Order #4821 shipped to Rotterdam warehouse");
         d.set_rect(span, 0.0, 0.0, 330.0, 22.0);
         d.set_styles(span, truncate);
+        // The next cell of the row holds the status the order runs into.
+        neighbor(&mut d, body, 150.0, 0.0, 140.0, 22.0, "Delivered");
         let hits = check_element_text_overflow_dom(&d, span);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "span.truncate overflows its container by 190px");
@@ -5400,6 +5632,7 @@ mod tests {
         d.add_text(run, "docs.example.com/guides/getting-started/installation");
         d.set_rect(run, 0.0, 40.0, 380.0, 22.0);
         d.set_styles(run, &[("display", "inline"), ("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "16px")]);
+        neighbor(&mut d, body, 150.0, 40.0, 140.0, 22.0, "Updated");
         let hits = check_element_text_overflow_dom(&d, run);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "b overflows its container by 240px");
@@ -5478,7 +5711,9 @@ mod tests {
         // Nothing the engine measures reaches past the box.
         assert!(check_element_text_overflow_dom(&d, tag).is_empty(), "no generated content");
 
-        // overflow.html `ov-pseudo`: a generated suffix.
+        // overflow.html `ov-pseudo`: a generated suffix, in a row whose next
+        // tag starts where the scroll extent ends.
+        neighbor(&mut d, body, 300.0, 24.0, 100.0, 40.0, "Next tag");
         d.set_pseudo_style(tag, "::after", "content", "\" and a very long generated suffix past the box\"");
         let hits = check_element_text_overflow_dom(&d, tag);
         assert_eq!(hits.len(), 1, "{hits:?}");
@@ -5527,6 +5762,161 @@ mod tests {
         assert_eq!(check_element_text_overflow_dom(&d, tag).len(), 1, "an icon glyph string");
     }
 
+    /// observations-25 issue 18 (P19): text that runs past its own box into
+    /// free space reports nothing. It reports when a clipping ancestor cuts
+    /// it, when it runs into another box, or when it reaches the viewport
+    /// edge.
+    #[test]
+    fn text_overflow_reports_only_a_spill_that_does_harm() {
+        // bt.cn's footer: a `white-space: pre` contact line 52px past its
+        // 169px column, with the footer's empty right half beside it.
+        let (mut d, body) = page();
+        let footer = d.add(Some(body), "div");
+        visible(&mut d, footer);
+        d.set_rect(footer, 0.0, 3023.0, 1280.0, 441.0);
+        d.el_mut(footer).client_width = 1280.0;
+        let col = d.add(Some(footer), "div");
+        visible(&mut d, col);
+        d.set_rect(col, 869.0, 3071.0, 169.0, 212.0);
+        let line = d.add(Some(col), "span");
+        visible(&mut d, line);
+        d.set_attr(line, "class", "block whitespace-pre");
+        d.add_text(line, "商务合作QQ（商务）：394030111");
+        d.set_styles(line, &[("position", "static"), ("fontSize", "14px"), ("whiteSpace", "pre")]);
+        d.set_rect(line, 869.0, 3107.0, 169.0, 20.0);
+        d.el_mut(line).client_width = 169.0;
+        d.el_mut(line).scroll_width = 221.0;
+        d.set_text_rect(line, 869.0, 3108.0, 221.0, 17.0);
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "free space");
+        // The footer hiding its overflow at the column's edge cuts the number.
+        d.set_styles(col, &[("overflow", "hidden"), ("overflowX", "hidden")]);
+        d.el_mut(col).client_width = 169.0;
+        assert_eq!(
+            check_element_text_overflow_dom(&d, line).iter().map(|h| h.snippet.as_str()).collect::<Vec<_>>(),
+            vec!["span.block.whitespace-pre overflows its box by 52px"],
+            "cut by the column"
+        );
+        d.set_styles(col, &[("overflow", "visible"), ("overflowX", "visible")]);
+        // A box the line runs into, on its line.
+        let badge = d.add(Some(footer), "img");
+        visible(&mut d, badge);
+        d.set_style(badge, "position", "static");
+        d.set_rect(badge, 1080.0, 3100.0, 40.0, 30.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an image beside it");
+        // The same image a line below shares no line with it.
+        d.set_rect(badge, 1080.0, 3127.0, 40.0, 30.0);
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "a line below");
+        // A painted box counts; a wrapper that paints nothing does not.
+        let chip = d.add(Some(footer), "div");
+        visible(&mut d, chip);
+        d.set_style(chip, "position", "static");
+        d.set_rect(chip, 1070.0, 3100.0, 90.0, 30.0);
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "an unpainted wrapper");
+        d.set_style(chip, "backgroundColor", "rgb(240, 240, 240)");
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "a filled chip");
+        d.set_style(chip, "display", "none");
+        // Positioned boxes with no text the line runs under: an image, an
+        // svg and a filled box are boxes it collides with; a hairline and a
+        // faint wash are decoration it reads over.
+        let layer = d.add(Some(footer), "img");
+        visible(&mut d, layer);
+        d.set_style(layer, "position", "absolute");
+        d.set_rect(layer, 1060.0, 3104.0, 60.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute image");
+        d.set_style(layer, "display", "none");
+        let svg = d.add(Some(footer), "svg");
+        visible(&mut d, svg);
+        d.set_style(svg, "position", "absolute");
+        d.set_rect(svg, 1060.0, 3104.0, 40.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute svg");
+        d.set_style(svg, "display", "none");
+        let block = d.add(Some(footer), "div");
+        visible(&mut d, block);
+        d.set_styles(block, &[("position", "absolute"), ("backgroundColor", "rgb(0, 51, 102)")]);
+        d.set_rect(block, 1060.0, 3104.0, 60.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute filled box");
+        d.set_style(block, "backgroundColor", "rgba(0, 0, 0, 0.1)");
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "a faint wash");
+        d.set_style(block, "borderLeftWidth", "1px");
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "a bordered frame");
+        d.set_styles(block, &[("borderLeftWidth", "0px"), ("backgroundColor", "rgb(0, 51, 102)")]);
+        d.set_rect(block, 1060.0, 3104.0, 60.0, 2.0);
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "a 2px rule");
+        d.set_style(block, "display", "none");
+
+        // v0-compute-11.vercel.app: a nowrap headline line runs 59px past its
+        // span over a full-bleed video, a scrim and a 1px grid line, with the
+        // next headline line set right below it. None of them is a collision.
+        let (mut d, body) = page();
+        let hero = d.add(Some(body), "section");
+        visible(&mut d, hero);
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 800.0);
+        let video = d.add(Some(hero), "video");
+        visible(&mut d, video);
+        d.set_style(video, "position", "static");
+        d.set_rect(video, 0.0, 0.0, 1280.0, 800.0);
+        let rule = d.add(Some(hero), "div");
+        visible(&mut d, rule);
+        d.set_styles(rule, &[("position", "absolute"), ("backgroundColor", "rgba(255, 255, 255, 0.1)")]);
+        d.set_rect(rule, 746.0, 0.0, 1.0, 800.0);
+        let h1 = d.add(Some(hero), "h1");
+        visible(&mut d, h1);
+        d.set_rect(h1, 48.0, 335.0, 651.0, 141.0);
+        let first = d.add(Some(h1), "span");
+        visible(&mut d, first);
+        d.set_attr(first, "class", "block whitespace-nowrap");
+        d.add_text(first, "Distributed compute,");
+        d.set_styles(first, &[("position", "static"), ("fontSize", "77px"), ("whiteSpace", "nowrap")]);
+        d.set_rect(first, 48.0, 335.0, 651.0, 70.75);
+        d.el_mut(first).client_width = 651.0;
+        d.el_mut(first).scroll_width = 710.0;
+        // A Range rect spans the font's ascent and descent, past the line box.
+        d.set_text_rect(first, 48.0, 323.0, 710.0, 93.0);
+        let second = d.add(Some(h1), "span");
+        visible(&mut d, second);
+        d.add_text(second, "agents that delegate");
+        d.set_styles(second, &[("position", "static"), ("fontSize", "77px")]);
+        d.set_rect(second, 48.0, 405.75, 690.0, 70.75);
+        d.set_text_rect(second, 48.0, 393.75, 690.0, 93.0);
+        assert!(check_element_text_overflow_dom(&d, first).is_empty(), "over its backdrop");
+        // Text set on the same line past it is another box.
+        let aside = d.add(Some(hero), "p");
+        visible(&mut d, aside);
+        d.add_text(aside, "Autonomous agents");
+        d.set_styles(aside, &[("position", "absolute"), ("fontSize", "14px")]);
+        d.set_rect(aside, 760.0, 350.0, 200.0, 20.0);
+        d.set_text_rect(aside, 760.0, 350.0, 180.0, 20.0);
+        assert_eq!(check_element_text_overflow_dom(&d, first).len(), 1, "a caption beside it");
+        d.set_rect(aside, 800.0, 350.0, 200.0, 20.0);
+        d.set_text_rect(aside, 800.0, 350.0, 180.0, 20.0);
+        assert!(
+            check_element_text_overflow_dom(&d, first).is_empty(),
+            "42px away, more than a quarter em of 77px type"
+        );
+
+        // soc-workflows-ai-cyb-tstb.bolt.host at 390px: a report panel's rule
+        // lines run 77px past the panel and off the side of the window.
+        let (mut d, body) = page();
+        d.inner_width = 390.0;
+        let panel = d.add(Some(body), "div");
+        visible(&mut d, panel);
+        d.set_attr(panel, "class", "output-content");
+        d.add_text(panel, "PHISHING INVESTIGATION REPORT ==============================");
+        d.set_styles(panel, &[("position", "static"), ("fontSize", "14px"), ("fontFamily", "monospace")]);
+        d.set_rect(panel, 65.0, 1436.0, 260.0, 5608.0);
+        d.el_mut(panel).client_width = 260.0;
+        d.el_mut(panel).scroll_width = 337.0;
+        d.set_text_rect(panel, 65.0, 1436.0, 337.0, 5600.0);
+        assert_eq!(
+            check_element_text_overflow_dom(&d, panel).iter().map(|h| h.snippet.as_str()).collect::<Vec<_>>(),
+            vec!["div.output-content overflows its box by 77px"],
+            "past the viewport edge"
+        );
+        // At 1280px the same spill ends in free space.
+        d.inner_width = 1280.0;
+        assert!(check_element_text_overflow_dom(&d, panel).is_empty(), "free space at 1280px");
+    }
+
     /// so-net.ne.jp's sprite tabs push their label 9,999px out of an
     /// overflow-hidden box: nothing of it shows, so nothing spills.
     #[test]
@@ -5566,6 +5956,12 @@ mod tests {
         d.el_mut(stat).scroll_width = 122.0;
         d.set_styles(stat, &[("display", "block"), ("overflow", "visible"), ("overflowX", "visible"), ("position", "static"), ("fontSize", "40px"), ("whiteSpace", "nowrap")]);
         d.set_text_rect(stat, 20.0, 100.0, 122.0, 40.0);
+        d.set_rect(main, 0.0, 0.0, 390.0, 2000.0);
+        d.el_mut(main).client_width = 390.0;
+        // v0-optimus-delta.vercel.app: the next stat starts 3px past the
+        // spill, under a quarter em of 40px type, so the two read as one.
+        let next = neighbor(&mut d, main, 145.0, 100.0, 93.0, 40.0, "<50ms");
+        d.set_style(next, "fontSize", "40px");
         let hits = check_element_text_overflow_dom(&d, stat);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "div.stat overflows its box by 29px");

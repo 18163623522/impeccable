@@ -1960,6 +1960,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     el_pass(&mut groups, pc::check_first_viewport_column_overflow_dom(dom));
 
     page_pass(&mut groups, &mut page_level, q::check_page_quality_dom(dom));
+    page_pass(&mut groups, &mut page_level, q::check_page_overflow_dom(dom));
     page_pass(&mut groups, &mut page_level, hits(pc::check_cream_palette(dom)));
     // The stylesheet-text forms go last among the built-in passes because
     // they defer to what the element forms above have already read.

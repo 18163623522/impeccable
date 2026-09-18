@@ -36,6 +36,14 @@ pub const ANY: &str = "(?s:.)";
 pub struct RuleHit {
     pub id: String,
     pub snippet: String,
+    /// A per-finding severity that overrides the rule's registry severity,
+    /// such as `advisory` on a contrast ratio just under its bar. `None`
+    /// keeps the registry's. The engines carry it onto the finding they
+    /// print, and the finding's `advisory` flag is derived from it. The
+    /// recorded call vectors predate the field and compare `{ id, snippet }`
+    /// only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
 }
 
 impl RuleHit {
@@ -43,7 +51,13 @@ impl RuleHit {
         RuleHit {
             id: id.to_string(),
             snippet,
+            severity: None,
         }
+    }
+
+    /// Whether this hit's own severity is `advisory`.
+    pub fn is_advisory(&self) -> bool {
+        self.severity.as_deref() == Some("advisory")
     }
 }
 

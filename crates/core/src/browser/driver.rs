@@ -1550,7 +1550,13 @@ pub fn visual_contrast_result_finding(
     if scoped_ignore_active(dom, el, &finding_type) {
         return None;
     }
-    Some(BrowserFinding::new(finding_type, detail))
+    let mut item = BrowserFinding::new(finding_type, detail);
+    item.severity = finding
+        .get("severity")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Some(item)
 }
 
 fn hits(v: Vec<crate::checks::rules::RuleHit>) -> Vec<BrowserFinding> {

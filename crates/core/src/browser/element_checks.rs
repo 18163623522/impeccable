@@ -185,6 +185,7 @@ fn finding_hits(v: Vec<measures::Finding>) -> Vec<RuleHit> {
         .map(|f| RuleHit {
             id: f.id,
             snippet: f.snippet,
+            severity: None,
         })
         .collect()
 }
@@ -1014,9 +1015,19 @@ pub fn check_element_colors_dom(
         owner: u64::from(el),
         on_screen: wholly_within_page_width(dom, &rect) && crate::browser::painted::text_shown_across(dom, el),
     };
-    let mut findings = check_colors_deduped_claiming(&color_opts, seen, Some(claim), &mut |h: &RuleHit| {
-        safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h)
-    });
+    // Text with no reading job (avatar initials, a version stamp, a
+    // signature, a mockup's labels) reports as advisory, asked only of an
+    // element that failed.
+    let decorative = std::cell::OnceCell::new();
+    let is_decorative =
+        || *decorative.get_or_init(|| super::decorative_text::is_decorative_text_dom(dom, el));
+    let mut findings = crate::checks::rules::check_colors_deduped_shaped(
+        &color_opts,
+        seen,
+        Some(claim),
+        &is_decorative,
+        &mut |h: &RuleHit| safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h),
+    );
     findings.retain(|h| verdict_stands(h));
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
@@ -1035,11 +1046,15 @@ pub fn check_element_colors_dom(
             if !skip {
                 if let Some(ph_raw) = dom.pseudo_style(el, "::placeholder", "color") {
                     if let Some(ph_color) = parse_rgb_or_any(&ph_raw) {
-                        findings.extend(
+                        let mut hits: Vec<RuleHit> =
                             check_placeholder_colors(&color_opts, placeholder, ph_color)
                                 .into_iter()
-                                .filter(|h| verdict_stands(h)),
-                        );
+                                .filter(|h| verdict_stands(h))
+                                .collect();
+                        if hits.iter().any(|h| h.id == "low-contrast") && is_decorative() {
+                            crate::checks::rules::demote_low_contrast(&mut hits);
+                        }
+                        findings.extend(hits);
                     }
                 }
             }

@@ -24,7 +24,7 @@ use impeccable_core::checks::measures::{
     GptBorderShadowRowTree, OversizedH1Input, StyleMap, ICON_MAX_PX,
 };
 use impeccable_core::checks::rules::{
-    check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
+    check_borders, check_colors_deduped_shaped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
     check_placeholder_colors, is_close_letter_text, is_emoji_only_text, is_glyph_only_text,
     is_heading_tag, is_icon_ligature_text, names_close_control, resolve_hero_heading_size_px,
@@ -63,6 +63,7 @@ fn hits(v: Vec<measures::Finding>) -> Vec<RuleHit> {
         .map(|f| RuleHit {
             id: f.id,
             snippet: f.snippet,
+            severity: None,
         })
         .collect()
 }
@@ -970,9 +971,19 @@ pub fn check_element_colors(
     // under the text waives it too: this engine has no layout, so it reads
     // the stretched, out-of-flow shape such a photo is written in
     // (`picture_under_text`), where the browser path measures the layers.
-    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
-        !scoped_ignore_active(el, &h.id) && !picture_under_text(el)
-    });
+    // Text with no reading job (avatar initials, a version stamp, a
+    // signature, a mockup's labels) reports as advisory, asked only of an
+    // element that failed.
+    let decorative = std::cell::OnceCell::new();
+    let is_decorative =
+        || *decorative.get_or_init(|| crate::decorative_text::is_decorative_text(el));
+    let mut findings = check_colors_deduped_shaped(
+        &color_opts,
+        seen,
+        None,
+        &is_decorative,
+        &mut |h: &RuleHit| !scoped_ignore_active(el, &h.id) && !picture_under_text(el),
+    );
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();
         if !placeholder.is_empty() {
@@ -997,11 +1008,11 @@ pub fn check_element_colors(
                         .or_else(|| parse_rgb(sv_opt(ph_style, "color")))
                         .or_else(|| parse_any_color(sv_opt(ph_style, "color")));
                     if let Some(ph_color) = ph_color {
-                        findings.extend(check_placeholder_colors(
-                            &color_opts,
-                            placeholder,
-                            ph_color,
-                        ));
+                        let mut hits = check_placeholder_colors(&color_opts, placeholder, ph_color);
+                        if hits.iter().any(|h| h.id == "low-contrast") && is_decorative() {
+                            impeccable_core::checks::rules::demote_low_contrast(&mut hits);
+                        }
+                        findings.extend(hits);
                     }
                 }
             }

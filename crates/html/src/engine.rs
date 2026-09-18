@@ -243,7 +243,13 @@ pub fn detect_html_source(
                 if scoped_ignore_active(el, &h.id) {
                     continue;
                 }
-                if let Some(f) = mk(&h.id, &h.snippet) {
+                if let Some(mut f) = mk(&h.id, &h.snippet) {
+                    // A hit's own severity (a contrast ratio just under its
+                    // bar) overrides the registry's.
+                    if let Some(sev) = h.severity.filter(|s| !s.is_empty()) {
+                        f.severity = sev;
+                        impeccable_core::findings::derive_advisory_flag(&mut f);
+                    }
                     findings.push(f);
                 }
             }

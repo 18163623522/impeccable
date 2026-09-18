@@ -3738,3 +3738,107 @@ reporting.
     `phrasing_text_font`, `average_glyph_advance_em_at`,
     `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
     are new; `scrolls_x` and `moves_a_track` are now `pub(crate)`.
+
+## Recorded 2026-09-18: low-contrast reports near misses and decorative text as advisory (corpus/premise3-low-contrast-advisory)
+
+Two taste calls Paul decided on 2026-09-18, both "advisory". Each moves a
+`low-contrast` finding's own severity to `advisory` (the rule's registry
+severity is unchanged, since neither call covers every finding): the finding
+stays in the output with its measured ratio and its snippet byte for byte, the
+JSON gains `"severity": "advisory", "advisory": true`, the text output moves
+it under "Advisory (not counted as failures)", the failure count and the exit
+code drop it, `--no-advisory` hides it, and the design hook leaves it out
+unless `advisoryRules` is `include`, as for every other advisory finding.
+
+- **r3-02, ratios just under the bar.** Decision: "Report ratios inside the
+  margin as advisory, outside the failure count. The findings stay visible
+  with their measured ratios." The margin is within 0.3 of the bar for
+  normal text (4.2:1 up to 4.5:1) and within 0.2 for large text (2.8:1 up
+  to 3:1), read off the ratio as the snippet prints it, so every finding
+  printed `4.2:1` reports the same way. Every producer applies it: the
+  element pass, the link and span path, placeholders and `:hover` state in
+  both engines, and the URL engine's sampled (`browser contrast`) and pixel
+  (`pixel contrast`) passes on their verdict. r3-08 (keep) is untouched:
+  bold display text at 700+ above about 36px under the large-text margin
+  (2.0 to 2.7:1) keeps failing.
+- **r3-04, text with no reading job.** Decision: "Rank those shapes lower:
+  reported as advisory, outside the failure count. The clipto.com mockup
+  labels and the terminal text stay visible." The shapes are read
+  conservatively (`crates/core/src/checks/decorative_text.rs`): one or two
+  letters (not a lone lower-case `i`, `x` or `v` icon glyph) alone and centred in a small (12 to 72px) square or round
+  box that paints itself, not the whole label of a control and not a key in
+  a `kbd`; text made only of a version or build identifier (with at most a
+  date, a time, a short hash), outside headings and controls, where a word
+  like `release` or `build` needs a dotted version, a build number that is
+  not a year, or a hash after it; a short name in a handwriting face or
+  marked `signature`, outside headings and controls; and text under an
+  ancestor whose class or id has a `mockup(s)` or `illustration(s)` part, or
+  `mock` beside a UI word (`mock-window`), and no credit or caption part (not
+  a landmark or `section`), unless the text is sentence-length copy, or under
+  an HTML element marked `role="img"` (on an `svg` the role labels charts,
+  whose axis text is read, so it is not evidence there). Anything uncertain
+  keeps failing: digits, three letters, an `i` info badge, an uncentred
+  letter, a version inside a sentence, a version as a heading or a link,
+  `Release 2024`, a `mock-exam` or an `illustration-credit`, a mockup built
+  from utility classes alone. An advisory copy claims its colour pair for itself, so it
+  never hides a failing copy of the same pair on the SAFE_TAGS path.
+
+New fixtures `low-contrast-near-bar.html` and `low-contrast-decorative.html`
+(failing, advisory and passing columns); the URL-engine passes are pinned by
+`crates/browser/tests/low_contrast_advisory.rs`, the static engine by
+`crates/html/tests/low_contrast_advisory.rs`. Every re-recorded golden was
+diffed finding by finding against its predecessor: no finding is added or
+removed and no snippet changes; the only moves are `low-contrast` findings
+from `warning` to `advisory`, the text output's sections and counts that
+follow from them, and the new fixtures' own findings.
+
+- `detect-fixture-json-low-contrast-near-bar-html`, `detect-fixture-text-low-contrast-near-bar-html`, `detect-fixture-json-low-contrast-decorative-html`, `detect-fixture-text-low-contrast-decorative-html`: new cases.
+- `detect-fixture-json-low-contrast-near-threshold-html`, `detect-fixture-text-low-contrast-near-threshold-html`: all four near-threshold findings (4.49:1 and 2.99:1) are advisory, so the fixture exits 0 with "0 anti-patterns found" and 4 advisory notes.
+- `detect-fixture-json-modern-color-borders-html`, `detect-fixture-text-modern-color-borders-html`: `4.49:1 — text #64748b on #fef7f2` is advisory (14 to 13 counted).
+- `detect-fixture-json-named-color-borders-html`, `detect-fixture-text-named-color-borders-html`: `4.4:1 — text #64748b on #f6f6f6` is advisory (8 to 7 counted).
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: `4.2:1 — text #ffffff on #8b5cf6 (gradient on button.ai-btn)` is advisory (32 to 31 counted).
+- `detect-fixture-json-gradient-surface-contrast-html`, `detect-fixture-text-gradient-surface-contrast-html`: the white letters `A` and `B` centred in 56px gradient `div.feature-tile` squares (1.6:1 and 1.5:1) read as avatar-initial tiles and are advisory (14 to 12 counted); the navy tile's `C` passes as before.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the nine moves above plus the two new fixtures (644 to 658 counted, 94 to 118 advisory notes: nine moved plus the new fixtures' 23 failing and 15 advisory; `--no-advisory` drops the nine).
+- Review revision: the decorative fixture gained eight should-flag rows the first cut wrongly read as decorative (a `kbd` key, a lower-case `i` info badge, `v4.2.0` as an `h3`, `v3.1.0` as a `nav` link, `Release 2024`, a `mock-exam`, an `illustration-credit`, and a sentence under a `mockups-grid`). All eight fail; `detect-fixture-*-low-contrast-decorative-html` and the five sweeps were re-recorded for those eight added warnings (650 to 658 counted) and nothing else moved.
+
+Known limits, stated so the ratchet does not read them as misses: a
+signature in a plain serif italic (evebcn.com's 'Pedro'), a mockup made of
+utility classes (clipto.com, resurf.so, the kraflio.com post card,
+context.dev's request illustration, v0-optimus-delta's 'Ready'), step and
+ghost numerals (bt.cn's '02.', opentrailpaper.com's '1', the 'II' marker) and
+syntax tokens in a code demo carry no DOM evidence for the four shapes and
+keep failing; the SVG initials an `aria-hidden` avatar draws are not measured
+by the pixel pass at all, as before.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, from its review, after
+the revision (14872d6e) fixed the three problems the review raised (stamps in
+headings and links, `mock-exam` and credit class names, `kbd` keys and icon
+glyphs). These are what the branch still leaves open.
+
+1. **The margin is read off the printed ratio.** A ratio that prints as
+   `4.2:1` is in the margin, so the real band is about 4.15 up to 4.5 for
+   normal text and 2.75 up to 3 for large text (#7c7c7c on white at 4.164,
+   #9b9b9b at 2.763, both advisory in both engines). The large-text margin
+   grows from 0.2 to 0.25 in practice. Paul to confirm.
+2. **Letter tiles read as initials.** Letter logos and icon tiles are
+   demoted along with avatar initials: the gradient-surface-contrast
+   fixture's A and B feature tiles, chorusai's 'O' agent tile, usebidflow's
+   'Y'. The gradient-surface fixture's should-flag tiles are now advisory,
+   so that fixture could change its glyphs to keep testing surface
+   resolution.
+3. **The extension badge counts advisory findings.** The service worker sums
+   `findings.length`, which already held for em-dash-overuse; about 860
+   corpus findings per run now fall into the advisory bucket.
+4. **The ratchet ignores severity**, so a severity-only change shows no
+   difference. The harness should diff severity on matched findings (the
+   review's copy at /tmp/review-premise3-low-contrast-advisory/harness adds
+   `Cand.severity` and a candidate dump).
+5. **Visual-contrast moves are unreplayed.** The live-only pixel pass's
+   severity moves (about 3 in-margin findings in run 25, plus any decorative
+   ones) need a live capture to confirm.
+6. **The static engine's centring test is loose.** Any flex or grid box
+   counts as centring evidence for initials, looser than the browser
+   engine's rect test. SVG initials inside `aria-hidden` avatars are still
+   not measured by the pixel pass.

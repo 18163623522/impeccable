@@ -225,6 +225,10 @@ pub fn compare_screenshot_contrast(
 pub struct RawFinding {
     pub id: &'static str,
     pub snippet: String,
+    /// The per-finding severity, `advisory` for decorative text or a
+    /// verdict just under its bar
+    /// ([`impeccable_core::browser::visual::visual_contrast_severity`]).
+    pub severity: Option<String>,
 }
 
 fn js_string(v: &Value) -> String {
@@ -471,6 +475,9 @@ fn measure_candidate(
     };
     Ok(Some(RawFinding {
         id: "low-contrast",
+        severity: impeccable_core::browser::visual::visual_contrast_severity(
+            candidate, measured, threshold,
+        ),
         snippet: pixel_contrast_snippet(
             measured,
             median,

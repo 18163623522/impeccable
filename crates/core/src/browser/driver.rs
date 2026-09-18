@@ -774,6 +774,117 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
     false
 }
 
+// ─── Brand hue (corpus decision r3-23-ai-color-palette-brand-hue) ──────────
+
+/// How far apart two hues may sit and still be one brand colour, in degrees.
+const BRAND_HUE_TOLERANCE_DEG: f64 = 12.0;
+/// A band across the page (a footer, a hero, a feature band) this share of
+/// the viewport's area or larger is a brand surface whatever it is.
+const BRAND_SURFACE_MIN_VIEWPORT_SHARE: f64 = 0.2;
+/// A band spans at least this share of the viewport's width. A card or a
+/// panel beside other content is not a band, however large: context.dev's
+/// blue brand keeps a violet feature panel that does not make violet its
+/// brand.
+const BRAND_BAND_MIN_WIDTH_SHARE: f64 = 0.9;
+/// A nav bar or header spans at least this share of the viewport's width.
+const BRAND_BAR_MIN_WIDTH_SHARE: f64 = 0.5;
+
+/// The heading forms of ai-color-palette: purple text on a heading, as a
+/// computed colour or a Tailwind class.
+fn is_heading_palette_finding(f: &BrowserFinding) -> bool {
+    f.type_ == "ai-color-palette" && f.detail.ends_with(" on heading")
+}
+
+fn is_heading_tag(tag: &str) -> bool {
+    matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+}
+
+fn names_logo(dom: &dyn Dom, el: ElId) -> bool {
+    ["id", "class", "alt", "aria-label"].iter().any(|attr| {
+        dom.attr(el, attr)
+            .map(|v| v.to_ascii_lowercase().contains("logo"))
+            .unwrap_or(false)
+    })
+}
+
+fn is_nav_bar(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+    let role = dom.attr(el, "role").unwrap_or_default();
+    matches!(tag, "nav" | "header") || role == "navigation" || role == "banner"
+}
+
+/// The chromatic colours the page paints on its brand surfaces: the logo
+/// (its background, or its text when the logo is set in type), the nav bar
+/// or header, and any solid band across the page covering a fifth of the
+/// viewport or more.
+/// Headings and gradients are not brand surfaces: purple that shows up only
+/// there is the palette the rule is about.
+fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
+    use super::element_checks::{ai_palette_is_visible, element_rect};
+    use crate::color::{has_chroma, parse_any_color, parse_gradient_colors};
+    let viewport_w = dom.inner_width();
+    let viewport_area = viewport_w * dom.inner_height();
+    let mut out: Vec<crate::color::Rgba> = Vec::new();
+    for el in dom.query_all(None, "*").unwrap_or_default() {
+        let tag = tag_lower(dom, el);
+        if is_heading_tag(&tag) {
+            continue;
+        }
+        let Some(rect) = element_rect(dom, el) else { continue };
+        if !ai_palette_is_visible(dom, el) {
+            continue;
+        }
+        let logo = names_logo(dom, el);
+        let bar = is_nav_bar(dom, el, &tag) && rect.width >= BRAND_BAR_MIN_WIDTH_SHARE * viewport_w;
+        let large = rect.width >= BRAND_BAND_MIN_WIDTH_SHARE * viewport_w
+            && rect.width * rect.height >= BRAND_SURFACE_MIN_VIEWPORT_SHARE * viewport_area;
+        if !(logo || bar || large) {
+            continue;
+        }
+        // A gradient paints over the background colour.
+        let painted_gradient = !parse_gradient_colors(Some(&dom.style(el, "backgroundImage"))).is_empty();
+        if !painted_gradient {
+            if let Some(bg) = parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+                if bg.alpha_or_one() >= 0.9 && has_chroma(Some(&bg), Some(50.0)) {
+                    out.push(bg);
+                }
+            }
+        }
+        if logo && super::dom::has_direct_text_longer_than(dom, el, 0) {
+            if let Some(ink) = parse_any_color(Some(&dom.style(el, "color"))) {
+                if ink.alpha_or_one() >= 0.9 && has_chroma(Some(&ink), Some(50.0)) {
+                    out.push(ink);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn hues_match(a: &crate::color::Rgba, b: &crate::color::Rgba) -> bool {
+    use crate::color::get_hue;
+    let d = (get_hue(Some(a)) - get_hue(Some(b))).abs();
+    d.min(360.0 - d) <= BRAND_HUE_TOLERANCE_DEG
+}
+
+/// Drop the heading forms of ai-color-palette whose heading wears the hue
+/// the page's brand surfaces are painted in (te.eg: `#5c2d91` section
+/// headings under a `#5c2d91` nav bar). The gradient and neon forms stand.
+fn drop_brand_hue_headings(dom: &dyn Dom, groups: &mut [FindingGroup]) {
+    let mut brand: Option<Vec<crate::color::Rgba>> = None;
+    for g in groups.iter_mut() {
+        if !g.findings.iter().any(is_heading_palette_finding) {
+            continue;
+        }
+        let Some(ink) = crate::color::parse_any_color(Some(&dom.style(g.el, "color"))) else {
+            continue;
+        };
+        let colors = brand.get_or_insert_with(|| brand_surface_colors(dom));
+        if colors.iter().any(|c| hues_match(c, &ink)) {
+            g.findings.retain(|f| !is_heading_palette_finding(f));
+        }
+    }
+}
+
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
 /// (a selector matching nothing drops the finding; a match under a
@@ -1290,6 +1401,13 @@ pub fn serialize_findings(dom: &dyn Dom, groups: &[FindingGroup]) -> serde_json:
         } else {
             Value::Null
         };
+        // Markup a known widget vendor owns keeps its findings, tagged with
+        // the vendor so the report says where the fix lives.
+        let vendor = if el != 0 && !is_page_level {
+            crate::third_party::widget_vendor(dom, el)
+        } else {
+            None
+        };
         let findings: Vec<Value> = g
             .findings
             .iter()
@@ -1312,7 +1430,13 @@ pub fn serialize_findings(dom: &dyn Dom, groups: &[FindingGroup]) -> serde_json:
                 let advisory = severity == "advisory";
                 m.insert("severity".into(), Value::String(severity));
                 m.insert("advisory".into(), Value::Bool(advisory));
-                m.insert("detail".into(), Value::String(f.detail.clone()));
+                m.insert(
+                    "detail".into(),
+                    Value::String(match vendor {
+                        Some(v) => crate::third_party::tag_detail(&f.detail, v),
+                        None => f.detail.clone(),
+                    }),
+                );
                 m.insert(
                     "ignoreValue".into(),
                     Value::String(f.ignore_value.clone().unwrap_or_default()),
@@ -1325,6 +1449,9 @@ pub fn serialize_findings(dom: &dyn Dom, groups: &[FindingGroup]) -> serde_json:
                     "description".into(),
                     Value::String(ap.map(|a| a.description).unwrap_or("").to_string()),
                 );
+                if let Some(v) = vendor {
+                    m.insert("thirdParty".into(), Value::String(v.to_string()));
+                }
                 Value::Object(m)
             })
             .collect();
@@ -1912,6 +2039,7 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
                 .retain(|f| !(f.type_ == "low-contrast" && f.detail == snippet));
         }
     }
+    drop_brand_hue_headings(dom, &mut groups);
     groups.retain(|g| !g.findings.is_empty());
 
     let page_pass =|groups: &mut Vec<FindingGroup>, page_level: &mut Vec<BrowserFinding>, list: Vec<BrowserFinding>| {
@@ -2090,6 +2218,148 @@ mod tests {
         };
         assert_eq!(run(false), vec!["bounce-easing", "dark-glow", "pulsing-dot", "repeating-stripes-gradient"]);
         assert_eq!(run(true), vec!["repeating-stripes-gradient"]);
+    }
+
+    /// te.eg: `#5c2d91` section headings under a `#5c2d91` nav bar. The
+    /// heading form goes; a gradient on the same page still reports; a page
+    /// whose only purple is its headings keeps the heading finding.
+    #[test]
+    fn purple_headings_in_the_brand_hue_are_skipped() {
+        let run = |nav_bg: &str, bar_width: f64| {
+            let mut d = FakeDom::new();
+            let (html, body) = d.with_page();
+            d.set_rect(html, 0.0, 0.0, 1280.0, 3000.0);
+            d.set_rect(body, 0.0, 0.0, 1280.0, 3000.0);
+            let nav = d.add(Some(body), "nav");
+            d.set_rect(nav, 0.0, 0.0, bar_width, 50.0);
+            d.set_styles(nav, &[("backgroundColor", nav_bg), ("backgroundImage", "none")]);
+            let h2 = d.add(Some(body), "h2");
+            d.set_rect(h2, 15.0, 944.0, 1250.0, 43.0);
+            d.set_style(h2, "color", "rgb(92, 45, 145)");
+            let hero = d.add(Some(body), "div");
+            d.set_rect(hero, 0.0, 100.0, 1280.0, 400.0);
+            let mut groups = vec![
+                FindingGroup {
+                    el: h2,
+                    findings: vec![BrowserFinding::new("ai-color-palette", "Purple/violet text (#5c2d91) on heading")],
+                },
+                FindingGroup {
+                    el: hero,
+                    findings: vec![BrowserFinding::new("ai-color-palette", "Purple/violet gradient background")],
+                },
+            ];
+            drop_brand_hue_headings(&d, &mut groups);
+            groups.iter().flat_map(|g| g.findings.iter().map(|f| f.detail.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(run("rgb(92, 45, 145)", 1280.0), vec!["Purple/violet gradient background"]);
+        // A nearby hue is the same brand colour; a teal bar is not.
+        assert_eq!(run("rgb(110, 50, 160)", 1280.0), vec!["Purple/violet gradient background"]);
+        assert_eq!(run("rgb(0, 128, 128)", 1280.0).len(), 2);
+        // A short nav pill is not the nav bar.
+        assert_eq!(run("rgb(92, 45, 145)", 200.0).len(), 2);
+    }
+
+    #[test]
+    fn purple_headings_match_a_logo_or_a_large_surface() {
+        let run = |setup: &dyn Fn(&mut FakeDom, ElId)| {
+            let mut d = FakeDom::new();
+            let (html, body) = d.with_page();
+            d.set_rect(html, 0.0, 0.0, 1280.0, 3000.0);
+            d.set_rect(body, 0.0, 0.0, 1280.0, 3000.0);
+            setup(&mut d, body);
+            let h1 = d.add(Some(body), "h1");
+            d.set_rect(h1, 0.0, 600.0, 800.0, 60.0);
+            d.set_style(h1, "color", "rgb(124, 58, 237)");
+            let mut groups = vec![FindingGroup {
+                el: h1,
+                findings: vec![BrowserFinding::new("ai-color-palette", "text-violet-600 on heading")],
+            }];
+            drop_brand_hue_headings(&d, &mut groups);
+            groups[0].findings.len()
+        };
+        // A text logo set in the heading's violet.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "a");
+                d.set_attr(logo, "class", "site-logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(logo, "Acme");
+                d.set_style(logo, "color", "rgb(124, 58, 237)");
+            }),
+            0
+        );
+        // A footer band in the same violet.
+        assert_eq!(
+            run(&|d, body| {
+                let footer = d.add(Some(body), "footer");
+                d.set_rect(footer, 0.0, 2600.0, 1280.0, 400.0);
+                d.set_style(footer, "backgroundColor", "rgb(124, 58, 237)");
+            }),
+            0
+        );
+        // A large panel beside other content is not a band.
+        assert_eq!(
+            run(&|d, body| {
+                let panel = d.add(Some(body), "div");
+                d.set_rect(panel, 457.0, 2600.0, 669.0, 713.0);
+                d.set_style(panel, "backgroundColor", "rgb(124, 58, 237)");
+            }),
+            1
+        );
+        // The same band painted as a gradient is not a brand surface.
+        assert_eq!(
+            run(&|d, body| {
+                let band = d.add(Some(body), "section");
+                d.set_rect(band, 0.0, 2600.0, 1280.0, 400.0);
+                d.set_styles(
+                    band,
+                    &[
+                        ("backgroundColor", "rgb(124, 58, 237)"),
+                        ("backgroundImage", "linear-gradient(90deg, rgb(124, 58, 237), rgb(219, 39, 119))"),
+                    ],
+                );
+            }),
+            1
+        );
+        // Another purple heading is not a brand surface either.
+        assert_eq!(
+            run(&|d, body| {
+                let other = d.add(Some(body), "h2");
+                d.set_rect(other, 0.0, 1000.0, 1280.0, 400.0);
+                d.set_style(other, "backgroundColor", "rgb(124, 58, 237)");
+            }),
+            1
+        );
+    }
+
+    /// Findings on Taboola's injected cards name the vendor in the message
+    /// and carry it as `thirdParty`; their severity is unchanged.
+    #[test]
+    fn serialized_findings_name_a_widget_vendor() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let feed = d.add(Some(body), "div");
+        d.set_attr(feed, "id", "taboola-mid-home-page-thumbnails-nd");
+        let button = d.add(Some(feed), "button");
+        d.set_rect(button, 10.0, 10.0, 72.0, 24.0);
+        let own = d.add(Some(body), "button");
+        d.set_rect(own, 10.0, 100.0, 72.0, 24.0);
+        let finding = || BrowserFinding::new("undersized-ui-text", "10px functional text \"Learn More\" (below 11px floor)");
+        let groups = vec![
+            FindingGroup { el: button, findings: vec![finding()] },
+            FindingGroup { el: own, findings: vec![finding()] },
+        ];
+        let out = serialize_findings(&d, &groups);
+        let first = &out[0]["findings"][0];
+        assert_eq!(
+            first["detail"],
+            json!("10px functional text \"Learn More\" (below 11px floor) (third-party: Taboola)")
+        );
+        assert_eq!(first["thirdParty"], json!("Taboola"));
+        assert_eq!(first["severity"], json!("warning"));
+        let second = &out[1]["findings"][0];
+        assert_eq!(second["detail"], json!("10px functional text \"Learn More\" (below 11px floor)"));
+        assert!(second.get("thirdParty").is_none());
     }
 
     fn ds_config(v: serde_json::Value) -> BrowserConfig {

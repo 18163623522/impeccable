@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Script errors from ad tech (browser-only)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #fff; }
+    main { width: 640px; margin: 0 auto; padding: 32px 24px; }
+    p { font-size: 16px; line-height: 24px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>The page renders fine</h1>
+    <p>Ad scripts on real pages throw at capture: Chrome removed the Topics API
+    that prebid bundles still call, and tag scripts fail inside their own code.
+    Those errors are the vendor's, so they report as advisory and name the
+    vendor. The site's own script errors keep reporting as errors.</p>
+  </main>
+  <script>
+    // Should flag (error): the site's own script throws.
+    function renderCart() { throw new TypeError('cart is undefined'); }
+    setTimeout(renderCart, 0);
+    // Should flag (advisory, third-party AnyMind): code an ad-tech host
+    // served. The sourceURL names the script the way the real one is named.
+    setTimeout(new Function('pbjs.que.push(1)\n//# sourceURL=https://anymind360.com/js/17837/prebid_2026_9_10.js'), 0);
+    // Should flag (advisory, third-party ad tech): the Topics API rejection
+    // Chrome gives since it removed the API, raised here the way Chrome
+    // raises it so the fixture does not depend on the browser build.
+    Promise.reject(new DOMException(
+      "Failed to execute 'browsingTopics' on 'Document': document.browsingTopics() is deprecated and has been removed.",
+      'NotSupportedError'
+    ));
+  </script>
+</body>
+</html>

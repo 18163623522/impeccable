@@ -590,6 +590,30 @@ impl SafeTagTextSeen {
     }
 }
 
+/// Whether an ai-color-palette finding is one of its purple/violet forms
+/// (purple heading text, a purple or violet gradient, the stock violet
+/// accents, Tailwind `purple`/`violet`/`indigo` classes), as opposed to its
+/// cyan-on-dark forms. These are the forms a project's DESIGN.md switches
+/// off when it declares a purple (see `impeccable_detect::design_system`).
+pub fn is_purple_palette_finding(id: &str, snippet: &str) -> bool {
+    if id != "ai-color-palette" {
+        return false;
+    }
+    let lower = snippet.to_ascii_lowercase();
+    lower.contains("purple") || lower.contains("violet") || lower.contains("indigo")
+}
+
+/// Whether a declared colour is a purple or violet: chromatic, in the hue
+/// band the rule reads as purple (260-310deg) widened by 10deg a side, so a
+/// violet-500 (258deg) or a magenta-leaning plum (318deg) counts.
+pub fn is_declared_purple(c: &Rgba) -> bool {
+    if !has_chroma(Some(c), Some(30.0)) {
+        return false;
+    }
+    let hue = get_hue(Some(c));
+    (250.0..=320.0).contains(&hue)
+}
+
 /// JS: checks.mjs#checkColors
 pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     let tag = opts.tag.as_str();
@@ -1680,11 +1704,93 @@ pub const TYPE_HIERARCHY_MIN_ROLES: usize = 3;
 /// JS: checks.mjs#TYPE_HIERARCHY_MIN_STEP_RATIO
 pub const TYPE_HIERARCHY_MIN_STEP_RATIO: f64 = 1.25;
 
-/// One `{ role, size }` entry the JS pushes into `samples`.
+/// One `{ role, size }` entry the JS pushes into `samples`, plus the
+/// element's computed font weight ([`parse_font_weight`]; NaN when it does
+/// not read as a weight).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeSample {
     pub role: String,
     pub size: f64,
+    pub weight: f64,
+}
+
+/// How much heavier than the body text a heading has to be for its weight
+/// to separate the roles: two steps of the 100-900 scale (400 to 600).
+pub const TYPE_HIERARCHY_WEIGHT_STEP: f64 = 200.0;
+/// The share of heading elements that have to be that much heavier.
+pub const TYPE_HIERARCHY_WEIGHT_SHARE: f64 = 0.8;
+
+/// A computed `font-weight` as a number: `normal` 400, `bold` 700, a number
+/// as itself, anything else NaN.
+pub fn parse_font_weight(value: &str) -> f64 {
+    let v = js::to_lower_case(js::trim(value));
+    match v.as_str() {
+        "normal" => 400.0,
+        "bold" => 700.0,
+        _ => {
+            let n = js::parse_float(&v);
+            if n.is_finite() && (1.0..=1000.0).contains(&n) {
+                n
+            } else {
+                f64::NAN
+            }
+        }
+    }
+}
+
+fn type_sample_in_range(sample: &TypeSample) -> bool {
+    let size = math_round(sample.size * 10.0) / 10.0;
+    !sample.role.is_empty() && size.is_finite() && (8.0..200.0).contains(&size)
+}
+
+/// Whether weight, not size, separates the headings from the body text:
+/// the body text's most common weight, and at least four in five heading
+/// elements set at least [`TYPE_HIERARCHY_WEIGHT_STEP`] heavier. Dense
+/// commerce and listing pages (otto.de) run a tight size ramp on purpose and
+/// set every heading bold; a flat ramp there reports as advisory (corpus
+/// decision r4-p23-flat-type-hierarchy-commerce).
+pub fn type_roles_separated_by_weight(samples: &[TypeSample]) -> bool {
+    let mut body_weights: Vec<(f64, usize)> = Vec::new();
+    let mut heading_weights: Vec<f64> = Vec::new();
+    for sample in samples.iter().filter(|s| type_sample_in_range(s)) {
+        if !sample.weight.is_finite() {
+            continue;
+        }
+        if sample.role == "body" {
+            match body_weights.iter_mut().find(|(w, _)| *w == sample.weight) {
+                Some(slot) => slot.1 += 1,
+                None => body_weights.push((sample.weight, 1)),
+            }
+        } else {
+            heading_weights.push(sample.weight);
+        }
+    }
+    // The most common body weight; a tie goes to the lighter one.
+    let Some(body) = body_weights
+        .iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)))
+        .map(|(w, _)| *w)
+    else {
+        return false;
+    };
+    if heading_weights.is_empty() {
+        return false;
+    }
+    let heavier = heading_weights
+        .iter()
+        .filter(|w| **w >= body + TYPE_HIERARCHY_WEIGHT_STEP)
+        .count();
+    heavier as f64 >= TYPE_HIERARCHY_WEIGHT_SHARE * heading_weights.len() as f64
+}
+
+/// The severity a flat-type-hierarchy finding over `samples` reports at:
+/// advisory when weight separates the roles, the rule's own otherwise.
+pub fn flat_type_hierarchy_severity(samples: &[TypeSample]) -> Option<&'static str> {
+    if type_roles_separated_by_weight(samples) {
+        Some("advisory")
+    } else {
+        None
+    }
 }
 
 /// JS: checks.mjs#typeHierarchyRole
@@ -1780,10 +1886,15 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
         .iter()
         .map(|(role, size)| format!("{} {}px", role, number_to_string(*size)))
         .collect();
+    let weight_note = if type_roles_separated_by_weight(samples) {
+        "; weight separates headings from body text"
+    } else {
+        ""
+    };
     vec![RuleHit::new(
         "flat-type-hierarchy",
         format!(
-            "Role sizes: {} (largest adjacent step {}:1; target {}:1)",
+            "Role sizes: {} (largest adjacent step {}:1; target {}:1{weight_note})",
             role_sizes.join(", "),
             to_fixed(largest_step, 2),
             number_to_string(TYPE_HIERARCHY_MIN_STEP_RATIO)
@@ -1883,8 +1994,65 @@ mod tests {
             .map(|(role, size)| TypeSample {
                 role: role.to_string(),
                 size: *size,
+                weight: f64::NAN,
             })
             .collect()
+    }
+
+    fn weighted(entries: &[(&str, f64, f64, usize)]) -> Vec<TypeSample> {
+        entries
+            .iter()
+            .flat_map(|(role, size, weight, n)| {
+                std::iter::repeat_with(move || TypeSample {
+                    role: role.to_string(),
+                    size: *size,
+                    weight: *weight,
+                })
+                .take(*n)
+            })
+            .collect()
+    }
+
+    /// otto.de (findings 111427, 112210): headings bold at 14-16px over
+    /// 14px regular body text. co-trip.jp (109941): headings at 500 and 400
+    /// over 400 body text, which weight does not separate.
+    #[test]
+    fn flat_type_hierarchy_is_advisory_when_weight_separates_the_roles() {
+        let otto = weighted(&[
+            ("body", 14.0, 400.0, 580),
+            ("h2", 16.0, 700.0, 9),
+            ("h2", 12.0, 400.0, 1),
+            ("h3", 16.0, 700.0, 12),
+            ("h3", 14.0, 700.0, 10),
+        ]);
+        let hits = check_flat_type_hierarchy_samples(&otto);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.ends_with("target 1.25:1; weight separates headings from body text)"), "{hits:?}");
+        assert_eq!(flat_type_hierarchy_severity(&otto), Some("advisory"));
+
+        let co_trip = weighted(&[
+            ("body", 14.0, 400.0, 123),
+            ("h1", 16.0, 500.0, 2),
+            ("h2", 16.0, 500.0, 10),
+            ("h2", 16.0, 400.0, 8),
+            ("h3", 11.7, 400.0, 16),
+        ]);
+        let hits = check_flat_type_hierarchy_samples(&co_trip);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.ends_with("target 1.25:1)"), "{hits:?}");
+        assert_eq!(flat_type_hierarchy_severity(&co_trip), None);
+
+        // One heading in five at body weight is still weight-separated; two
+        // in five is not.
+        let mostly = weighted(&[("body", 14.0, 400.0, 20), ("h2", 16.0, 700.0, 4), ("h3", 15.0, 400.0, 1)]);
+        assert!(type_roles_separated_by_weight(&mostly));
+        let split = weighted(&[("body", 14.0, 400.0, 20), ("h2", 16.0, 700.0, 3), ("h3", 15.0, 400.0, 2)]);
+        assert!(!type_roles_separated_by_weight(&split));
+        // Unread weights say nothing.
+        assert!(!type_roles_separated_by_weight(&samples(&[("body", 14.0), ("h2", 16.0)])));
+        assert_eq!(parse_font_weight("bold"), 700.0);
+        assert_eq!(parse_font_weight(" 600 "), 600.0);
+        assert!(parse_font_weight("bolder").is_nan());
     }
 
     /// copperhead.sh: a 66px title and a 48px closing title, both h1.

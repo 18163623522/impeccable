@@ -241,6 +241,9 @@ struct Ctx<'a> {
     /// JS `hadOperationalFailure`: at least one requested target could not be
     /// scanned, which forces exit 1 (#711).
     had_operational_failure: bool,
+    /// One line per design system that switched a check off for a scanned
+    /// target (a DESIGN.md that declares a purple), in first-seen order.
+    design_notes: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -260,10 +263,17 @@ impl<'a> Ctx<'a> {
             &self.cwd,
             &self.home,
         ) {
-            Some(ds) => ScanOptions {
-                design_system: Some(ds),
-                ..self.base.clone()
-            },
+            Some(ds) => {
+                if let Some(note) = crate::design_system::declared_purple_note(&ds) {
+                    if !self.design_notes.contains(&note) {
+                        self.design_notes.push(note);
+                    }
+                }
+                ScanOptions {
+                    design_system: Some(ds),
+                    ..self.base.clone()
+                }
+            }
             None => self.base.clone(),
         }
     }
@@ -542,6 +552,7 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         cache: DesignSystemCache::new(),
         stdin_tty,
         had_operational_failure: false,
+        design_notes: Vec::new(),
     };
 
     let mut all: Vec<Finding> = Vec::new();
@@ -625,13 +636,27 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         } else {
             let text = format_findings(&all, false, stderr_tty);
             ctx.io.err(&format!("{text}\n"));
+            print_design_notes(&mut ctx, true);
         }
         return Ok(exit_code);
     }
     if json_mode {
         ctx.io.out("[]\n");
+    } else if !quiet_mode {
+        print_design_notes(&mut ctx, false);
     }
     Ok(exit_code)
+}
+
+/// Text mode: say which checks a project's DESIGN.md switched off, after the
+/// findings (or alone, when there are none).
+fn print_design_notes(ctx: &mut Ctx, after_findings: bool) {
+    if ctx.design_notes.is_empty() {
+        return;
+    }
+    let lead = if after_findings { "\n" } else { "" };
+    let text = ctx.design_notes.join("\n");
+    ctx.io.err(&format!("{lead}{text}\n"));
 }
 
 /// The `error.message` Node hands `reportLocalScanFailure` for a failed

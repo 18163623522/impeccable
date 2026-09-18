@@ -1829,6 +1829,8 @@ pub fn detect_text(content: &str, file_path: &str, options: &TextOptions) -> Vec
         }
     }
 
+    crate::design_system::drop_declared_purple_findings(&mut deduped, options.design_system);
+
     // A rule pack sees the file after every built-in matcher, analyzer, and
     // the dedupe, and before inline ignores: its rows are waivable with
     // `impeccable-disable` exactly like built-in rules, and appending keeps

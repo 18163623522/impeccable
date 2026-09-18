@@ -9,7 +9,8 @@ use crate::dom::{StaticDocument, StaticElement};
 use crate::quality::{has_nonblank_direct_text, pf0};
 use impeccable_core::checks::measures::{cream_from_class_list, is_cream_color};
 use impeccable_core::checks::rules::{
-    check_flat_type_hierarchy_samples, is_card_like_from_props, type_hierarchy_role, RuleHit,
+    check_flat_type_hierarchy_samples, flat_type_hierarchy_severity, is_card_like_from_props,
+    parse_font_weight, type_hierarchy_role, RuleHit,
     TypeSample, TYPE_HIERARCHY_SELECTOR,
 };
 use impeccable_core::checks::text_rules::{
@@ -102,6 +103,17 @@ fn is_rendered_type_element(el: &StaticElement<'_>) -> bool {
 
 /// JS: checks.mjs#checkFlatTypeHierarchyFromDoc over the static document.
 pub fn check_flat_type_hierarchy_from_doc(doc: &StaticDocument) -> Vec<RuleHit> {
+    check_flat_type_hierarchy_samples(&flat_type_samples_from_doc(doc))
+}
+
+/// The severity [`check_flat_type_hierarchy_from_doc`]'s finding reports at
+/// (see `flat_type_hierarchy_severity`): advisory when weight separates the
+/// roles.
+pub fn flat_type_hierarchy_severity_for_doc(doc: &StaticDocument) -> Option<&'static str> {
+    flat_type_hierarchy_severity(&flat_type_samples_from_doc(doc))
+}
+
+fn flat_type_samples_from_doc(doc: &StaticDocument) -> Vec<TypeSample> {
     let mut samples: Vec<TypeSample> = Vec::new();
     for el in doc.query_selector_all(TYPE_HIERARCHY_SELECTOR) {
         if js::trim(&el.text_content()).is_empty() || !is_rendered_type_element(&el) {
@@ -114,9 +126,10 @@ pub fn check_flat_type_hierarchy_from_doc(doc: &StaticDocument) -> Vec<RuleHit> 
         samples.push(TypeSample {
             role: type_hierarchy_role(&el.tag_lower()),
             size: font_size,
+            weight: parse_font_weight(sv(el.style(), "fontWeight")),
         });
     }
-    check_flat_type_hierarchy_samples(&samples)
+    samples
 }
 
 // ─── Nested cards ───────────────────────────────────────────────────────────

@@ -20,7 +20,8 @@ use crate::checks::measures::{
     is_screen_reader_only_text_style, SrOnlyMetrics, StyleMap,
 };
 use crate::checks::rules::{
-    check_flat_type_hierarchy_samples, is_card_like_from_props, type_hierarchy_role, RuleHit,
+    check_flat_type_hierarchy_samples, flat_type_hierarchy_severity, is_card_like_from_props,
+    parse_font_weight, type_hierarchy_role, RuleHit,
     TypeSample, TYPE_HIERARCHY_SELECTOR,
 };
 use crate::color::parse_any_color;
@@ -170,8 +171,12 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
         }
     }
 
-    for hit in check_flat_type_hierarchy_from_dom(dom, Some(TYPE_HIERARCHY_SKIP_SELECTOR)) {
-        findings.push(BrowserFinding::new(&hit.id, hit.snippet));
+    let samples = flat_type_samples_from_dom(dom, Some(TYPE_HIERARCHY_SKIP_SELECTOR));
+    let severity = flat_type_hierarchy_severity(&samples);
+    for hit in check_flat_type_hierarchy_samples(&samples) {
+        let mut f = BrowserFinding::new(&hit.id, hit.snippet);
+        f.severity = severity.map(String::from);
+        findings.push(f);
     }
 
     findings
@@ -211,6 +216,11 @@ pub fn check_flat_type_hierarchy_from_dom(
     dom: &dyn Dom,
     skip_selector: Option<&str>,
 ) -> Vec<RuleHit> {
+    check_flat_type_hierarchy_samples(&flat_type_samples_from_dom(dom, skip_selector))
+}
+
+/// The type samples the flat-type-hierarchy check reads off a live DOM.
+pub fn flat_type_samples_from_dom(dom: &dyn Dom, skip_selector: Option<&str>) -> Vec<TypeSample> {
     let mut samples: Vec<TypeSample> = Vec::new();
     for el in dom
         .query_all(None, TYPE_HIERARCHY_SELECTOR)
@@ -231,9 +241,10 @@ pub fn check_flat_type_hierarchy_from_dom(
         samples.push(TypeSample {
             role: type_hierarchy_role(&tag_lower(dom, el)),
             size: font_size,
+            weight: parse_font_weight(&dom.style(el, "fontWeight")),
         });
     }
-    check_flat_type_hierarchy_samples(&samples)
+    samples
 }
 
 /// Whether `el` is drawn as a card, read from its computed box rather than

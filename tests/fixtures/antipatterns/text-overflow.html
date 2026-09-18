@@ -126,6 +126,30 @@
     </div>
   </div>
 
+  <!-- FLAG: the spill runs under a positioned box with no text of its own.
+       An image and a filled box laid over the end of the line cover it. -->
+  <div class="row">
+    <div style="position: relative; width: 120px; height: 24px">
+      <span class="flag-under-positioned-image" style="display: block; white-space: nowrap; line-height: 24px">Contact sales at sales@example.com</span>
+      <img alt="" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="position: absolute; left: 180px; top: 0; width: 60px; height: 24px">
+    </div>
+  </div>
+  <div class="row">
+    <div style="position: relative; width: 120px; height: 24px">
+      <span class="flag-under-positioned-box" style="display: block; white-space: nowrap; line-height: 24px">Contact sales at sales@example.com</span>
+      <div style="position: absolute; left: 180px; top: 0; width: 60px; height: 24px; background: #036"></div>
+    </div>
+  </div>
+
+  <!-- PASS: a positioned hairline with no text (a 1px grid line) over the
+       spill is decoration the text reads over, not a box it runs into. -->
+  <div class="row">
+    <div style="position: relative; width: 120px; height: 24px">
+      <span class="pass-under-hairline" style="display: block; white-space: nowrap; line-height: 24px">Contact sales at sales@example.com</span>
+      <div style="position: absolute; left: 180px; top: -24px; width: 1px; height: 72px; background: rgba(0, 0, 0, 0.1)"></div>
+    </div>
+  </div>
+
   <!-- PASS: text that runs past its own box into free space, where nothing
        is cut or covered. A white-space: pre contact line in a 120px column
        with empty page beside it (bt.cn's footer), and a nowrap headline

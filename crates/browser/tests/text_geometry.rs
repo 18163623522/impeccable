@@ -186,6 +186,8 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "flag-pseudo-suffix",
             "flag-stat-collides",
             "flag-viewport-edge",
+            "flag-under-positioned-image",
+            "flag-under-positioned-box",
         ],
         &[
             "pass-ripple",
@@ -194,6 +196,7 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-stat-neighbor",
             "pass-free-space-pre",
             "pass-free-space-headline",
+            "pass-under-hairline",
         ],
         "text-overflow",
     );

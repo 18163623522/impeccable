@@ -2762,9 +2762,10 @@ fn spill_reaches_viewport_edge(dom: &dyn Dom, spills: (bool, bool), reach: (f64,
 /// text or the painted box of an element that is neither `el`, nor one of its
 /// ancestors or descendants, on the lines `el` sets. A box that holds `el`'s
 /// whole box is a backdrop the text sits on (a hero video, a gradient
-/// scrim), and a positioned box with no text is a decoration layer (a grid
-/// line); neither is a collision. A wrapper that paints nothing counts only
-/// through the text and boxes inside it.
+/// scrim), and a positioned decoration layer (a grid line, a faint wash)
+/// is not a collision either. A positioned image, svg or filled box the
+/// spill runs under is. A wrapper that paints nothing counts only through
+/// the text and boxes inside it.
 fn spill_meets_another_box(
     dom: &dyn Dom,
     el: ElId,
@@ -2810,11 +2811,12 @@ fn spill_meets_another_box(
             continue;
         }
         let has_text = has_direct_text_longer_than(dom, other, 0);
+        let replaced = REPLACED_TAGS.contains(&tag.as_str());
         let position = dom.style(other, "position");
-        if !has_text && (position == "absolute" || position == "fixed") {
+        if !has_text && !replaced && (position == "absolute" || position == "fixed") && is_decoration_layer(dom, other, &r) {
             continue;
         }
-        let paints = has_text || REPLACED_TAGS.contains(&tag.as_str()) || paints_own_box(dom, other);
+        let paints = has_text || replaced || paints_own_box(dom, other);
         if !paints {
             continue;
         }
@@ -2831,6 +2833,36 @@ fn spill_meets_another_box(
         }
     }
     false
+}
+
+/// Thickness at or under which a positioned box with no text is a rule line
+/// (v0-compute-11.vercel.app's 1px grid line), not a box.
+const DECORATION_HAIRLINE_PX: f64 = 2.0;
+
+/// Alpha under which a positioned fill with no text is a wash the text
+/// reads through (the same grid line paints white at 10%).
+const DECORATION_FAINT_ALPHA: f64 = 0.25;
+
+/// Whether a positioned box with no text is a decoration layer a spill may
+/// run over: a hairline, or a plain fill (no image, no border) faint enough
+/// to read text through. A filled badge, a panel, or anything with a
+/// background image or a border is a box the text collides with.
+fn is_decoration_layer(dom: &dyn Dom, el: ElId, r: &Rect) -> bool {
+    if r.width <= DECORATION_HAIRLINE_PX || r.height <= DECORATION_HAIRLINE_PX {
+        return true;
+    }
+    let image = dom.style(el, "backgroundImage");
+    if !image.is_empty() && image != "none" {
+        return false;
+    }
+    if ["Top", "Right", "Bottom", "Left"]
+        .iter()
+        .any(|s| style_px(dom, el, &format!("border{s}Width")) > 0.0)
+    {
+        return false;
+    }
+    let fill = measures::css_color_alpha(Some(&dom.style(el, "backgroundColor")));
+    fill * opacity_of(dom, el) < DECORATION_FAINT_ALPHA
 }
 
 /// A clipping box that marks or clamps its own truncation: `text-overflow`
@@ -5768,6 +5800,34 @@ mod tests {
         d.set_style(chip, "backgroundColor", "rgb(240, 240, 240)");
         assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "a filled chip");
         d.set_style(chip, "display", "none");
+        // Positioned boxes with no text the line runs under: an image, an
+        // svg and a filled box are boxes it collides with; a hairline and a
+        // faint wash are decoration it reads over.
+        let layer = d.add(Some(footer), "img");
+        visible(&mut d, layer);
+        d.set_style(layer, "position", "absolute");
+        d.set_rect(layer, 1060.0, 3104.0, 60.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute image");
+        d.set_style(layer, "display", "none");
+        let svg = d.add(Some(footer), "svg");
+        visible(&mut d, svg);
+        d.set_style(svg, "position", "absolute");
+        d.set_rect(svg, 1060.0, 3104.0, 40.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute svg");
+        d.set_style(svg, "display", "none");
+        let block = d.add(Some(footer), "div");
+        visible(&mut d, block);
+        d.set_styles(block, &[("position", "absolute"), ("backgroundColor", "rgb(0, 51, 102)")]);
+        d.set_rect(block, 1060.0, 3104.0, 60.0, 24.0);
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "an absolute filled box");
+        d.set_style(block, "backgroundColor", "rgba(0, 0, 0, 0.1)");
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "a faint wash");
+        d.set_style(block, "borderLeftWidth", "1px");
+        assert_eq!(check_element_text_overflow_dom(&d, line).len(), 1, "a bordered frame");
+        d.set_styles(block, &[("borderLeftWidth", "0px"), ("backgroundColor", "rgb(0, 51, 102)")]);
+        d.set_rect(block, 1060.0, 3104.0, 60.0, 2.0);
+        assert!(check_element_text_overflow_dom(&d, line).is_empty(), "a 2px rule");
+        d.set_style(block, "display", "none");
 
         // v0-compute-11.vercel.app: a nowrap headline line runs 59px past its
         // span over a full-bleed video, a scrim and a 1px grid line, with the

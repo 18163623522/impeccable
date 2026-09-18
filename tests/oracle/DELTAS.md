@@ -3804,8 +3804,14 @@ of the new phone fixture, which report nothing.
   (`spill_reaches_viewport_edge`); or a spilled part within a quarter em of
   another element's text or painted box on the element's lines
   (`spill_meets_another_box`: not an ancestor or descendant, not a backdrop
-  holding the element's whole box, not an out-of-flow box with no text, and
-  lines that only touch share no line). A quarter em (`SPILL_MEETS_EM`) is
+  holding the element's whole box, not a decoration layer, and lines that
+  only touch share no line). A decoration layer (`is_decoration_layer`) is
+  an absolutely or fixed positioned box with no text that is not a replaced
+  element or an `svg` and is either a hairline 2px thick or less
+  (v0-compute-11's 1px grid line) or a plain fill, with no background image
+  and no border, whose alpha times opacity is under 0.25. A positioned
+  image, `svg`, filled badge or bordered frame the spill runs under is a
+  box it overlaps and reports. A quarter em (`SPILL_MEETS_EM`) is
   under a word space: v0-optimus-delta.vercel.app's `99.99%` ends 3px short
   of `<50ms` at 36px and the judges read the two as touching. bt.cn's
   `white-space: pre` footer lines and v0-compute-11.vercel.app's nowrap
@@ -3842,13 +3848,16 @@ Fixtures and tests:
   x overflow reports once as cut off, naming `ul.wide-list`.
 - `text-overflow.html`: the flag column hides its overflow at 320px so its
   spills are cut; `flag-stat-collides`, `flag-viewport-edge`,
-  `pass-stat-neighbor`, `pass-free-space-pre` and `pass-free-space-headline`
-  are new. `evidence_findings.rs` counts nine spills.
+  `flag-under-positioned-image`, `flag-under-positioned-box`,
+  `pass-stat-neighbor`, `pass-free-space-pre`, `pass-free-space-headline`
+  and `pass-under-hairline` are new. `evidence_findings.rs` counts eleven
+  spills.
 - Unit tests: the phone floor, the page-level form (both wordings, the widest
   box, the scroll bound, a fixed box, clipping boxes, root and body overflow,
   inline ignores), the scroll side under `direction: rtl`, and the three
   text-overflow conditions on bt.cn, v0-compute-11, soc-workflows and the
-  stats (`quality.rs`, `element_checks.rs`).
+  stats, with positioned images, `svg`, filled and bordered boxes counting
+  and a hairline and a faint wash not (`quality.rs`, `element_checks.rs`).
 
 ### Known limits at merge
 

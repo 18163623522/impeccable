@@ -243,7 +243,7 @@
     "id": "body-text-viewport-edge",
     "name": "Body text touching viewport edge",
     "category": "quality",
-    "description": "Body paragraphs render flush against the left or right viewport edge with no container providing horizontal padding. Wrap content in a container with at least 16px (ideally 24-32px) of horizontal padding, or apply max-width with mx-auto."
+    "description": "Body paragraphs render flush against the left or right viewport edge with no container providing horizontal padding: closer than 16px, or 12px on viewports 480px wide or narrower. Wrap content in a container with at least 16px (ideally 24-32px) of horizontal padding, or apply max-width with mx-auto. Body text that runs past the viewport edge is reported once per page as overflow, naming the widest element: constrain that element's width instead of adding padding."
   },
   {
     "id": "tight-leading",
@@ -297,7 +297,7 @@
     "id": "text-overflow",
     "name": "Content overflowing its container",
     "category": "quality",
-    "description": "Content renders wider than its container, spilling out or forcing a horizontal scrollbar. Let text wrap, constrain widths, or give the region a deliberate scroll affordance."
+    "description": "Content renders wider than its container and the spill does harm: a clipping ancestor cuts it off, it runs into another box, or it reaches the viewport edge. Let text wrap, constrain widths, or give the region a deliberate scroll affordance."
   },
   {
     "id": "repeated-container-text",

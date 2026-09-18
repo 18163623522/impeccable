@@ -123,6 +123,7 @@ fn the_text_geometry_rules_measure_the_text() {
     );
 
     let edges = findings(&engine, port, "body-text-viewport-edge.html", "body-text-viewport-edge");
+    let (page, edges): (Vec<_>, Vec<_>) = edges.into_iter().partition(|(_, sel)| sel == "body");
     assert_cases(
         &edges,
         &[
@@ -130,10 +131,7 @@ fn the_text_geometry_rules_measure_the_text() {
             "div.escape:nth-of-type(2) > p",
             "li",
             "flag-inline-prose",
-            "flag-cut-by-wrapper",
-            "flag-runs-past",
-            "flag-transformed-wrapper",
-            "flag-shell-sliver",
+            "flag-gutter-beside-overflow",
         ],
         &[
             "pass-centred-text",
@@ -142,15 +140,28 @@ fn the_text_geometry_rules_measure_the_text() {
             "pass-past-viewport",
             "pass-ticker-first",
             "pass-ticker-second",
+            // Past the window's edge: the page's overflow, not a gutter.
+            "past-cut-by-wrapper",
+            "past-runs-on",
+            "past-transformed-wrapper",
+            "past-shell-sliver",
         ],
         "body-text-viewport-edge",
     );
     assert_eq!(
         edges.len(),
-        8,
-        "two paragraphs, the list item, the inline prose, the paragraph an overflow-x-hidden wrapper cuts, \
-         the column running past the window, the paragraph in a transformed wrapper that holds no row and \
-         the non-wrapping row's second column the page wrapper cuts under a quarter in view: {edges:?}"
+        5,
+        "two paragraphs, the list item, the inline prose, and the 8px left gutter of the paragraph \
+         that also runs past the right edge: {edges:?}"
+    );
+    let gutter = edges.iter().find(|(_, sel)| sel.contains("flag-gutter-beside-overflow")).unwrap();
+    assert!(gutter.0.ends_with("(left 8px)"), "only the gutter side: {gutter:?}");
+    assert_eq!(
+        page.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
+        vec!["page scrolls sideways at 1280px: div reaches 2520px past the right edge, and text in 5 blocks runs past it"],
+        "one page-level finding: the paragraph an overflow-x-hidden wrapper cuts, the column running past the \
+         window, the paragraph in a transformed wrapper, the non-wrapping row's second column and the \
+         gutter case, naming the 3800px row that sets the page's width"
     );
 
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
@@ -169,8 +180,21 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
     let overflow = findings(&engine, port, "text-overflow.html", "text-overflow");
     assert_cases(
         &overflow,
-        &["flag-nowrap", "flag-in-x-hidden-wrapper", "flag-pseudo-suffix"],
-        &["pass-ripple", "pass-image-replacement", "pass-reserve"],
+        &[
+            "flag-nowrap",
+            "flag-in-x-hidden-wrapper",
+            "flag-pseudo-suffix",
+            "flag-stat-collides",
+            "flag-viewport-edge",
+        ],
+        &[
+            "pass-ripple",
+            "pass-image-replacement",
+            "pass-reserve",
+            "pass-stat-neighbor",
+            "pass-free-space-pre",
+            "pass-free-space-headline",
+        ],
         "text-overflow",
     );
     assert!(
@@ -181,4 +205,60 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
     let flush = findings(&engine, port, "edge-flush-cards.html", "edge-flush-cards");
     assert_eq!(flush.len(), 1, "only the pager: {flush:?}");
     assert!(flush[0].0.contains("flag-pager"), "{flush:?}");
+}
+
+/// `(snippet, selector)` for each finding of `rule` on one fixture, scanned
+/// at `viewport`.
+fn findings_at(
+    engine: &BrowserEngine,
+    port: u16,
+    fixture: &str,
+    rule: &str,
+    viewport: (u32, u32),
+) -> Vec<(String, String)> {
+    let url = format!("http://127.0.0.1:{port}/{fixture}");
+    let options = ScanOptions {
+        viewport: Some(viewport),
+        ..Default::default()
+    };
+    engine
+        .detect_url(&url, &options)
+        .expect("scan")
+        .into_iter()
+        .filter(|f| f.antipattern == rule)
+        .map(|f| {
+            let selector = f.extras.get("selector").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            (f.snippet, selector)
+        })
+        .collect()
+}
+
+/// Taste calls r3-34 and r4-p20 at a phone's width: a 12px gutter floor, and
+/// a list past the edge of a page whose body hides sideways overflow reports
+/// once, as text cut off at the edge.
+#[test]
+fn viewport_edge_at_phone_width() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let edges = findings_at(
+        &engine,
+        port,
+        "body-text-viewport-edge-phone.html",
+        "body-text-viewport-edge",
+        (390, 844),
+    );
+    let (page, edges): (Vec<_>, Vec<_>) = edges.into_iter().partition(|(_, sel)| sel == "body");
+    assert_cases(
+        &edges,
+        &["flag-phone-8", "flag-phone-11"],
+        &["pass-phone-12", "pass-phone-14", "pass-phone-24", "past-wide-item"],
+        "body-text-viewport-edge",
+    );
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    assert_eq!(page.len(), 1, "{page:?}");
+    assert!(
+        page[0].0.starts_with("text runs past the right edge of the 390px viewport and is cut off: ul.wide-list reaches 114px past it")
+            && page[0].0.ends_with("with text in 2 blocks"),
+        "{page:?}"
+    );
 }

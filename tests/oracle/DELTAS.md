@@ -3738,3 +3738,128 @@ reporting.
     `phrasing_text_font`, `average_glyph_advance_em_at`,
     `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
     are new; `scrolls_x` and `moves_a_track` are now `pub(crate)`.
+
+## Recorded 2026-09-18: viewport edges and overflow (corpus/premise3-edges-and-overflow)
+
+Three taste calls Paul decided on 2026-09-18, all "narrow", from corpus run 25
+(`reports/observations-25.md` issues 8 and 18, and round 3 issue 34). Every
+change is in the URL engine's rule pass; the static engine measures no boxes
+and is unchanged. No golden moves: the two new goldens are the static scans
+of the new phone fixture, which report nothing.
+
+- **r3-34-body-text-viewport-edge-phone.** Decision: "Use a 12px floor at
+  widths of 480px or less and 16px above. Text 8px from a phone's edge still
+  reports." `body_text_gutter_floor` returns 12px when `innerWidth` is 480px
+  or less (`BODY_TEXT_PHONE_VIEWPORT_MAX_PX`, `BODY_TEXT_GUTTER_PHONE_PX`) and
+  16px above (`BODY_TEXT_GUTTER_PX`). rtx.com's consistent 12px at 390px and
+  sapo.vn's 15px no longer report; 8px and 11px at 390px, and 12px at 481px,
+  still do.
+- **r4-p20-body-text-viewport-edge-overflow.** Decision: "Report text past
+  the viewport edge as overflow, once per page, with a message that says the
+  page scrolls sideways and names the widest element. The per-paragraph
+  findings go. Gutters between 0 and 16px still report as gutters." The
+  measurement moved into `body_text_edge_span`, shared by the element form
+  and a new page pass, `check_page_overflow_dom`, which the driver runs after
+  `check_page_quality_dom`. A paragraph whose text runs past a side (the
+  distance rounds below 0) reports no gutter on that side and keeps its
+  gutter finding for the other side (centene.com's `left 10px / right -95px`
+  now reads `left 10px`). The page pass collects those paragraphs through the
+  same gates plus the Text paint gate and inline ignores, and reports one
+  `body-text-viewport-edge` finding on the page (`selector` `body`,
+  `pageLevel`). The page-level finding keeps the rule id rather than taking
+  `text-overflow`'s: the paragraphs it replaces are this rule's, the
+  decision is this rule's, and `text-overflow` (below) keeps its own
+  per-element viewport-edge findings, so carrying the page form there would
+  report one overflowing layout twice under one id. No rule id is added.
+  - When the page scrolls sideways (the viewport does not clip x overflow,
+    reading the root's `overflow-x` and then body's; the side is the one the
+    page scrolls to, right or left under `direction: rtl`; the root's
+    `scrollWidth` exceeds its `clientWidth`) the message reads `page scrolls
+    sideways at 390px: body.page.page_section_misc reaches 634px past the
+    right edge, and text in 14 blocks runs past it` (drom.ru). The widest
+    element is the box reaching furthest past that side among those no
+    ancestor below the root clips or scrolls on x, not fixed, and no further
+    than the page scrolls; ties go to the outer box.
+  - When the page cannot scroll to that side (centene.com and agora.co.il
+    clip at the root or body, v0-optimus-delta.vercel.app and
+    simplybudget.framer.ai cut the text inside an `overflow-x-hidden`
+    wrapper, a left-to-right page's left edge), saying it scrolls sideways
+    would be false, so the message reads `text runs past the right edge of
+    the 390px viewport and is cut off: div reaches 120px past it, with text in
+    14 blocks` (centene.com), naming the widest box among the paragraphs and
+    their ancestors. A box elsewhere that reaches past the edge on such a
+    page is held by a clip the walk cannot see, so it is not named. This
+    second wording is a reading of the decision, flagged for review.
+  - In both, the paragraph is named when its own text reaches further than
+    any box.
+- **r4-p19-text-overflow-free-space.** Decision: "Report only when a clipping
+  ancestor cuts the text, the spill overlaps another box, or it reaches the
+  viewport edge. The findings go. Stats that collide and URLs cut at a panel
+  edge still report." `overflow_is_painted` became `painted_overflow_extent`,
+  which returns the reach of what paints past the box (the scroll extent
+  where the overflow is taken as read), and `spill_does_harm` asks three
+  things of it: a box at `overflow-x: hidden` or `clip` (the element or an
+  ancestor below the body, with area) that the reach passes
+  (`spill_is_clipped`); a reach within a quarter em of the viewport's side
+  (`spill_reaches_viewport_edge`); or a spilled part within a quarter em of
+  another element's text or painted box on the element's lines
+  (`spill_meets_another_box`: not an ancestor or descendant, not a backdrop
+  holding the element's whole box, not an out-of-flow box with no text, and
+  lines that only touch share no line). A quarter em (`SPILL_MEETS_EM`) is
+  under a word space: v0-optimus-delta.vercel.app's `99.99%` ends 3px short
+  of `<50ms` at 36px and the judges read the two as touching. bt.cn's
+  `white-space: pre` footer lines and v0-compute-11.vercel.app's nowrap
+  headline over its hero video no longer report; the stats and
+  soc-workflows-ai-cyb-tstb.bolt.host's report panel (77px past a 260px
+  panel, off the side of a 390px window) still do.
+
+Ratchet, run 25, both cohorts (585 captures), against the integration base
+(`48c6e9cb`, whose own ratchet differs from the recording on line-length,
+low-contrast, undersized-ui-text and four smaller rules, unchanged here):
+
+- body-text-viewport-edge 453 to 161: 331 removed, 39 added. 262 removed are
+  phone gutters of 12 to 15px (sapo.vn 163, ladepeche.fr 21,
+  simplybudget.framer.ai 19, hrsd.gov.sa 16; 149 pattern-absent, 30
+  disputed, 7 confirmed-harmful on hrsd.gov.sa at `right 12px`, which the
+  decision accepts). 66 are per-paragraph findings past the edge (62
+  confirmed-harmful); every capture that lost one gains the page-level
+  finding. 3 are aajtak.in items whose `left 15px / right 10px` now reads
+  `right 10px`. Added: 14 page-level findings, one per capture, and 25 gutter
+  snippets rewritten to their in-viewport side.
+- text-overflow 53 to 33: 20 removed (bt.cn 12 and v0-compute-11.vercel.app 2,
+  all real-harmless; 6 unjudged spills into free space on sapo.vn,
+  evebcn.com, avikmukherjee.com, chorusai.replit.app and clipto.com), none
+  added. The two stats and the report panel still report.
+
+Fixtures and tests:
+
+- `body-text-viewport-edge.html`: the four cases past the edge are renamed
+  `past-*` and no longer report per paragraph; `flag-gutter-beside-overflow`
+  is new (8px on the left, past the right). `crates/browser/tests/text_geometry.rs`
+  pins five gutter findings and one page-level finding naming the 3800px row.
+- `body-text-viewport-edge-phone.html` is new, scanned at 390x844: 8px and
+  11px flag, 12px, 14px and 24px pass, and a 480px list in a body that hides
+  x overflow reports once as cut off, naming `ul.wide-list`.
+- `text-overflow.html`: the flag column hides its overflow at 320px so its
+  spills are cut; `flag-stat-collides`, `flag-viewport-edge`,
+  `pass-stat-neighbor`, `pass-free-space-pre` and `pass-free-space-headline`
+  are new. `evidence_findings.rs` counts nine spills.
+- Unit tests: the phone floor, the page-level form (both wordings, the widest
+  box, the scroll bound, a fixed box, clipping boxes, root and body overflow,
+  inline ignores), the scroll side under `direction: rtl`, and the three
+  text-overflow conditions on bt.cn, v0-compute-11, soc-workflows and the
+  stats (`quality.rs`, `element_checks.rs`).
+
+### Known limits at merge
+
+1. **Parked carousel cards** that pass the Text gate (microsoft.com's
+   `store-layout-column`, becomeautonomous.com's second `proto-acard`) now
+   report through the page-level form instead of per paragraph: one finding
+   per page where there were one per card. Issue 24's transform-only tracks
+   are the cause and remain open.
+2. **text-overflow's own-clip case** still reports: a box that clips its own
+   overflow cuts its text, which the decision keeps. ynet.co.il's collapsed
+   accordion title (issue 33) and v0-compute-11's 2% ASCII texture report as
+   before.
+3. **The quarter em** is a fixed fraction of the spilling text's size;
+   a spill that ends a word space from its neighbour reads as clear.

@@ -16,9 +16,10 @@
 //! - **Signatures**: a short name set in a handwriting face, or marked
 //!   `signature` by its class or id, outside headings and controls.
 //! - **Text inside illustration mockups**: an ancestor that says it is one,
-//!   by a `mockup` / `mock` / `illustration` class or id token, or by
-//!   `role="img"`. A mockup built from utility classes alone says nothing,
-//!   and its text keeps failing.
+//!   by a `mockup` / `mock` / `illustration` class or id token, or an HTML
+//!   subtree marked `role="img"` (not an `svg`, where the role labels a
+//!   chart whose axis text is read). A mockup built from utility classes
+//!   alone says nothing, and its text keeps failing.
 //!
 //! The adapters gather [`DecorativeTextFacts`] against their own DOM; the
 //! decision is made here, once, for both engines.
@@ -75,7 +76,7 @@ pub struct DecorativeTextFacts {
     /// ([`is_signature_marker`]).
     pub signature_marked: bool,
     /// An ancestor says it is an illustration mockup ([`is_mockup_marker`],
-    /// or `role="img"`).
+    /// or `role="img"` on an HTML element outside any `svg`).
     pub mockup_ancestor: bool,
 }
 
@@ -152,8 +153,8 @@ fn bare_version_spans(text: &str) -> Vec<(usize, usize)> {
 static STAMP_FILLER_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?ix)
-        \b\d{4}[-./]\d{1,2}[-./]\d{1,2}\b
-        | \b\d{1,2}[-./]\d{1,2}[-./]\d{2,4}\b
+        \b\d{4}[-./]\d{1,2}[-./]\d{1,2}(?:[\sT]+\d{1,2}(?::\d{2}){0,2})?\b
+        | \b\d{1,2}[-./]\d{1,2}[-./]\d{2,4}(?:[\sT]+\d{1,2}(?::\d{2}){0,2})?\b
         | \b\d{1,2}:\d{2}(?::\d{2})?\b
         | \b[0-9a-f]{7,12}\b
         | [\s·•|/,()\[\]–—-]+
@@ -328,6 +329,7 @@ mod tests {
             "Build 1289",
             "build: 2024.03.1",
             "N0.0.1 · 2024-03-01",
+            "N0.0.1 , 2026-09-08 19",
             "v1.8.0 (5f3a2c1)",
             "Release 12.4 — 03/01/2024",
             "commit 5f3a2c1d",
@@ -349,6 +351,7 @@ mod tests {
             "13.08.26",
             "13.08.2026",
             "12.03.24 · 09:30",
+            "2026-09-08 19",
         ] {
             assert!(!is_version_stamp(t), "{t}");
         }

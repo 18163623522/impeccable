@@ -69,14 +69,21 @@ fn in_avatar_box(dom: &dyn Dom, el: ElId, text: &str) -> bool {
 }
 
 fn marked_mockup(dom: &dyn Dom, el: ElId) -> bool {
+    // `role="img"` names an HTML subtree drawn as a picture. On an `svg` (or
+    // inside one) it is how a chart, a logo or an icon is labelled, and a
+    // chart's axis labels are read, so it says nothing there.
+    let mut in_svg = closest_or_none(dom, el, "svg").is_some();
     let mut cur = Some(el);
     while let Some(c) = cur {
         let tag = tag_lower(dom, c);
         if tag == "figcaption" {
             return false;
         }
-        if dom.attr(c, "role").is_some_and(|r| js::trim(&r).eq_ignore_ascii_case("img")) {
+        if !in_svg && dom.attr(c, "role").is_some_and(|r| js::trim(&r).eq_ignore_ascii_case("img")) {
             return true;
+        }
+        if tag == "svg" {
+            in_svg = false;
         }
         if !MOCKUP_MARKER_SKIP_TAGS.contains(&tag.as_str())
             && (is_mockup_marker(&class_attr(dom, c))
@@ -177,5 +184,21 @@ mod tests {
         let p = d.add(Some(sec), "p");
         d.add_text(p, "Every mockup ships with source files");
         assert_eq!(decorative_text_shape_dom(&d, p), None);
+    }
+
+    #[test]
+    fn role_img_marks_html_pictures_not_svg_charts() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let pic = d.add(Some(body), "div");
+        d.set_attr(pic, "role", "img");
+        let code = d.add(Some(pic), "code");
+        d.add_text(code, "$ npm run build");
+        assert_eq!(decorative_text_shape_dom(&d, code), Some(DecorativeShape::Mockup));
+        let chart = d.add(Some(body), "svg");
+        d.set_attr(chart, "role", "img");
+        let label = d.add(Some(chart), "text");
+        d.add_text(label, "Nov 2022");
+        assert_eq!(decorative_text_shape_dom(&d, label), None);
     }
 }

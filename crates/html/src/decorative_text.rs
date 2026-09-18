@@ -118,13 +118,19 @@ fn in_avatar_box(el: &StaticElement<'_>, text: &str) -> bool {
 }
 
 fn marked_mockup(el: &StaticElement<'_>) -> bool {
+    // `role="img"` names an HTML subtree drawn as a picture; on or inside an
+    // `svg` it labels a chart, a logo or an icon, whose text is read.
+    let mut in_svg = ancestors_inclusive(el).any(|c| c.tag_lower() == "svg");
     for c in ancestors_inclusive(el) {
         let tag = c.tag_lower();
         if tag == "figcaption" {
             return false;
         }
-        if role_is(&c, &["img"]) {
+        if !in_svg && role_is(&c, &["img"]) {
             return true;
+        }
+        if tag == "svg" {
+            in_svg = false;
         }
         if !MOCKUP_MARKER_SKIP_TAGS.contains(&tag.as_str())
             && (is_mockup_marker(c.class_name()) || is_mockup_marker(c.id_attr()))

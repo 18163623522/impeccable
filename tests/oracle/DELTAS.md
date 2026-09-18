@@ -3770,8 +3770,9 @@ unless `advisoryRules` is `include`, as for every other advisory finding.
   version or build identifier (with at most a date, a time, a short hash); a
   short name in a handwriting face or marked `signature`, outside headings
   and controls; and text under an ancestor whose class or id says `mockup`,
-  `mock` or `illustration` (not a landmark or `section`), or under
-  `role="img"`. Anything uncertain keeps failing: digits, three letters, an
+  `mock` or `illustration` (not a landmark or `section`), or under an
+  HTML element marked `role="img"` (on an `svg` the role labels charts,
+  whose axis text is read, so it is not evidence there). Anything uncertain keeps failing: digits, three letters, an
   uncentred letter, a version inside a sentence, a mockup built from utility
   classes alone. An advisory copy claims its colour pair for itself, so it
   never hides a failing copy of the same pair on the SAFE_TAGS path.
@@ -3794,8 +3795,10 @@ follow from them, and the new fixtures' own findings.
 - `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the nine moves above plus the two new fixtures (644 to 650 counted, 94 to 118 advisory notes: nine moved plus the new fixtures' 15 failing and 15 advisory; `--no-advisory` drops the nine).
 
 Known limits, stated so the ratchet does not read them as misses: a
-signature in a plain serif italic (evebcn.com's 'Pedro') and a mockup made of
-utility classes (clipto.com, the kraflio.com post card, context.dev's request
-illustration) carry no DOM evidence and keep failing; the SVG initials an
-`aria-hidden` avatar draws are not measured by the pixel pass at all, as
-before.
+signature in a plain serif italic (evebcn.com's 'Pedro'), a mockup made of
+utility classes (clipto.com, resurf.so, the kraflio.com post card,
+context.dev's request illustration, v0-optimus-delta's 'Ready'), step and
+ghost numerals (bt.cn's '02.', opentrailpaper.com's '1', the 'II' marker) and
+syntax tokens in a code demo carry no DOM evidence for the four shapes and
+keep failing; the SVG initials an `aria-hidden` avatar draws are not measured
+by the pixel pass at all, as before.

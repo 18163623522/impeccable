@@ -14,8 +14,9 @@ use impeccable_core::checks::measures::{
 };
 use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
-    is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
-    JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
+    font_weight_number, is_bold_title_leading, is_cjk_text, is_line_clamp_display,
+    is_under_ui_text_floor, justifies_without_word_spaces_text, tracking_is_crushed,
+    ALL_CAPS_LONG_RUN, JUSTIFY_NARROW_CHARS_PER_LINE, SMALLPRINT_TEXT_FLOOR_PX, UI_TEXT_FLOOR_PX, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
     LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
 };
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
@@ -558,6 +559,14 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 && !is_non_rendered_text(el, tag, Some(style))
                 && !is_visually_hidden(el, style)
                 && !is_heading_text(el, tag)
+                // A bold title in a line clamp gets the heading exemption. The
+                // browser engine also exempts bold text of two lines or fewer;
+                // with no layout, lines cannot be counted here.
+                && !is_bold_title_leading(
+                    font_weight_number(sv(style, "fontWeight")),
+                    None,
+                    is_line_clamp_display(sv(style, "display")),
+                )
             {
                 findings.push(RuleHit::new(
                     "tight-leading",
@@ -621,7 +630,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         let dt_len = utf16_len(&direct_text);
         let ui_skip_tags = ["sub", "sup", "option"];
         if font_size > 0.0
-            && font_size < 11.0
+            && font_size < UI_TEXT_FLOOR_PX
             && dt_len >= 2
             && !ui_skip_tags.contains(&tag)
             // A footnote marker is set small by convention, and so is the
@@ -635,11 +644,14 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 let is_furniture = el.closest(FURNITURE).is_some();
                 let is_smallprint = el.closest(SMALLPRINT).is_some();
                 let floor = if !is_interactive && is_smallprint {
-                    10.0
+                    SMALLPRINT_TEXT_FLOOR_PX
                 } else {
-                    11.0
+                    UI_TEXT_FLOOR_PX
                 };
-                if font_size < floor && (is_interactive || is_furniture || dt_len <= 20) {
+                // A 0.1px tolerance under each floor, as the browser engine.
+                if is_under_ui_text_floor(font_size, floor)
+                    && (is_interactive || is_furniture || dt_len <= 20)
+                {
                     let excerpt = slice_utf16_prefix(&direct_text, 40);
                     findings.push(RuleHit::new(
                         "undersized-ui-text",

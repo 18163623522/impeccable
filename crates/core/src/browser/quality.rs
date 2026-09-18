@@ -21,8 +21,10 @@ use super::text_geometry::{
     scrolling_ancestor_cuts, text_line_count,
 };
 use crate::checks::text_rules::{
-    average_glyph_advance_em_at, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
-    ALL_CAPS_LONG_RUN,
+    average_glyph_advance_em_at, font_weight_number, is_bold_title_leading, is_cjk_text,
+    is_line_clamp_display, is_under_ui_text_floor, justifies_without_word_spaces_text,
+    tracking_is_crushed, ALL_CAPS_LONG_RUN, LEADING_BOLD_TITLE_WEIGHT, SMALLPRINT_TEXT_FLOOR_PX,
+    UI_TEXT_FLOOR_PX,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
     LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
     SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
@@ -193,15 +195,51 @@ pub fn has_meaningful_direct_text(dom: &dyn Dom, el: ElId) -> bool {
     has_direct_text_longer_than(dom, el, 4)
 }
 
+/// The tallest box `cramped-padding` measures by its glyphs rather than by the
+/// content area of its text. Chips run 24 to 28px; the price and step chips
+/// the r3-20 evidence rests on measure exactly 28 and 24.
+pub const SMALL_CHIP_MAX_HEIGHT_PX: f64 = 28.0;
+
+/// The band of `t`, a text rect of `node`, that its glyphs occupy: each line's
+/// em box, one font size tall and centred on the line's content area. A Range
+/// rect spans the font's ascent plus descent, which for most faces runs 1.2
+/// to 1.4em and leaves room above the capitals and below the descenders; that
+/// room, like CSS half-leading, is space a reader sees between the glyphs and
+/// the edge. Only the vertical edges move; a rect already no taller than its
+/// em boxes is returned as it is.
+pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
+    let font_size = parse_float(&dom.style(node, "fontSize"));
+    if !(font_size.is_finite() && font_size > 0.0) {
+        return *t;
+    }
+    let own = resolve_length_px(Some(&dom.style(node, "lineHeight")), font_size)
+        .filter(|lh| lh.is_finite() && *lh > 0.0)
+        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
+    let pitch = line_pitch_px(dom, node, own);
+    let lines = text_line_count(t.height, pitch, font_size);
+    let content = t.height - (lines - 1.0) * pitch;
+    let inset = (content - font_size) / 2.0;
+    if !(inset > 0.0) || inset * 2.0 >= t.height {
+        return *t;
+    }
+    Rect::from_xywh(t.left, t.top + inset, t.width, t.height - inset * 2.0)
+}
+
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
 ///
 /// Each candidate is measured by its own text rect, not by its border box: a
 /// padded button, a centred heading and a table cell all fill the box they sit
 /// in while their glyphs stay well inside it, and it is the glyphs a reader
 /// sees crowding the boundary.
+///
+/// In a chip at most [`SMALL_CHIP_MAX_HEIGHT_PX`] tall the text is measured by
+/// its glyphs ([`glyph_band`]) rather than by the content area its rect spans:
+/// the line box there already holds the glyphs off the edge, and two pixels
+/// of declared padding read as enough. Taste call r3-20 (2026-09-18).
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
     const TEXT_EDGE_THRESHOLD: f64 = 4.0;
+    let small_chip = rect.height > 0.0 && rect.height <= SMALL_CHIP_MAX_HEIGHT_PX;
     let candidates = dom.query_all(Some(el), TEXT_EDGE_QUERY).unwrap_or_default();
     for node in candidates {
         let tag_name = dom.tag_name(node);
@@ -229,9 +267,13 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
             continue;
         }
         // A Dom that cannot measure text falls back to the box, the behaviour
-        // this rule had before, rather than going silent.
+        // this rule had before, rather than going silent. In a small chip the
+        // glyphs are measured rather than the font's content area.
         let nr = match dom.direct_text_rect(node) {
-            Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(&t, &br) {
+            Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(
+                &if small_chip { glyph_band(dom, node, &t) } else { t },
+                &br,
+            ) {
                 Some(c) => c,
                 None => continue,
             },
@@ -318,6 +360,50 @@ pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
         cur = dom.parent(c);
     }
     true
+}
+
+/// How far up from a text element the tight-leading floor looks for the box
+/// that clamps or clips its lines: the element, the inline run it may sit in,
+/// and the title wrapper around that (ynet.co.il sets its headline in a `div`
+/// inside a link inside the clamped `div.slotTitle`).
+const LINE_CLAMP_SEARCH_DEPTH: usize = 4;
+
+/// The lines of `t`, the text rect of `el`, that render: whether a line clamp
+/// holds them, and where the nearest box that clips them on the y axis cuts
+/// them off.
+///
+/// A `-webkit-box` between `el` and that box is a clamp. Current Chrome
+/// computes the `display` of a `-webkit-box` that carries
+/// `-webkit-line-clamp` as `flow-root`, and no capture carries the clamp
+/// property itself, so a `flow-root` box that clips counts as the clamp when
+/// the text lays out lines past its content box: the lines a clamp hides are
+/// still laid out, and their Range rects run on below it.
+fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
+    let mut cur = Some(el);
+    let mut depth = 0;
+    while let Some(c) = cur {
+        if depth >= LINE_CLAMP_SEARCH_DEPTH {
+            break;
+        }
+        let display = dom.style(c, "display");
+        if is_line_clamp_display(&display) {
+            return (true, t.bottom);
+        }
+        let clips = |k: &str| matches!(dom.style(c, k).as_str(), "hidden" | "clip");
+        if clips("overflowY") || clips("overflow") {
+            let r = dom.rect(c);
+            let content_bottom =
+                r.bottom - style_px(dom, c, "borderBottomWidth") - style_px(dom, c, "paddingBottom");
+            if !(content_bottom.is_finite() && t.all_finite()) || content_bottom >= t.bottom {
+                return (false, t.bottom);
+            }
+            let clamped = display == "flow-root" && t.bottom > content_bottom + 1.0;
+            return (clamped, js::math_max(content_bottom, t.top));
+        }
+        cur = dom.parent(c);
+        depth += 1;
+    }
+    (false, t.bottom)
 }
 
 /// The tags whose prose is measured for `line-length` when its words sit
@@ -993,10 +1079,23 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             if ratio > 0.0 && shown < 1.3 {
                 let text_rect = dom.direct_text_rect(el).unwrap_or(*rect);
                 let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES;
+                // A bold run of two rendered lines or fewer, or one in a line
+                // clamp, is a title set on a div or span: it gets the heading
+                // exemption. Lines a clipping box cuts off do not render.
+                let bold_title = || {
+                    let weight = font_weight_number(&st("fontWeight"));
+                    if weight < LEADING_BOLD_TITLE_WEIGHT {
+                        return false;
+                    }
+                    let (clamped, bottom) = rendered_lines(dom, el, &text_rect);
+                    let lines = text_line_count(bottom - text_rect.top, lh, font_size);
+                    is_bold_title_leading(weight, Some(lines), clamped)
+                };
                 if wraps
                     && !is_non_rendered_text(dom, el, tag)
                     && !is_visually_hidden(dom, el)
                     && !is_heading_text(dom, el, tag)
+                    && !bold_title()
                 {
                     findings.push(RuleHit::new(
                         "tight-leading",
@@ -1053,7 +1152,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let dt_len = utf16_len(&dt);
         let ui_skip_tags = ["sub", "sup", "option"];
         if font_size > 0.0
-            && font_size < 11.0
+            && font_size < UI_TEXT_FLOOR_PX
             && dt_len >= 2
             && !ui_skip_tags.contains(&tag)
             // A footnote marker is set small by convention, and so is the
@@ -1066,8 +1165,17 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 let is_interactive = matches_or_closest(dom, el, INTERACTIVE);
                 let is_furniture = matches_or_closest(dom, el, FURNITURE);
                 let is_smallprint = matches_or_closest(dom, el, SMALLPRINT);
-                let floor = if !is_interactive && is_smallprint { 10.0 } else { 11.0 };
-                if font_size < floor && (is_interactive || is_furniture || dt_len <= 20) {
+                let floor = if !is_interactive && is_smallprint {
+                    SMALLPRINT_TEXT_FLOOR_PX
+                } else {
+                    UI_TEXT_FLOOR_PX
+                };
+                // Fluid type a hair under the floor (10.9688px against 11px)
+                // is not smaller text to a reader: the floor keeps a 0.1px
+                // tolerance under each value.
+                if is_under_ui_text_floor(font_size, floor)
+                    && (is_interactive || is_furniture || dt_len <= 20)
+                {
                     let excerpt = slice_utf16_prefix(&dt, 40);
                     findings.push(RuleHit::new(
                         "undersized-ui-text",
@@ -1668,6 +1776,120 @@ mod tests {
         );
     }
 
+    /// A chip `height` tall on a tinted fill, 2px of vertical padding, and one
+    /// label whose box and text rect are given. Returns `(chip, label)`.
+    fn chip(d: &mut FakeDom, height: f64, font: &str, line_height: &str, label: (f64, f64)) -> (ElId, ElId) {
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let chip = d.add(Some(body), "div");
+        d.set_attr(chip, "class", "faq-content__step");
+        d.set_rect(chip, 620.0, 100.0, 66.0, height);
+        d.set_styles(
+            chip,
+            &[
+                ("position", "static"),
+                ("display", "flex"),
+                ("backgroundColor", "rgb(255, 170, 1)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "2px"),
+                ("paddingRight", "8px"),
+                ("paddingBottom", "2px"),
+                ("paddingLeft", "8px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        let span = text_el(d, chip, "span", "Point", font);
+        d.set_styles(
+            span,
+            &[
+                ("display", "block"),
+                ("lineHeight", line_height),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("marginTop", "0px"),
+                ("marginRight", "0px"),
+                ("marginBottom", "0px"),
+                ("marginLeft", "0px"),
+            ],
+        );
+        let (top, h) = label;
+        d.set_rect(span, 628.0, 100.0 + top, 41.0, h);
+        d.set_text_rect(span, 628.0, 100.0 + top, 41.0, h);
+        (chip, span)
+    }
+
+    fn cramped(d: &FakeDom, el: ElId) -> Vec<String> {
+        check_element_quality_dom(d, el, &BrowserConfig::default())
+            .into_iter()
+            .filter(|h| h.id == "cramped-padding")
+            .map(|h| h.snippet)
+            .collect()
+    }
+
+    /// Taste call r3-20: a chip at most 28px tall is measured by its glyphs,
+    /// half-leading included. yungching.com.tw's 24px step chip sets a 14px
+    /// label on a 20px `normal` line 2px off its edges; the glyphs' em box
+    /// sits 5px off. haraj.com.sa's 28px price chip holds a 19px content
+    /// area 4px off on a 24px line; its em box is 5.5px off.
+    #[test]
+    fn cramped_padding_measures_small_chips_by_their_glyphs() {
+        let mut d = FakeDom::new();
+        let (step, _) = chip(&mut d, 24.0, "14px", "normal", (2.0, 20.0));
+        assert!(cramped(&d, step).is_empty(), "{:?}", cramped(&d, step));
+
+        let mut d = FakeDom::new();
+        let (price, _) = chip(&mut d, 28.0, "16px", "24px", (4.0, 19.0));
+        assert!(cramped(&d, price).is_empty(), "28px is still a small chip");
+
+        // The same label geometry past 28px keeps the content-area measure.
+        let mut d = FakeDom::new();
+        let (tall, _) = chip(&mut d, 30.0, "14px", "normal", (2.0, 20.0));
+        assert_eq!(
+            cramped(&d, tall),
+            vec!["<div> \"faq-content__step\": children flush against bg on top (no inset)"]
+        );
+
+        // A chip whose glyphs really do touch its edges still reports: a 16px
+        // label on a 16px line in a 20px chip, its 19px content area 0.5px
+        // off, keeps its em box 2px off the top and bottom.
+        let mut d = FakeDom::new();
+        let (touching, label) = chip(&mut d, 20.0, "16px", "16px", (2.0, 16.0));
+        d.set_text_rect(label, 628.0, 100.5, 41.0, 19.0);
+        assert_eq!(
+            cramped(&d, touching),
+            vec!["<div> \"faq-content__step\": children flush against bg on top/bottom (no inset)"]
+        );
+    }
+
+    #[test]
+    fn glyph_band_centres_the_em_box_on_each_line() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let one = text_el(&mut d, body, "span", "Point", "14px");
+        let t = Rect::from_xywh(0.0, 10.0, 40.0, 20.0);
+        let g = glyph_band(&d, one, &t);
+        assert_eq!((g.top, g.bottom, g.left, g.right), (13.0, 27.0, 0.0, 40.0));
+
+        // Two 18px lines 18px apart: the content area is 21.6px (1.2em)
+        // and the union 39.6px; the em box moves 1.8px in at each end.
+        let two = text_el(&mut d, body, "span", "Two lines of label text", "18px");
+        d.set_style(two, "lineHeight", "18px");
+        let t = Rect::from_xywh(0.0, 0.0, 200.0, 39.6);
+        let g = glyph_band(&d, two, &t);
+        assert!((g.top - 1.8).abs() < 1e-9 && (g.bottom - 37.8).abs() < 1e-9, "{g:?}");
+
+        // A content area no taller than the font size has nothing to take off.
+        let tight = text_el(&mut d, body, "span", "Tight face", "16px");
+        let t = Rect::from_xywh(0.0, 0.0, 60.0, 15.0);
+        assert_eq!(glyph_band(&d, tight, &t), t);
+    }
+
     /// `direct_text_rect` is a font-metric box, not an ink box: half-leading
     /// and scripts with tall marks push it out of the box that paints the
     /// text, where no glyph can land. Measure the part inside that box.
@@ -2154,6 +2376,80 @@ mod tests {
     /// observations-20 row 40: an inline run at `line-height: 11px` inside a
     /// 14px block sits on 14px lines, and a label at 18px inside a 22.4px
     /// block sits on 22.4px ones.
+    /// Taste call r3-03: bold titles set on a div or span get the heading
+    /// exemption at two rendered lines or fewer, or in a line clamp.
+    #[test]
+    fn tight_leading_exempts_bold_titles() {
+        const TITLE: &str = "Two southern residents charged over an international trafficking ring";
+        fn title(d: &mut FakeDom, parent: ElId, weight: &str, lines: f64) -> ElId {
+            let el = text_el(d, parent, "div", TITLE, "14px");
+            d.set_styles(el, &[("lineHeight", "16px"), ("fontWeight", weight), ("display", "block")]);
+            let h = 16.8 + 16.0 * (lines - 1.0);
+            d.set_rect(el, 355.0, 300.0, 265.0, 16.0 * lines);
+            d.el_mut(el).direct_text_rect = Some(Rect::from_xywh(355.0, 300.0, 265.0, h));
+            el
+        }
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+
+        let bold = title(&mut d, body, "700", 2.0);
+        assert!(snippets(&d, bold, "tight-leading").is_empty(), "bold, two lines");
+        let semibold = title(&mut d, body, "600", 2.0);
+        assert!(snippets(&d, semibold, "tight-leading").is_empty(), "600 is bold");
+        let medium = title(&mut d, body, "500", 2.0);
+        assert_eq!(snippets(&d, medium, "tight-leading"), vec!["line-height 1.14x (need >=1.3)"]);
+        let three = title(&mut d, body, "700", 3.0);
+        assert_eq!(
+            snippets(&d, three, "tight-leading"),
+            vec!["line-height 1.14x (need >=1.3)"],
+            "bold body text of three lines keeps the floor"
+        );
+
+        // A clamp exempts a bold title however many lines it lays out:
+        // older Chrome computes `-webkit-box`, current Chrome `flow-root`
+        // with the hidden lines laid out past the content box.
+        let boxed = title(&mut d, body, "670", 4.0);
+        d.set_style(boxed, "display", "-webkit-box");
+        assert!(snippets(&d, boxed, "tight-leading").is_empty(), "-webkit-box clamp");
+        let flow = title(&mut d, body, "670", 4.0);
+        d.set_styles(flow, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(flow, 355.0, 300.0, 265.0, 32.0);
+        assert!(snippets(&d, flow, "tight-leading").is_empty(), "flow-root clamp");
+        // flow-root with nothing laid out past the box is no clamp.
+        let unclamped = title(&mut d, body, "670", 4.0);
+        d.set_styles(unclamped, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
+        assert_eq!(snippets(&d, unclamped, "tight-leading").len(), 1, "flow-root, no hidden lines");
+        // Regular copy in a clamp keeps the floor.
+        let regular = title(&mut d, body, "400", 4.0);
+        d.set_style(regular, "display", "-webkit-box");
+        assert_eq!(snippets(&d, regular, "tight-leading").len(), 1, "regular weight in a clamp");
+
+        // ynet.co.il's `div.slotTitle.medium`: the headline's own div lays out
+        // three lines, and the clamped wrapper two levels up (through the
+        // link) shows two of them.
+        let wrapper = d.add(Some(body), "div");
+        d.set_styles(wrapper, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(wrapper, 230.0, 4109.0, 190.0, 38.0);
+        let link = d.add(Some(wrapper), "a");
+        d.set_style(link, "display", "inline");
+        let headline = text_el(&mut d, link, "div", TITLE, "15px");
+        d.set_styles(headline, &[("display", "block"), ("lineHeight", "19px"), ("fontWeight", "670")]);
+        d.set_rect(headline, 230.0, 4109.0, 190.0, 38.0);
+        d.el_mut(headline).direct_text_rect = Some(Rect::from_xywh(252.0, 4111.0, 167.0, 53.0));
+        assert!(snippets(&d, headline, "tight-leading").is_empty(), "two of three lines render");
+        d.set_style(headline, "fontWeight", "400");
+        assert_eq!(snippets(&d, headline, "tight-leading").len(), 1, "regular weight keeps the floor");
+
+        // An inline bold run wrapping to two lines on its block.
+        let block = d.add(Some(body), "div");
+        d.set_styles(block, &[("display", "block"), ("fontSize", "16px"), ("lineHeight", "normal")]);
+        let run = text_el(&mut d, block, "span", TITLE, "16px");
+        d.set_styles(run, &[("display", "inline"), ("lineHeight", "19px"), ("fontWeight", "670")]);
+        d.set_rect(run, 466.0, 8866.0, 374.0, 34.0);
+        d.el_mut(run).direct_text_rect = Some(Rect::from_xywh(466.0, 8866.0, 374.0, 34.0));
+        assert!(snippets(&d, run, "tight-leading").is_empty(), "inline bold run, two lines");
+    }
+
     #[test]
     fn tight_leading_reads_the_block_an_inline_run_sits_on() {
         const COPY: &str = "Free furniture, free books, free clothes, free computers, and more besides.";
@@ -2403,6 +2699,52 @@ mod tests {
         d.set_style(s, "fontSize", "9px");
         d.add_selector(s, SR_ONLY_SELECTOR);
         assert!(check_element_quality_dom(&d, s, &BrowserConfig::default()).is_empty());
+    }
+
+    /// Taste call r3-19: each floor keeps a 0.1px tolerance, so fluid type a
+    /// hair under it stops reporting and text 0.1px under or more reports.
+    #[test]
+    fn undersized_ui_text_tolerates_fluid_sizes_a_hair_under_the_floor() {
+        fn undersized(d: &FakeDom, el: ElId) -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "undersized-ui-text")
+                .map(|h| h.snippet)
+                .collect()
+        }
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let s = text_el(&mut d, body, "span", "透天厝", "10.9688px");
+        d.set_rect(s, 23.0, 711.0, 33.0, 11.0);
+        assert!(undersized(&d, s).is_empty(), "0.03px under 11px");
+        d.set_style(s, "fontSize", "10.95px");
+        assert!(undersized(&d, s).is_empty(), "0.05px under 11px");
+        d.set_style(s, "fontSize", "10.9px");
+        assert_eq!(undersized(&d, s), vec!["10.9px functional text \"透天厝\" (below 11px floor)"]);
+        d.set_style(s, "fontSize", "10.944px");
+        assert!(undersized(&d, s).is_empty(), "swipeloan.in's slider ticks");
+
+        // The smallprint floor keeps the same tolerance.
+        let legal = text_el(&mut d, body, "span", "Terms apply", "9.95px");
+        d.set_rect(legal, 23.0, 800.0, 60.0, 11.0);
+        d.add_selector(legal, SMALLPRINT);
+        assert!(undersized(&d, legal).is_empty(), "0.05px under 10px");
+        d.set_style(legal, "fontSize", "9.9px");
+        assert_eq!(undersized(&d, legal), vec!["9.9px functional text \"Terms apply\" (below 10px floor)"]);
+
+        // Text in a link keeps the interactive floor, smallprint class or not
+        // (taste call r3-07, kept).
+        let card = d.add(Some(body), "a");
+        d.set_attr(card, "href", "/story");
+        d.add_selector(card, INTERACTIVE);
+        let credit = text_el(&mut d, card, "div", "Photo: Reuters", "10.5px");
+        d.set_rect(credit, 23.0, 900.0, 80.0, 12.0);
+        d.add_selector(credit, INTERACTIVE);
+        d.add_selector(credit, SMALLPRINT);
+        assert_eq!(
+            undersized(&d, credit),
+            vec!["10.5px functional text \"Photo: Reuters\" (below 11px floor)"]
+        );
     }
 
     #[test]

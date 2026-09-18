@@ -104,6 +104,14 @@
     .pass-heading-good { padding: 16px; background: #f1f5f9; border-radius: 8px; font-size: 24px; font-weight: 600; line-height: 1.2; }
     .pass-hero-good { padding: 20px 32px; background: #f1f5f9; border-radius: 8px; font-size: 32px; font-weight: 700; line-height: 1.2; }
 
+    /* ── FLAG: a small chip whose glyphs really do touch its edges ── */
+    .flag-touching-chip { display: flex; align-items: center; width: 180px; height: 20px; padding: 0 8px; background: #fde68a; border-radius: 4px; }
+    .flag-touching-chip span { font-size: 16px; line-height: 16px; }
+
+    /* ── PASS: a small chip whose line box already holds the glyphs off the edge ── */
+    .pass-step-chip { display: inline-flex; align-items: center; height: 24px; box-sizing: border-box; padding: 2px 8px; background: #ffaa01; color: #1a1a1a; border-radius: 4px; }
+    .pass-step-chip span { font-size: 14px; line-height: 20px; font-weight: 500; }
+
     /* ── PASS: an inline highlight that wraps is two one-line fragments ── */
     .pass-highlight-copy { width: 240px; font-size: 14px; line-height: 26px; margin: 0; }
     .pass-highlight { background: #fef08a; padding: 0 5px; }
@@ -156,6 +164,12 @@
       <div class="case">
         <span class="case-label">260x36px flex row, padding 0, 16px text on an 18px line box: two lines run edge to edge</span>
         <div class="flag-tight-band">Two full lines of label text inside a 36px band</div>
+      </div>
+
+      <h3>Small chip whose text touches the edge (browser engine only)</h3>
+      <div class="case">
+        <span class="case-label">20px chip, padding 0: the 16px glyphs reach within 2px of the top and bottom</span>
+        <div class="flag-touching-chip"><span>Limited edition</span></div>
       </div>
 
       <h3>Cramped multi-line code block</h3>
@@ -256,6 +270,12 @@
       <div class="case">
         <span class="case-label">32px hero, 20px / 32px padding</span>
         <div class="pass-hero-good">Hero With Big Padding</div>
+      </div>
+
+      <h3>Small chip inset by its line box (browser engine only)</h3>
+      <div class="case">
+        <span class="case-label">24px step chip, padding 2px 8px, 14px label on a 20px line: the glyphs sit 5px off the top and bottom. The static engine reads only the declared padding and still reports it.</span>
+        <div class="pass-step-chip"><span>Point 1</span></div>
       </div>
 
       <h3>Inline highlight across two lines</h3>

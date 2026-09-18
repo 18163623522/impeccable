@@ -28,6 +28,9 @@
     .story-excerpt { width: 420px; font-size: 22px; line-height: 25px; margin: 0; padding-left: 20px; }
     .nested-desc { width: 300px; font-size: 16px; line-height: 17.6px; margin: 0; text-transform: none; letter-spacing: normal; }
     .card-heading { font-size: 16px; margin: 0; text-transform: none; letter-spacing: normal; }
+    .bold-body-run { width: 240px; font-size: 16px; line-height: 19px; font-weight: 700; margin: 0; }
+    .medium-slot-title { width: 320px; font-size: 14px; line-height: 16px; font-weight: 500; }
+    .clamped-regular-blurb { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; width: 260px; font-size: 15px; line-height: 18px; font-weight: 400; }
 
     /* Should pass: display type, heading text, single lines, non-rendered. */
     .display-statement { width: 560px; font-size: 32px; line-height: 36px; margin: 0; }
@@ -41,6 +44,10 @@
     .teaser-copy { width: 300px; font-size: 19px; line-height: 24px; text-transform: none; letter-spacing: normal; }
     .links-block { width: 280px; font-size: 14px; line-height: 22px; }
     .link-run { font-size: 12px; line-height: 11.4px; }
+    .bold-slot-title { width: 320px; font-size: 14px; line-height: 16px; font-weight: 700; }
+    .bold-ticker-link { font-size: 16px; line-height: 19px; font-weight: 670; color: #1a1a1a; text-decoration: none; }
+    .ticker-item { width: 440px; }
+    .clamped-video-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; width: 290px; font-size: 15px; line-height: 18px; font-weight: 670; }
   </style>
   <!-- SHOULD PASS: stylesheet source is text the browser never typesets. -->
   <style id="theme-overrides">
@@ -71,6 +78,19 @@
       <!-- A paragraph of reading copy nested in an h3 is body copy, not
            heading text: the heading exemption must not reach a block. -->
       <h3 class="card-heading"><p class="nested-desc">The service card puts its whole description paragraph inside the card heading, and it still wraps to several lines of reading copy.</p></h3>
+
+      <h3>Bold body text running four lines at 1.19</h3>
+      <!-- Bold is not a title by itself: past two lines the text is reading
+           copy set heavy, and it keeps the floor. -->
+      <p class="bold-body-run">This whole card description is set in bold, and it wraps to four lines in the narrow column, so its lines still crowd each other like body copy.</p>
+
+      <h3>Medium-weight two-line card title at 1.14</h3>
+      <!-- Weight 500 is under the 600 the bold-title exemption asks for. -->
+      <div class="medium-slot-title">Two southern residents charged over an international trafficking ring</div>
+
+      <h3>Regular-weight blurb in a three-line clamp at 1.20</h3>
+      <!-- A clamp exempts a bold title only: regular copy in one keeps the floor. -->
+      <div class="clamped-regular-blurb">The clamped teaser under the photo is regular reading copy, and the clamp cuts it after three lines that still sit too close together to read comfortably.</div>
     </div>
 
     <div class="col" data-col="pass">
@@ -131,6 +151,23 @@
            around it. The static engine has no layout to find the block that
            sets the pitch, so it still reports this one. -->
       <div class="links-block"><span class="link-run">Free furniture, free books, free clothes, free computers, free phones, free fridges and much more besides.</span></div>
+
+      <h3>Bold two-line card title on a div (browser engine only)</h3>
+      <!-- SHOULD PASS in the browser engine: weight 700 over two rendered
+           lines is a headline set on a div, and gets the exemption h1 to h6
+           have. The static engine cannot count lines, so it still reports
+           this one. -->
+      <div class="bold-slot-title">Two southern residents charged over an international trafficking ring</div>
+
+      <h3>Bold two-line ticker headline in an inline link (browser engine only)</h3>
+      <!-- SHOULD PASS in the browser engine: an inline run at weight 670 that
+           wraps to two lines. The static engine cannot count them. -->
+      <div class="ticker-item"><a class="bold-ticker-link" href="/news/awards">The tourism Oscars: Dubai on land, Qatar in the air, and who won for Israel?</a></div>
+
+      <h3>Bold title in a two-line clamp</h3>
+      <!-- SHOULD PASS: weight 670 in a -webkit-box line clamp, however many
+           lines the full text would run to. -->
+      <span class="clamped-video-title">The compact luxury crossover turning heads this season, with a cabin that feels far larger than it is and a price that undercuts every rival</span>
     </div>
 
   </div>

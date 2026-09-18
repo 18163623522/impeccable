@@ -76,6 +76,77 @@ pub const LEADING_HEADING_TEXT_TAGS: &[&str] = &[
     "label", "font", "bdi", "bdo", "ins", "del",
 ];
 
+/// The weight from which text set at body size reads as a title, for the
+/// tight-leading floor. Card and ticker headlines are set on `div` and
+/// `span` as often as on a heading tag, bold, at 1.14 to 1.2; at
+/// [`LEADING_BOLD_TITLE_MAX_LINES`] lines or fewer, or line-clamped, they get
+/// the exemption `h1` to `h6` have. Taste call r3-03 (2026-09-18).
+pub const LEADING_BOLD_TITLE_WEIGHT: f64 = 600.0;
+
+/// The most rendered lines a bold run may set and still count as a title for
+/// the tight-leading floor. Bold body text running three lines or more keeps
+/// the floor.
+pub const LEADING_BOLD_TITLE_MAX_LINES: f64 = 2.0;
+
+/// A computed `font-weight` as a number. A browser always computes a number;
+/// the static cascade keeps the keyword an author wrote, so `bold` and
+/// `bolder` read as 700 and `lighter` as 100. Anything else unreadable
+/// (`normal` included) is 400.
+pub fn font_weight_number(value: &str) -> f64 {
+    match js::trim(value) {
+        "bold" | "bolder" => 700.0,
+        "lighter" => 100.0,
+        v => {
+            let n = js::parse_float(v);
+            if n.is_finite() {
+                n
+            } else {
+                400.0
+            }
+        }
+    }
+}
+
+/// Whether a computed `display` is the `-webkit-box` a line clamp needs.
+/// Neither engine carries `-webkit-line-clamp` itself, and a `-webkit-box`
+/// on text today is that clamp: the old flexbox syntax it once spelled is
+/// long gone from authored CSS.
+pub fn is_line_clamp_display(display: &str) -> bool {
+    matches!(js::trim(display), "-webkit-box" | "-webkit-inline-box")
+}
+
+/// Whether text `weight` heavy counts as a title for the tight-leading floor:
+/// bold, and set on at most [`LEADING_BOLD_TITLE_MAX_LINES`] lines or in a
+/// line clamp. `lines` is `None` where the engine cannot count them (the
+/// static engine has no layout), and then only a clamp exempts.
+pub fn is_bold_title_leading(weight: f64, lines: Option<f64>, line_clamped: bool) -> bool {
+    weight >= LEADING_BOLD_TITLE_WEIGHT
+        && (line_clamped || lines.is_some_and(|l| l <= LEADING_BOLD_TITLE_MAX_LINES))
+}
+
+/// The size floor of `undersized-ui-text` for interactive and functional
+/// text.
+pub const UI_TEXT_FLOOR_PX: f64 = 11.0;
+
+/// The softer floor non-interactive legal smallprint gets.
+pub const SMALLPRINT_TEXT_FLOOR_PX: f64 = 10.0;
+
+/// How far under a floor text may render before `undersized-ui-text`
+/// reports it. Fluid type scales a 12px design size to 10.9688px, 0.03px
+/// under the 11px floor, and nobody reads that as smaller text. The same
+/// tolerance applies under both floors, so only text at 10.9px or below
+/// (the 11px floor) or 9.9px or below (the 10px smallprint floor) reports.
+/// Taste call r3-19 (2026-09-18).
+pub const UI_TEXT_FLOOR_TOLERANCE_PX: f64 = 0.1;
+
+/// Whether `font_size` sits under `floor` by the tolerance or more. Compared
+/// in thousandths of a pixel, so a size a hair off 10.9 in binary floats is
+/// judged by the value it prints.
+pub fn is_under_ui_text_floor(font_size: f64, floor: f64) -> bool {
+    let shortfall = js::math_round((floor - font_size) * 1000.0);
+    shortfall >= js::math_round(UI_TEXT_FLOOR_TOLERANCE_PX * 1000.0)
+}
+
 /// JS: checks.mjs#TEXT_EDGE_TAGS (upper-case tag names, as the JS set).
 pub const TEXT_EDGE_TAGS: &[&str] = &[
     "A",

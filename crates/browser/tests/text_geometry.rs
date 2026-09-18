@@ -153,12 +153,28 @@ fn the_text_geometry_rules_measure_the_text() {
          the non-wrapping row's second column the page wrapper cuts under a quarter in view: {edges:?}"
     );
 
+    // Bold titles of two lines or fewer, or in a line clamp, are exempt (taste
+    // call r3-03); bold body text of four lines, a weight-500 title and
+    // regular copy in a clamp keep the floor.
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
-    assert_cases(&leading, &["card-blurb", "nested-desc"], &["teaser-copy", "link-run"], "tight-leading");
-    assert_eq!(leading.len(), 5, "the five flag cases: {leading:?}");
+    assert_cases(
+        &leading,
+        &["card-blurb", "nested-desc", "bold-body-run", "medium-slot-title", "clamped-regular-blurb"],
+        &["teaser-copy", "link-run", "bold-slot-title", "bold-ticker-link", "clamped-video-title"],
+        "tight-leading",
+    );
+    assert_eq!(leading.len(), 8, "the eight flag cases: {leading:?}");
 
+    // A chip at most 28px tall is measured by its glyphs (taste call r3-20):
+    // the step chip's line box holds them 5px off its edges, the 20px chip's
+    // glyphs still reach within 2px.
     let cramped = findings(&engine, port, "cramped-padding.html", "cramped-padding");
-    assert_cases(&cramped, &["flag-card-4"], &["pass-highlight"], "cramped-padding");
+    assert_cases(
+        &cramped,
+        &["flag-card-4", "flag-touching-chip"],
+        &["pass-highlight", "pass-step-chip"],
+        "cramped-padding",
+    );
 }
 
 #[test]

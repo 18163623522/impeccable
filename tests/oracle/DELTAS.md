@@ -4308,3 +4308,177 @@ controls reports again. The review's open issues, for Paul to confirm:
 5. **The fill-only double frames go.** r4-p16 drops the 38 harmful fill-only
    double frames, as Paul accepted; the corpus violation count rises from 56
    to 75, all from that counter-evidence.
+
+## Recorded 2026-09-18: brand hue, ad tech, vendor widgets and weighted ramps (corpus premise round 3)
+
+Four taste calls Paul decided on 2026-09-18, each implemented as the chosen
+option's text says. Quoted verbatim from the corpus decisions table:
+
+- **r3-23-ai-color-palette-brand-hue, narrow:** "Skip when the heading hue
+  matches the logo, the nav bar or a large brand surface on the same page.
+  Purple that shows up only in headings and gradients still reports." With
+  Paul's note: "i think a realistic fix for users would be that if in their
+  design.md, they have purple, then we auto-disable the purple as ai tell
+  check".
+- **r3-31-script-error-ad-tech, advisory:** "Class known ad-tech API
+  rejections (browsingTopics and the like) as third-party and report them as
+  advisory."
+- **r4-p24-third-party-widget-markup, narrow:** "Tag findings inside known
+  vendor subtrees (Taboola, Swiper and the like) as third-party, and name the
+  vendor in the message. They keep counting as failures, because visitors see
+  them."
+- **r4-p23-flat-type-hierarchy-commerce, advisory:** "Report a flat ramp as
+  advisory when weight separates the roles. The findings stay visible, outside
+  the failure count."
+
+What each does (the contract is in `docs/CLI-CONTRACT.md`):
+
+1. **Brand hue, URL engine.** The heading forms of `ai-color-palette` (snippets
+   ending ` on heading`) drop when the heading's computed colour is within 12
+   degrees of hue of a solid (alpha 0.9 or more, chroma 50 or more, no
+   gradient over it) logo, nav bar or header at least half the viewport wide,
+   or band at least 90% of the viewport wide covering a fifth of its area.
+   Headings are never brand surfaces; gradients and neon text still report.
+   `drop_brand_hue_headings` in `crates/core/src/browser/driver.rs`.
+2. **Brand hue, DESIGN.md.** A design system that declares a purple (chroma 30
+   or more, hue 250 to 320) drops every purple/violet form of
+   `ai-color-palette` in the static, regex and URL engines for that target (the
+   cyan forms stay), so the design hook gets it too; text mode prints
+   `Note: ai-color-palette's purple/violet check is off: <DESIGN.md> declares
+   <label> (<hex>).` The detect crate's own design-system loader supplies the
+   colours: it parses the same DESIGN.md frontmatter `crates/context`'s
+   `parse_design_md` does, and `crates/detect` cannot depend on
+   `crates/context`.
+3. **Ad tech.** A `script-error` thrown from AnyMind, Prebid, Meta Pixel,
+   Google Tag Manager, OneTrust or Google Ads script hosts, or naming
+   `browsingTopics` / `joinAdInterestGroup` / `runAdAuction` / `adsbygoogle`,
+   is `severity: advisory`, ends ` (third-party: <vendor>)` and carries
+   `thirdParty`. The list is `crates/core/src/third_party.rs`. The
+   three-error cap is applied after classing, to counted and ad-tech errors
+   separately (`capped_script_errors` in `crates/browser/src/lib.rs`), so
+   three ad-tech errors ahead of the site's own never push it out of the
+   report: a page whose only counted error arrived fourth would otherwise pass
+   with exit 0. `script-error-ad-tech.html` has three ad-tech errors ahead of
+   its own and a fourth after it.
+4. **Vendor widgets.** Findings on Taboola's feed subtree and on Swiper's own
+   wrapper and slide elements end ` (third-party: <vendor>)` and carry
+   `thirdParty`; severity unchanged. Same module.
+5. **Weighted ramps.** `flat-type-hierarchy` is advisory, with `; weight
+   separates headings from body text` inside its parenthesis, when at least
+   four in five heading samples are 200 or more heavier than the body's most
+   common weight. Static and URL engines.
+
+Goldens:
+
+- New: `detect-design-purple-json`, `detect-design-purple-text`,
+  `detect-design-blue-json`, `detect-design-blue-text` (a project with a
+  purple DESIGN.md reports none of the three purple findings its page and
+  component carry and prints the note; the blue project reports all three),
+  `hook-stop-purple-heading-design-purple`, `hook-stop-purple-heading-design-none`
+  (the Stop review of a `text-purple-700` heading is silent with the purple
+  DESIGN.md and reports it without one), and the json and text cases of the
+  new fixtures `ai-color-palette-brand-hue.html`,
+  `ai-color-palette-brand-hue-headings-only.html`, `script-error-ad-tech.html`,
+  `third-party-widgets.html`, `flat-type-hierarchy-weight.html` and
+  `flat-type-hierarchy-weight-flat.html`. The static engine has no rendered
+  page, so both brand-hue fixtures report their two headings there; the
+  script-error and widget fixtures are URL-engine cases that carry only their
+  static findings here (`crates/browser/tests/brand_and_vendors.rs` holds the
+  URL assertions).
+- `detect-fixture-json-covered-text-contrast-html`,
+  `detect-fixture-text-covered-text-contrast-html`,
+  `detect-fixture-json-painted-at-capture-html`,
+  `detect-fixture-text-painted-at-capture-html`,
+  `detect-fixture-json-typography-should-flag-html`,
+  `detect-fixture-text-typography-should-flag-html`: the one
+  `flat-type-hierarchy` finding each moves from warning to advisory with the
+  weight note, because each fixture sets its headings bold over regular body
+  text. Counted findings drop by one, advisory notes rise by one; nothing else
+  moved.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`,
+  `detect-no-advisory-json`, `detect-no-advisory-text`: the three advisory
+  moves above plus the new fixtures' static findings (644 to 648 counted, 94
+  to 100 advisory in the full sweep).
+- The generated browser asset was regenerated with `cargo xtask bundle`.
+
+**Corpus.** `premise3-brand-and-vendors-25` against run 25 (585 captures, both
+cohorts), compared with `integration-25-synced` (the same base engine): every
+difference outside these four rules' changes is the base's own drift and
+identical in both. The changes:
+
+- `ai-color-palette`: 76 heading findings removed (6 real-harmless, 70
+  unjudged): te.eg 19 (the evidence cluster, 12 findings, plus its inner
+  pages), nubank.com.br 54 (logo and full-width sections in `#8d0de3`), zid.sa
+  2 (a full-width `#af72ff` hero), context.dev 1 (a 95%-wide violet panel at
+  phone width; its desktop capture keeps the finding because the panel is
+  52% wide). None confirmed-harmful.
+- `flat-type-hierarchy`: 15 of 33 move to advisory (2 real-harmless: the two
+  otto.de representatives; 13 unjudged: yna.co.kr, donckelektro.nl, aajtak.in,
+  avikmukherjee.com, joongang.co.kr, all bold headings over regular body).
+  co-trip.jp (109941, headings at 500 and 400) stays a warning.
+- Tagged, severity unchanged: Taboola 23 (`undersized-ui-text` 11, all
+  confirmed-harmful; `low-contrast` 5; `tight-leading` 6; `clipped-overflow-container`
+  1) on ynet.co.il, climatempo.com.br and aajtak.in, and Swiper 8
+  (`layout-transition` on nubank.com.br 7, yungching.com.tw 1). The ratchet
+  keys on snippets, so each tag counts as one removal and one addition, and
+  the 14 confirmed-harmful tagged findings raise its violation count from 56
+  to 70 without anything leaving the report.
+- `script-error` does not replay. Classified offline over the recorded
+  run-25 findings, 20 of 116 turn advisory: co-trip.jp's AnyMind
+  `browsingTopics` rejection 6, onlinetest.tw's `adsbygoogle` errors 8 and
+  adm.com's OneTrust auto-blocker 6 (5 real-harmless, 1 unjudged). The 19
+  real-harmless ones are the decision's run-25 evidence count. The att.com
+  Adobe tag, its web-vitals chunk, PostHog on context.dev and ynet.co.il's
+  ad-unit bundle stay errors: they are served from the site's own host or are
+  not ad tech.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, after the revision
+(69aa49e5) fixed the one problem the review raised: the URL engine now
+classes page errors before capping them and caps counted and ad-tech errors
+at three each, so ad-tech errors never take a first-party error's slot. The
+review's open issues, for Paul to confirm:
+
+1. **co-trip.jp stays a warning.** The r4-p23 option text says "The 3
+   findings stay visible, outside the failure count", but only otto.de's two
+   (111427, 112210) turn advisory. co-trip.jp 109941 has headings at 500 for
+   12 of 36 samples and 400 for the rest, which no reasonable weight
+   threshold catches, though both judges called it contrast by weight.
+2. **The engines disagree on default bold.** A heading that relies on the
+   browser's default bold reports a warning in a static scan and advisory in
+   a URL scan (the review's `ft-default.html`), so the design hook's static
+   scan can fail a page whose URL scan passes. Defaulting h1 to h6 to 700 in
+   the static sampler when no `font-weight` is declared would close it.
+3. **r4-p23 reaches beyond commerce.** 13 unjudged findings on news sites and
+   a blog (yna.co.kr, joongang.co.kr, aajtak.in, donckelektro.nl,
+   avikmukherjee.com) turn advisory, following the option's weight criterion.
+4. **The logo trigger is partial.** It reads the logo element's own
+   background, or its text colour only when the text sits directly in it, so
+   `<a class="site-logo"><span>Acme</span></a>` with a purple span still
+   reports; SVG and image logos are invisible because the snapshot carries no
+   `fill`. Reading descendant text ink when the logo has no direct text would
+   help.
+5. **A stock violet CTA band is a brand surface.** A full-width band in
+   Tailwind's violet-600 (#7c3aed) silences a matching violet-600 heading,
+   following the option text; the page-level accent finding still reports.
+6. **The DESIGN.md switch misses indigo and URLs.** An indigo DESIGN.md
+   (#4f46e5, hue about 243) does not switch the check off though the rule
+   treats `indigo` classes as purple forms, and the switch never applies to
+   http(s) scans, localhost dev servers included.
+7. **The hook drops the purple forms silently.** Only CLI text mode prints
+   that the check is off; JSON has no place for the note, and the design hook
+   never tells the agent.
+8. **r3-31 is wider than API rejections.** Any error thrown from a Meta
+   Pixel, GTM, OneTrust or Google Ads host is ad tech. OneTrust is a consent
+   manager; the evidence ids support it, but Paul should confirm it belongs
+   on the list.
+9. **Vendor tagging is partial.** Only rule-pass and visual-contrast findings
+   are tagged; content-hidden findings and the static engine never are.
+   Swiper is tagged on its own elements only, not its subtree, on purpose.
+10. **Tags change snippets**, so snippet-keyed consumers (the ratchet,
+    cluster keys) count each tagged finding as one removal and one addition.
+11. **Live test flake.** `crates/cli/tests/agent_target.rs` and the
+    impeccable-live lib tests fail now and then under a full
+    `cargo test --workspace` run; older than the branch.

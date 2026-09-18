@@ -1,0 +1,251 @@
+//! Third-party vendors the detector names in its findings.
+//!
+//! A finding the site cannot fix in its own markup still reports, but it says
+//! where the fix lives. Two kinds of vendor are known, each kept to the ones
+//! the corpus has evidence for:
+//!
+//! - **Widgets** ([`WIDGET_VENDORS`]): markup a vendor script injects or a
+//!   vendor stylesheet styles. Findings on it are tagged with the vendor and
+//!   keep their severity, because visitors see them (corpus decision
+//!   r4-p24-third-party-widget-markup).
+//! - **Ad tech** ([`AD_TECH_VENDORS`], [`AD_TECH_APIS`]): uncaught errors and
+//!   rejections thrown by advertising and tag scripts on pages that render
+//!   fine. Those `script-error` findings are tagged and report as advisory
+//!   (corpus decision r3-31-script-error-ad-tech).
+//!
+//! A tagged finding carries the vendor twice: at the end of its message
+//! ([`tag_detail`]) and, in the CLI's JSON, as a `thirdParty` key.
+
+use crate::browser::dom::{ancestors_inclusive, Dom, ElId};
+
+/// How far a widget vendor's markup reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetScope {
+    /// Everything under the vendor's container is the vendor's (an injected
+    /// recommendation feed).
+    Subtree,
+    /// Only the vendor's own structural elements are the vendor's; what the
+    /// site puts inside them is the site's (a carousel library's slide
+    /// wrappers hold the site's own content).
+    OwnElement,
+}
+
+/// A vendor whose markup is recognized by its ids and classes.
+#[derive(Debug)]
+pub struct WidgetVendor {
+    pub name: &'static str,
+    pub scope: WidgetScope,
+    /// An element whose id starts with one of these is the vendor's.
+    pub id_prefixes: &'static [&'static str],
+    /// An element with a class token starting with one of these is the
+    /// vendor's.
+    pub class_prefixes: &'static [&'static str],
+    /// An element with one of these exact class tokens is the vendor's.
+    pub classes: &'static [&'static str],
+}
+
+/// The widget vendors, from the corpus evidence: Taboola recommendation cards
+/// on ynet.co.il and climatempo.com.br (findings 110423, 110711, 123649,
+/// 123650, 123679), and a Swiper carousel's vendor CSS on nubank.com.br
+/// (111379, 111514).
+pub const WIDGET_VENDORS: &[WidgetVendor] = &[
+    WidgetVendor {
+        name: "Taboola",
+        scope: WidgetScope::Subtree,
+        // `#taboola-mid-home-page-thumbnails-nd.trc_related_container` holds
+        // `#internal_trc_<n>` and the `.trc_rbox_*` frame around the cards.
+        id_prefixes: &["taboola-", "internal_trc_"],
+        class_prefixes: &["trc_rbox"],
+        classes: &["trc_related_container"],
+    },
+    WidgetVendor {
+        name: "Swiper",
+        scope: WidgetScope::OwnElement,
+        id_prefixes: &["swiper-wrapper-"],
+        class_prefixes: &[],
+        classes: &["swiper", "swiper-container", "swiper-wrapper", "swiper-slide"],
+    },
+];
+
+fn marks(dom: &dyn Dom, el: ElId, vendor: &WidgetVendor) -> bool {
+    if let Some(id) = dom.attr(el, "id") {
+        if vendor.id_prefixes.iter().any(|p| id.starts_with(p)) {
+            return true;
+        }
+    }
+    let class = dom.attr(el, "class").unwrap_or_default();
+    class
+        .split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r'))
+        .filter(|t| !t.is_empty())
+        .any(|token| {
+            vendor.classes.contains(&token) || vendor.class_prefixes.iter().any(|p| token.starts_with(p))
+        })
+}
+
+/// The widget vendor whose markup `el` is, if any.
+pub fn widget_vendor(dom: &dyn Dom, el: ElId) -> Option<&'static str> {
+    for vendor in WIDGET_VENDORS {
+        let hit = match vendor.scope {
+            WidgetScope::OwnElement => marks(dom, el, vendor),
+            WidgetScope::Subtree => ancestors_inclusive(dom, el)
+                .into_iter()
+                .any(|a| marks(dom, a, vendor)),
+        };
+        if hit {
+            return Some(vendor.name);
+        }
+    }
+    None
+}
+
+/// An ad-tech script host: an error thrown from a script it serves is the
+/// vendor's.
+#[derive(Debug)]
+pub struct AdTechVendor {
+    pub name: &'static str,
+    /// Substrings of the script URL the error was thrown from.
+    pub sources: &'static [&'static str],
+}
+
+/// The ad-tech hosts, from the corpus evidence: AnyMind's Prebid bundle and
+/// the Facebook pixel on co-trip.jp (findings 80412, 80232), a Google Tag
+/// Manager tag on adm.com (87473), and OneTrust's auto-blocker on adm.com
+/// (87472, 87474, 87513, 87514), the consent layer that holds ad and tracking
+/// tags back and throws when it patches `document.createElement`. Product
+/// analytics (PostHog) and a site's own bundles and telemetry chunks, ad
+/// code served from the site's own host included, are not on the list and
+/// stay first-party script errors.
+pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
+    AdTechVendor { name: "AnyMind", sources: &["anymind360.com"] },
+    AdTechVendor { name: "Prebid", sources: &["/prebid"] },
+    AdTechVendor { name: "Meta Pixel", sources: &["connect.facebook.net"] },
+    AdTechVendor { name: "Google Tag Manager", sources: &["googletagmanager.com"] },
+    AdTechVendor { name: "OneTrust", sources: &["cookielaw.org"] },
+    AdTechVendor {
+        name: "Google Ads",
+        sources: &["googlesyndication.com", "doubleclick.net", "googleadservices.com"],
+    },
+];
+
+/// Ad APIs whose rejection names itself in the message: Chrome removed the
+/// Topics API (`document.browsingTopics() is deprecated and has been
+/// removed`, findings 65354, 65585 on co-trip.jp) and ad scripts still call
+/// it; the Protected Audience calls are the same kind of rejection; AdSense
+/// throws `adsbygoogle.push() error` at slots it cannot fill. Each maps to
+/// the vendor it names.
+pub const AD_TECH_APIS: &[(&str, &str)] = &[
+    ("browsingTopics", "ad tech"),
+    ("joinAdInterestGroup", "ad tech"),
+    ("runAdAuction", "ad tech"),
+    ("adsbygoogle", "Google Ads"),
+];
+
+/// The ad-tech vendor behind an uncaught page error, from where it was
+/// thrown (`source`, the script URL and frame) or, failing that, the ad API
+/// its message names.
+pub fn ad_tech_vendor(message: &str, source: Option<&str>) -> Option<&'static str> {
+    if let Some(source) = source {
+        let lower = source.to_ascii_lowercase();
+        for vendor in AD_TECH_VENDORS {
+            if vendor.sources.iter().any(|s| lower.contains(s)) {
+                return Some(vendor.name);
+            }
+        }
+    }
+    AD_TECH_APIS
+        .iter()
+        .find(|(api, _)| message.contains(api))
+        .map(|(_, name)| *name)
+}
+
+/// A finding's message with the vendor named at its end.
+pub fn tag_detail(detail: &str, vendor: &str) -> String {
+    format!("{detail} (third-party: {vendor})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::fake_dom::FakeDom;
+
+    #[test]
+    fn taboola_tags_its_whole_subtree() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let feed = d.add(Some(body), "div");
+        d.set_attr(feed, "id", "taboola-mid-home-page-thumbnails-nd");
+        d.set_attr(feed, "class", "trc_related_container tbl-trecs-container");
+        let card = d.add(Some(feed), "div");
+        d.set_attr(card, "id", "internal_trc_2016259095");
+        let button = d.add(Some(card), "button");
+        assert_eq!(widget_vendor(&d, button), Some("Taboola"));
+        assert_eq!(widget_vendor(&d, feed), Some("Taboola"));
+        let own = d.add(Some(body), "button");
+        assert_eq!(widget_vendor(&d, own), None);
+    }
+
+    #[test]
+    fn swiper_tags_its_own_elements_only() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let wrapper = d.add(Some(body), "div");
+        d.set_attr(wrapper, "id", "swiper-wrapper-c3421110317cdd10310");
+        d.set_attr(wrapper, "class", "swiper-wrapper");
+        let slide = d.add(Some(wrapper), "div");
+        d.set_attr(slide, "class", "swiper-slide swiper-slide-visible");
+        let heading = d.add(Some(slide), "h2");
+        assert_eq!(widget_vendor(&d, slide), Some("Swiper"));
+        assert_eq!(widget_vendor(&d, wrapper), Some("Swiper"));
+        // The site's own content inside a slide is the site's.
+        assert_eq!(widget_vendor(&d, heading), None);
+        // A class that only starts like Swiper's is not Swiper's.
+        let other = d.add(Some(body), "div");
+        d.set_attr(other, "class", "swiper-like-thing");
+        assert_eq!(widget_vendor(&d, other), None);
+    }
+
+    #[test]
+    fn ad_tech_errors_name_their_vendor() {
+        let topics = "Uncaught (in promise) NotSupportedError: Failed to execute 'browsingTopics' on 'Document': document.browsingTopics() is deprecated and has been removed.";
+        assert_eq!(ad_tech_vendor(topics, None), Some("ad tech"));
+        assert_eq!(
+            ad_tech_vendor(topics, Some("at https://anymind360.com/js/17837/prebid_2026_9_10_16_23_39.js:89:956")),
+            Some("AnyMind")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught TypeError: a.__fbeventsModules[e] is not a function",
+                Some("at a.getFbeventsModules, https://connect.facebook.net/signals/config/1?v=2.9:20:4472")
+            ),
+            Some("Meta Pixel")
+        );
+        assert_eq!(
+            ad_tech_vendor("Uncaught [object Object]", Some("at error, https://www.googletagmanager.com/gtm.js?id=GTM-X:272:504")),
+            Some("Google Tag Manager")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught TypeError: Cannot redefine property: src",
+                Some("at document.createElement, https://cdn.cookielaw.org/consent/x/OtAutoBlock.js:10:312")
+            ),
+            Some("OneTrust")
+        );
+        // Analytics and first-party code are not ad tech.
+        assert_eq!(
+            ad_tech_vendor(
+                "[SessionRecording] must be started with a valid sessionManager.",
+                Some("at get Ph, https://www.context.dev/ingest/static/1.417.1/posthog-recorder.js:1:156066")
+            ),
+            None
+        );
+        assert_eq!(ad_tech_vendor("Minified React error #418", Some("at https://example.com/app.js:1:1")), None);
+    }
+
+    #[test]
+    fn tagged_detail_ends_with_the_vendor() {
+        assert_eq!(
+            tag_detail("10px functional text \"Learn More\" (below 11px floor)", "Taboola"),
+            "10px functional text \"Learn More\" (below 11px floor) (third-party: Taboola)"
+        );
+    }
+}

@@ -583,10 +583,68 @@ impl SafeTagTextSeen {
         });
     }
 
+    /// Whether the page has already claimed `key` for rule `id`, outright or
+    /// provisionally. Asking claims nothing.
+    pub fn has_claimed(&self, id: &str, key: &str) -> bool {
+        let k = (id.to_string(), key.to_string());
+        self.reported.contains(&k) || self.provisional.iter().any(|(p, _, _)| *p == k)
+    }
+
     /// The provisional hits later on-screen elements replaced, as
     /// `(handle, snippet)` (drained).
     pub fn take_superseded(&mut self) -> Vec<(u64, String)> {
         std::mem::take(&mut self.superseded)
+    }
+}
+
+// ─── Contrast severity ──────────────────────────────────────────────────────
+
+/// The per-finding severity a contrast finding reports at when it is not a
+/// full failure.
+pub const ADVISORY_SEVERITY: &str = "advisory";
+
+/// The lowest ratio, as printed, that still counts as just under the 4.5:1
+/// bar for normal text: within 0.3 of it.
+pub const NEAR_BAR_FLOOR_NORMAL: f64 = 4.2;
+/// The lowest ratio, as printed, that still counts as just under the 3:1
+/// bar for large text: within 0.2 of it.
+pub const NEAR_BAR_FLOOR_LARGE: f64 = 2.8;
+
+/// Whether a failing contrast ratio sits just under its bar: 4.2:1 up to
+/// 4.5:1 for normal text, 2.8:1 up to 3:1 for large text (taste call r3-02,
+/// "Report ratios inside the margin as advisory, outside the failure count.
+/// The findings stay visible with their measured ratios.").
+///
+/// The margin is read off the ratio as the snippet prints it
+/// ([`crate::color::ratio_label`]), so every finding that prints `4.2:1`
+/// reports the same way, whether the ratio underneath is 4.196 or 4.204. A
+/// ratio at or over the bar is not a failure and is not near it; any other
+/// bar (a NaN from a candidate with no threshold) has no margin.
+pub fn contrast_near_bar(ratio: f64, threshold: f64) -> bool {
+    if !ratio.is_finite() || !(ratio < threshold) {
+        return false;
+    }
+    let floor = if threshold == 4.5 {
+        NEAR_BAR_FLOOR_NORMAL
+    } else if threshold == 3.0 {
+        NEAR_BAR_FLOOR_LARGE
+    } else {
+        return false;
+    };
+    string_to_number(&crate::color::ratio_label(ratio, threshold)) >= floor
+}
+
+/// The severity a failing contrast finding carries: `advisory` just under
+/// its bar ([`contrast_near_bar`]), else the rule's own.
+pub fn contrast_severity(ratio: f64, threshold: f64) -> Option<String> {
+    contrast_near_bar(ratio, threshold).then(|| ADVISORY_SEVERITY.to_string())
+}
+
+/// Marks every `low-contrast` hit advisory. The engines call it on an
+/// element whose text has no reading job ([`crate::checks::decorative_text`]).
+pub fn demote_low_contrast(hits: &mut [RuleHit]) {
+    for h in hits.iter_mut().filter(|h| h.id == "low-contrast") {
+        h.severity = Some(ADVISORY_SEVERITY.to_string());
     }
 }
 
@@ -710,37 +768,72 @@ pub fn check_colors_deduped_claiming(
     claim: Option<PairClaim>,
     keep: &mut dyn FnMut(&RuleHit) -> bool,
 ) -> Vec<RuleHit> {
+    check_colors_deduped_shaped(opts, seen, claim, &|| false, keep)
+}
+
+/// [`check_colors_deduped_claiming`] with the engine's verdict on whether
+/// the element's text has no reading job ([`crate::checks::decorative_text`]).
+/// `decorative` is asked at most once, and only when the element failed
+/// contrast; a yes reports its `low-contrast` hits as advisory.
+///
+/// An advisory copy never speaks for the page's failing copies of the same
+/// colour pair: it is dropped where a failing copy already reported the
+/// pair, and the pair it claims is its own, so the white-on-blue avatar
+/// initial that comes first leaves the white-on-blue button label after it
+/// failing as before.
+pub fn check_colors_deduped_shaped(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    claim: Option<PairClaim>,
+    decorative: &dyn Fn() -> bool,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
     let mut hits = check_colors(opts);
+    let shaped = hits.iter().any(|h| h.id == "low-contrast") && decorative();
+    if shaped {
+        demote_low_contrast(&mut hits);
+    }
     if scores_safe_tag_text(opts) {
-        match (
+        let surface_key = match (
             opts.bg_source.as_deref(),
             opts.bg_source_host.as_deref(),
             opts.text_color.as_ref(),
         ) {
-            // A gradient is sampled where each element's text sits, so fifty
-            // links across one gradient header name fifty slightly different
-            // colours. They are one text colour on one box, reported once.
-            // The box is named by its identity, not by its label: a row of
-            // `div.w-14` tiles on amber, lime and blue gradients is three
-            // surfaces. The snippet is claimed as well, so identical tiles on
-            // one gradient stay one report, as they always were.
             (Some(source), Some(host), Some(text)) => {
-                let surface_key =
-                    format!("text {} over {} [{}]", ink_key(text), source, host);
-                seen.keep_first_keyed_claiming(
-                    &mut hits,
-                    &|h: &RuleHit| vec![h.snippet.clone(), surface_key.clone()],
-                    claim,
-                    keep,
-                );
+                Some(format!("text {} over {} [{}]", ink_key(text), source, host))
             }
-            _ => seen.keep_first_keyed_claiming(
-                &mut hits,
-                &|h: &RuleHit| vec![h.snippet.clone()],
-                claim,
-                keep,
-            ),
+            _ => None,
+        };
+        if shaped {
+            hits.retain(|h| {
+                !(seen.has_claimed(&h.id, &h.snippet)
+                    || surface_key.as_deref().is_some_and(|k| seen.has_claimed(&h.id, k)))
+            });
+            let keys_of = |h: &RuleHit| {
+                let mut keys = vec![format!("decorative {}", h.snippet)];
+                if let Some(k) = &surface_key {
+                    keys.push(format!("decorative {k}"));
+                }
+                keys
+            };
+            seen.keep_first_keyed_claiming(&mut hits, &keys_of, claim, keep);
+            return hits;
         }
+        // A gradient is sampled where each element's text sits, so fifty
+        // links across one gradient header name fifty slightly different
+        // colours. They are one text colour on one box, reported once. The
+        // box is named by its identity, not by its label: a row of `div.w-14`
+        // tiles on amber, lime and blue gradients is three surfaces. The
+        // snippet is claimed as well, so identical tiles on one gradient stay
+        // one report, as they always were.
+        let keys_of = |h: &RuleHit| {
+            let mut keys = vec![h.snippet.clone()];
+            if let Some(k) = &surface_key {
+                keys.push(k.clone());
+            }
+            keys
+        };
+        seen.keep_first_keyed_claiming(&mut hits, &keys_of, claim, keep);
     }
     hits
 }
@@ -926,7 +1019,7 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
                 .as_deref()
                 .map(|s| format!(" ({s})"))
                 .unwrap_or_default();
-            findings.push(RuleHit::new(
+            let mut hit = RuleHit::new(
                 "low-contrast",
                 format!(
                     "{}:1 (need {}:1) — text {} on {}{}",
@@ -936,7 +1029,9 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
                     color_to_hex(Some(&bgs[worst_idx])),
                     source
                 ),
-            ));
+            );
+            hit.severity = contrast_severity(ratio, threshold);
+            findings.push(hit);
         }
     }
     findings
@@ -1015,7 +1110,7 @@ pub fn check_hover_contrast(opts: &HoverContrastOpts) -> Vec<RuleHit> {
     if ratio >= threshold {
         return Vec::new();
     }
-    vec![RuleHit::new(
+    let mut hit = RuleHit::new(
         "low-contrast",
         format!(
             ":hover state {}:1 (need {}:1) — text {} on {}",
@@ -1024,7 +1119,9 @@ pub fn check_hover_contrast(opts: &HoverContrastOpts) -> Vec<RuleHit> {
             color_to_hex(Some(&text_color)),
             color_to_hex(Some(&bg))
         ),
-    )]
+    );
+    hit.severity = contrast_severity(ratio, threshold);
+    vec![hit]
 }
 
 // ─── isCardLikeFromProps / HEADING_TAGS ─────────────────────────────────────
@@ -2453,5 +2550,95 @@ mod tests {
         assert!(!is_heading_tag("div"));
         assert!(is_card_like_from_props(true, false, false, true));
         assert!(!is_card_like_from_props(false, false, true, true));
+    }
+
+    #[test]
+    fn near_bar_margin_reads_the_printed_ratio() {
+        // Normal text: printed 4.2 up to 4.49 is advisory, printed 4.1 fails.
+        assert!(contrast_near_bar(4.499, 4.5));
+        assert!(contrast_near_bar(4.3, 4.5));
+        assert!(contrast_near_bar(4.2, 4.5));
+        assert!(contrast_near_bar(4.174, 4.5)); // prints 4.2
+        assert!(!contrast_near_bar(4.149, 4.5)); // prints 4.1
+        assert!(!contrast_near_bar(4.5, 4.5));
+        assert!(!contrast_near_bar(2.0, 4.5));
+        // Large text: printed 2.8 up to 2.99 is advisory, printed 2.7 fails.
+        assert!(contrast_near_bar(2.995, 3.0));
+        assert!(contrast_near_bar(2.779, 3.0)); // prints 2.8
+        assert!(!contrast_near_bar(2.745, 3.0)); // prints 2.7
+        assert!(!contrast_near_bar(3.0, 3.0));
+        // No bar, no margin.
+        assert!(!contrast_near_bar(4.3, f64::NAN));
+        assert!(!contrast_near_bar(f64::NAN, 4.5));
+        assert_eq!(contrast_severity(4.3, 4.5).as_deref(), Some("advisory"));
+        assert_eq!(contrast_severity(3.9, 4.5), None);
+    }
+
+    fn white_panel(text: Rgba, font_size: f64, font_weight: f64) -> ColorOpts {
+        ColorOpts {
+            tag: "p".to_string(),
+            text_color: Some(text),
+            effective_bg: Some(Rgba::new(255.0, 255.0, 255.0, 1.0)),
+            font_size,
+            font_weight,
+            has_direct_text: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn check_colors_stamps_near_bar_hits_advisory() {
+        let gray = |v: f64| Rgba::new(v, v, v, 1.0);
+        let near = check_colors(&white_panel(gray(121.0), 14.0, 400.0)); // #797979 4.35:1
+        let hit = near.iter().find(|h| h.id == "low-contrast").expect("hit");
+        assert!(hit.is_advisory(), "{hit:?}");
+        let far = check_colors(&white_panel(gray(125.0), 14.0, 400.0)); // #7d7d7d 4.12:1
+        assert_eq!(far.iter().find(|h| h.id == "low-contrast").unwrap().severity, None);
+        // r3-08 keeps bold display text under the large-text margin failing.
+        let display = check_colors(&white_panel(gray(158.0), 40.0, 700.0)); // #9e9e9e 2.68:1
+        assert_eq!(display.iter().find(|h| h.id == "low-contrast").unwrap().severity, None);
+        let display_near = check_colors(&white_panel(gray(149.0), 40.0, 700.0)); // #959595 2.99:1
+        assert!(display_near.iter().find(|h| h.id == "low-contrast").unwrap().is_advisory());
+        let hover = check_hover_contrast(&HoverContrastOpts {
+            tag: "button".to_string(),
+            text_color: Some(gray(120.0)),
+            bg: Some(gray(255.0)),
+            own_bg_alpha: Some(1.0),
+            font_size: 14.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            is_emoji_only: false,
+        });
+        assert!(hover[0].is_advisory(), "{hover:?}");
+    }
+
+    #[test]
+    fn shaped_hits_claim_their_own_pair() {
+        let link = ColorOpts {
+            tag: "span".to_string(),
+            paints_own_text: true,
+            ..white_panel(Rgba::new(187.0, 187.0, 187.0, 1.0), 14.0, 400.0)
+        };
+        let mut seen = SafeTagTextSeen::default();
+        let mut keep = |_: &RuleHit| true;
+        // Decorative first: advisory, and a second decorative copy dedupes.
+        let a = check_colors_deduped_shaped(&link, &mut seen, None, &|| true, &mut keep);
+        assert!(a.len() == 1 && a[0].is_advisory(), "{a:?}");
+        assert!(check_colors_deduped_shaped(&link, &mut seen, None, &|| true, &mut keep).is_empty());
+        // The failing copy after it still reports, and then speaks for both.
+        let b = check_colors_deduped_shaped(&link, &mut seen, None, &|| false, &mut keep);
+        assert!(b.len() == 1 && !b[0].is_advisory(), "{b:?}");
+        assert!(check_colors_deduped_shaped(&link, &mut seen, None, &|| false, &mut keep).is_empty());
+        let mut seen2 = SafeTagTextSeen::default();
+        assert_eq!(check_colors_deduped_shaped(&link, &mut seen2, None, &|| false, &mut keep).len(), 1);
+        assert!(check_colors_deduped_shaped(&link, &mut seen2, None, &|| true, &mut keep).is_empty());
+        // The verdict is asked only of an element that failed.
+        let readable = ColorOpts {
+            text_color: Some(Rgba::new(20.0, 20.0, 20.0, 1.0)),
+            ..link.clone()
+        };
+        let asked = std::cell::Cell::new(false);
+        check_colors_deduped_shaped(&readable, &mut seen, None, &|| { asked.set(true); true }, &mut keep);
+        assert!(!asked.get());
     }
 }

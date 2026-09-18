@@ -51,8 +51,11 @@ impl BrowserFinding {
         }
     }
     /// `{ type: f.id, detail: f.snippet }` from a Section 3 hit.
+    /// The hit's own severity, when it carries one, travels with it.
     pub fn from_hit(hit: &crate::rules::types::RuleHit) -> Self {
-        BrowserFinding::new(hit.id.clone(), hit.snippet.clone())
+        let mut f = BrowserFinding::new(hit.id.clone(), hit.snippet.clone());
+        f.severity = hit.severity.clone();
+        f
     }
     /// `{ type: f.id, detail: f.snippet }` from a measures Finding.
     pub fn from_measure(f: &crate::css::measures::Finding) -> Self {

@@ -16,7 +16,9 @@
 
     /* Should flag: each ratio sits just under its bar, and the snippet prints
        it under the bar, never as the bar itself (the old `4.50:1 (need 4.5:1)`).
-       Each case gets its own colour so the finding names it. */
+       Each case gets its own colour so the finding names it. All four sit
+       inside the near-bar margin (taste call r3-02), so they report as
+       advisory; low-contrast-near-bar.html holds the failing side. */
     .flag-body-copy { color: #777777; font-size: 14px; }  /* 4.498:1 on #070707, need 4.5 */
     .flag-large-copy { color: #595959; font-size: 28px; } /* 2.998:1 on #000000, need 3 */
     .flag-link { color: #7b7b7b; font-size: 14px; }       /* 4.496:1 on #101010, need 4.5 */

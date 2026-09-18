@@ -3738,3 +3738,64 @@ reporting.
     `phrasing_text_font`, `average_glyph_advance_em_at`,
     `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
     are new; `scrolls_x` and `moves_a_track` are now `pub(crate)`.
+
+## Recorded 2026-09-18: low-contrast reports near misses and decorative text as advisory (corpus/premise3-low-contrast-advisory)
+
+Two taste calls Paul decided on 2026-09-18, both "advisory". Each moves a
+`low-contrast` finding's own severity to `advisory` (the rule's registry
+severity is unchanged, since neither call covers every finding): the finding
+stays in the output with its measured ratio and its snippet byte for byte, the
+JSON gains `"severity": "advisory", "advisory": true`, the text output moves
+it under "Advisory (not counted as failures)", the failure count and the exit
+code drop it, `--no-advisory` hides it, and the design hook leaves it out
+unless `advisoryRules` is `include`, as for every other advisory finding.
+
+- **r3-02, ratios just under the bar.** Decision: "Report ratios inside the
+  margin as advisory, outside the failure count. The findings stay visible
+  with their measured ratios." The margin is within 0.3 of the bar for
+  normal text (4.2:1 up to 4.5:1) and within 0.2 for large text (2.8:1 up
+  to 3:1), read off the ratio as the snippet prints it, so every finding
+  printed `4.2:1` reports the same way. Every producer applies it: the
+  element pass, the link and span path, placeholders and `:hover` state in
+  both engines, and the URL engine's sampled (`browser contrast`) and pixel
+  (`pixel contrast`) passes on their verdict. r3-08 (keep) is untouched:
+  bold display text at 700+ above about 36px under the large-text margin
+  (2.0 to 2.7:1) keeps failing.
+- **r3-04, text with no reading job.** Decision: "Rank those shapes lower:
+  reported as advisory, outside the failure count. The clipto.com mockup
+  labels and the terminal text stay visible." The shapes are read
+  conservatively (`crates/core/src/checks/decorative_text.rs`): one or two
+  letters alone and centred in a small (12 to 72px) square or round box that
+  paints itself, not the whole label of a control; text made only of a
+  version or build identifier (with at most a date, a time, a short hash); a
+  short name in a handwriting face or marked `signature`, outside headings
+  and controls; and text under an ancestor whose class or id says `mockup`,
+  `mock` or `illustration` (not a landmark or `section`), or under
+  `role="img"`. Anything uncertain keeps failing: digits, three letters, an
+  uncentred letter, a version inside a sentence, a mockup built from utility
+  classes alone. An advisory copy claims its colour pair for itself, so it
+  never hides a failing copy of the same pair on the SAFE_TAGS path.
+
+New fixtures `low-contrast-near-bar.html` and `low-contrast-decorative.html`
+(failing, advisory and passing columns); the URL-engine passes are pinned by
+`crates/browser/tests/low_contrast_advisory.rs`, the static engine by
+`crates/html/tests/low_contrast_advisory.rs`. Every re-recorded golden was
+diffed finding by finding against its predecessor: no finding is added or
+removed and no snippet changes; the only moves are `low-contrast` findings
+from `warning` to `advisory`, the text output's sections and counts that
+follow from them, and the new fixtures' own findings.
+
+- `detect-fixture-json-low-contrast-near-bar-html`, `detect-fixture-text-low-contrast-near-bar-html`, `detect-fixture-json-low-contrast-decorative-html`, `detect-fixture-text-low-contrast-decorative-html`: new cases.
+- `detect-fixture-json-low-contrast-near-threshold-html`, `detect-fixture-text-low-contrast-near-threshold-html`: all four near-threshold findings (4.49:1 and 2.99:1) are advisory, so the fixture exits 0 with "0 anti-patterns found" and 4 advisory notes.
+- `detect-fixture-json-modern-color-borders-html`, `detect-fixture-text-modern-color-borders-html`: `4.49:1 — text #64748b on #fef7f2` is advisory (14 to 13 counted).
+- `detect-fixture-json-named-color-borders-html`, `detect-fixture-text-named-color-borders-html`: `4.4:1 — text #64748b on #f6f6f6` is advisory (8 to 7 counted).
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: `4.2:1 — text #ffffff on #8b5cf6 (gradient on button.ai-btn)` is advisory (32 to 31 counted).
+- `detect-fixture-json-gradient-surface-contrast-html`, `detect-fixture-text-gradient-surface-contrast-html`: the white letters `A` and `B` centred in 56px gradient `div.feature-tile` squares (1.6:1 and 1.5:1) read as avatar-initial tiles and are advisory (14 to 12 counted); the navy tile's `C` passes as before.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the nine moves above plus the two new fixtures (644 to 650 counted, 94 to 118 advisory notes: nine moved plus the new fixtures' 15 failing and 15 advisory; `--no-advisory` drops the nine).
+
+Known limits, stated so the ratchet does not read them as misses: a
+signature in a plain serif italic (evebcn.com's 'Pedro') and a mockup made of
+utility classes (clipto.com, the kraflio.com post card, context.dev's request
+illustration) carry no DOM evidence and keep failing; the SVG initials an
+`aria-hidden` avatar draws are not measured by the pixel pass at all, as
+before.

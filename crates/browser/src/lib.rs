@@ -1118,6 +1118,7 @@ fn run_visual_contrast_fallback(
         .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
         .map(|(f, selector)| RawResult {
             selector,
+            severity: js_str(f.get("severity")),
             ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
         })
         .collect();
@@ -1172,6 +1173,7 @@ fn run_visual_contrast_fallback(
                 f.map(|f| {
                     vec![RawResult {
                         selector: selector_of(candidate),
+                        severity: f.severity.unwrap_or_default(),
                         ..RawResult::new(origin::VISUAL_CONTRAST, f.id.to_string(), f.snippet)
                     }]
                 })

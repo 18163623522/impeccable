@@ -160,6 +160,14 @@ fn decorative_shapes_are_advisory_on_every_pass() {
         "span.fine-print",
         "div.utility-card > span",
         "section.panel.mockups > p",
+        "kbd.key",
+        "span.info",
+        "h3.release-h",
+        "a.version-link",
+        "span.release-year",
+        "div.panel.mock-exam > p",
+        "div.panel.illustration-credit > p",
+        "div.panel.mockups-grid > p",
     ] {
         assert_severity(by_selector(&findings, tail), false);
     }

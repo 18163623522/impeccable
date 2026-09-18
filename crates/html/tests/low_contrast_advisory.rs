@@ -113,9 +113,24 @@ fn decorative_shapes_are_advisory_and_uncertain_shapes_fail() {
     // not centred, a version inside a sentence, a script heading, a class
     // that only starts with `signature`, fine print wearing the advisory
     // signature's colour, an unmarked mockup, and copy in a
-    // `section.mockups`.
-    assert_eq!(failing.len(), 10, "{failing:#?}");
-    for pair in ["#b0b0b0 on #ffffff", "#aaaaaa on #ffffff", "#ffffff on #93c5fd"] {
+    // `section.mockups`; then a key in a `kbd`, a lower-case info badge, a
+    // version as a heading and as a link, a year after "Release", a
+    // `mock-exam`, an `illustration-credit` and a sentence under a
+    // `mockups-grid`.
+    assert_eq!(failing.len(), 18, "{failing:#?}");
+    for pair in [
+        "#b0b0b0 on #ffffff",
+        "#aaaaaa on #ffffff",
+        "#ffffff on #93c5fd",
+        "#b5b5b5 on #f6f6f6",
+        "#ffffff on #e5e7eb",
+        "#b7b7b7 on #ffffff",
+        "#b8b8b8 on #ffffff",
+        "#b9b9b9 on #ffffff",
+        "#a1a1a1 on #ffffff",
+        "#a2a2a2 on #ffffff",
+        "#a3a3a3 on #ffffff",
+    ] {
         assert!(failing.iter().any(|s| s.contains(pair)), "failing {pair}: {failing:#?}");
     }
     assert!(findings.iter().all(|f| !f.snippet.contains("#1d4ed8") && !f.snippet.contains("#4b5563")));

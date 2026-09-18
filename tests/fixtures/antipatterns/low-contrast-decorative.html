@@ -51,6 +51,23 @@
     .utility-card { width: 300px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 12px; }
     .utility-card span { color: #aaaaaa; font-size: 12px; }
     .mockups p { color: #a0a0a0; font-size: 14px; margin: 0; }
+    /* A key in a shortcut hint and a lower-case info badge sit in avatar
+       boxes but are not initials. */
+    .hint { color: #1f2937; font-size: 14px; margin: 0; }
+    .key { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+      border: 1px solid #cccccc; border-radius: 4px; background: #f6f6f6; color: #b5b5b5; font-size: 12px; font-family: ui-monospace, monospace; }
+    .info { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px;
+      border-radius: 50%; background: #e5e7eb; color: #ffffff; font-size: 11px; font-weight: 700; }
+    /* A version as a changelog heading or a link is navigation; a year after
+       "Release" is not a build number. */
+    .release-h { color: #b7b7b7; font-size: 18px; margin: 0; }
+    .version-link { color: #b8b8b8; font-size: 14px; }
+    .release-year { color: #b9b9b9; font-size: 14px; }
+    /* A practice exam and an image credit are not mockups, and a sentence
+       under a mockups wrapper is copy about them. */
+    .mock-exam p { color: #a1a1a1; font-size: 14px; margin: 0; }
+    .illustration-credit p { color: #a2a2a2; font-size: 14px; margin: 0; }
+    .mockups-grid p { color: #a3a3a3; font-size: 14px; margin: 0; }
 
     /* Should pass: readable twins. */
     .av-ok { background: #1d4ed8; }
@@ -84,6 +101,14 @@
       <div class="panel"><span class="fine-print">Terms apply to every plan</span></div>
       <div class="panel"><div class="utility-card"><span>Ready to publish</span></div></div>
       <section class="panel mockups"><p>Every mockup ships with its source files</p></section>
+      <div class="panel"><p class="hint">Press <kbd class="key">K</kbd> to search</p></div>
+      <div class="panel row"><span class="info">i</span><span class="name">Details</span></div>
+      <article class="panel"><h3 class="release-h">v4.2.0</h3><p class="name">Fixed the export people asked about.</p></article>
+      <nav class="panel"><a class="version-link" href="#v3">v3.1.0</a></nav>
+      <div class="panel"><span class="release-year">Release 2024</span></div>
+      <div class="panel mock-exam"><p>Question 1 of 20</p></div>
+      <div class="panel illustration-credit"><p>Illustrations by Jane Doe</p></div>
+      <div class="panel mockups-grid"><p>Download our device frames and use them in your pitch deck for free.</p></div>
     </div>
     <div class="col">
       <h2>Should pass</h2>

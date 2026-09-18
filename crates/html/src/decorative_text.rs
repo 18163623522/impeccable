@@ -117,17 +117,19 @@ fn in_avatar_box(el: &StaticElement<'_>, text: &str) -> bool {
     false
 }
 
-fn marked_mockup(el: &StaticElement<'_>) -> bool {
+/// `(picture, marked)`: an HTML ancestor is `role="img"`, or an ancestor's
+/// class or id names a mockup. A `figcaption` on the way up ends both.
+fn marked_mockup(el: &StaticElement<'_>) -> (bool, bool) {
     // `role="img"` names an HTML subtree drawn as a picture; on or inside an
     // `svg` it labels a chart, a logo or an icon, whose text is read.
     let mut in_svg = ancestors_inclusive(el).any(|c| c.tag_lower() == "svg");
     for c in ancestors_inclusive(el) {
         let tag = c.tag_lower();
         if tag == "figcaption" {
-            return false;
+            return (false, false);
         }
         if !in_svg && role_is(&c, &["img"]) {
-            return true;
+            return (true, false);
         }
         if tag == "svg" {
             in_svg = false;
@@ -135,10 +137,10 @@ fn marked_mockup(el: &StaticElement<'_>) -> bool {
         if !MOCKUP_MARKER_SKIP_TAGS.contains(&tag.as_str())
             && (is_mockup_marker(c.class_name()) || is_mockup_marker(c.id_attr()))
         {
-            return true;
+            return (false, true);
         }
     }
-    false
+    (false, false)
 }
 
 /// What the static document says about one element's text.
@@ -153,13 +155,16 @@ pub fn decorative_text_facts(el: &StaticElement<'_>) -> DecorativeTextFacts {
     let signature_marked = ancestors_inclusive(el)
         .take(2)
         .any(|c| is_signature_marker(c.class_name()) || is_signature_marker(c.id_attr()));
+    let (picture_ancestor, mockup_ancestor) = marked_mockup(el);
     DecorativeTextFacts {
         avatar_box: !text.is_empty() && text.chars().count() <= 3 && in_avatar_box(el, &text),
+        in_kbd: ancestors_inclusive(el).any(|c| c.tag_lower() == "kbd"),
         font_family: sv(el.style(), "fontFamily").to_string(),
         in_heading,
         control_label: control.is_some_and(|c| collapsed_text(&c) == text),
         signature_marked,
-        mockup_ancestor: marked_mockup(el),
+        mockup_ancestor,
+        picture_ancestor,
         text,
     }
 }

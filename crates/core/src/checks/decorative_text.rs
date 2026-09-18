@@ -8,18 +8,28 @@
 //!
 //! - **Avatar initials**: one letter, or two, alone in a small square or
 //!   round box that paints itself, and centred in it. Digits are left out
-//!   (a notification count, a page number, a step), and so is a letter that
-//!   is the whole label of a control (an A to Z index, a quiz option).
+//!   (a notification count, a page number, a step), and so are a lone
+//!   lower-case `i`, `x` or `v` (an info badge, a close glyph, a chevron), a
+//!   key in a `kbd` (a shortcut hint) and a letter that is the whole label
+//!   of a control (an A to Z index, a quiz option). A brand's lower-case
+//!   letter in a chat avatar (tryrote.com's `r`) is still an avatar.
 //! - **Build or version stamps**: text made only of a version or build
 //!   identifier, optionally with a date, a time or a short hash
-//!   (`v2.4.1`, `Build 1289`, `N0.0.1 · 2024-03-01`).
+//!   (`v2.4.1`, `Build 1289`, `N0.0.1 · 2024-03-01`), outside headings and
+//!   controls: a changelog entry's `<h2>v4.2.0</h2>` and a `v3.1.0` link are
+//!   navigation, not stamps. A word like `release` or `build` needs a dotted
+//!   version, a build number that is not a year, or a hash after it
+//!   (`Release 2024` is a year).
 //! - **Signatures**: a short name set in a handwriting face, or marked
 //!   `signature` by its class or id, outside headings and controls.
 //! - **Text inside illustration mockups**: an ancestor that says it is one,
-//!   by a `mockup` / `mock` / `illustration` class or id token, or an HTML
-//!   subtree marked `role="img"` (not an `svg`, where the role labels a
-//!   chart whose axis text is read). A mockup built from utility classes
-//!   alone says nothing, and its text keeps failing.
+//!   by a `mockup` or `illustration` class or id part, or `mock` beside a UI
+//!   word (`mock-window`, `mockBrowser`), or an HTML subtree marked
+//!   `role="img"` (not an `svg`, where the role labels a chart whose axis
+//!   text is read). Under a class marker, sentence-length copy is still
+//!   copy (`mockups-grid` marketing text), and a `mock-exam` or an
+//!   `illustration-credit` is not a mockup at all. A mockup built from
+//!   utility classes alone says nothing, and its text keeps failing.
 //!
 //! The adapters gather [`DecorativeTextFacts`] against their own DOM; the
 //! decision is made here, once, for both engines.
@@ -72,12 +82,17 @@ pub struct DecorativeTextFacts {
     /// A small square or round box that paints itself holds this text and
     /// nothing else, centred in it ([`avatar_sized`], [`centred_in`]).
     pub avatar_box: bool,
+    /// The element is, or sits in, a `kbd`: a key in a shortcut hint.
+    pub in_kbd: bool,
     /// The element or its parent is marked a signature by class or id
     /// ([`is_signature_marker`]).
     pub signature_marked: bool,
-    /// An ancestor says it is an illustration mockup ([`is_mockup_marker`],
-    /// or `role="img"` on an HTML element outside any `svg`).
+    /// An ancestor's class or id says it is an illustration mockup
+    /// ([`is_mockup_marker`]).
     pub mockup_ancestor: bool,
+    /// An ancestor is an HTML element marked `role="img"` outside any `svg`:
+    /// the author declared the subtree a picture.
+    pub picture_ancestor: bool,
 }
 
 /// The shape a text with no reading job was recognised by.
@@ -91,19 +106,27 @@ pub enum DecorativeShape {
 
 /// The decorative shape these facts show, if any.
 pub fn classify_decorative_text(f: &DecorativeTextFacts) -> Option<DecorativeShape> {
-    if f.mockup_ancestor {
+    if f.picture_ancestor {
         return Some(DecorativeShape::Mockup);
     }
     if f.text.is_empty() {
         return None;
     }
-    if f.avatar_box && !f.control_label && is_initials(&f.text) {
+    if f.mockup_ancestor && !is_sentence_copy(&f.text) {
+        return Some(DecorativeShape::Mockup);
+    }
+    if f.avatar_box
+        && !f.control_label
+        && !f.in_kbd
+        && is_initials(&f.text)
+        && !is_icon_letter(&f.text)
+    {
         return Some(DecorativeShape::AvatarInitials);
     }
-    if is_version_stamp(&f.text) {
-        return Some(DecorativeShape::VersionStamp);
-    }
     if !f.in_heading && !f.control_label {
+        if is_version_stamp(&f.text) {
+            return Some(DecorativeShape::VersionStamp);
+        }
         let by_marker = f.signature_marked && is_name_like(&f.text, false);
         let by_face = is_handwriting_face(&f.font_family) && is_name_like(&f.text, true);
         if by_marker || by_face {
@@ -121,16 +144,60 @@ pub fn is_initials(text: &str) -> bool {
         && !text.trim().contains(char::is_whitespace)
 }
 
+/// A lone lower-case letter that small UI draws as an icon: `i` in an info
+/// badge, `x` on a close chip, `v` as a chevron. Not initials.
+pub fn is_icon_letter(text: &str) -> bool {
+    matches!(text.trim(), "i" | "x" | "v")
+}
+
+/// Text that reads as a sentence: eight words or more, or five or more
+/// ending in `.`, `!` or `?`. A mockup's labels are short ("Ready", "Draft
+/// saved", "$ npm run build"); a paragraph under a marked wrapper is copy.
+pub fn is_sentence_copy(text: &str) -> bool {
+    let words = text.split_whitespace().count();
+    let ends = text.trim_end().ends_with(['.', '!', '?', '。', '！', '？']);
+    words >= 8 || (words >= 5 && ends)
+}
+
 static STAMP_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r"(?ix)
-        \b(?:version|ver\.?|build|release|rev(?:ision)?|commit)\s*[:\#]?\s*[0-9a-z][0-9a-z.+_-]*\d[0-9a-z.+_-]*
+        \b(?:version|ver\.?|build|release|rev(?:ision)?|commit)\s*[:\#]?\s*(?P<id>[0-9a-z][0-9a-z.+_-]*\d[0-9a-z.+_-]*)
         | (?:^|[\s(\[])v\d+(?:\.\d+)+(?:[-+][0-9a-z.]+)?
         | (?:^|[\s(\[])[a-z]{1,3}\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9a-z.]+)?
         ",
     )
     .expect("STAMP_TOKEN_RE")
 });
+/// What may follow `version`, `build`, `release` and the other stamp words:
+/// a dotted version (`12.4`, `2024.03.1`), a build number that is not a year
+/// (`1289`, not `2024`), optionally with a suffix (`1289-rc1`), or a short
+/// hash (`5f3a2c1`). `Release 2024` is a year and `Build faster` no number.
+static STAMP_ID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?ix)^(?:
+        [a-z]?\d+(?:\.\d+)+(?:[-+_][0-9a-z.]+)?
+        | (?P<num>\d+)(?:[-+_][0-9a-z.]+)?
+        | [0-9a-f]{7,40}
+        )$",
+    )
+    .expect("STAMP_ID_RE")
+});
+
+fn is_stamp_id(id: &str) -> bool {
+    let Some(c) = STAMP_ID_RE.captures(id) else { return false };
+    match c.name("num") {
+        Some(n) => {
+            let n = n.as_str();
+            let year = n.len() == 4 && (n.starts_with("19") || n.starts_with("20"));
+            // A hash of digits alone falls here too (`1234567`), and reads as
+            // a build number, which is what it is used as.
+            !year
+        }
+        None => true,
+    }
+}
+
 /// A bare three-part version (`1.10.0`). A dotted date (`2026.08.13`,
 /// `13.08.26`) has a four-digit part or a zero-padded one, which a version
 /// never has, and is left to [`STAMP_FILLER_RE`] as a date.
@@ -171,8 +238,16 @@ pub fn is_version_stamp(text: &str) -> bool {
     if text.is_empty() || text.chars().count() > 64 {
         return false;
     }
-    let tokens = STAMP_TOKEN_RE.is_match(text);
-    let mut rest = STAMP_TOKEN_RE.replace_all(text, " ").into_owned();
+    let mut tokens = false;
+    let mut rest = STAMP_TOKEN_RE
+        .replace_all(text, |c: &regex::Captures<'_>| {
+            if c.name("id").is_some_and(|id| !is_stamp_id(id.as_str())) {
+                return c[0].to_string();
+            }
+            tokens = true;
+            " ".to_string()
+        })
+        .into_owned();
     let bare = bare_version_spans(&rest);
     if !tokens && bare.is_empty() {
         return false;
@@ -199,17 +274,60 @@ pub fn is_signature_marker(class_or_id: &str) -> bool {
         .any(|token| SIGNATURE_TOKEN_RE.is_match(token))
 }
 
-/// Whether a class list or id names an illustration mockup: a token part
-/// (split on `-`, `_`, `:` and `/`) that is `mock`, `mockup` or `mockups`,
-/// or a token that contains `mockup` or `illustration`.
+/// UI words that make a `mock` part name a picture of an interface
+/// (`mock-window`, `mockBrowser`) rather than a practice run (`mock-exam`,
+/// `mock-interview`).
+const MOCK_UI_PARTS: &[&str] = &[
+    "app", "browser", "chrome", "dashboard", "desktop", "device", "editor", "frame", "laptop",
+    "phone", "screen", "terminal", "ui", "window",
+];
+/// Parts that make a token name the words about an illustration, which are
+/// read: `illustration-credit`, `mockup-caption`.
+const MOCKUP_COPY_PARTS: &[&str] = &[
+    "attribution", "caption", "captions", "copyright", "credit", "credits", "license",
+    "licence",
+];
+
+/// A class or id token's parts: split on `-`, `_`, `:`, `/` and `.`, and
+/// where a lower-case letter meets a capital (`heroIllustration`), lower
+/// cased.
+fn token_parts(token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in token.chars() {
+        if matches!(c, '-' | '_' | ':' | '/' | '.') {
+            if !cur.is_empty() {
+                parts.push(std::mem::take(&mut cur));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !cur.is_empty() {
+            parts.push(std::mem::take(&mut cur));
+        }
+        prev_lower = c.is_lowercase();
+        cur.extend(c.to_lowercase());
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
+
+/// Whether a class list or id names an illustration mockup: a token with a
+/// part that is `mockup(s)` or `illustration(s)`, or `mock` beside a UI
+/// word part ([`MOCK_UI_PARTS`]), and no part naming a credit or caption
+/// ([`MOCKUP_COPY_PARTS`]).
 pub fn is_mockup_marker(class_or_id: &str) -> bool {
     class_or_id.split_whitespace().any(|token| {
-        let lower = token.to_ascii_lowercase();
-        lower.contains("mockup")
-            || lower.contains("illustration")
-            || lower
-                .split(|c: char| matches!(c, '-' | '_' | ':' | '/'))
-                .any(|part| part == "mock")
+        let parts = token_parts(token);
+        let has = |set: &[&str]| parts.iter().any(|p| set.contains(&p.as_str()));
+        if has(MOCKUP_COPY_PARTS) {
+            return false;
+        }
+        has(&["mockup", "mockups", "illustration", "illustrations"])
+            || (has(&["mock"]) && has(MOCK_UI_PARTS))
     })
 }
 
@@ -309,15 +427,27 @@ mod tests {
     #[test]
     fn initials_need_an_avatar_box_and_letters() {
         let boxed = |t: &str| DecorativeTextFacts { avatar_box: true, ..facts(t) };
-        for t in ["J", "AB", "r", "李"] {
+        for t in ["J", "AB", "李", "r", "Jd"] {
             assert_eq!(classify_decorative_text(&boxed(t)), Some(DecorativeShape::AvatarInitials), "{t}");
         }
-        for t in ["3", "12", "A1", "ABC", "A B", "×"] {
+        for t in ["3", "12", "A1", "ABC", "A B", "×", "i", "x", "v"] {
             assert_eq!(classify_decorative_text(&boxed(t)), None, "{t}");
         }
         assert_eq!(classify_decorative_text(&facts("JD")), None);
         let label = DecorativeTextFacts { control_label: true, ..boxed("A") };
         assert_eq!(classify_decorative_text(&label), None);
+        // A key in a shortcut hint is a key, however avatar-like its box.
+        let key = DecorativeTextFacts { in_kbd: true, ..boxed("K") };
+        assert_eq!(classify_decorative_text(&key), None);
+    }
+
+    #[test]
+    fn stamps_in_headings_and_controls_are_navigation() {
+        let heading = DecorativeTextFacts { in_heading: true, ..facts("v4.2.0") };
+        assert_eq!(classify_decorative_text(&heading), None);
+        let link = DecorativeTextFacts { control_label: true, ..facts("v3.1.0") };
+        assert_eq!(classify_decorative_text(&link), None);
+        assert_eq!(classify_decorative_text(&facts("v3.1.0")), Some(DecorativeShape::VersionStamp));
     }
 
     #[test]
@@ -335,6 +465,10 @@ mod tests {
             "commit 5f3a2c1d",
             "1.10.0",
             "0.0.1 (2024-03-01)",
+            "Build 1289-rc1",
+            "Build 5f3a2c1",
+            "Release 12.4",
+            "rev 512",
         ] {
             assert!(is_version_stamp(t), "{t}");
         }
@@ -352,6 +486,11 @@ mod tests {
             "13.08.2026",
             "12.03.24 · 09:30",
             "2026-09-08 19",
+            "Release 2024",
+            "Build 2026",
+            "Version 1999",
+            "Release 2024-03-01",
+            "Build faster",
         ] {
             assert!(!is_version_stamp(t), "{t}");
         }
@@ -382,13 +521,45 @@ mod tests {
 
     #[test]
     fn mockups_say_so() {
-        assert!(is_mockup_marker("hero-mockup rounded"));
-        assert!(is_mockup_marker("mock-window"));
-        assert!(is_mockup_marker("heroIllustration"));
-        assert!(!is_mockup_marker("hammock"));
-        assert!(!is_mockup_marker("mocha card"));
+        for yes in [
+            "hero-mockup rounded",
+            "mock-window",
+            "mockBrowser",
+            "heroIllustration",
+            "mockup-phone",
+            "illustrations",
+            "app__mockup",
+            "md:hero-mockup",
+        ] {
+            assert!(is_mockup_marker(yes), "{yes}");
+        }
+        for no in [
+            "hammock",
+            "mocha card",
+            "mock-exam",
+            "mock-interview",
+            "mock",
+            "illustration-credit",
+            "mockup-caption",
+            "illustrator-bio",
+            "mockupsgrid",
+        ] {
+            assert!(!is_mockup_marker(no), "{no}");
+        }
         let m = DecorativeTextFacts { mockup_ancestor: true, ..facts("Ready") };
         assert_eq!(classify_decorative_text(&m), Some(DecorativeShape::Mockup));
+        // A paragraph under a marked wrapper is copy about the mockups.
+        let copy = DecorativeTextFacts {
+            mockup_ancestor: true,
+            ..facts("Download our device frames and use them in your pitch deck for free.")
+        };
+        assert_eq!(classify_decorative_text(&copy), None);
+        // A picture the author marked role="img" is a picture, sentences and all.
+        let pic = DecorativeTextFacts { picture_ancestor: true, ..copy.clone() };
+        assert_eq!(classify_decorative_text(&pic), Some(DecorativeShape::Mockup));
+        assert!(!is_sentence_copy("Draft saved"));
+        assert!(!is_sentence_copy("$ npm run build --watch"));
+        assert!(is_sentence_copy("Your export is ready to download."));
     }
 
     #[test]

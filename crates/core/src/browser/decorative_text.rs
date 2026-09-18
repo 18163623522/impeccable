@@ -68,7 +68,9 @@ fn in_avatar_box(dom: &dyn Dom, el: ElId, text: &str) -> bool {
     false
 }
 
-fn marked_mockup(dom: &dyn Dom, el: ElId) -> bool {
+/// `(picture, marked)`: an HTML ancestor is `role="img"`, or an ancestor's
+/// class or id names a mockup. A `figcaption` on the way up ends both.
+fn marked_mockup(dom: &dyn Dom, el: ElId) -> (bool, bool) {
     // `role="img"` names an HTML subtree drawn as a picture. On an `svg` (or
     // inside one) it is how a chart, a logo or an icon is labelled, and a
     // chart's axis labels are read, so it says nothing there.
@@ -77,10 +79,10 @@ fn marked_mockup(dom: &dyn Dom, el: ElId) -> bool {
     while let Some(c) = cur {
         let tag = tag_lower(dom, c);
         if tag == "figcaption" {
-            return false;
+            return (false, false);
         }
         if !in_svg && dom.attr(c, "role").is_some_and(|r| js::trim(&r).eq_ignore_ascii_case("img")) {
-            return true;
+            return (true, false);
         }
         if tag == "svg" {
             in_svg = false;
@@ -89,11 +91,11 @@ fn marked_mockup(dom: &dyn Dom, el: ElId) -> bool {
             && (is_mockup_marker(&class_attr(dom, c))
                 || is_mockup_marker(&dom.attr(c, "id").unwrap_or_default()))
         {
-            return true;
+            return (false, true);
         }
         cur = dom.parent(c);
     }
-    false
+    (false, false)
 }
 
 fn marked_signature(dom: &dyn Dom, el: ElId) -> bool {
@@ -108,13 +110,16 @@ pub fn decorative_text_facts_dom(dom: &dyn Dom, el: ElId) -> DecorativeTextFacts
     let text = collapsed_text(dom, el);
     let control_label = closest_or_none(dom, el, CONTROL_SELECTOR)
         .is_some_and(|c| collapsed_text(dom, c) == text);
+    let (picture_ancestor, mockup_ancestor) = marked_mockup(dom, el);
     DecorativeTextFacts {
         avatar_box: !text.is_empty() && text.chars().count() <= 3 && in_avatar_box(dom, el, &text),
+        in_kbd: closest_or_none(dom, el, "kbd").is_some(),
         font_family: dom.style(el, "fontFamily"),
         in_heading: closest_or_none(dom, el, HEADING_SELECTOR).is_some(),
         control_label,
         signature_marked: marked_signature(dom, el),
-        mockup_ancestor: marked_mockup(dom, el),
+        mockup_ancestor,
+        picture_ancestor,
         text,
     }
 }
@@ -155,6 +160,29 @@ mod tests {
     }
 
     #[test]
+    fn a_key_or_an_info_badge_is_not_initials() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        let key = d.add(Some(p), "kbd");
+        d.add_text(key, "K");
+        d.set_styles(key, &[("backgroundColor", "rgb(246, 246, 246)")]);
+        d.set_rect(key, 0.0, 0.0, 20.0, 20.0);
+        assert_eq!(decorative_text_shape_dom(&d, key), None);
+        let info = d.add(Some(body), "span");
+        d.add_text(info, "i");
+        d.set_styles(info, &[("backgroundColor", "rgb(242, 242, 242)")]);
+        d.set_rect(info, 0.0, 40.0, 16.0, 16.0);
+        assert_eq!(decorative_text_shape_dom(&d, info), None);
+        // A brand's lower-case letter in a chat avatar is an avatar.
+        let brand = d.add(Some(body), "span");
+        d.add_text(brand, "r");
+        d.set_styles(brand, &[("backgroundColor", "rgb(19, 130, 232)")]);
+        d.set_rect(brand, 0.0, 80.0, 28.0, 28.0);
+        assert_eq!(decorative_text_shape_dom(&d, brand), Some(DecorativeShape::AvatarInitials));
+    }
+
+    #[test]
     fn a_letter_in_an_unpainted_or_wide_box_is_text() {
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
@@ -184,6 +212,14 @@ mod tests {
         let p = d.add(Some(sec), "p");
         d.add_text(p, "Every mockup ships with source files");
         assert_eq!(decorative_text_shape_dom(&d, p), None);
+        // A practice exam and an image credit are not pictures of a UI.
+        for class in ["mock-exam", "illustration-credit"] {
+            let wrap = d.add(Some(body), "div");
+            d.set_attr(wrap, "class", class);
+            let q = d.add(Some(wrap), "p");
+            d.add_text(q, "Short label");
+            assert_eq!(decorative_text_shape_dom(&d, q), None, "{class}");
+        }
     }
 
     #[test]

@@ -3765,16 +3765,22 @@ unless `advisoryRules` is `include`, as for every other advisory finding.
   reported as advisory, outside the failure count. The clipto.com mockup
   labels and the terminal text stay visible." The shapes are read
   conservatively (`crates/core/src/checks/decorative_text.rs`): one or two
-  letters alone and centred in a small (12 to 72px) square or round box that
-  paints itself, not the whole label of a control; text made only of a
-  version or build identifier (with at most a date, a time, a short hash); a
-  short name in a handwriting face or marked `signature`, outside headings
-  and controls; and text under an ancestor whose class or id says `mockup`,
-  `mock` or `illustration` (not a landmark or `section`), or under an
-  HTML element marked `role="img"` (on an `svg` the role labels charts,
-  whose axis text is read, so it is not evidence there). Anything uncertain keeps failing: digits, three letters, an
-  uncentred letter, a version inside a sentence, a mockup built from utility
-  classes alone. An advisory copy claims its colour pair for itself, so it
+  letters (not a lone lower-case `i`, `x` or `v` icon glyph) alone and centred in a small (12 to 72px) square or round
+  box that paints itself, not the whole label of a control and not a key in
+  a `kbd`; text made only of a version or build identifier (with at most a
+  date, a time, a short hash), outside headings and controls, where a word
+  like `release` or `build` needs a dotted version, a build number that is
+  not a year, or a hash after it; a short name in a handwriting face or
+  marked `signature`, outside headings and controls; and text under an
+  ancestor whose class or id has a `mockup(s)` or `illustration(s)` part, or
+  `mock` beside a UI word (`mock-window`), and no credit or caption part (not
+  a landmark or `section`), unless the text is sentence-length copy, or under
+  an HTML element marked `role="img"` (on an `svg` the role labels charts,
+  whose axis text is read, so it is not evidence there). Anything uncertain
+  keeps failing: digits, three letters, an `i` info badge, an uncentred
+  letter, a version inside a sentence, a version as a heading or a link,
+  `Release 2024`, a `mock-exam` or an `illustration-credit`, a mockup built
+  from utility classes alone. An advisory copy claims its colour pair for itself, so it
   never hides a failing copy of the same pair on the SAFE_TAGS path.
 
 New fixtures `low-contrast-near-bar.html` and `low-contrast-decorative.html`
@@ -3792,7 +3798,8 @@ follow from them, and the new fixtures' own findings.
 - `detect-fixture-json-named-color-borders-html`, `detect-fixture-text-named-color-borders-html`: `4.4:1 — text #64748b on #f6f6f6` is advisory (8 to 7 counted).
 - `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: `4.2:1 — text #ffffff on #8b5cf6 (gradient on button.ai-btn)` is advisory (32 to 31 counted).
 - `detect-fixture-json-gradient-surface-contrast-html`, `detect-fixture-text-gradient-surface-contrast-html`: the white letters `A` and `B` centred in 56px gradient `div.feature-tile` squares (1.6:1 and 1.5:1) read as avatar-initial tiles and are advisory (14 to 12 counted); the navy tile's `C` passes as before.
-- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the nine moves above plus the two new fixtures (644 to 650 counted, 94 to 118 advisory notes: nine moved plus the new fixtures' 15 failing and 15 advisory; `--no-advisory` drops the nine).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the nine moves above plus the two new fixtures (644 to 658 counted, 94 to 118 advisory notes: nine moved plus the new fixtures' 23 failing and 15 advisory; `--no-advisory` drops the nine).
+- Review revision: the decorative fixture gained eight should-flag rows the first cut wrongly read as decorative (a `kbd` key, a lower-case `i` info badge, `v4.2.0` as an `h3`, `v3.1.0` as a `nav` link, `Release 2024`, a `mock-exam`, an `illustration-credit`, and a sentence under a `mockups-grid`). All eight fail; `detect-fixture-*-low-contrast-decorative-html` and the five sweeps were re-recorded for those eight added warnings (650 to 658 counted) and nothing else moved.
 
 Known limits, stated so the ratchet does not read them as misses: a
 signature in a plain serif italic (evebcn.com's 'Pedro'), a mockup made of

@@ -7,7 +7,8 @@
 //!   differs from its surface, and is rounded or shadowed; dividers, pills,
 //!   one-line eyebrows, a card's own header band and a lip shadow are not cards.
 //!   An inner card shows a border or casts a shadow (r4-p16), and figures,
-//!   output blocks, players and a dialog's panels are not inner cards (r4-p17).
+//!   output blocks, players and a dialog's panels are not inner cards when
+//!   they are the box's main child (r4-p17).
 //! - `clipped-overflow-container.html`: track words read past BEM separators
 //!   and camelCase, and on the positioned child itself.
 //! - `buried-raster.html`: SVG sources, icon-sized boxes, blurred placeholders
@@ -139,6 +140,14 @@ fn nested_cards_read_the_computed_box() {
             "#flag-controls-inner",
             "#flag-icon-inner",
             "#flag-mono-page-inner",
+            // r4-p17: embedded content that is not the box's main child, and
+            // a card nested further inside a dialog's panel.
+            "#flag-hidden-audio-inner",
+            "#flag-avatar-video-inner",
+            "#flag-promo-player-inner",
+            "#flag-illustration-inner",
+            "#flag-dialog-nested-inner",
+            "#flag-mono-button-inner",
         ],
         &[
             "#pass-band-inner",
@@ -158,6 +167,7 @@ fn nested_cards_read_the_computed_box() {
             "#pass-output-inner",
             "#pass-player-inner",
             "#pass-dialog-inner",
+            "#flag-dialog-group",
         ],
     );
 }

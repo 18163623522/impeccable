@@ -14,10 +14,14 @@
   Two decisions narrow what counts as the inner card. r4-p16: an inner box
   counts only when it shows a border or casts a shadow, so a rounded tint (a
   chat bubble, a stat tile) is not a card; the outer card may still be a
-  fill. r4-p17: a box that frames embedded content (an svg or a canvas with a
-  caption, a monospace output block, a media player) is not an inner card,
-  and neither is any box whose outer card is a dialog. Inner boxes holding
-  ordinary text and controls still report.
+  fill. r4-p17: a box that frames embedded content as its main child (an
+  svg or a canvas with a caption, a monospace output block, a media player)
+  is not an inner card, and neither is any box whose outer card is a dialog
+  (the dialog itself, or the first card inside it). Inner boxes holding
+  ordinary text and controls still report: a hidden sound element, an avatar
+  video, a promo's play button, an illustration beside copy and buttons, a
+  monospace tier with an Upgrade button, and a card nested further inside a
+  dialog's panel.
 
   The file scan has no layout and reads class names and declared styles, so it
   reports some of the pass column. crates/browser/tests/card_heuristics.rs pins
@@ -97,6 +101,68 @@
       <div class="inner border rounded-xl mono" id="flag-mono-page-inner">
         <p>An inner card in the same face is not an output block.</p>
         <p>The whole page is set this way.</p>
+      </div>
+    </div>
+
+    <div class="case card border rounded-2xl" id="flag-hidden-audio-outer">
+      <p>Outer card holding a settings panel with a sound element.</p>
+      <div class="inner border rounded-xl" id="flag-hidden-audio-inner">
+        <audio preload="none"></audio>
+        <p>Chime when a scan finishes, with a summary of what changed.</p>
+        <button type="button" style="width: 96px; height: 32px">Save</button>
+        <button type="button" style="width: 96px; height: 32px">Cancel</button>
+      </div>
+    </div>
+
+    <div class="case card border rounded-2xl" id="flag-avatar-video-outer">
+      <p>Outer card holding a profile with a looping avatar.</p>
+      <div class="inner border rounded-xl" id="flag-avatar-video-inner">
+        <video width="48" height="48" muted style="display: block; width: 48px; height: 48px"></video>
+        <p>Jane Doe, head of design, writes about type and colour.</p>
+        <button type="button" style="width: 96px; height: 32px">Follow</button>
+      </div>
+    </div>
+
+    <div class="case card border rounded-2xl" id="flag-promo-player-outer">
+      <p>Outer card holding a pricing tier with a promo clip.</p>
+      <div class="inner border rounded-xl" id="flag-promo-player-inner">
+        <p>Team plan with shared projects and review queues, billed yearly.</p>
+        <button type="button" style="width: 96px; height: 32px">Choose</button>
+        <button type="button" aria-label="Play intro" style="width: 96px; height: 32px">Play intro</button>
+        <progress value="20" max="100"></progress>
+      </div>
+    </div>
+
+    <div class="case card border rounded-2xl" id="flag-illustration-outer">
+      <p>Outer card holding a feature tile with an illustration.</p>
+      <figure class="inner sized border rounded-xl" id="flag-illustration-inner" style="margin: 0">
+        <svg width="368" height="220" viewBox="0 0 368 220" aria-hidden="true" style="display: block; width: 368px; height: 220px"><rect width="368" height="220" fill="#e4e4e7"></rect></svg>
+        <h3>Automations</h3>
+        <p>Trigger workflows from any event, with retries and alerts.</p>
+        <button type="button" style="width: 96px; height: 32px">Try it</button>
+        <button type="button" style="width: 96px; height: 32px">Docs</button>
+        <figcaption>Automations</figcaption>
+      </figure>
+    </div>
+
+    <div class="case" role="dialog" aria-label="Settings" id="flag-dialog-nested-outer">
+      <div class="card border rounded-2xl">
+        <p>A dialog's panel holding a group of settings.</p>
+        <div class="inner border rounded-xl" id="flag-dialog-group">
+          <p>Notification settings, with their own controls.</p>
+          <div class="inner border rounded-xl" id="flag-dialog-nested-inner">
+            <p>A card inside the group, inside the dialog's panel.</p>
+            <button type="button" style="width: 96px; height: 32px">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="case card border rounded-2xl" id="flag-mono-button-outer">
+      <p>Outer card holding a tier set in a monospace face.</p>
+      <div class="inner border rounded-xl mono" id="flag-mono-button-inner">
+        <p>Pro plan: unlimited scans, team seats and priority support.</p>
+        <button type="button" style="width: 96px; height: 32px">Upgrade</button>
       </div>
     </div>
   </section>

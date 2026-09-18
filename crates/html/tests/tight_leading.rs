@@ -66,11 +66,63 @@ fn fixture_flag_and_pass_cases() {
         snippets.iter().any(|s| s.contains("0.95")),
         "the documented static-only inline run, got {snippets:?}"
     );
+    // The bold-title cases (taste call r3-03): bold body text over four lines
+    // (1.19), the weight-500 title (1.14), regular copy in a clamp (1.20) and
+    // bold text a max-height clip cuts to three lines (1.14) flag in both
+    // engines; the bold titles in a clamp, one of which the text fills
+    // exactly, pass in both. The two bold titles of two lines, on a div and
+    // in an inline link, pass in the browser only: the static engine cannot
+    // count lines.
     assert_eq!(
         snippets.len(),
-        7,
-        "expected five flags plus the two documented static hits, got {snippets:?}"
+        13,
+        "expected nine flags plus the four documented static hits, got {snippets:?}"
     );
+}
+
+#[test]
+fn a_bold_title_in_a_line_clamp_passes() {
+    let clamp = "display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;";
+    for weight in ["700", "600", "bold", "bolder"] {
+        let hits = scan(&page(
+            &format!("span {{ {clamp} width: 290px; font-size: 15px; line-height: 18px; font-weight: {weight}; }}"),
+            &format!("<span>{COPY}</span>"),
+        ));
+        assert!(hits.is_empty(), "weight {weight} in a clamp: {hits:?}");
+    }
+    for weight in ["500", "normal", "400"] {
+        let hits = scan(&page(
+            &format!("span {{ {clamp} width: 290px; font-size: 15px; line-height: 18px; font-weight: {weight}; }}"),
+            &format!("<span>{COPY}</span>"),
+        ));
+        assert_eq!(hits.len(), 1, "weight {weight} in a clamp keeps the floor: {hits:?}");
+    }
+    // Bold without a clamp: the lines cannot be counted without layout, so
+    // the static engine keeps the floor.
+    let hits = scan(&page(
+        "div { width: 265px; font-size: 14px; line-height: 16px; font-weight: 700; }",
+        &format!("<div>{COPY}</div>"),
+    ));
+    assert_eq!(hits.len(), 1, "unclamped bold, lines unknown: {hits:?}");
+    // A clamp on a plain block (which clamps nothing) and a flow-root box
+    // that only clips are no line clamp.
+    for decls in [
+        "display: block; -webkit-line-clamp: 2; overflow: hidden;",
+        "display: flow-root; overflow: hidden; max-height: 54px;",
+    ] {
+        let hits = scan(&page(
+            &format!("div {{ {decls} width: 265px; font-size: 14px; line-height: 16px; font-weight: 700; }}"),
+            &format!("<div>{COPY}</div>"),
+        ));
+        assert_eq!(hits.len(), 1, "{decls}: no clamp: {hits:?}");
+    }
+    // An authored flow-root box with a clamp value reads as the clamp, the
+    // way the browser engine sees a CSS clamp Chrome computes as flow-root.
+    let hits = scan(&page(
+        "div { display: flow-root; -webkit-line-clamp: 2; overflow: hidden; width: 265px; font-size: 14px; line-height: 16px; font-weight: 700; }",
+        &format!("<div>{COPY}</div>"),
+    ));
+    assert!(hits.is_empty(), "flow-root with a clamp value: {hits:?}");
 }
 
 #[test]

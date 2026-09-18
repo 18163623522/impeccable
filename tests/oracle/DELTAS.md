@@ -3842,3 +3842,167 @@ glyphs). These are what the branch still leaves open.
    counts as centring evidence for initials, looser than the browser
    engine's rect test. SVG initials inside `aria-hidden` avatars are still
    not measured by the pixel pass.
+
+## Recorded 2026-09-18: typography tolerances (taste calls r3-03, r3-19, r3-20; corpus/premise3-typography-tolerances)
+
+Three taste calls on the typography rules, all decided "narrow" on
+2026-09-18. The chosen option text is the spec.
+
+- **r3-03, `tight-leading`:** "Exempt weight 600 or more with at most two
+  rendered lines, or a -webkit-box line clamp, the way h1 to h6 are exempt.
+  Bold body text running three lines or more still reports."
+- **r3-19, `undersized-ui-text`:** "Flag only below about 10.9px. Text less
+  than 0.1px under the floor stops reporting."
+- **r3-20, `cramped-padding`:** "Measure the inset from the glyphs,
+  half-leading included, for chips under 28px tall. A chip whose text really
+  touches the edge still reports."
+- **r3-07 stays "keep":** any text inside a link keeps the 11px interactive
+  floor, a smallprint class included. The new `Flag Photo Credit` fixture case
+  pins it.
+
+What changed:
+
+- **tight-leading.** Weight is the computed `font-weight` (the static
+  cascade's `bold` and `bolder` read as 700). Rendered lines are counted with
+  `text_line_count` over the text rect, cut at the nearest box within four
+  levels that clips on the y axis, so a headline whose own `div` lays out
+  three lines and whose clamped wrapper shows two (ynet.co.il's
+  `div.slotTitle.medium`) counts as two. A clamp (`is_line_clamp`, shared by
+  both engines) is read from a box's `display` and `webkitLineClamp` on the
+  element or on that path: a `-webkit-box` or `-webkit-inline-box` display is
+  one, and so is a `flow-root` or `inline-block` box carrying a clamp value,
+  which is how Chrome computes a CSS clamp that takes effect. Every run-25
+  snapshot records `webkitLineClamp` (ynet.co.il capture 2683 has 867
+  elements at 1 to 4, all computed `flow-root`). A box that only clips, a
+  `max-height` with `overflow: hidden`, is no clamp: it cuts the line count at
+  its content box, so bold text it shows three lines of still reports. A
+  `-webkit-line-clamp` on a plain block clamps nothing and is no clamp either.
+  The static cascade now carries `-webkit-line-clamp` (default `none`) for
+  the same test. The static engine has no layout: it exempts only bold text
+  in a clamp, and bold text without one keeps reporting there. Registry
+  severity is unchanged.
+- **undersized-ui-text.** Two floors exist, 11px (interactive and functional
+  text) and 10px (non-interactive smallprint). Each keeps a 0.1px tolerance,
+  compared in thousandths of a pixel: text at 10.9px or below (9.9px for
+  smallprint) reports, 10.9688px and 10.944px no longer do. Both engines.
+- **cramped-padding.** In the wrapper path ("children flush against"), a box
+  at most 28px tall measures each text child by its glyphs: each line's em
+  box, one font size tall and centred on the content area its Range rect
+  spans, which adds the room a face keeps above its capitals and below its
+  descenders to the padding and CSS half-leading the rect already sat inside.
+  Only the vertical edges move, and the 4px edge threshold is unchanged. The
+  28px bound is inclusive: the price chips the decision rests on
+  (haraj.com.sa) measure exactly 28px. The first path (own text) is gated at a
+  30px line box and cannot see a chip. URL engine only: the static wrapper
+  path reads declared padding, not text.
+
+Fixtures: `tight-leading.html` gains four flag cases (bold body text over
+four lines, a weight-500 two-line title, regular copy in a three-line clamp,
+and bold text a `max-height` clip shows three lines of) and four pass cases
+(a bold two-line div title and a bold two-line inline link, both
+browser-only, a bold title in a three-line clamp it fills exactly, so the
+clamp hides nothing, and a bold title in a two-line clamp).
+`undersized-ui-text.html` gains 10.9px and 9.9px flags, the card-wide link
+credit, and 10.9688px and 9.95px passes. `cramped-padding.html` gains a 20px
+chip whose glyphs touch (flag) and a 24px step chip (pass, browser only).
+`crates/browser/tests/text_geometry.rs` pins the browser-only cases; the unit
+tests in `crates/core/src/browser/quality.rs` and
+`crates/html/tests/{tight_leading,undersized_ui_text}.rs` pin the rest.
+
+Corpus, run 25, both cohorts (`premise3-typography-tolerances-25`, diffed
+finding by finding against the unchanged engine): violations 56 as base, no
+confirmed-harmful finding removed, no other rule moved.
+
+- tight-leading: 34 removed (real-harmless 23, unjudged 11), none added:
+  ynet.co.il 23 (the bold span cluster, the taboola `-webkit-box` titles
+  (their `webkitLineClamp` is `none`; `trc_ellipsis` trims them by script), the
+  two clamped `slotTitle medium` headlines, Draft.js bold lead-ins),
+  nubank.com.br 6, thecignagroup.com 3, aajtak.in 1, clipto.com 1. Every
+  remaining bold finding runs three lines or more (tchibo.de's 22px titles
+  among them). The weight-500 `slotTitle` cluster (rep 110325, clone 110549)
+  keeps reporting: 500 is under the decision's 600.
+- undersized-ui-text: 24 removed (unjudged 18, real-harmless 6):
+  yungching.com.tw's 10.9688px card meta (6) and swipeloan.in's 10.944px
+  slider ticks (18, the run-20 evidence of the same entry).
+- cramped-padding: 10 removed, 1 added. yungching.com.tw's 24px step chips
+  (4), haraj.com.sa's 28px price chip (1), people.com.cn's 24.4px `i.gray`
+  chips (4, the run-19 evidence of the same entry); context.dev's 17.5px
+  `Auto-fill` chip moves from "top/bottom" to "top" (its glyphs still reach
+  the top edge).
+
+Goldens re-recorded from the binary and reviewed line by line: each gains only
+the new fixture cases' static findings (two cramped-padding, six
+tight-leading, three undersized-ui-text) and the summary counts (644 to 655
+in the directory sweeps).
+
+- `detect-fixture-json-cramped-padding-html`, `detect-fixture-text-cramped-padding-html`, `detect-fixture-json-tight-leading-html`, `detect-fixture-text-tight-leading-html`, `detect-fixture-json-undersized-ui-text-html`, `detect-fixture-text-undersized-ui-text-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`.
+
+### Known limits at merge
+
+1. **The static engine keeps the declared-padding flush test**, so the 24px
+   step chip and every small chip it flags are still reported by a file scan.
+2. **The static engine counts no lines**, so a bold title outside a clamp
+   still reports there.
+3. **Bold inline emphasis counts.** A bold lead-in phrase of one or two lines
+   inside a regular paragraph (ynet.co.il's Draft.js bullets) is exempt like a
+   title; the paragraph's own text keeps the floor.
+4. **A clamp exempts at any line count**, as the decision reads: taboola's
+   three-line `-webkit-box` titles pass, and so does a clamp the text fills
+   exactly. Computed styles cannot tell an authored `flow-root` box with a
+   stray `-webkit-line-clamp` (which clamps nothing) from a CSS clamp Chrome
+   computes as `flow-root`, so both read as a clamp.
+5. **The em box is centred on the content area.** Faces with a tall ascent
+   and a short descent sit their glyphs higher than that; the edge threshold
+   stays 4px.
+6. **API.** `glyph_band`, `SMALL_CHIP_MAX_HEIGHT_PX` (core);
+   `LEADING_BOLD_TITLE_WEIGHT`, `LEADING_BOLD_TITLE_MAX_LINES`,
+   `font_weight_number`, `is_line_clamp_display`, `is_line_clamp`,
+   `is_bold_title_leading`,
+   `UI_TEXT_FLOOR_PX`, `SMALLPRINT_TEXT_FLOOR_PX`,
+   `UI_TEXT_FLOOR_TOLERANCE_PX`, `is_under_ui_text_floor` (foundation) are
+   new.
+
+### Revised at review: read the line clamp itself
+
+The first cut never read `webkitLineClamp`, on the claim that no capture
+carried it, and took a clipping `flow-root` box with text laid out past it as
+the clamp. It is in `STYLE_PROPS` and in every run-25 snapshot, and the
+stand-in misfired both ways: a bold title in a real three-line clamp that its
+text fills exactly still reported, and bold text cut to three lines by a
+`max-height` on a `flow-root` box was exempt. The clamp is now read from
+`display` and `webkitLineClamp` together (`is_line_clamp`, both engines), and
+a clipping box without a clamp only cuts the line count. The two fixture cases
+above pin both directions; `detect-fixture-{json,text}-tight-leading-html`,
+the three `detect-dir-*-all-fixtures` sweeps, `detect-scope-type`,
+`detect-scope-both` and `detect-no-advisory-{json,text}` were re-recorded for
+the one new static finding (the clipped bold summary, 1.14x). Run 25 is
+unchanged by the revision: the same 34 tight-leading removals against the
+unchanged engine, finding for finding, and every other rule identical.
+
+### Known limits at merge (from the review)
+
+Recorded when `corpus/integration` merged this branch, after the revision
+(7adcad5c) fixed the one problem the review raised: the bold-title exemption
+now reads the line clamp itself. The review's open issues, for Paul to
+confirm:
+
+1. **The chip bound is inclusive.** r3-20 exempts chips up to and including
+   28px tall (`<= 28`), while the option text says "under 28px". The entry's
+   problem text says "24 to 28px chips" and haraj.com.sa's evidence chip
+   measures exactly 28, so the inclusive bound is defensible.
+2. **Glyphs are the em box, not ink.** With Arial 16px in a 24px chip (2px
+   padding, 20px line) the capitals sit about 6px from the top, yet the chip
+   still reports "flush on top" (em band 3.99px from the edge). Base already
+   reported it, so it is not a regression, but the decision reaches fewer
+   Latin faces with a large ascent than it reads.
+3. **The r3-03 reading is (bold AND (two lines or fewer OR clamp)).** The
+   other reading, ((bold AND two lines or fewer) OR any clamp), is what the
+   entry's question text leans toward. Under the implemented one, ynet's
+   weight-500 clamped `slotTitle` cluster (reps 110325 and 110549,
+   `webkitLineClamp` 3) keeps reporting.
+4. **The static engine counts no lines.** It exempts only a bold title in a
+   `-webkit-box`, so a bold two-line title still reports in a file scan (the
+   fixture documents this).
+5. **The UI floor rounds to thousandths.** `is_under_ui_text_floor` rounds the
+   shortfall, so 10.9000 up to about 10.9005px still reports though it is
+   under 0.1px short of the floor. Not practically significant.

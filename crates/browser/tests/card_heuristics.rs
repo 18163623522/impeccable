@@ -6,6 +6,8 @@
 //! - `nested-cards.html`: a card paints an edge on three sides or a fill that
 //!   differs from its surface, and is rounded or shadowed; dividers, pills,
 //!   one-line eyebrows, a card's own header band and a lip shadow are not cards.
+//!   An inner card shows a border or casts a shadow (r4-p16), and figures,
+//!   output blocks, players and a dialog's panels are not inner cards (r4-p17).
 //! - `clipped-overflow-container.html`: track words read past BEM separators
 //!   and camelCase, and on the positioned child itself.
 //! - `buried-raster.html`: SVG sources, icon-sized boxes, blurred placeholders
@@ -130,7 +132,14 @@ fn nested_cards_read_the_computed_box() {
     assert_marks(
         &findings,
         "nested-cards",
-        &["#flag-outlined-inner", "#flag-raised-inner"],
+        &[
+            "#flag-outlined-inner",
+            "#flag-raised-inner",
+            "#flag-tint-shadow-inner",
+            "#flag-controls-inner",
+            "#flag-icon-inner",
+            "#flag-mono-page-inner",
+        ],
         &[
             "#pass-band-inner",
             "#pass-strip-inner",
@@ -141,6 +150,14 @@ fn nested_cards_read_the_computed_box() {
             "#pass-media-frame",
             "#pass-mark-inline",
             "#pass-lip-inner",
+            // r4-p16: a fill with no border and no shadow.
+            "#pass-tint-inner",
+            // r4-p17: embedded content, and a dialog's panels.
+            "#pass-figure-inner",
+            "#pass-canvas-inner",
+            "#pass-output-inner",
+            "#pass-player-inner",
+            "#pass-dialog-inner",
         ],
     );
 }

@@ -217,6 +217,147 @@ pub fn is_card_like(el: &StaticElement<'_>) -> bool {
     is_card_like_from_props(has_shadow, has_border, has_radius, has_bg)
 }
 
+/// Tags whose text is set in a monospace face by the user agent: the static
+/// cascade has no UA stylesheet, so the tag stands in for the face.
+const MONOSPACE_TAGS: [&str; 5] = ["pre", "code", "samp", "kbd", "output"];
+
+/// Whether `el` frames embedded content rather than holding a second card
+/// (decision r4-p17-nested-cards-embedded-content): a media player (an
+/// `<audio>` or a `<video>`, or a play or pause button beside a seek
+/// control), a figure (an `<svg>` or a `<canvas>` with a caption, read here
+/// as a `<figure>` or a `<figcaption>` since the file scan has no layout to
+/// measure the figure's share of the box), or a monospace output block (see
+/// `is_output_block`).
+fn frames_embedded_content(el: &StaticElement<'_>, outer: &StaticElement<'_>) -> bool {
+    if el.query_selector("audio, video").is_some() {
+        return true;
+    }
+    if el
+        .query_selector("[role=\"slider\"], input[type=\"range\"], progress")
+        .is_some()
+        && el
+            .query_selector_all("button, [role=\"button\"]")
+            .iter()
+            .any(|b| {
+                let name = b
+                    .get_attribute("aria-label")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| b.text_content());
+                let name = js::to_lower_case(js::trim(&name));
+                name.starts_with("play") || name.starts_with("pause")
+            })
+    {
+        return true;
+    }
+    if el.query_selector("svg, canvas").is_some()
+        && (el.tag_lower() == "figure" || el.query_selector("figcaption").is_some())
+    {
+        return true;
+    }
+    is_output_block(el, outer)
+}
+
+/// Inline tags a run of text passes through; the static cascade has no UA
+/// stylesheet, so a declared `display` is read first and the tag stands in
+/// for the default.
+const INLINE_TAGS: [&str; 16] = [
+    "a", "abbr", "b", "br", "code", "em", "i", "kbd", "mark", "s", "samp", "small", "span",
+    "strong", "sub", "sup",
+];
+
+/// The file scan's reading of a monospace output block (r4-p17), as the URL
+/// engine's `is_output_block`: one element holds 60% of the box's text, 90%
+/// of that is in a monospace tag or face, and it is one run of text (a
+/// monospace tag, preserved white space, or inline runs holding 80% of it).
+fn is_output_block(el: &StaticElement<'_>, outer: &StaticElement<'_>) -> bool {
+    let mono_face = |e: &StaticElement<'_>| {
+        impeccable_core::checks::text_rules::is_monospace_family(sv(e.style(), "fontFamily"))
+    };
+    if mono_face(outer) {
+        return false;
+    }
+    let mut nodes = vec![*el];
+    nodes.extend(el.query_selector_all("*"));
+    if nodes.len() > 2000 {
+        return false;
+    }
+    let index: std::collections::HashMap<ego_tree::NodeId, usize> =
+        nodes.iter().enumerate().map(|(i, n)| (n.id(), i)).collect();
+    let mut text = vec![0usize; nodes.len()];
+    let mut mono = vec![0usize; nodes.len()];
+    let mut run = vec![0usize; nodes.len()];
+    let mono_at = |i: usize| {
+        let mut cur = Some(nodes[i]);
+        while let Some(c) = cur {
+            if MONOSPACE_TAGS.contains(&c.tag_lower().as_str()) || mono_face(&c) {
+                return true;
+            }
+            if c == *el {
+                break;
+            }
+            cur = c.parent_element();
+        }
+        false
+    };
+    for (i, node) in nodes.iter().enumerate() {
+        let own = node.direct_text().chars().filter(|c| !c.is_whitespace()).count();
+        text[i] = own;
+        run[i] = own;
+        if own > 0 && mono_at(i) {
+            mono[i] = own;
+        }
+    }
+    for i in (1..nodes.len()).rev() {
+        let Some(&parent) = nodes[i].parent_element().and_then(|p| index.get(&p.id())) else {
+            continue;
+        };
+        text[parent] += text[i];
+        mono[parent] += mono[i];
+        let display = sv(nodes[i].style(), "display");
+        let inline = if display.is_empty() {
+            INLINE_TAGS.contains(&nodes[i].tag_lower().as_str())
+        } else {
+            matches!(display, "inline" | "contents")
+        };
+        if inline {
+            run[parent] += run[i];
+        }
+    }
+    let total = text[0];
+    total > 0
+        && nodes.iter().enumerate().any(|(i, node)| {
+            if (text[i] as f64) < total as f64 * 0.6 || (mono[i] as f64) < text[i] as f64 * 0.9 {
+                return false;
+            }
+            let ws = sv(node.style(), "whiteSpace");
+            MONOSPACE_TAGS.contains(&node.tag_lower().as_str())
+                || ws.starts_with("pre")
+                || ws == "break-spaces"
+                || run[i] as f64 >= text[i] as f64 * 0.8
+        })
+}
+
+/// Whether the outer card is a dialog: it, or a box around it, is a
+/// `<dialog>`, carries `role="dialog"` or `role="alertdialog"`, or is marked
+/// `aria-modal="true"` (r4-p17).
+fn is_dialog_card(outer: &StaticElement<'_>) -> bool {
+    let mut cur = Some(*outer);
+    while let Some(a) = cur {
+        let role_dialog = a.get_attribute("role").is_some_and(|role| {
+            role.split_ascii_whitespace()
+                .any(|t| matches!(js::to_lower_case(t).as_str(), "dialog" | "alertdialog"))
+        });
+        let modal = a
+            .get_attribute("aria-modal")
+            .is_some_and(|v| js::to_lower_case(js::trim(v)) == "true");
+        if a.tag_lower() == "dialog" || role_dialog || modal {
+            return true;
+        }
+        cur = a.parent_element();
+    }
+    false
+}
+
 /// JS: checks.mjs#checkPageLayout(doc, win)
 pub fn check_page_layout(doc: &StaticDocument) -> Vec<RuleHit> {
     let mut findings = Vec::new();
@@ -247,7 +388,9 @@ pub fn check_page_layout(doc: &StaticDocument) -> Vec<RuleHit> {
         let mut parent = el.parent_element();
         while let Some(p) = parent {
             if is_card_like(&p) {
-                flagged.push(*el);
+                if !is_dialog_card(&p) && !frames_embedded_content(el, &p) {
+                    flagged.push(*el);
+                }
                 break;
             }
             parent = p.parent_element();

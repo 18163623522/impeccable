@@ -3738,3 +3738,83 @@ reporting.
     `phrasing_text_font`, `average_glyph_advance_em_at`,
     `is_monospace_family`, `MONOSPACE_ADVANCE_EM` and `PROPORTIONAL_ADVANCE_EM`
     are new; `scrolls_x` and `moves_a_track` are now `pub(crate)`.
+
+## Recorded 2026-09-18: nested-cards reads fill-only boxes and embedded content (corpus/premise3-nested-cards-premise)
+
+Two taste calls Paul decided on 2026-09-18 from observations-25 (round 4).
+Both narrow the rule's premise in both engines; the registry severity is
+unchanged, and r4-p18 (cards listed inside a panel) was decided `keep`, so a
+list of sibling cards in a framed panel still reports and fails.
+
+- **r4-p16-nested-cards-fill-only = narrow** (against the recommendation).
+  The decision: "Count an inner box as a card only when it shows a border or
+  casts a shadow. The 79 harmless findings go, and so do the 38 findings of
+  harmful fill-only double frames shown as counter-evidence." The URL engine
+  now skips an inner candidate that shows no border on any side (half a pixel
+  or wider, a style that draws, a colour that is not transparent) and casts
+  no shadow (`shows_border_or_shadow`). The outer card still counts a fill,
+  so a framed box inside a tinted panel reports as before. There is no
+  fill-only path left, advisory or otherwise: Paul accepted losing the
+  harmful fill-only double frames. The file scan needs nothing, since it has
+  only ever counted a box with a four-sided border class or a shadow.
+- **r4-p17-nested-cards-embedded-content = narrow.** The decision: "Skip a
+  box whose main child is an svg or canvas with a caption, a monospace output
+  block or a media player, and any box whose outer card is a dialog. Inner
+  boxes that hold ordinary text and controls still report." Read as:
+  - **Figure** (URL engine): an `<svg>` or `<canvas>` inside the box covers
+    at least 40% of it and the box holds text beside it. The file scan has no
+    layout, so it reads an `<svg>` or `<canvas>` in a `<figure>` or beside a
+    `<figcaption>`.
+  - **Monospace output block**: one element (the box or a descendant) holds
+    at least 60% of the box's text, 90% of that text is monospace, and it is
+    one run of text: a `pre`, `code`, `samp`, `kbd` or `output`, a box that
+    keeps its white space, or text whose inline runs hold 80% of it. A stack
+    of rows set in a monospace face (dograh.com's provider list with its
+    toggles, context.dev's company cards) is ordinary text and still reports,
+    and so does every box on a page whose outer card is itself monospace.
+  - **Media player**: the box holds an `<audio>` or `<video>`, or a play or
+    pause button beside a seek control (`role="slider"`, a range input, a
+    `<progress>`).
+  - **Dialog**: the outer card, or a box around it, is a `<dialog>`, has
+    `role="dialog"` or `role="alertdialog"`, or `aria-modal="true"` (the
+    panel of a modal inside its fixed overlay).
+- **Fixture.** `nested-cards.html` gains four flag cases (a tint that casts a
+  shadow, a panel with copy and a button, a tile with an icon, a monospace
+  card on a monospace page) and six pass cases (a fill-only bubble, an svg
+  figure, a canvas figure, a `<pre>` output block, an audio player, a panel
+  in a `role="dialog"` card). `crates/browser/tests/card_heuristics.rs` pins
+  all of them against the URL engine; `crates/html/tests/nested_cards_embedded.rs`
+  pins the file scan's reading.
+- **Goldens.** Re-recorded from the binary:
+  `detect-fixture-json-nested-cards-html`, `detect-fixture-text-nested-cards-html`
+  (3 to 7 findings), `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures` (644 to 648), `detect-scope-layout-text`
+  (39 to 43), `detect-scope-both`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`. Each gains only the fixture's four new flag
+  cases as `Card inside card (div)` and the summary count; none of the six
+  new pass cases reports in the file scan, and nothing else moved.
+- **Corpus, run 25 (both cohorts, 585 captures).** nested-cards 279 to 203:
+  76 removed, 0 added; every other rule matches the synced integration base
+  exactly. Violations 56 to 75, all 19 of them the r4-p16 counter-evidence
+  Paul accepted to lose (donckelektro.nl 6, framai.framer.website 6,
+  paymentkit.com 4, simplybudget.framer.ai 3).
+  - r4-p16 alone removes 63 (real-harmless 39, confirmed-harmful 19,
+    pattern-absent 5) and would add 2: context.dev's code window, whose
+    fill-only inner panel had hidden it, which r4-p17 then skips as an output
+    block.
+  - r4-p17 removes 13 more: soc-workflows-ai-cyb-tstb.bolt.host's report,
+    hungrygpu.com's chart in its welcome dialog, theagenticdatacompany.com's
+    audio player, context.dev's terminal and code blocks, blueprintbuddy's
+    GA4 event JSON, and challengebrew.com's constellation demo (an svg
+    covering most of a card with its caption line).
+  - Against the premise counts: 10 of the 23 r4-p16 evidence
+    representatives show a border or a shadow (bitroad.ai's agent bubbles
+    and outcome box, challengebrew.com's panels, billia.app's rows,
+    demotv.lol's battle cards, swipeloan.in's shadowed cards), so the
+    decision as written keeps them; the other 13 go. 7 of the 15 r4-p17
+    representatives are product mockups and previews with no svg, canvas,
+    monospace run or player as their main child (askjo.ai's paper preview,
+    overdrive.health's and veeza.ai's mockups) or a data grid with 42%
+    monospace text (visiby.net's heatmap); they hold ordinary text and
+    controls and still report. Of the 8 that go, kraflio.com's bubble and
+    clipto.com's panel are fill-only and go by r4-p16.

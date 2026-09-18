@@ -15,6 +15,10 @@ use super::element_checks::{
 };
 use super::painted::painted_at_capture;
 use super::{BrowserFinding, ElFinding};
+use crate::checks::embedded_content::{
+    control_of, is_media_control_name, is_output_chrome, is_play_name, visible_chars, Control,
+    CAPTION_MAX_CHARS,
+};
 use crate::checks::measures::{
     cream_from_class_list, is_cream_color, is_opaque_decorated_box,
     is_screen_reader_only_text_style, SrOnlyMetrics, StyleMap,
@@ -264,6 +268,31 @@ pub fn is_card_like_dom(dom: &dyn Dom, el: ElId) -> bool {
     card_edge_sides(dom, el, &layers) >= 3 || fill_differs_from_surface(dom, el)
 }
 
+/// Whether `el` shows a border on any side (half a pixel wide or more, in a
+/// style that draws and a colour that is not transparent) or casts a shadow.
+/// A nested card needs one of the two: a rounded box that paints only a fill
+/// (a chat bubble, a stat tile, an open accordion's tint) is not counted as an
+/// inner card, per decision r4-p16-nested-cards-fill-only. The outer card
+/// still counts a fill.
+fn shows_border_or_shadow(dom: &dyn Dom, el: ElId) -> bool {
+    let layers = crate::checks::measures::parse_shadow_layers(&dom.style(el, "boxShadow"));
+    let casts_shadow = layers.iter().any(|l| {
+        l.alpha >= crate::checks::measures::FAINT_PAINT_ALPHA
+            && (l.x != 0.0 || l.y != 0.0 || l.blur > 0.0 || l.spread != 0.0)
+    });
+    casts_shadow
+        || ["Top", "Right", "Bottom", "Left"].iter().any(|side| {
+            let width = parse_float(&dom.style(el, &format!("border{side}Width")));
+            let style = dom.style(el, &format!("border{side}Style"));
+            let color = dom.style(el, &format!("border{side}Color"));
+            width >= 0.5
+                && style != "none"
+                && style != "hidden"
+                && crate::checks::measures::css_color_alpha(Some(&color))
+                    >= crate::checks::measures::FAINT_PAINT_ALPHA
+        })
+}
+
 /// Any corner of a computed `border-radius` above zero.
 fn has_corner_radius(value: &str) -> bool {
     value
@@ -421,6 +450,239 @@ fn shares_card_edges(dom: &dyn Dom, inner: ElId, outer: ElId) -> bool {
         >= 3
 }
 
+/// Share of a box's area an embedded figure must cover to be its main child.
+const FIGURE_MIN_AREA_SHARE: f64 = 0.4;
+
+/// Share of a box's text an output block must hold to be its main child.
+const OUTPUT_MIN_TEXT_SHARE: f64 = 0.6;
+
+/// A box with more elements than this is not read as an output block.
+const OUTPUT_MAX_NODES: usize = 2000;
+
+/// The controls inside `el` (itself included), with the name each reads by:
+/// its `aria-label`, else its `title`, else its text.
+fn controls_in(dom: &dyn Dom, el: ElId) -> Vec<(ElId, Control, String)> {
+    let mut nodes = vec![el];
+    nodes.extend(dom.query_all(Some(el), "*").unwrap_or_default());
+    nodes
+        .into_iter()
+        .filter_map(|n| {
+            let kind = control_of(
+                &tag_lower(dom, n),
+                dom.attr(n, "type").as_deref(),
+                dom.attr(n, "role").as_deref(),
+            )?;
+            let name = dom
+                .attr(n, "aria-label")
+                .or_else(|| dom.attr(n, "title"))
+                .unwrap_or_else(|| dom.text_content(n));
+            Some((n, kind, name))
+        })
+        .collect()
+}
+
+/// Non-whitespace characters of `el`'s text outside its controls (a
+/// control inside another one is counted once).
+fn text_outside_controls(dom: &dyn Dom, el: ElId, controls: &[(ElId, Control, String)]) -> usize {
+    let total = visible_chars(&dom.text_content(el));
+    let inside: usize = controls
+        .iter()
+        .filter(|(c, _, _)| {
+            !controls
+                .iter()
+                .any(|(o, _, _)| o != c && dom.contains(*o, *c))
+        })
+        .map(|(c, _, _)| visible_chars(&dom.text_content(*c)))
+        .sum();
+    total.saturating_sub(inside)
+}
+
+/// A figure: an `<svg>` or a `<canvas>` inside the box covers at least 40% of
+/// it and is its main child. The box holds a caption beside it (text, at most
+/// `CAPTION_MAX_CHARS` of it: a chart with its legend and source line) and no
+/// control outside the figure. A feature tile with an illustration, a heading,
+/// copy and buttons is ordinary text and controls and keeps reporting.
+fn is_figure_box(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let area = rect.width * rect.height;
+    if !(area > 0.0) {
+        return false;
+    }
+    let figures: Vec<ElId> = dom
+        .query_all(Some(el), "svg, canvas")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&figure| {
+            let r = dom.rect(figure);
+            let w = (rect.right.min(r.right) - rect.left.max(r.left)).max(0.0);
+            let h = (rect.bottom.min(r.bottom) - rect.top.max(r.top)).max(0.0);
+            w * h >= area * FIGURE_MIN_AREA_SHARE
+        })
+        .collect();
+    if figures.is_empty() {
+        return false;
+    }
+    let total = visible_chars(&dom.text_content(el));
+    let controls = controls_in(dom, el);
+    figures.into_iter().any(|figure| {
+        let caption = total.saturating_sub(visible_chars(&dom.text_content(figure)));
+        caption > 0
+            && caption <= CAPTION_MAX_CHARS
+            && controls.iter().all(|(c, _, _)| dom.contains(figure, *c))
+    })
+}
+
+/// A monospace output block: one element in the box (the box itself or a
+/// descendant) holds at least 60% of the box's text, at least 90% of that
+/// text is set in a monospace face, and it is one run of text (a `<pre>`, a
+/// `<code>`, `<samp>`, `<kbd>` or `<output>`, a box that keeps its white
+/// space, or text whose inline runs hold 80% of it): sample output, a
+/// terminal transcript, a request printed as code. A stack of rows set in a
+/// monospace face (a list of providers with toggles, a table of fields) is
+/// ordinary text and controls and keeps reporting, and so does any box on a
+/// page whose outer card is set in a monospace face itself. The block is the
+/// box's main child only when the box holds no control but its own chrome (a
+/// copy button, an icon button such as a code window's "more options" menu):
+/// a card set in a monospace face with a paragraph and an Upgrade button is
+/// ordinary text and controls. (Links are not controls: a terminal's inline
+/// links stay part of its output.)
+fn is_output_block(dom: &dyn Dom, el: ElId, outer: ElId) -> bool {
+    use crate::checks::text_rules::is_monospace_family;
+    if is_monospace_family(&dom.style(outer, "fontFamily")) {
+        return false;
+    }
+    if !controls_in(dom, el)
+        .iter()
+        .all(|(c, kind, name)| is_output_chrome(*kind, name, &dom.text_content(*c)))
+    {
+        return false;
+    }
+    let mut nodes = vec![el];
+    nodes.extend(dom.query_all(Some(el), "*").unwrap_or_default());
+    if nodes.len() > OUTPUT_MAX_NODES {
+        return false;
+    }
+    let index: std::collections::HashMap<ElId, usize> = nodes.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+    // Per node: its subtree's text, the monospace share of it, and the part
+    // reached through inline boxes alone (one run of text).
+    let mut text = vec![0usize; nodes.len()];
+    let mut mono = vec![0usize; nodes.len()];
+    let mut run = vec![0usize; nodes.len()];
+    for (i, &node) in nodes.iter().enumerate() {
+        let own: usize = dom
+            .direct_text_nodes(node)
+            .iter()
+            .map(|t| t.chars().filter(|c| !c.is_whitespace()).count())
+            .sum();
+        text[i] = own;
+        run[i] = own;
+        if own > 0 && is_monospace_family(&dom.style(node, "fontFamily")) {
+            mono[i] = own;
+        }
+    }
+    // Document order puts every child after its parent, so a reverse walk
+    // folds each subtree into its parent once.
+    for i in (1..nodes.len()).rev() {
+        let Some(&parent) = dom.parent(nodes[i]).and_then(|p| index.get(&p)) else {
+            continue;
+        };
+        text[parent] += text[i];
+        mono[parent] += mono[i];
+        if matches!(dom.style(nodes[i], "display").as_str(), "inline" | "contents") {
+            run[parent] += run[i];
+        }
+    }
+    let total = text[0];
+    if total == 0 {
+        return false;
+    }
+    nodes.iter().enumerate().any(|(i, &node)| {
+        if (text[i] as f64) < total as f64 * OUTPUT_MIN_TEXT_SHARE
+            || (mono[i] as f64) < text[i] as f64 * 0.9
+        {
+            return false;
+        }
+        let preformatted = matches!(
+            tag_lower(dom, node).as_str(),
+            "pre" | "code" | "samp" | "kbd" | "output"
+        ) || {
+            let ws = dom.style(node, "whiteSpace");
+            ws.starts_with("pre") || ws == "break-spaces"
+        };
+        preformatted || run[i] as f64 >= text[i] as f64 * 0.8
+    })
+}
+
+/// A media player that is the box's main child. The box holds a visible
+/// `<audio>` or `<video>` (drawn with its own controls, or covering 40% of
+/// the box), or a play or pause button beside a seek control
+/// (`role="slider"`, a range input or a `<progress>`). And the player is most
+/// of the box: every control in it is the player's own (a seek control, or a
+/// button named with a media word or not named at all), and the text outside
+/// the controls is caption-length (a title and a time). A hidden sound
+/// element, a small avatar video or a promo's play button in a card of
+/// ordinary copy and controls does not make it a player.
+fn is_media_player(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let area = rect.width * rect.height;
+    let visible_media = dom
+        .query_all(Some(el), "audio, video")
+        .unwrap_or_default()
+        .into_iter()
+        .any(|m| {
+            let r = dom.rect(m);
+            if !(r.width > 0.0 && r.height > 0.0) {
+                return false;
+            }
+            let w = (rect.right.min(r.right) - rect.left.max(r.left)).max(0.0);
+            let h = (rect.bottom.min(r.bottom) - rect.top.max(r.top)).max(0.0);
+            dom.attr(m, "controls").is_some() || (area > 0.0 && w * h >= area * FIGURE_MIN_AREA_SHARE)
+        });
+    let controls = controls_in(dom, el);
+    let custom = controls
+        .iter()
+        .any(|(_, kind, name)| *kind == Control::Button && is_play_name(name))
+        && (controls.iter().any(|(_, kind, _)| *kind == Control::Seek)
+            || dom.query_one(Some(el), "progress").ok().flatten().is_some());
+    (visible_media || custom)
+        && controls.iter().all(|(_, kind, name)| {
+            *kind == Control::Seek || (*kind == Control::Button && is_media_control_name(name))
+        })
+        && text_outside_controls(dom, el, &controls) <= CAPTION_MAX_CHARS
+}
+
+/// Whether `el` is a dialog: a `<dialog>`, `role="dialog"` or
+/// `role="alertdialog"`, or `aria-modal="true"`.
+fn is_dialog_el(dom: &dyn Dom, el: ElId) -> bool {
+    tag_lower(dom, el) == "dialog"
+        || dom.attr(el, "role").is_some_and(|role| {
+            role.split_ascii_whitespace()
+                .any(|token| matches!(js::to_lower_case(token).as_str(), "dialog" | "alertdialog"))
+        })
+        || dom
+            .attr(el, "aria-modal")
+            .is_some_and(|v| js::to_lower_case(js::trim(&v)) == "true")
+}
+
+/// Whether the outer card is a dialog: the dialog itself, or the first
+/// card-like box inside one (a modal's panel inside its fixed overlay). A
+/// card further in, inside the dialog's panel, is an ordinary card and its
+/// nested cards report.
+fn is_dialog_card(dom: &dyn Dom, outer: ElId) -> bool {
+    if is_dialog_el(dom, outer) {
+        return true;
+    }
+    let mut cur = dom.parent(outer);
+    while let Some(a) = cur {
+        if is_dialog_el(dom, a) {
+            return true;
+        }
+        if is_card_like_dom(dom, a) {
+            return false;
+        }
+        cur = dom.parent(a);
+    }
+    false
+}
+
 /// `role="menu"` or `role="listbox"`: a popup panel, however card-like it is
 /// drawn.
 fn has_popup_role(dom: &dyn Dom, el: ElId) -> bool {
@@ -459,7 +721,13 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
         // form draws around a single input or select. A highlight run inside a
         // line (`<mark>`) is not a box at all, and a frame around a picture or
         // a video is embedded media.
-        if is_single_line_label_box(dom, el, &rect)
+        //
+        // A box that shows neither a border nor a shadow is not an inner card
+        // (r4-p16), and neither is a frame around embedded content: a figure
+        // with its caption, a monospace output block or a media player
+        // (r4-p17).
+        if !shows_border_or_shadow(dom, el)
+            || is_single_line_label_box(dom, el, &rect)
             || is_field_box(dom, el)
             || matches!(dom.style(el, "display").as_str(), "inline" | "contents")
             || is_media_frame(dom, el, &rect)
@@ -471,8 +739,15 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
             if is_card_like_dom(dom, p) {
                 // A panel not painted at capture (a closed mega-nav panel
                 // held at `visibility: hidden`) is not a card anyone sees,
-                // and a band along the card's own edges is part of it.
-                if super::painted::painted_at_capture(dom, el) && !shares_card_edges(dom, el, p) {
+                // a band along the card's own edges is part of it, and a
+                // dialog's panels are the dialog's content (r4-p17).
+                if super::painted::painted_at_capture(dom, el)
+                    && !shares_card_edges(dom, el, p)
+                    && !is_dialog_card(dom, p)
+                    && !is_figure_box(dom, el, &rect)
+                    && !is_media_player(dom, el, &rect)
+                    && !is_output_block(dom, el, p)
+                {
                     flagged.push(el);
                 }
                 break;
@@ -3129,7 +3404,9 @@ mod tests {
         assert!(check_layout(&d).is_empty(), "a field box");
         let note = d.add(Some(field), "p");
         d.add_text(note, "Pick the service you need");
-        assert_eq!(check_layout(&d).len(), 1, "a box with content beside the control");
+        assert!(check_layout(&d).is_empty(), "a fill with no border or shadow (r4-p16)");
+        outlined(&mut d, field, "10px");
+        assert_eq!(check_layout(&d).len(), 1, "a framed box with content beside the control");
 
         // clipto.com: a tinted, rounded `<mark>` run; demotv.lol: a bordered
         // frame around a video thumbnail.
@@ -3211,6 +3488,243 @@ mod tests {
         assert!(check_layout(&d).is_empty(), "a white box with a lip");
         d.set_style(inner, "boxShadow", "rgba(0, 0, 0, 0.1) 0px 1px 3px 0px");
         assert_eq!(check_layout(&d).len(), 1, "a shadow that draws three edges");
+    }
+
+    /// observations-25 P16 and P17: adant.ai's and kraflio.com's chat
+    /// bubbles (a fill and a radius, nothing else), hungrygpu.com's chart
+    /// figure in its welcome dialog, soc-workflows-ai-cyb-tstb.bolt.host's
+    /// sample report, theagenticdatacompany.com's audio sample player.
+    #[test]
+    fn nested_cards_skip_fill_only_boxes_and_embedded_content() {
+        fn page() -> (FakeDom, ElId) {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let card = d.add(Some(body), "div");
+            outlined(&mut d, card, "16px");
+            d.set_style(card, "fontFamily", "Inter, sans-serif");
+            d.set_rect(card, 0.0, 0.0, 600.0, 500.0);
+            d.add_text(card, "An outer card with copy of its own");
+            (d, card)
+        }
+
+        // A rounded tint with no border and no shadow is not an inner card.
+        let (mut d, card) = page();
+        let bubble = outlined_card(&mut d, card, (24.0, 24.0, 400.0, 90.0));
+        d.set_style(bubble, "backgroundColor", "rgb(244, 244, 245)");
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            d.set_style(bubble, &format!("border{side}Width"), "0px");
+        }
+        assert!(check_layout(&d).is_empty(), "a fill-only box");
+        d.set_style(bubble, "borderBottomWidth", "1px");
+        assert_eq!(check_layout(&d).len(), 1, "a fill with a border");
+        d.set_style(bubble, "borderBottomWidth", "0px");
+        d.set_style(bubble, "boxShadow", "rgba(0, 0, 0, 0.1) 0px 1px 3px 0px");
+        assert_eq!(check_layout(&d).len(), 1, "a fill with a shadow");
+        d.set_style(bubble, "boxShadow", "rgba(0, 0, 0, 0) 0px 1px 3px 0px");
+        assert!(check_layout(&d).is_empty(), "a transparent shadow casts nothing");
+
+        // The outer card may be fill-only: the narrowing reads the inner box.
+        let (mut d, card) = page();
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            d.set_style(card, &format!("border{side}Width"), "0px");
+        }
+        d.set_style(card, "backgroundColor", "rgb(233, 236, 239)");
+        outlined_card(&mut d, card, (24.0, 24.0, 400.0, 90.0));
+        assert_eq!(check_layout(&d).len(), 1, "a framed box in a fill-only card");
+
+        // A figure: an svg covering 40% or more of the box, with a caption.
+        let (mut d, card) = page();
+        let figure = outlined_card(&mut d, card, (24.0, 24.0, 474.0, 309.0));
+        let svg = d.add(Some(figure), "svg");
+        d.set_rect(svg, 38.0, 56.0, 446.0, 168.0);
+        assert!(check_layout(&d).is_empty(), "a chart with its caption");
+        d.set_rect(svg, 38.0, 56.0, 446.0, 100.0);
+        assert_eq!(check_layout(&d).len(), 1, "an illustration beside the copy");
+        d.set_rect(svg, 38.0, 56.0, 24.0, 24.0);
+        assert_eq!(check_layout(&d).len(), 1, "an icon");
+        // Without a caption the svg is the whole box's text: still a card.
+        let (mut d, card) = page();
+        let figure = d.add(Some(card), "div");
+        outlined(&mut d, figure, "12px");
+        d.set_rect(figure, 24.0, 24.0, 474.0, 309.0);
+        let canvas = d.add(Some(figure), "canvas");
+        d.set_rect(canvas, 38.0, 56.0, 446.0, 168.0);
+        let label = d.add(Some(canvas), "span");
+        d.add_text(label, "A chart drawn on a canvas");
+        assert_eq!(check_layout(&d).len(), 1, "a canvas with no caption");
+        let caption = d.add(Some(figure), "p");
+        d.add_text(caption, "Late 2024 open weights");
+        assert!(check_layout(&d).is_empty(), "a canvas with a caption");
+
+        // A monospace output block, unless the outer card is monospace too.
+        let (mut d, card) = page();
+        let output = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 400.0));
+        d.set_style(output, "fontFamily", "\"Courier New\", monospace");
+        assert!(check_layout(&d).is_empty(), "a monospace output block");
+        d.set_style(card, "fontFamily", "\"JetBrains Mono\", monospace");
+        assert_eq!(check_layout(&d).len(), 1, "a card on a monospace page");
+        d.set_style(card, "fontFamily", "Inter, sans-serif");
+        // dograh.com: a stack of provider rows set in a monospace face, each a
+        // block of its own, is ordinary text, not one run of output.
+        let (mut d, card) = page();
+        let stack = d.add(Some(card), "div");
+        outlined(&mut d, stack, "12px");
+        d.set_rect(stack, 24.0, 24.0, 500.0, 400.0);
+        for name in ["Vertex AI speech to speech", "Deepgram speech to text", "Gemini Flash brain"] {
+            let row = d.add(Some(stack), "div");
+            d.set_styles(row, &[("display", "flex"), ("fontFamily", "\"JetBrains Mono\", monospace")]);
+            d.add_text(row, name);
+        }
+        assert_eq!(check_layout(&d).len(), 1, "a stack of monospace rows");
+        // A terminal: a header line and one paragraph of monospace output
+        // with inline links in it.
+        let (mut d, card) = page();
+        let terminal = d.add(Some(card), "div");
+        outlined(&mut d, terminal, "16px");
+        d.set_rect(terminal, 24.0, 24.0, 405.0, 160.0);
+        let header = d.add(Some(terminal), "div");
+        d.set_style(header, "fontFamily", "Inter, sans-serif");
+        d.add_text(header, "agent setup");
+        let para = d.add(Some(terminal), "p");
+        d.set_style(para, "fontFamily", "\"JetBrains Mono\", monospace");
+        d.add_text(para, "Signup for an account and get an API key with");
+        let link = d.add(Some(para), "a");
+        d.set_styles(link, &[("display", "inline"), ("fontFamily", "\"JetBrains Mono\", monospace")]);
+        d.add_text(link, "context.dev/auth.md");
+        d.add_text(para, "then follow the quickstart to integrate it");
+        assert!(check_layout(&d).is_empty(), "a terminal transcript");
+
+        let (mut d, card) = page();
+        let output = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 400.0));
+        d.set_style(output, "fontFamily", "\"Courier New\", monospace");
+        let prose = d.add(Some(output), "p");
+        d.set_style(prose, "fontFamily", "Inter, sans-serif");
+        d.add_text(prose, "A paragraph of ordinary copy that outweighs the monospace line above it");
+        assert_eq!(check_layout(&d).len(), 1, "mostly ordinary text");
+
+        // A media player.
+        let (mut d, card) = page();
+        let player = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 120.0));
+        let play = d.add(Some(player), "button");
+        d.set_attr(play, "aria-label", "Play");
+        assert_eq!(check_layout(&d).len(), 1, "a button alone");
+        let seek = d.add(Some(player), "div");
+        d.set_attr(seek, "role", "slider");
+        assert!(check_layout(&d).is_empty(), "a play button beside a seek bar");
+        let mute = d.add(Some(player), "button");
+        d.set_attr(mute, "aria-label", "Mute");
+        assert!(check_layout(&d).is_empty(), "the player's own buttons");
+        let choose = d.add(Some(player), "button");
+        d.add_text(choose, "Choose");
+        assert_eq!(check_layout(&d).len(), 1, "a pricing tier with a promo player");
+        let (mut d, card) = page();
+        let player = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 120.0));
+        let audio = d.add(Some(player), "audio");
+        d.set_attr(audio, "controls", "");
+        d.set_rect(audio, 40.0, 60.0, 300.0, 54.0);
+        assert!(check_layout(&d).is_empty(), "an audio element with its controls");
+        d.set_rect(audio, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(check_layout(&d).len(), 1, "a hidden audio element");
+        // A settings panel with a hidden sound element, and a profile card
+        // with a small avatar video, are ordinary text and controls.
+        let (mut d, card) = page();
+        let panel = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 120.0));
+        d.add(Some(panel), "audio");
+        let save = d.add(Some(panel), "button");
+        d.add_text(save, "Save");
+        assert_eq!(check_layout(&d).len(), 1, "a panel with a hidden audio element");
+        let (mut d, card) = page();
+        let profile = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 160.0));
+        let video = d.add(Some(profile), "video");
+        d.set_rect(video, 40.0, 40.0, 48.0, 48.0);
+        let follow = d.add(Some(profile), "button");
+        d.add_text(follow, "Follow");
+        assert_eq!(check_layout(&d).len(), 1, "a profile card with an avatar video");
+        // A player whose text is more than a title and a time is a card.
+        let (mut d, card) = page();
+        let player = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 200.0));
+        let play = d.add(Some(player), "button");
+        d.set_attr(play, "aria-label", "Play");
+        let seek = d.add(Some(player), "input");
+        d.set_attr(seek, "type", "range");
+        assert!(check_layout(&d).is_empty(), "a range input player");
+        let notes = d.add(Some(player), "p");
+        d.add_text(
+            notes,
+            "Show notes for the episode: the guests talk about type, colour, layout and the \
+             long road from a first sketch to a shipped design system, then take questions.",
+        );
+        assert_eq!(check_layout(&d).len(), 1, "a player beside a paragraph of copy");
+
+        // A feature tile: a large illustration, a heading, copy and buttons.
+        let (mut d, card) = page();
+        let tile = outlined_card(&mut d, card, (24.0, 24.0, 474.0, 309.0));
+        let svg = d.add(Some(tile), "svg");
+        d.set_rect(svg, 38.0, 56.0, 446.0, 168.0);
+        assert!(check_layout(&d).is_empty(), "an illustration with a caption line");
+        let button = d.add(Some(tile), "button");
+        d.add_text(button, "Try it");
+        assert_eq!(check_layout(&d).len(), 1, "a tile with a control beside its svg");
+        let (mut d, card) = page();
+        let tile = outlined_card(&mut d, card, (24.0, 24.0, 474.0, 309.0));
+        let svg = d.add(Some(tile), "svg");
+        d.set_rect(svg, 38.0, 56.0, 446.0, 168.0);
+        let copy = d.add(Some(tile), "p");
+        d.add_text(
+            copy,
+            "Trigger workflows from any event in your stack, with retries, alerts, audit \
+             logs and approvals built in, and a history of every run kept for a year.",
+        );
+        assert_eq!(check_layout(&d).len(), 1, "an svg beside body copy");
+
+        // A card set in a monospace face with a paragraph and a button.
+        let (mut d, card) = page();
+        let tier = outlined_card(&mut d, card, (24.0, 24.0, 500.0, 160.0));
+        d.set_style(tier, "fontFamily", "\"Courier New\", monospace");
+        assert!(check_layout(&d).is_empty(), "a monospace output block");
+        let copy_button = d.add(Some(tier), "button");
+        d.set_attr(copy_button, "aria-label", "Copy code");
+        assert!(check_layout(&d).is_empty(), "a code block with its copy button");
+        // context.dev's code window: a "more options" icon menu in its header.
+        let menu = d.add(Some(tier), "button");
+        d.set_attr(menu, "aria-label", "More options");
+        d.set_attr(menu, "aria-haspopup", "menu");
+        assert!(check_layout(&d).is_empty(), "a code window's icon menu");
+        let upgrade = d.add(Some(tier), "button");
+        d.add_text(upgrade, "Upgrade");
+        assert_eq!(check_layout(&d).len(), 1, "a monospace card with an Upgrade button");
+
+        // The dialog itself as the outer card, or the first card inside it.
+        for (attr, value) in [("role", "dialog"), ("role", "alertdialog"), ("aria-modal", "true")] {
+            let (mut d, card) = page();
+            outlined_card(&mut d, card, (24.0, 24.0, 400.0, 90.0));
+            d.set_attr(card, attr, value);
+            assert!(check_layout(&d).is_empty(), "{attr}={value}");
+        }
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let overlay = d.add(Some(body), "div");
+        d.set_attr(overlay, "role", "dialog");
+        let panel = d.add(Some(overlay), "div");
+        outlined(&mut d, panel, "16px");
+        d.set_rect(panel, 380.0, 111.0, 520.0, 578.0);
+        d.add_text(panel, "Welcome to the daily brief");
+        let group = outlined_card(&mut d, panel, (403.0, 257.0, 474.0, 300.0));
+        assert!(check_layout(&d).is_empty(), "a modal's panel");
+        // A card inside a card inside the dialog's panel is an ordinary
+        // nested card.
+        outlined_card(&mut d, group, (420.0, 320.0, 400.0, 120.0));
+        assert_eq!(check_layout(&d).len(), 1, "a card nested inside the dialog's panel");
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let overlay = d.add(Some(body), "div");
+        d.set_attr(overlay, "role", "region");
+        let panel = d.add(Some(overlay), "div");
+        outlined(&mut d, panel, "16px");
+        d.set_rect(panel, 380.0, 111.0, 520.0, 578.0);
+        d.add_text(panel, "Welcome to the daily brief");
+        outlined_card(&mut d, panel, (403.0, 257.0, 474.0, 200.0));
+        assert_eq!(check_layout(&d).len(), 1, "a region is not a dialog");
     }
 
     #[test]

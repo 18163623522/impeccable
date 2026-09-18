@@ -4171,3 +4171,140 @@ issues, for Paul to confirm:
 6. **Parked carousel cards** (microsoft.com `store-layout-column`,
    becomeautonomous.com `proto-acard`) show up as one page-level finding
    each, inherited from issue 24 (item 1 above).
+
+## Recorded 2026-09-18: nested-cards reads fill-only boxes and embedded content (corpus/premise3-nested-cards-premise)
+
+Two taste calls Paul decided on 2026-09-18 from observations-25 (round 4).
+Both narrow the rule's premise in both engines; the registry severity is
+unchanged, and r4-p18 (cards listed inside a panel) was decided `keep`, so a
+list of sibling cards in a framed panel still reports and fails.
+
+- **r4-p16-nested-cards-fill-only = narrow** (against the recommendation).
+  The decision: "Count an inner box as a card only when it shows a border or
+  casts a shadow. The 79 harmless findings go, and so do the 38 findings of
+  harmful fill-only double frames shown as counter-evidence." The URL engine
+  now skips an inner candidate that shows no border on any side (half a pixel
+  or wider, a style that draws, a colour that is not transparent) and casts
+  no shadow (`shows_border_or_shadow`). The outer card still counts a fill,
+  so a framed box inside a tinted panel reports as before. There is no
+  fill-only path left, advisory or otherwise: Paul accepted losing the
+  harmful fill-only double frames. The file scan needs nothing, since it has
+  only ever counted a box with a four-sided border class or a shadow.
+- **r4-p17-nested-cards-embedded-content = narrow.** The decision: "Skip a
+  box whose main child is an svg or canvas with a caption, a monospace output
+  block or a media player, and any box whose outer card is a dialog. Inner
+  boxes that hold ordinary text and controls still report." Each reading
+  asks that the embedded content be the box's main child, so a card of
+  ordinary copy and controls that also holds a sound element, a small video,
+  an illustration or a monospace paragraph still reports. The shared half
+  (what counts as a control, a caption, a player's own button) is in
+  `impeccable_core::checks::embedded_content`. Read as:
+  - **Figure** (URL engine): an `<svg>` or `<canvas>` inside the box covers
+    at least 40% of it, the box holds text beside it of caption length (1 to
+    140 non-space characters), and no control sits outside the figure. The
+    file scan has no layout, so it reads an `<svg>` or `<canvas>` in a
+    `<figure>` or beside a `<figcaption>`, with the same caption and control
+    limits.
+  - **Monospace output block**: one element (the box or a descendant) holds
+    at least 60% of the box's text, 90% of that text is monospace, and it is
+    one run of text: a `pre`, `code`, `samp`, `kbd` or `output`, a box that
+    keeps its white space, or text whose inline runs hold 80% of it. A stack
+    of rows set in a monospace face (dograh.com's provider list with its
+    toggles, context.dev's company cards) is ordinary text and still reports,
+    and so does every box on a page whose outer card is itself monospace.
+    The box may hold no control but the block's own chrome: a button named
+    as a copy button, or an icon button with no text of its own
+    (context.dev's code window has a "More options" icon menu in its
+    header). A monospace card with a paragraph and an Upgrade button reports.
+  - **Media player**: the box holds a visible `<audio>` or `<video>` (drawn
+    with `controls`, or covering 40% of the box; the file scan reads
+    `controls` alone), or a play or pause button beside a seek control
+    (`role="slider"`, a range input, a `<progress>`). And the player is most
+    of the box: every control in it is a seek control or a button named with
+    a media word (play, pause, mute, volume, skip and the like) or not named,
+    and the text outside the controls is caption-length. A settings panel
+    with a hidden `<audio>`, a profile card with a 48px avatar video and a
+    pricing tier with a "Play intro" button beside its Choose button report.
+  - **Dialog**: the outer card is a `<dialog>`, has `role="dialog"` or
+    `role="alertdialog"`, or `aria-modal="true"`, or it is the first
+    card-like box inside such an element (the panel of a modal inside its
+    fixed overlay). A card nested further in, inside the dialog's panel,
+    reports as it does anywhere else.
+- **Fixture.** `nested-cards.html` gains ten flag cases (a tint that casts a
+  shadow, a panel with copy and a button, a tile with an icon, a monospace
+  card on a monospace page; and, for the main-child reading, a panel with a
+  hidden `<audio>`, a profile with an avatar `<video>`, a pricing tier with a
+  promo play button and a `<progress>`, a feature tile with a large svg,
+  copy and buttons in a `<figure>`, a card nested inside a dialog's panel,
+  and a monospace tier with an Upgrade button) and six pass cases (a fill-only bubble, an svg
+  figure, a canvas figure, a `<pre>` output block, an audio player, a panel
+  in a `role="dialog"` card). `crates/browser/tests/card_heuristics.rs` pins
+  all of them against the URL engine; `crates/html/tests/nested_cards_embedded.rs`
+  pins the file scan's reading.
+- **Goldens.** Re-recorded from the binary:
+  `detect-fixture-json-nested-cards-html`, `detect-fixture-text-nested-cards-html`
+  (3 to 13 findings), `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures` (644 to 654), `detect-scope-layout-text`
+  (39 to 49), `detect-scope-both`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`. Each gains only the fixture's ten new flag
+  cases (nine `Card inside card (div)`, one `Card inside card (figure)`) and
+  the summary count; none of the six new pass cases reports in the file
+  scan, and nothing else moved.
+- **Corpus, run 25 (both cohorts, 585 captures).** nested-cards 279 to 203:
+  76 removed, 0 added (the same with the main-child reading as without it;
+  requiring no labelled control beside an output block first brought
+  context.dev's code window back twice, which the icon-button allowance
+  settles); every other rule matches the synced integration base
+  exactly. Violations 56 to 75, all 19 of them the r4-p16 counter-evidence
+  Paul accepted to lose (donckelektro.nl 6, framai.framer.website 6,
+  paymentkit.com 4, simplybudget.framer.ai 3).
+  - r4-p16 alone removes 63 (real-harmless 39, confirmed-harmful 19,
+    pattern-absent 5) and would add 2: context.dev's code window, whose
+    fill-only inner panel had hidden it, which r4-p17 then skips as an output
+    block.
+  - r4-p17 removes 13 more: soc-workflows-ai-cyb-tstb.bolt.host's report,
+    hungrygpu.com's chart in its welcome dialog, theagenticdatacompany.com's
+    audio player, context.dev's terminal and code blocks, blueprintbuddy's
+    GA4 event JSON, and challengebrew.com's constellation demo (an svg
+    covering most of a card with its caption line).
+  - Against the premise counts: 10 of the 23 r4-p16 evidence
+    representatives show a border or a shadow (bitroad.ai's agent bubbles
+    and outcome box, challengebrew.com's panels, billia.app's rows,
+    demotv.lol's battle cards, swipeloan.in's shadowed cards), so the
+    decision as written keeps them; the other 13 go. 7 of the 15 r4-p17
+    representatives are product mockups and previews with no svg, canvas,
+    monospace run or player as their main child (askjo.ai's paper preview,
+    overdrive.health's and veeza.ai's mockups) or a data grid with 42%
+    monospace text (visiby.net's heatmap); they hold ordinary text and
+    controls and still report. Of the 8 that go, kraflio.com's bubble and
+    clipto.com's panel are fill-only and go by r4-p16.
+
+### Known limits at merge
+
+Recorded when `corpus/integration` merged this branch, after the revision
+(10bfab7f) fixed the problems the review raised: a player, a figure, an
+output block or a dialog must now be the box's main child, so a card with a
+hidden audio element, an avatar video, a promo player, an illustration tile,
+a card nested inside a dialog's panel or a monospace tier beside ordinary
+controls reports again. The review's open issues, for Paul to confirm:
+
+1. **One side of border counts.** r4-p16 reads a border on any single side
+   as "shows a border": a tint with only a bottom rule still reports as a
+   card, and so does a tint whose 1px border is drawn in its own fill colour,
+   which looks fill-only on screen. Decide whether it needs three or more
+   sides, or a border colour that differs from the fill.
+2. **The stated count and the criteria differ.** The r4-p17 option text says
+   "The 33 findings go", but only 13 findings (8 of 15 representatives) are
+   removed by r4-p17 in run 25. The other 7 representatives (askjo's paper
+   preview, overdrive's and veeza's product mockups, visiby's heatmap at 42%
+   monospace) do not meet the option's own criteria. The criteria win here.
+3. **The engines read figures and monospace differently.** The file scan
+   needs a `figure` or `figcaption` element and reads monospace from tags or
+   a declared font; the URL engine reads an area share and the computed
+   font. The two can disagree on the same markup.
+4. **A large decorative svg with a caption line is skipped.**
+   challengebrew.com's constellation svg goes, which the judges called
+   harmless, and any svg of that shape beside one line of text goes with it.
+5. **The fill-only double frames go.** r4-p16 drops the 38 harmful fill-only
+   double frames, as Paul accepted; the corpus violation count rises from 56
+   to 75, all from that counter-evidence.

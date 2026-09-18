@@ -3783,7 +3783,13 @@ What each does (the contract is in `docs/CLI-CONTRACT.md`):
    Google Tag Manager, OneTrust or Google Ads script hosts, or naming
    `browsingTopics` / `joinAdInterestGroup` / `runAdAuction` / `adsbygoogle`,
    is `severity: advisory`, ends ` (third-party: <vendor>)` and carries
-   `thirdParty`. The list is `crates/core/src/third_party.rs`.
+   `thirdParty`. The list is `crates/core/src/third_party.rs`. The
+   three-error cap is applied after classing, to counted and ad-tech errors
+   separately (`capped_script_errors` in `crates/browser/src/lib.rs`), so
+   three ad-tech errors ahead of the site's own never push it out of the
+   report: a page whose only counted error arrived fourth would otherwise pass
+   with exit 0. `script-error-ad-tech.html` has three ad-tech errors ahead of
+   its own and a fourth after it.
 4. **Vendor widgets.** Findings on Taboola's feed subtree and on Swiper's own
    wrapper and slide elements end ` (third-party: <vendor>)` and carry
    `thirdParty`; severity unchanged. Same module.

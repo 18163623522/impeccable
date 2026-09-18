@@ -889,9 +889,9 @@ fn scan_page_inner(
     })?;
     results.extend(hidden);
 
-    for error in page.page_errors().into_iter().take(3) {
-        results.push(script_error_result(&error.message, error.source.as_deref()));
-    }
+    results.extend(capped_script_errors(
+        page.page_errors().iter().map(|e| (e.message.as_str(), e.source.as_deref())),
+    ));
 
     let analyses = step(profile, "visual-contrast", "browser-analyze", url, || {
         snapshot_engine::analyze_visual_contrast(page, &base, 12.0, true)
@@ -921,6 +921,29 @@ fn scan_page_inner(
         capture_post_scan(page, ev, request, &selectors, &identities);
     }
     Ok(results)
+}
+
+/// At most this many counted script errors per scan, and separately at
+/// most this many ad-tech ones.
+const SCRIPT_ERROR_CAP: usize = 3;
+
+/// The page's deduped errors as `script-error` results, in arrival order.
+/// The cap applies to counted errors and advisory ad-tech errors
+/// separately, after classifying, so ad-tech errors never take the slots a
+/// first-party error needs: three failing ad scripts ahead of a broken app
+/// bundle still report the bundle as an error.
+fn capped_script_errors<'a>(errors: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Vec<RawResult> {
+    let (mut counted, mut ad_tech) = (0usize, 0usize);
+    let mut out = Vec::new();
+    for (message, source) in errors {
+        let r = script_error_result(message, source);
+        let slot = if r.third_party.is_some() { &mut ad_tech } else { &mut counted };
+        if *slot < SCRIPT_ERROR_CAP {
+            *slot += 1;
+            out.push(r);
+        }
+    }
+    out
 }
 
 /// One uncaught page error as a `script-error` result. The message alone
@@ -1250,6 +1273,27 @@ fn truthy(v: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ad_tech_errors_never_take_a_counted_errors_slot() {
+        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/p{n}.js:1:1")));
+        let mut errors: Vec<(String, Option<String>)> = (1..=4).map(prebid).collect();
+        errors.push(("Uncaught TypeError: cart is undefined".to_string(), Some("at https://example.com/js/app.js:1:1".to_string())));
+        for n in 1..=4 {
+            errors.push((format!("Uncaught Error: first-party {n}"), None));
+        }
+        let results = capped_script_errors(errors.iter().map(|(m, s)| (m.as_str(), s.as_deref())));
+        let summary: Vec<(bool, &str)> =
+            results.iter().map(|r| (r.severity == "advisory", r.snippet.as_str())).collect();
+        assert_eq!(summary.len(), 6, "{summary:?}");
+        // Three ad-tech errors, in arrival order; the fourth is capped.
+        assert!(summary[..3].iter().all(|(advisory, s)| *advisory && s.contains("(third-party: Prebid)")));
+        // The first-party error after them still reports, counted, and the
+        // counted cap stops at three of its own.
+        assert_eq!(summary[3], (false, "Uncaught TypeError: cart is undefined (at https://example.com/js/app.js:1:1)"));
+        assert_eq!(summary[4], (false, "Uncaught Error: first-party 1"));
+        assert_eq!(summary[5], (false, "Uncaught Error: first-party 2"));
+    }
 
     #[test]
     fn design_system_serialization_shape() {

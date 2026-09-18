@@ -8,7 +8,8 @@
 //!   do; a gradient reports on both (r3-23-ai-color-palette-brand-hue).
 //! - `script-error-ad-tech.html`: an error an ad-tech script threw, or the
 //!   removed Topics API rejected, names the vendor and reports as advisory;
-//!   the site's own error stays an error (r3-31-script-error-ad-tech).
+//!   the site's own error stays an error, even after three ad-tech errors,
+//!   because the two are capped separately (r3-31-script-error-ad-tech).
 //! - `third-party-widgets.html`: findings on Taboola's cards and on Swiper's
 //!   slide elements name the vendor and keep their severity; the site's own
 //!   markup, inside a slide or not, is not tagged
@@ -123,7 +124,13 @@ fn ad_tech_script_errors_are_advisory_and_name_the_vendor() {
     let port = serve();
     let findings = scan(&engine, port, "script-error-ad-tech.html");
     let errors = of(&findings, "script-error");
-    assert_eq!(errors.len(), 3, "{errors:#?}");
+    // Three ad-tech errors arrive ahead of the site's own; a fourth, after
+    // it, is past the ad-tech cap. The counted error still reports.
+    assert_eq!(errors.len(), 4, "{errors:#?}");
+    assert!(!errors.iter().any(|f| f.snippet.contains("slot render failed")), "{errors:#?}");
+    let prebid = errors.iter().find(|f| f.snippet.contains("bidder timeout")).expect("Prebid error");
+    assert_eq!(prebid.severity, "advisory");
+    assert_eq!(third_party(prebid), Some("Prebid"));
 
     let own = errors.iter().find(|f| f.snippet.contains("cart is undefined")).expect("own error");
     assert_eq!(own.severity, "error");

@@ -14,7 +14,7 @@ use impeccable_core::checks::measures::{
 };
 use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
-    font_weight_number, is_bold_title_leading, is_cjk_text, is_line_clamp_display,
+    font_weight_number, is_bold_title_leading, is_cjk_text, is_line_clamp,
     is_under_ui_text_floor, justifies_without_word_spaces_text, tracking_is_crushed,
     ALL_CAPS_LONG_RUN, JUSTIFY_NARROW_CHARS_PER_LINE, SMALLPRINT_TEXT_FLOOR_PX, UI_TEXT_FLOOR_PX, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
     LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
@@ -559,13 +559,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 && !is_non_rendered_text(el, tag, Some(style))
                 && !is_visually_hidden(el, style)
                 && !is_heading_text(el, tag)
-                // A bold title in a line clamp gets the heading exemption. The
-                // browser engine also exempts bold text of two lines or fewer;
-                // with no layout, lines cannot be counted here.
+                // A bold title in a -webkit-box line clamp gets the heading
+                // exemption. The browser engine also exempts bold text of two
+                // lines or fewer; with no layout, lines cannot be counted here.
                 && !is_bold_title_leading(
                     font_weight_number(sv(style, "fontWeight")),
                     None,
-                    is_line_clamp_display(sv(style, "display")),
+                    is_line_clamp(sv(style, "display"), sv(style, "webkitLineClamp")),
                 )
             {
                 findings.push(RuleHit::new(

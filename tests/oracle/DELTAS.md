@@ -3763,13 +3763,20 @@ What changed:
   `text_line_count` over the text rect, cut at the nearest box within four
   levels that clips on the y axis, so a headline whose own `div` lays out
   three lines and whose clamped wrapper shows two (ynet.co.il's
-  `div.slotTitle.medium`) counts as two. A clamp is a `-webkit-box` or
-  `-webkit-inline-box` on the element or on that path; current Chrome
-  computes such a clamp's `display` as `flow-root`, and no capture carries
-  `-webkit-line-clamp`, so a clipping `flow-root` box whose text lays out lines
-  past its content box counts as the clamp too. The static engine has no
-  layout: it exempts only bold text in a `-webkit-box`, and bold text without
-  a clamp keeps reporting there. Registry severity is unchanged.
+  `div.slotTitle.medium`) counts as two. A clamp (`is_line_clamp`, shared by
+  both engines) is read from a box's `display` and `webkitLineClamp` on the
+  element or on that path: a `-webkit-box` or `-webkit-inline-box` display is
+  one, and so is a `flow-root` or `inline-block` box carrying a clamp value,
+  which is how Chrome computes a CSS clamp that takes effect. Every run-25
+  snapshot records `webkitLineClamp` (ynet.co.il capture 2683 has 867
+  elements at 1 to 4, all computed `flow-root`). A box that only clips, a
+  `max-height` with `overflow: hidden`, is no clamp: it cuts the line count at
+  its content box, so bold text it shows three lines of still reports. A
+  `-webkit-line-clamp` on a plain block clamps nothing and is no clamp either.
+  The static cascade now carries `-webkit-line-clamp` (default `none`) for
+  the same test. The static engine has no layout: it exempts only bold text
+  in a clamp, and bold text without one keeps reporting there. Registry
+  severity is unchanged.
 - **undersized-ui-text.** Two floors exist, 11px (interactive and functional
   text) and 10px (non-interactive smallprint). Each keeps a 0.1px tolerance,
   compared in thousandths of a pixel: text at 10.9px or below (9.9px for
@@ -3785,10 +3792,12 @@ What changed:
   30px line box and cannot see a chip. URL engine only: the static wrapper
   path reads declared padding, not text.
 
-Fixtures: `tight-leading.html` gains three flag cases (bold body text over
-four lines, a weight-500 two-line title, regular copy in a three-line clamp)
-and three pass cases (a bold two-line div title and a bold two-line inline
-link, both browser-only, and a bold title in a two-line clamp).
+Fixtures: `tight-leading.html` gains four flag cases (bold body text over
+four lines, a weight-500 two-line title, regular copy in a three-line clamp,
+and bold text a `max-height` clip shows three lines of) and four pass cases
+(a bold two-line div title and a bold two-line inline link, both
+browser-only, a bold title in a three-line clamp it fills exactly, so the
+clamp hides nothing, and a bold title in a two-line clamp).
 `undersized-ui-text.html` gains 10.9px and 9.9px flags, the card-wide link
 credit, and 10.9688px and 9.95px passes. `cramped-padding.html` gains a 20px
 chip whose glyphs touch (flag) and a 24px step chip (pass, browser only).
@@ -3801,7 +3810,8 @@ finding by finding against the unchanged engine): violations 56 as base, no
 confirmed-harmful finding removed, no other rule moved.
 
 - tight-leading: 34 removed (real-harmless 23, unjudged 11), none added:
-  ynet.co.il 23 (the bold span cluster, the taboola `-webkit-box` titles, the
+  ynet.co.il 23 (the bold span cluster, the taboola `-webkit-box` titles
+  (their `webkitLineClamp` is `none`; `trc_ellipsis` trims them by script), the
   two clamped `slotTitle medium` headlines, Draft.js bold lead-ins),
   nubank.com.br 6, thecignagroup.com 3, aajtak.in 1, clipto.com 1. Every
   remaining bold finding runs three lines or more (tchibo.de's 22px titles
@@ -3817,8 +3827,8 @@ confirmed-harmful finding removed, no other rule moved.
   the top edge).
 
 Goldens re-recorded from the binary and reviewed line by line: each gains only
-the new fixture cases' static findings (two cramped-padding, five
-tight-leading, three undersized-ui-text) and the summary counts (644 to 654
+the new fixture cases' static findings (two cramped-padding, six
+tight-leading, three undersized-ui-text) and the summary counts (644 to 655
 in the directory sweeps).
 
 - `detect-fixture-json-cramped-padding-html`, `detect-fixture-text-cramped-padding-html`, `detect-fixture-json-tight-leading-html`, `detect-fixture-text-tight-leading-html`, `detect-fixture-json-undersized-ui-text-html`, `detect-fixture-text-undersized-ui-text-html`, `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`.
@@ -3833,14 +3843,34 @@ in the directory sweeps).
    inside a regular paragraph (ynet.co.il's Draft.js bullets) is exempt like a
    title; the paragraph's own text keeps the floor.
 4. **A clamp exempts at any line count**, as the decision reads: taboola's
-   three-line clamped titles pass. A `flow-root` box that clips text laid out
-   past it is read as a clamp even when a `max-height` did the clipping.
+   three-line `-webkit-box` titles pass, and so does a clamp the text fills
+   exactly. Computed styles cannot tell an authored `flow-root` box with a
+   stray `-webkit-line-clamp` (which clamps nothing) from a CSS clamp Chrome
+   computes as `flow-root`, so both read as a clamp.
 5. **The em box is centred on the content area.** Faces with a tall ascent
    and a short descent sit their glyphs higher than that; the edge threshold
    stays 4px.
 6. **API.** `glyph_band`, `SMALL_CHIP_MAX_HEIGHT_PX` (core);
    `LEADING_BOLD_TITLE_WEIGHT`, `LEADING_BOLD_TITLE_MAX_LINES`,
-   `font_weight_number`, `is_line_clamp_display`, `is_bold_title_leading`,
+   `font_weight_number`, `is_line_clamp_display`, `is_line_clamp`,
+   `is_bold_title_leading`,
    `UI_TEXT_FLOOR_PX`, `SMALLPRINT_TEXT_FLOOR_PX`,
    `UI_TEXT_FLOOR_TOLERANCE_PX`, `is_under_ui_text_floor` (foundation) are
    new.
+
+### Revised at review: read the line clamp itself
+
+The first cut never read `webkitLineClamp`, on the claim that no capture
+carried it, and took a clipping `flow-root` box with text laid out past it as
+the clamp. It is in `STYLE_PROPS` and in every run-25 snapshot, and the
+stand-in misfired both ways: a bold title in a real three-line clamp that its
+text fills exactly still reported, and bold text cut to three lines by a
+`max-height` on a `flow-root` box was exempt. The clamp is now read from
+`display` and `webkitLineClamp` together (`is_line_clamp`, both engines), and
+a clipping box without a clamp only cuts the line count. The two fixture cases
+above pin both directions; `detect-fixture-{json,text}-tight-leading-html`,
+the three `detect-dir-*-all-fixtures` sweeps, `detect-scope-type`,
+`detect-scope-both` and `detect-no-advisory-{json,text}` were re-recorded for
+the one new static finding (the clipped bold summary, 1.14x). Run 25 is
+unchanged by the revision: the same 34 tight-leading removals against the
+unchanged engine, finding for finding, and every other rule identical.

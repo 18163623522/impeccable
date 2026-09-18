@@ -107,12 +107,30 @@ pub fn font_weight_number(value: &str) -> f64 {
     }
 }
 
-/// Whether a computed `display` is the `-webkit-box` a line clamp needs.
-/// Neither engine carries `-webkit-line-clamp` itself, and a `-webkit-box`
-/// on text today is that clamp: the old flexbox syntax it once spelled is
-/// long gone from authored CSS.
+/// Whether a `display` is the `-webkit-box` a line clamp needs. A
+/// `-webkit-box` on text today is that clamp, set by CSS or by a script that
+/// trims the text itself (Taboola's `trc_ellipsis`): the old flexbox syntax it
+/// once spelled is long gone from authored CSS.
 pub fn is_line_clamp_display(display: &str) -> bool {
     matches!(js::trim(display), "-webkit-box" | "-webkit-inline-box")
+}
+
+/// Whether a box holds its text in a `-webkit-box` line clamp, from its
+/// `display` and its `-webkit-line-clamp` (`webkitLineClamp`).
+///
+/// A `-webkit-box` display is one ([`is_line_clamp_display`]). Chrome
+/// computes the `display` of a box whose CSS clamp takes effect as
+/// `flow-root` (`inline-block` for `-webkit-inline-box`), so those count when
+/// they carry a clamp value. A `-webkit-line-clamp` on a plain block clamps
+/// nothing and computes as `block`, and a `flow-root` box that only clips
+/// (a `max-height` with `overflow: hidden`) carries no clamp value: neither
+/// is a clamp.
+pub fn is_line_clamp(display: &str, line_clamp: &str) -> bool {
+    let display = js::trim(display);
+    if is_line_clamp_display(display) {
+        return true;
+    }
+    !matches!(js::trim(line_clamp), "" | "none") && matches!(display, "flow-root" | "inline-block")
 }
 
 /// Whether text `weight` heavy counts as a title for the tight-leading floor:

@@ -22,7 +22,7 @@ use super::text_geometry::{
 };
 use crate::checks::text_rules::{
     average_glyph_advance_em_at, font_weight_number, is_bold_title_leading, is_cjk_text,
-    is_line_clamp_display, is_under_ui_text_floor, justifies_without_word_spaces_text,
+    is_line_clamp, is_under_ui_text_floor, justifies_without_word_spaces_text,
     tracking_is_crushed, ALL_CAPS_LONG_RUN, LEADING_BOLD_TITLE_WEIGHT, SMALLPRINT_TEXT_FLOOR_PX,
     UI_TEXT_FLOOR_PX,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
@@ -372,12 +372,12 @@ const LINE_CLAMP_SEARCH_DEPTH: usize = 4;
 /// holds them, and where the nearest box that clips them on the y axis cuts
 /// them off.
 ///
-/// A `-webkit-box` between `el` and that box is a clamp. Current Chrome
-/// computes the `display` of a `-webkit-box` that carries
-/// `-webkit-line-clamp` as `flow-root`, and no capture carries the clamp
-/// property itself, so a `flow-root` box that clips counts as the clamp when
-/// the text lays out lines past its content box: the lines a clamp hides are
-/// still laid out, and their Range rects run on below it.
+/// A box between `el` and that clipping box with a `-webkit-box` line clamp
+/// ([`is_line_clamp`], read from its `display` and `webkitLineClamp`) holds
+/// the text in a clamp. A box that clips without a clamp (a `max-height` or
+/// a fixed height with `overflow: hidden`) is no clamp: it only cuts the
+/// count at its content box, so bold text it shows three lines of still
+/// reports.
 fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
     let mut cur = Some(el);
     let mut depth = 0;
@@ -385,8 +385,7 @@ fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
         if depth >= LINE_CLAMP_SEARCH_DEPTH {
             break;
         }
-        let display = dom.style(c, "display");
-        if is_line_clamp_display(&display) {
+        if is_line_clamp(&dom.style(c, "display"), &dom.style(c, "webkitLineClamp")) {
             return (true, t.bottom);
         }
         let clips = |k: &str| matches!(dom.style(c, k).as_str(), "hidden" | "clip");
@@ -397,8 +396,7 @@ fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
             if !(content_bottom.is_finite() && t.all_finite()) || content_bottom >= t.bottom {
                 return (false, t.bottom);
             }
-            let clamped = display == "flow-root" && t.bottom > content_bottom + 1.0;
-            return (clamped, js::math_max(content_bottom, t.top));
+            return (false, js::math_max(content_bottom, t.top));
         }
         cur = dom.parent(c);
         depth += 1;
@@ -2405,30 +2403,56 @@ mod tests {
             "bold body text of three lines keeps the floor"
         );
 
-        // A clamp exempts a bold title however many lines it lays out:
-        // older Chrome computes `-webkit-box`, current Chrome `flow-root`
-        // with the hidden lines laid out past the content box.
+        // A clamp exempts a bold title however many lines it lays out.
+        // Current Chrome computes a CSS clamp that takes effect as
+        // `flow-root` carrying `webkitLineClamp`; a `-webkit-box` whose
+        // clamp is left to a script (Taboola's) computes as itself.
         let boxed = title(&mut d, body, "670", 4.0);
-        d.set_style(boxed, "display", "-webkit-box");
+        d.set_styles(boxed, &[("display", "-webkit-box"), ("webkitLineClamp", "none")]);
         assert!(snippets(&d, boxed, "tight-leading").is_empty(), "-webkit-box clamp");
         let flow = title(&mut d, body, "670", 4.0);
-        d.set_styles(flow, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
+        d.set_styles(
+            flow,
+            &[("display", "flow-root"), ("webkitLineClamp", "2"), ("overflow", "hidden"), ("overflowY", "hidden")],
+        );
         d.set_rect(flow, 355.0, 300.0, 265.0, 32.0);
         assert!(snippets(&d, flow, "tight-leading").is_empty(), "flow-root clamp");
-        // flow-root with nothing laid out past the box is no clamp.
-        let unclamped = title(&mut d, body, "670", 4.0);
-        d.set_styles(unclamped, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
-        assert_eq!(snippets(&d, unclamped, "tight-leading").len(), 1, "flow-root, no hidden lines");
+        // A clamp of three lines that hides nothing still exempts.
+        let exact = title(&mut d, body, "700", 3.0);
+        d.set_styles(
+            exact,
+            &[("display", "flow-root"), ("webkitLineClamp", "3"), ("overflow", "hidden"), ("overflowY", "hidden")],
+        );
+        assert!(snippets(&d, exact, "tight-leading").is_empty(), "clamp of three, nothing hidden");
+        // A clipping flow-root box with no clamp only cuts the count: three
+        // of six laid-out lines render, and bold text of three lines reports.
+        let maxed = title(&mut d, body, "700", 6.0);
+        d.set_styles(
+            maxed,
+            &[("display", "flow-root"), ("webkitLineClamp", "none"), ("overflow", "hidden"), ("overflowY", "hidden")],
+        );
+        d.set_rect(maxed, 355.0, 300.0, 265.0, 48.0);
+        assert_eq!(snippets(&d, maxed, "tight-leading").len(), 1, "max-height clip, no clamp");
+        // The same box cut to two lines is a two-line bold title.
+        d.set_rect(maxed, 355.0, 300.0, 265.0, 32.0);
+        assert!(snippets(&d, maxed, "tight-leading").is_empty(), "clipped to two lines");
+        // A clamp on a plain block clamps nothing, and is no clamp.
+        let stray = title(&mut d, body, "670", 4.0);
+        d.set_styles(stray, &[("display", "block"), ("webkitLineClamp", "2")]);
+        assert_eq!(snippets(&d, stray, "tight-leading").len(), 1, "clamp on a plain block");
         // Regular copy in a clamp keeps the floor.
         let regular = title(&mut d, body, "400", 4.0);
-        d.set_style(regular, "display", "-webkit-box");
+        d.set_styles(regular, &[("display", "flow-root"), ("webkitLineClamp", "2")]);
         assert_eq!(snippets(&d, regular, "tight-leading").len(), 1, "regular weight in a clamp");
 
         // ynet.co.il's `div.slotTitle.medium`: the headline's own div lays out
         // three lines, and the clamped wrapper two levels up (through the
         // link) shows two of them.
         let wrapper = d.add(Some(body), "div");
-        d.set_styles(wrapper, &[("display", "flow-root"), ("overflow", "hidden"), ("overflowY", "hidden")]);
+        d.set_styles(
+            wrapper,
+            &[("display", "flow-root"), ("webkitLineClamp", "2"), ("overflow", "hidden"), ("overflowY", "hidden")],
+        );
         d.set_rect(wrapper, 230.0, 4109.0, 190.0, 38.0);
         let link = d.add(Some(wrapper), "a");
         d.set_style(link, "display", "inline");

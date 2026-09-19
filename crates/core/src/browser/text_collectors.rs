@@ -13,7 +13,7 @@ use crate::checks::rules::{check_kicker_above_heading, KickerCandidate, RuleHit}
 use crate::checks::text_rules::{
     check_em_dash_overuse, check_numbered_section_labels, is_kicker_candidate,
     is_numbered_section_label_candidate, is_repeated_text_container, parse_numbered_label_text,
-    strip_edge_quotes, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
+    strip_edge_quotes, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR, LEADING_DISPLAY_TYPE_PX,
     KickerCandidateInput, NumberedLabelCandidate, NumberedLabelCandidateInput,
     REPEATED_TEXT_CONTAINER_TAGS, REPEATED_TEXT_SKIP_SELECTOR,
 };
@@ -48,6 +48,41 @@ pub fn is_kicker_card_context(dom: &dyn Dom, heading: ElId, kicker: ElId) -> boo
         Ok(Some(item)) => dom.contains(item, kicker),
         _ => false,
     }
+}
+
+/// Whether `kicker` sits in the card that holds `heading`: the nearest
+/// ancestor of the heading drawn as a card (a boundary of its own, read from
+/// the computed box), shorter than the viewport, whatever its tag. A label in
+/// a card beside its title is the card's metadata, as it is in an `article`
+/// or `li` card: aina-tech.io's white press card names its source ("The
+/// Future Media") over its 20px h3 headline in a `div`. Only a card title
+/// counts: an h3 or lower set under display size. A section's own heading in
+/// a painted panel (redoubt.agency's h2 in the hero's side panel,
+/// vestra.ai's 40px h3 across a feature band) keeps its eyebrow reported.
+fn kicker_in_painted_card(dom: &dyn Dom, heading: ElId, kicker: ElId) -> bool {
+    if kicker_heading_level(dom, heading) < 3.0 || font_size_of(dom, heading) >= LEADING_DISPLAY_TYPE_PX {
+        return false;
+    }
+    let viewport = {
+        let h = dom.inner_height();
+        if num_truthy(h) {
+            h
+        } else {
+            800.0
+        }
+    };
+    let body = dom.body();
+    let mut cur = dom.parent(heading);
+    while let Some(c) = cur {
+        if Some(c) == body {
+            return false;
+        }
+        if super::page_checks::is_card_like_dom(dom, c) {
+            return dom.rect(c).height < viewport && dom.contains(c, kicker);
+        }
+        cur = dom.parent(c);
+    }
+    false
 }
 
 static HEADING_LEVEL_RE: Lazy<Regex> =
@@ -131,7 +166,7 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
         if super::dom::closest_or_none(dom, kicker, KICKER_SKIP_SELECTOR).is_some() {
             continue;
         }
-        if is_kicker_card_context(dom, heading, kicker) {
+        if is_kicker_card_context(dom, heading, kicker) || kicker_in_painted_card(dom, heading, kicker) {
             continue;
         }
         let heading_tag = tag_lower(dom, heading);

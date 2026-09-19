@@ -102,6 +102,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "direction",
     "display",
     "filter",
+    "flexWrap",
     "float",
     "fontFamily",
     "fontSize",

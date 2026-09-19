@@ -21,7 +21,7 @@ use crate::checks::embedded_content::{
 };
 use crate::checks::measures::{
     cream_from_class_list, is_cream_color, is_opaque_decorated_box,
-    is_screen_reader_only_text_style, SrOnlyMetrics, StyleMap,
+    is_screen_reader_only_text_style, resolve_length_px, SrOnlyMetrics, StyleMap,
 };
 use crate::checks::rules::{
     check_flat_type_hierarchy_samples, flat_type_hierarchy_severity, is_card_like_from_props,
@@ -812,7 +812,8 @@ fn rhythm_overlaps_x(sr: &Rect, rect: &Rect) -> bool {
     math_min(sr.right, rect.right) - math_max(sr.left, rect.left) >= 8.0
 }
 
-/// A box that paints an edge on `side` ("Top" or "Bottom"): a background,
+/// A box that paints an edge on `side` ("Top" or "Bottom"): a background
+/// colour, a background image that covers the box ([`rhythm_image_band`]),
 /// a border on that side, or a shadow.
 fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     if rhythm_is_contents(dom, el) {
@@ -823,11 +824,86 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
             return true;
         }
     }
+    if rhythm_image_band(dom, el) {
+        return true;
+    }
     if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
         return true;
     }
     let bs = dom.style(el, "boxShadow");
     !bs.is_empty() && bs != "none"
+}
+
+/// A box whose `background-image` paints a band across all of it, with an
+/// edge a reader sees as plainly as one painted with a colour: jyes.com.tw's
+/// grey news band is a `url()` texture tiled over the section. A layer bands
+/// the box when it tiles on both axes, is sized to `cover`, or is a gradient
+/// drawn at the box's own size. An icon placed once beside a heading's text,
+/// a short accent bar drawn with a gradient under it, and text filled with a
+/// gradient (`background-clip: text`) decorate the box without painting it,
+/// and a layer whose tiling the capture did not record (no `background`
+/// shorthand) is not counted, as before.
+fn rhythm_image_band(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    if image.is_empty() || image == "none" {
+        return false;
+    }
+    if [dom.style(el, "backgroundClip"), dom.style(el, "webkitBackgroundClip")]
+        .iter()
+        .any(|clip| clip.contains("text"))
+    {
+        return false;
+    }
+    let images = crate::color::split_top_level_commas(&image);
+    let sizes = crate::color::split_top_level_commas(&dom.style(el, "backgroundSize"));
+    let layers = crate::color::split_top_level_commas(&dom.style(el, "background"));
+    images.iter().enumerate().any(|(i, img)| {
+        if img == "none" {
+            return false;
+        }
+        let size = sizes.get(i).or(sizes.last()).map(|s| js::trim(s).to_string()).unwrap_or_default();
+        if size == "cover" {
+            return true;
+        }
+        let gradient = img.contains("gradient(");
+        if gradient && matches!(size.as_str(), "auto" | "auto auto" | "100% 100%") {
+            return true;
+        }
+        // The shorthand spells each layer's tiling; the image's own
+        // parentheses are dropped so a `url()` holding "repeat" cannot match.
+        let Some(layer) = layers.get(i) else { return false };
+        let mut words = Vec::new();
+        let mut depth = 0i32;
+        let mut word = String::new();
+        for c in layer.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = (depth - 1).max(0),
+                c if depth == 0 && c.is_whitespace() => {
+                    if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                c if depth == 0 => word.push(c),
+                _ => {}
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+        let tiling: Vec<&str> = words
+            .iter()
+            .map(String::as_str)
+            .filter(|w| matches!(*w, "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round"))
+            .collect();
+        match tiling.as_slice() {
+            [one] => matches!(*one, "repeat" | "space" | "round"),
+            [x, y] => {
+                matches!(*x, "repeat" | "space" | "round") && matches!(*y, "repeat" | "space" | "round")
+            }
+            _ => false,
+        }
+    })
 }
 
 /// The flow box `s` presents to a walk: `s` itself, or for a
@@ -1027,7 +1103,16 @@ fn rhythm_text_size(dom: &dyn Dom, el: ElId) -> f64 {
 /// smaller than the body text (`text_size`), in capitals, tracked out, or
 /// as a chip that paints its own small box. A line set like the body copy is
 /// content of its own (a date, a byline, a closing sentence), not a label.
-fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: f64) -> bool {
+/// `opens_group` says the line is the first box its parent lays out, which
+/// lets colour, italics or weight alone mark it as a label
+/// ([`rhythm_set_apart`]).
+fn rhythm_reads_as_eyebrow(
+    dom: &dyn Dom,
+    line: ElId,
+    heading: ElId,
+    text_size: f64,
+    opens_group: bool,
+) -> bool {
     let heading_size = rhythm_font_size(dom, heading);
     let span = math_max(dom.rect(heading).width, dom.rect(line).width);
     for e in rhythm_subtree(dom, line, 40) {
@@ -1061,8 +1146,84 @@ fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: 
         if cased.len() >= 3 && cased.iter().all(|c| c.is_uppercase()) {
             return true;
         }
+        if opens_group && rhythm_set_apart(dom, line, heading, e) {
+            return true;
+        }
     }
     false
+}
+
+/// The longest line, in UTF-16 units, that reads as a label on colour,
+/// italics or weight alone. cnnbrasil.com.br's section links ("Política",
+/// "Eleições") and outreign.io's italic eyebrows ("Five screens", "Compare
+/// plans") are a word or two; a sentence closing the block above is longer.
+const RHYTHM_SET_APART_MAX_CHARS: usize = 40;
+
+/// How far apart, on any channel, two text colours must be to read as two
+/// colours: grey-400 on a black card, purple on off-white.
+const RHYTHM_COLOUR_STEP: f64 = 32.0;
+
+/// How much lighter than the text around it a line must be set to stand
+/// apart on weight alone: a hairline 100 or 200 italic against 400 body copy.
+const RHYTHM_LIGHTER_WEIGHT_STEP: f64 = 300.0;
+
+fn rhythm_colours_differ(dom: &dyn Dom, a: ElId, b: ElId) -> bool {
+    let (Some(ca), Some(cb)) = (
+        parse_any_color(Some(&dom.style(a, "color"))),
+        parse_any_color(Some(&dom.style(b, "color"))),
+    ) else {
+        return false;
+    };
+    (ca.r - cb.r).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.g - cb.g).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.b - cb.b).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.alpha_or_one() - cb.alpha_or_one()).abs() >= 0.25
+}
+
+fn rhythm_is_italic(dom: &dyn Dom, el: ElId) -> bool {
+    let style = dom.style(el, "fontStyle");
+    style.starts_with("italic") || style.starts_with("oblique")
+}
+
+/// A short line at body size that a reader still sees as a label: one
+/// rendered line of a few words whose colour, italics or much lighter weight
+/// sets it apart both from the text it sits in (its container's own type)
+/// and from the heading under it. A grey category link over a black
+/// headline, a purple italic eyebrow over a white title. A date or a closing
+/// sentence set like the copy around it stays content of its own.
+///
+/// Colour and italics also mark the line that closes the block above: a blue
+/// "View all essays" link under a grid, a grey date under an excerpt, with
+/// the next heading a few pixels below. What tells the two apart is the
+/// markup, so the caller asks this only of a line that opens its parent
+/// (cnnbrasil.com.br's category link starts the box that holds the headline;
+/// outreign.io's eyebrow starts the box that holds the title). A line with
+/// the block above laid out before it in the same parent stays a block of its
+/// own, and the gap is measured to it, as before.
+fn rhythm_set_apart(dom: &dyn Dom, line: ElId, heading: ElId, words: ElId) -> bool {
+    let Some(container) = dom.parent(line) else { return false };
+    if utf16_len(js::trim(&collapse_ws(&dom.text_content(line)))) > RHYTHM_SET_APART_MAX_CHARS {
+        return false;
+    }
+    let size = rhythm_font_size(dom, words);
+    let pitch = resolve_length_px(Some(&dom.style(words, "lineHeight")), size)
+        .filter(|lh| lh.is_finite() && *lh > 0.0)
+        .unwrap_or(size * 1.2);
+    let one_line = dom
+        .direct_text_rect(words)
+        .map_or(false, |t| t.height > 0.0 && t.height < math_max(pitch, size * 1.2) * 1.5);
+    if !one_line {
+        return false;
+    }
+    if rhythm_colours_differ(dom, words, container) && rhythm_colours_differ(dom, words, heading) {
+        return true;
+    }
+    if rhythm_is_italic(dom, words) && !rhythm_is_italic(dom, container) && !rhythm_is_italic(dom, heading) {
+        return true;
+    }
+    let weight = parse_font_weight(&dom.style(words, "fontWeight"));
+    let around = parse_font_weight(&dom.style(container, "fontWeight"));
+    weight.is_finite() && around.is_finite() && weight <= around - RHYTHM_LIGHTER_WEIGHT_STEP
 }
 
 fn rhythm_painted_background(dom: &dyn Dom, el: ElId) -> Option<crate::color::Rgba> {
@@ -1320,7 +1481,8 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(tag_lower(dom, sib).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
                 break;
             }
-            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size) {
+            let opens_group = previous_box(sib).is_none();
+            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size, opens_group) {
                 break;
             }
             top_el = sib;
@@ -2531,6 +2693,34 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     findings
 }
 
+/// How far down `d` (laid out at `dr`) shows: its bottom, or the bottom of
+/// the nearest box between it and the row `row` (both ends included) that
+/// clips or scrolls on y, when that ends sooner. cuisineactuelle.fr's tile
+/// column runs eleven tiles into a 610px box that scrolls them, inside a
+/// section that hides the rest; the column a reader sees ends at 610px.
+fn column_visible_bottom(dom: &dyn Dom, d: ElId, dr: &Rect, row: ElId) -> f64 {
+    let mut bottom = dr.bottom;
+    let mut cur = dom.parent(d);
+    while let Some(p) = cur {
+        let y = {
+            let v = dom.style(p, "overflowY");
+            if v.is_empty() {
+                dom.style(p, "overflow").split_whitespace().last().unwrap_or("").to_string()
+            } else {
+                v
+            }
+        };
+        if matches!(y.as_str(), "hidden" | "clip" | "auto" | "scroll") && dom.style(p, "display") != "inline" {
+            bottom = math_min(bottom, dom.rect(p).bottom);
+        }
+        if p == row {
+            break;
+        }
+        cur = dom.parent(p);
+    }
+    bottom
+}
+
 /// JS: checks.mjs#checkFirstViewportColumnOverflowDOM()
 pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -2624,7 +2814,7 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 }
                 let dr = dom.rect(d);
                 if dr.width > 0.0 && dr.height > 0.0 {
-                    content_bottom = math_max(content_bottom, dr.bottom);
+                    content_bottom = math_max(content_bottom, column_visible_bottom(dom, d, &dr, el));
                 }
             }
             // A column with nothing painted in its own flow (a collapsed
@@ -2868,6 +3058,46 @@ mod tests {
             f[0].finding.detail,
             "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
         );
+    }
+
+    /// observations-28 row 4: a background image paints a band a heading walk
+    /// stops at only when it covers the box. jyes.com.tw tiles a texture over
+    /// its news band; an icon placed once beside a heading, a 3px accent bar
+    /// drawn with a gradient, and gradient-filled text decorate the box.
+    #[test]
+    fn heading_rhythm_image_band_needs_a_layer_that_covers_the_box() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let el = d.add(Some(body), "section");
+        let band = |d: &mut FakeDom, styles: &[(&str, &str)]| {
+            for p in ["backgroundImage", "backgroundSize", "background", "backgroundClip", "webkitBackgroundClip"] {
+                d.set_style(el, p, "");
+            }
+            d.set_styles(el, styles);
+            rhythm_image_band(d, el)
+        };
+        let tile = r#"url("https://www.jyes.com.tw/index-news-bg.jpg")"#;
+        let shorthand = |repeat: &str| {
+            format!(r#"rgba(0, 0, 0, 0) {tile} {repeat} scroll 0% 0% / auto padding-box border-box"#)
+        };
+        let tiled = shorthand("repeat");
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &tiled)]));
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "cover")]));
+        let grad = "linear-gradient(rgb(255, 255, 255), rgb(250, 250, 250))";
+        assert!(band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto")]));
+        // An icon placed once, one axis of tiling, a tiling not recorded.
+        let once = shorthand("no-repeat");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &once)]));
+        let strip = shorthand("repeat-x");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &strip)]));
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto")]));
+        // A 48px accent bar drawn 3px tall under a title.
+        let bar = "linear-gradient(90deg, rgb(17, 17, 17) 0px, rgb(17, 17, 17) 48px, rgba(0, 0, 0, 0) 48px)";
+        let bar_layer = format!("rgba(0, 0, 0, 0) {bar} no-repeat scroll 0% 100% / 100% 3px padding-box border-box");
+        assert!(!band(&mut d, &[("backgroundImage", bar), ("backgroundSize", "100% 3px"), ("background", &bar_layer)]));
+        // Gradient-filled text paints the glyphs, not the box.
+        assert!(!band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto"), ("webkitBackgroundClip", "text")]));
+        assert!(!band(&mut d, &[("backgroundImage", "none")]));
     }
 
     /// observations-25 issue 20: joongang.co.kr's tab slide parked past its
@@ -3555,6 +3785,16 @@ mod tests {
         );
         d.set_rect(b_in, 640.0, 0.0, 600.0, 900.0);
         assert!(check_first_viewport_column_overflow_dom(&d).is_empty());
+
+        // observations-28 row 27: the tall column's box scrolls its content
+        // at 700px (cuisineactuelle.fr's tile list), so it ends where it is
+        // clipped, and the short column is short again.
+        d.set_rect(b_in, 640.0, 0.0, 600.0, 300.0);
+        d.set_styles(a, &[("overflowY", "auto")]);
+        d.set_rect(a, 0.0, 0.0, 640.0, 700.0);
+        assert!(check_first_viewport_column_overflow_dom(&d).is_empty(), "clipped at 700px");
+        d.set_styles(a, &[("overflowY", "visible")]);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "unclipped");
     }
 
     /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline

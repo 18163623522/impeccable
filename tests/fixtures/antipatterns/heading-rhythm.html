@@ -212,6 +212,23 @@
       .lrow { display: flex; gap: 24px; }
       .lrow > div { flex: 1; }
       .lrow h2 { margin: 16px 0 48px; }
+      /* PASS: a label at body size set apart by colour, italics or a light weight
+         (cnnbrasil.com.br's grey section links, outreign.io's italic eyebrows) */
+      .kick-grey { color: #6b7280; text-decoration: none; }
+      .kick-italic { font-style: italic; }
+      .kick-light { font-weight: 100; }
+      /* PASS: a band painted with a background image, not a colour (jyes.com.tw
+         tiles a url() texture; a gradient at the box's own size paints it too) */
+      .img-band { background-image: linear-gradient(#ececec, #ececec); padding: 25px 0; }
+      .tile-band { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Crect width='8' height='8' fill='%23ececec'/%3E%3Crect width='4' height='4' fill='%23e2e2e2'/%3E%3C/svg%3E"); padding: 25px 0; }
+      /* FLAG: a coloured link or a grey date closes the block above, laid out
+         in the same box as that block, with the next title twelve pixels under it */
+      .more-link { color: #1d4ed8; text-decoration: none; }
+      .post-date { color: #6b7280; }
+      /* FLAG: a heading's own background image decorates it without drawing a
+         top edge: an icon placed once beside the text, a short accent bar under it */
+      .icon-head { padding-left: 28px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%231d4ed8'/%3E%3C/svg%3E") no-repeat left center; }
+      .bar-head { padding-bottom: 10px; background-image: linear-gradient(90deg, #f59e0b 0 48px, transparent 48px); background-size: 100% 3px; background-repeat: no-repeat; background-position: left bottom; }
     </style>
     <h1>Wrapper spacing</h1>
 
@@ -298,6 +315,68 @@ npx impeccable detect src/</pre>
       <p class="blk">A closing paragraph above a heading that ends a box drawing a rule under it.</p>
       <div class="ruled above-10 below-36"><h3>Pass Heading Ends Ruled Box</h3></div>
       <p class="blk">The rule under the box ends the heading's box, so this content belongs to the next one.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a news card whose grey section link sits a few pixels above its headline.</p>
+      <div class="above-24"><a class="kick-grey" href="#">Política</a><div><h3 class="below-24">Pass Grey Kicker</h3></div></div>
+      <p class="blk">The grey link is the headline's label, so the cluster starts at the link, twenty-four pixels under the block above.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then an italic eyebrow at body size that opens the box holding a section title.</p>
+      <div class="above-24"><p class="kick-italic">Five screens</p><h2 class="above-12 below-24">Pass Italic Eyebrow</h2></div>
+      <p class="blk">The italic line is the title's label, and the cluster sits twenty-four pixels from both neighbours.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a hairline eyebrow at body size that opens the box holding a section title.</p>
+      <div class="above-24"><p class="kick-light">Compare plans</p><h2 class="above-12 below-24">Pass Light Eyebrow</h2></div>
+      <p class="blk">The weight sets the line apart from the copy around it, so it is read as the title's label.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A block of tiles closes with a blue link to the full list, laid out in the same box as the tiles.</p>
+      <div class="tiles above-12"></div>
+      <p class="above-24"><a class="more-link" href="#">View all essays</a></p>
+      <h2 class="above-12 below-40">Flag Link Closing Block</h2>
+      <p class="blk">The link ends the tiles above, so the title sits twelve pixels under it and forty above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A post excerpt closes with its grey date, and the next post's title follows twelve pixels under the date.</p>
+      <p class="post-date above-24">March 3, 2026</p>
+      <h2 class="above-12 below-40">Flag Date Closing Post</h2>
+      <p class="blk">The date belongs to the post above, so the title sits twelve pixels under it and forty above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph twelve pixels above a heading that carries a small icon as its own background image.</p>
+      <h3 class="icon-head above-12 below-40">Flag Icon Heading</h3>
+      <p class="blk">The icon decorates the heading and draws no edge above it, so the heading is measured as any other.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph twelve pixels above a title that draws a short accent bar under itself with a gradient.</p>
+      <h2 class="bar-head above-12 below-40">Flag Accent Bar Heading</h2>
+      <p class="blk">The bar sits under the title and draws nothing along its top, so the title is measured as any other.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a grey sentence ten pixels above the next title, too long to read as a label.</p>
+      <p class="kick-grey above-24">Filed under politics and the week in review</p>
+      <h2 class="above-10 below-48">Flag Grey Sentence Above</h2>
+      <p class="blk">A sentence is content of its own whatever its colour, so the title sits ten pixels under it and forty-eight above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph directly above a band whose grey is a background image rather than a colour.</p>
+      <div class="img-band"><h2 class="below-40">Pass Image Band Heading</h2><p class="blk">The band's edge separates the title from the paragraph above, as a colour band's does.</p></div>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph directly above a band painted with a small tiled texture instead of a colour.</p>
+      <div class="tile-band"><h2 class="below-40">Pass Tiled Band Heading</h2><p class="blk">The tiled texture covers the band, and its edge separates the title from the paragraph above.</p></div>
     </section>
   </section>
 </main>

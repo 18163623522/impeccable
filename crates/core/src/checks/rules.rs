@@ -1960,13 +1960,42 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
         }
     }
 
-    let mut roles: Vec<(String, f64)> = by_role
-        .into_iter()
-        .filter_map(|(role, sizes)| dominant_type_role_size(&role, &sizes).map(|size| (role, size)))
-        .collect();
+    // The ladder is read from the roles whose size the samples settle. A
+    // heading level with no dominant size drops out, and which of its sizes
+    // stands for it is not something the samples say.
+    let (mut settled_headings, mut dropped_headings) = (0usize, 0usize);
+    let mut dropped_sizes: Vec<f64> = Vec::new();
+    let mut roles: Vec<(String, f64)> = Vec::new();
+    for (role, sizes) in by_role {
+        let heading = role != "body";
+        match dominant_type_role_size(&role, &sizes) {
+            Some(size) => {
+                if heading {
+                    settled_headings += sizes.len();
+                }
+                roles.push((role, size));
+            }
+            None if heading => {
+                dropped_headings += sizes.len();
+                dropped_sizes.extend(sizes);
+            }
+            None => {}
+        }
+    }
 
     if roles.len() < TYPE_HIERARCHY_MIN_ROLES {
         return Vec::new();
+    }
+
+    // An h1 set smaller than the body text is not the page's title but a
+    // label wearing the tag (phillips66.com's 14px "FIND FBOS:" form label
+    // over 16px copy); the page's real headline sits in some other element,
+    // and a ladder topped by the label measures nothing a reader sees.
+    let size_of = |name: &str| roles.iter().find(|(r, _)| r == name).map(|(_, size)| *size);
+    if let (Some(h1), Some(body)) = (size_of("h1"), size_of("body")) {
+        if h1 < body {
+            return Vec::new();
+        }
     }
 
     roles.sort_by(|a, b| {
@@ -1977,11 +2006,35 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
             // root collation and byte order agree.
             .then_with(|| a.0.cmp(&b.0))
     });
-    let mut largest_step = 1.0f64;
-    for i in 1..roles.len() {
-        largest_step = math_max(largest_step, roles[i].1 / roles[i - 1].1);
-    }
+    let largest_step_of = |sizes: &[f64]| -> f64 {
+        let mut step = 1.0f64;
+        for i in 1..sizes.len() {
+            step = math_max(step, sizes[i] / sizes[i - 1]);
+        }
+        step
+    };
+    let ladder: Vec<f64> = roles.iter().map(|(_, size)| *size).collect();
+    let largest_step = largest_step_of(&ladder);
     if largest_step >= TYPE_HIERARCHY_MIN_STEP_RATIO {
+        return Vec::new();
+    }
+
+    // When the dropped heading levels hold most of the page's headings, the
+    // ladder leaves out the headings a reader sees, and the verdict rests on
+    // what they would add. cnnbrasil.com.br sets its thirty h3s at 14, 16 and
+    // 20px, ten each, against twelve h1 and h2 on a 14/16/16 ladder; any of
+    // those h3s at 20px stands a 1.25 step above the 16px h2, so the page is
+    // not shown flat, and it does not report. When no dropped size would
+    // break the flatness (h2s tied at 17 and 18px on a 16/16/18 ladder), the
+    // ramp is flat whichever size stands for them, and it reports as before.
+    if dropped_headings > settled_headings
+        && dropped_sizes.iter().any(|&extra| {
+            let mut with = ladder.clone();
+            with.push(extra);
+            with.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            largest_step_of(&with) >= TYPE_HIERARCHY_MIN_STEP_RATIO
+        })
+    {
         return Vec::new();
     }
 
@@ -2183,6 +2236,63 @@ mod tests {
         h3_tie.extend([("h3", 15.0), ("h3", 22.0)]);
         let hits = check_flat_type_hierarchy_samples(&samples(&h3_tie));
         assert!(hits.is_empty() || !hits[0].snippet.contains("h3"), "{hits:?}");
+    }
+
+    /// observations-28 row 23: the ladder leaves out the headings a reader
+    /// sees. cnnbrasil.com.br sets its thirty h3 headlines at 14, 16 and 20px,
+    /// ten each, so the h3 role drops out and a 14/16/16 ladder of body, h1
+    /// and h2 reports; phillips66.com's h1 is a 14px form label over 16px
+    /// copy. Neither ladder describes the page, and neither reports. A
+    /// dropped level declines only when one of its sizes would break the
+    /// flatness, and only when it holds more headings than the ladder does:
+    /// a tied role holding fewer stays out as before (otto.de's two h2s at 16
+    /// and 26px beside an h1, an h3 and an h4).
+    #[test]
+    fn flat_type_hierarchy_declines_a_ladder_without_the_page_headings() {
+        let mut news = vec![("h1", 16.0)];
+        news.extend([("body", 14.0); 99]);
+        news.extend([("body", 16.0); 44]);
+        news.extend([("h2", 16.0); 6]);
+        news.extend([("h2", 30.0); 3]);
+        news.extend([("h3", 14.0); 10]);
+        news.extend([("h3", 16.0); 10]);
+        news.extend([("h3", 20.0); 10]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&news)).is_empty(), "the h3 role drops out");
+        // With one h3 size settled, the ladder holds what a reader sees.
+        news.push(("h3", 16.0));
+        let hits = check_flat_type_hierarchy_samples(&samples(&news));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("h3 16px"), "{hits:?}");
+
+        let mut label = vec![("h1", 14.0)];
+        label.extend([("body", 16.0); 26]);
+        label.extend([("body", 15.0); 15]);
+        label.extend([("h2", 15.0); 3]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&label)).is_empty(), "h1 under body size");
+        // An h1 at the body size still counts.
+        label[0] = ("h1", 16.0);
+        assert_eq!(check_flat_type_hierarchy_samples(&samples(&label)).len(), 1);
+
+        // A dropped level whose sizes would all keep the ramp flat changes
+        // nothing: h2s tied at 17 and 18px, most of the headings, on a
+        // body 16px, h3 16px, h1 18px ladder.
+        let mut tie = vec![("h1", 18.0), ("h2", 17.0), ("h2", 18.0), ("h2", 17.0), ("h2", 18.0), ("h3", 16.0)];
+        tie.extend([("body", 16.0); 12]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&tie));
+        assert_eq!(hits.len(), 1, "the tied h2s keep it flat: {hits:?}");
+        assert!(hits[0].snippet.starts_with("Role sizes: body 16px, h3 16px, h1 18px"), "{hits:?}");
+        // Tied h2s at 17 and 23px: 23px stands a 1.28 step above the 18px
+        // h1, so the ladder does not show the page flat, and it declines.
+        tie[2] = ("h2", 23.0);
+        tie[4] = ("h2", 23.0);
+        assert!(check_flat_type_hierarchy_samples(&samples(&tie)).is_empty(), "a 23px h2 breaks the flatness");
+
+        let mut otto = vec![("h1", 16.0), ("h2", 16.0), ("h2", 26.0), ("h3", 16.0), ("h4", 12.0)];
+        otto.extend([("body", 14.0); 357]);
+        otto.extend([("body", 12.0); 46]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&otto));
+        assert_eq!(hits.len(), 1, "a tied minority role stays out: {hits:?}");
+        assert!(hits[0].snippet.starts_with("Role sizes: h4 12px, body 14px, h1 16px, h3 16px"), "{hits:?}");
     }
 
     #[test]

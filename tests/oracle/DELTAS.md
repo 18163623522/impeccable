@@ -5326,3 +5326,268 @@ corpus/integration and checked against the merged code:
 9. **Merge note.** low-contrast's `at_rest` drop (the colour-reveal skip)
    runs with round7-surfaces' `verdict_stands` in both the SAFE_TAGS closure
    and the retain, before the unread-surface rescore.
+
+## Recorded 2026-09-18: read the layout the reader sees (corpus/round7-reader-layout)
+
+Corpus run 28, observations-28 section 6 branch 3: rows 4, 13, 23, 24 and
+25, the band edge painted with `background-image`, the press-card kicker
+and the clipped column count (row 27). Every change removes findings where
+the engine measured something a reader does not see; where the engine
+cannot tell, the finding stays.
+
+- **heading-rhythm** (row 4). The eyebrow fold takes a short line at body
+  size as the heading's label when its colour, italics or much lighter
+  weight sets it apart from both its container and the heading, and the
+  line is the first box its parent lays out: one rendered line of at most
+  40 UTF-16 units, a colour at least 32 apart on a channel (or 0.25 in
+  alpha), or a weight 300 or more under its container's.
+  cnnbrasil.com.br's grey section links 1px over each headline and
+  outreign.io's italic hairline eyebrows 12 to 20px over each title were
+  measured as the block above; each opens the box that holds its heading.
+  A box whose `background-image` covers it (a layer tiled on both axes,
+  sized to `cover`, or a gradient at the box's own size) now draws an edge,
+  as one painted with a colour does (jyes.com.tw's grey news band tiles a
+  texture). Not done: observations-28 also proposed treating space that
+  `justify-content: space-between` makes as unmeasured, but the capture does
+  not record `justifyContent` or `flexDirection`, so a replay cannot tell;
+  the fold alone clears cnnbrasil.com.br.
+- **tight-leading** (row 25). A flex container with `flex-wrap: wrap`
+  whose own text is two or more runs, each an anonymous item too short to
+  wrap in the box by the widest advance a face sets (0.7em, 0.8em for a
+  capital, 1.05em for a full-width glyph), has no second line box:
+  outreign.io's hero meta row wraps three short runs as whole items onto two
+  rows on a phone. A single run, one long enough to wrap, a row that does
+  not wrap, a grid, and a row whose wrapping the capture did not record are
+  measured as before. The capture gains a `flexWrap` column for this. target.com 143630 was not an
+  engine misfire: the engine flags a two-line run whose selector also
+  matches a one-line span earlier on the page, so the crop shows the wrong
+  element (observations-28 row 28a).
+- **text-overflow** (row 24). An absolutely or fixed positioned descendant
+  adds nothing to the painted extent, text or not: clipto.com's hover QR
+  card at opacity 0, coachcall.ai's "Popular" badge pinned past a tab's
+  corner, drom.ru's "Еще" dropdown. Generated content on such a descendant
+  still leaves the overflow unmeasured, as the earlier review decided.
+- **cramped-padding** (row 13, flush form). A side is measured by what the
+  clipping boxes between the text and the container leave of the line; a
+  side a clip cuts by more than the edge tolerance is not flush (a table
+  scrolled sideways inside its bordered box on outreign.io, onco.cc,
+  copperhead.sh, visiby.net and vibe-genomics.replit.app; capitalone.com's
+  scrolling tab strip; inven.co.kr's ellipsized titles; tickers on yna.co.kr
+  and cnnbrasil.com.br). A band's fill bounds no side where an abutting
+  sibling paints the same colour (cencora.com's stacked grey bands, otto.de's
+  lavender promo band), and no side at all when an earlier positioned layer
+  under it paints that colour, which the ancestor walk never reads (hp.com's
+  grey media layer). A box a transform draws below 0.95 of its layout width
+  is measured at that scale: the 4px tolerance, the r3-20 chip bound and the
+  glyph band (people.com.cn lays its desktop page into a phone at 0.3).
+  cnnbrasil.com.br 143110 stays: its borders are 1px solid in the capture,
+  and nothing on record says they do not paint.
+- **flat-type-hierarchy** (row 23, both engines). The ladder declines when
+  the heading levels with no dominant size hold more headings than the
+  settled ones and one of their sizes, placed in the ladder, would make a
+  step of 1.25 or more (cnnbrasil.com.br sets thirty h3 headlines at 14, 16
+  and 20px, ten each, against twelve h1 and h2; 20px over the 16px h2 is a
+  1.25 step), and when the h1 is set smaller
+  than the body text (phillips66.com's 14px "FIND FBOS:" form label;
+  avikmukherjee.com's 13px name over 14px copy). The first version declined
+  whenever the most-used heading level dropped out; the ratchet showed it
+  removing otto.de's confirmed flat ramp (127002), where the dropped level
+  was two h2s beside three settled headings, and it was narrowed.
+- **kicker-above-heading** (press card, URL engine). A label in the
+  nearest ancestor of the heading drawn as a card (`is_card_like_dom`),
+  shorter than the viewport and holding the label, is card metadata, as in
+  an `article` or `li` card, when the heading is a card title: an h3 or
+  lower set under 24px. aina-tech.io's white press card is a `div`. The
+  first version had no title test; the ratchet showed it removing six
+  section eyebrows both judges call harmful (redoubt.agency's h2 in its
+  hero side panel, vestra.ai's 40px h3 across a feature band), and it was
+  narrowed. The static engine has no layout and still reports it.
+- **first-viewport-column-overflow** (row 27). A column's content ends at
+  the nearest box between it and the row that clips or scrolls y:
+  cuisineactuelle.fr's tile column runs eleven tiles into a 610px scroller
+  and read as 187% of the viewport.
+
+Fixtures: `heading-rhythm.html` gains the grey, italic and hairline labels
+at body size and the image band (pass) and a grey sentence too long to be a
+label (flag); `tight-leading.html` a flex row of short runs (pass, browser
+only) and one whose long run wraps (flag); `text-overflow.html` the hover
+tooltip and the corner badge (pass); `kicker-above-heading.html` the press
+card (pass, browser only), a section h2 in a painted side panel and a
+display-size h3 in a band (flag). New: `cramped-padding-edges.html` (the
+scrolled table's far side, the ellipsis panel, the same-grey band, the
+same-grey layer and the scaled chip pass; the scrolled table's start side
+and a band beside another colour flag; browser only),
+`flat-type-hierarchy-dropped-role.html` and
+`flat-type-hierarchy-h1-label.html` (pass in both engines), and
+`first-viewport-column-overflow-clipped.html` (pass). Pinned against a real
+browser by `crates/browser/tests/heading_rhythm.rs`, `text_geometry.rs` and
+`card_heuristics.rs`; each new pass case was checked to report on the base
+engine. The edge cases live in their own file because adding body copy to
+`cramped-padding.html` tipped that page's static flat-type ladder.
+
+Goldens recorded from the binary and read finding by finding:
+
+- New: `detect-fixture-json-cramped-padding-edges-html`,
+  `detect-fixture-text-cramped-padding-edges-html` (6 static findings: the
+  static engine has no layout and reports both flag cases and four of the
+  five pass cases),
+  `detect-fixture-json-first-viewport-column-overflow-clipped-html`,
+  `detect-fixture-text-first-viewport-column-overflow-clipped-html`,
+  `detect-fixture-json-flat-type-hierarchy-dropped-role-html`,
+  `detect-fixture-text-flat-type-hierarchy-dropped-role-html`,
+  `detect-fixture-json-flat-type-hierarchy-h1-label-html`,
+  `detect-fixture-text-flat-type-hierarchy-h1-label-html` (no findings, exit
+  0; the base engine reported both flat-type pages).
+- `detect-fixture-json-kicker-above-heading-html`,
+  `detect-fixture-text-kicker-above-heading-html`: 14 to 17, the two new flag
+  cases and the press card the static engine cannot read as a card.
+- `detect-fixture-json-tight-leading-html`,
+  `detect-fixture-text-tight-leading-html`: 13 to 15, the flex row whose
+  long run wraps (1.17x, both engines) and the flex row of short runs
+  (1.25x, static only).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-both`,
+  `detect-scope-layout-text`: the same eleven findings (686 to 697; layout
+  scope 54 to 60). Nothing removed: no existing fixture's static output
+  changed.
+
+Ratchet, run 28, all three cohorts (801 captures): 128 findings removed, 0
+added, 0 severity moves, 0 violations.
+
+| Rule | Base | Branch | Removed by label | By cohort |
+|---|---|---|---|---|
+| heading-rhythm | 65 | 2 | pattern-absent 63 | c3 63 |
+| cramped-padding | 194 | 156 | pattern-absent 22, unjudged 14, disputed 1, real-harmless 1 | c1 17, c2 2, c3 19 |
+| text-overflow | 41 | 25 | pattern-absent 6, unjudged 10 | c1 12, c3 4 |
+| flat-type-hierarchy | 37 | 31 | pattern-absent 4, unjudged 2 | c1 2, c3 4 |
+| kicker-above-heading | 362 | 360 | pattern-absent 2 | c3 2 |
+| tight-leading | 410 | 408 | real-harmless 2 | c3 2 |
+| first-viewport-column-overflow | 3 | 2 | pattern-absent 1 | c3 1 |
+
+te.eg's two heading-rhythm findings, correct in every run since 19, still
+report. Removed findings opened on crops: otto.de 126764 (the lavender band
+runs on below the heading), vibe-genomics.replit.app 130667, copperhead.sh
+135808 and visiby.net 137229 (tables cut by a sideways scroll),
+cnnbrasil.com.br 143043 and yna.co.kr 125352 (tickers cut by their track),
+inven.co.kr 141869 (titles an ellipsis ends inside the inset),
+people.com.cn 125418 and 125421 (bands with room at 0.3 scale), drom.ru
+127354 (a menu button whose dropdown is positioned), clipto.com 131711 (a
+pill whose tooltip is positioned), outreign.io 139926 (an italic eyebrow
+over the title) and cnnbrasil.com.br 143283 (a grey section link over the
+headline). Each shows the fix is right.
+
+### Known limits at merge
+
+1. **`justify-content` is not captured.** Space a column flexbox spreads
+   between its items still reads as a gap below a heading; a capture change
+   would let the rule treat it as unmeasured.
+2. **The press-card title test is a size.** A card whose title is an h2, or
+   an h3 at 24px or more, still reports its label; a section panel with an
+   h3 under 24px is exempt.
+3. **avikmukherjee.com's flat ramp is gone** with the h1-under-body test.
+   Its 13px h1 is the site owner's name on a deliberately small page, and
+   neither finding was judged.
+4. **The scale test reads the element's own width.** A box whose layout
+   width was not recorded, or a transform that scales one axis only, is
+   measured unscaled, as before.
+
+### Revised after review
+
+The independent review of the branch found four places where a fix removed
+findings the engine had measured right. Each now fails safe to the base
+behaviour; the reviewer's pages report exactly what base reports, in the
+URL engine and, for flat-type-hierarchy and tight-leading, the file engine.
+
+1. **A coloured line that closes the block above is not a label.** The
+   colour, italic and weight fold took a blue "View all essays" link under
+   a grid, 12 to 15px over the next h2, as that h2's label; three folded,
+   the gaps measured to the grid, and the page fell under the two-heading
+   minimum (4 findings to 0). A grey post date took the previous post's
+   date as the next title's label ("24px above" where base said "14px").
+   Markup is what tells the two apart: cnnbrasil.com.br's category link and
+   outreign.io's eyebrow each open the box that holds the heading, while a
+   closing link or date has the block above laid out before it in the same
+   box. The fold on colour, italics or weight alone now needs the line to
+   be the first box its parent lays out. Size, capitals, tracking and chips
+   fold as before.
+2. **A heading's own background image is not a top edge.** Any
+   `background-image` counted as a painted edge, so an icon bullet placed
+   once beside an h3 and a 48px accent bar drawn with a gradient under an h2
+   made each heading read as drawing its own top boundary, and every such
+   heading was skipped (4 to 0 on each page). Only a layer that covers the
+   box counts now: tiled on both axes, sized `cover`, or a gradient at the
+   box's own size, and never text filled through `background-clip: text`.
+   A layer whose tiling the capture did not record is not counted.
+3. **A dropped heading level declines only when it changes the verdict.**
+   The majority test declined whenever the dropped levels held more
+   headings than the settled ones. An 18px h1, h2s tied at 17 and 18px, a
+   16px h3 and 16px body is flat whichever size stands for the h2s, and
+   base reports it; the branch did not, in either engine. The ladder now
+   declines only when a dropped size placed in it makes a step of 1.25 or
+   more. cnnbrasil.com.br's 20px h3s still do.
+4. **Only a wrapping flex row moves its runs whole.** The skip compared each
+   run with the whole container and never read `flex-wrap`. Under the
+   default `nowrap` the items shrink into one row and each run wraps inside
+   its item; in a grid each run wraps in a cell narrower than the row. The
+   reviewer's 420px nowrap row and three-column grid row of 14px runs at 1.1
+   went from 2 findings to 0. The skip now needs `display: flex` or
+   `inline-flex` and a `flexWrap` that starts with `wrap`, and the capture
+   records `flexWrap` (`STYLE_PROPS` and `browser-bundle/15-snapshot.js`).
+   Run 28's snapshots predate the column and read it as empty, so on replay
+   outreign.io's hero row reports again; at 1280px that row is
+   `sm:flex-nowrap`, and its runs really do wrap in their items.
+
+Fixtures: `heading-rhythm.html` gains four flag cases (a link closing a tile
+block, a grey date closing a post, an h3 with a background icon, an h2 with a
+gradient accent bar) and a tiled-texture band (pass); its italic and hairline
+eyebrows now open their wrapper, as outreign.io's do. New:
+`tight-leading-runs.html` (a nowrap flex row and a grid row of short runs,
+flag in both engines; its own file because adding 12px runs to
+`tight-leading.html` tipped that page's static flat-type ladder) and
+`flat-type-hierarchy-dropped-flat.html` (flag in both engines). Unit tests:
+`heading_rhythm_image_band_needs_a_layer_that_covers_the_box`, the nowrap,
+unrecorded, wrap-reverse and grid cases in
+`tight_leading_reads_flex_text_runs_as_items`, and the tie cases in
+`flat_type_hierarchy_declines_a_ladder_without_the_page_headings`. Browser
+tests: `heading_rhythm.rs` (20 findings), `text_geometry.rs` and
+`card_heuristics.rs`.
+
+Goldens: new `detect-fixture-{json,text}-flat-type-hierarchy-dropped-flat-html`
+(1 finding) and `detect-fixture-{json,text}-tight-leading-runs-html` (2
+findings); the directory, scope and no-advisory goldens gain exactly those
+three findings (697 to 700). Nothing else changed.
+
+Ratchet, run 28, all three cohorts (801 captures): 126 removed, 0 added, 0
+severity moves, 0 violations. Every row matches the table above except
+tight-leading, which no longer removes anything (410 to 410): outreign.io's
+two findings report again, as item 4 says.
+
+### Known limits at merge (from the review)
+
+Open issues the review of the revision left, carried here at the merge into
+corpus/integration:
+
+1. **The h1-under-body decline** removes avikmukherjee.com's "h1 13px, h2
+   13px, body 14px" findings (129508 and 129576 on run 28, unjudged).
+   Earlier runs judged the same pattern pattern-yes, harm-no (13688,
+   13829). Whether a flat ramp under a label-sized h1 should still report
+   among the remaining roles is a spec call for Paul.
+2. **The painted-card kicker exemption also covers a section panel** whose
+   h3 is under 24px. Review page kk-panel.html (rounded grey section panels,
+   an uppercase tracked eyebrow over a 22px h3) goes from 3 findings on base
+   to 0. An h2 card title keeps reporting, and the static engine still
+   reports div cards.
+3. **The space-between part of row 4 is not done:** the snapshot does not
+   capture `justifyContent` or `flexDirection`. (`flexWrap` is now
+   captured, which fixed the tight-leading gate.)
+4. **cramped-padding:** `backdrop_layer_matches` does not check opacity or
+   visibility on the covering sibling; `drawn_scale` trusts `offsetWidth`,
+   so a transform that scales one axis is measured unscaled; the clip-cut
+   rule moves text truncated at a padding-less border over to
+   clipped-overflow and text-overflow.
+5. **text-overflow ignores positioned descendants that hold text**, so an
+   author-positioned label that collides with its neighbours is left to
+   text-occlusion.
+6. **The impeccable-live `dev_url::answers_whatever_scheme_the_page_uses`**
+   test failed once for the implementer, likely flaky under load.

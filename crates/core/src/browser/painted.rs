@@ -97,14 +97,17 @@ pub enum OwnOpacity {
 }
 
 /// The rules that measure one element's text. Style tells about the page
-/// (gradient text, fonts, borders) describe authored CSS whatever state is
-/// showing and are not gated; `italic-serif-display` reports one heading's
-/// display treatment, which a visitor meets only where the heading is shown.
+/// (fonts, borders) describe authored CSS whatever state is showing and are
+/// not gated; `italic-serif-display` reports one heading's display
+/// treatment, which a visitor meets only where the heading is shown, and
+/// `gradient-text` the ramp painted on one run of text, which a label in a
+/// closed menu never shows (bt.cn's mobile dropdown, observations-28 row 20).
 pub const PAINT_GATED_TEXT_RULES: &[&str] = &[
     "all-caps-body",
     "body-text-viewport-edge",
     "cramped-padding",
     "extreme-negative-tracking",
+    "gradient-text",
     "gray-on-color",
     "italic-serif-display",
     "justified-text",
@@ -1839,9 +1842,10 @@ mod tests {
             BrowserFinding::new("italic-serif-display", "italic serif h1 (playfair display) at 60px"),
             BrowserFinding::new("blinking-cursor", "i.caret — 5x10px blinking cursor"),
         ];
+        findings.push(BrowserFinding::new("font-overuse-stand-in", "an ungated style tell"));
         retain_painted(&d, a, &mut findings);
         let ids: Vec<&str> = findings.iter().map(|f| f.type_.as_str()).collect();
-        assert_eq!(ids, vec!["gradient-text"]);
+        assert_eq!(ids, vec!["font-overuse-stand-in"]);
 
         // Painted, every finding stays.
         d.set_rect(wrap, 40.0, 300.0, 400.0, 40.0);
@@ -1854,7 +1858,7 @@ mod tests {
         assert_eq!(kept.len(), 3);
 
         assert_eq!(paint_gate("content-hidden-at-rest"), None);
-        assert_eq!(paint_gate("gradient-text"), None);
+        assert_eq!(paint_gate("gradient-text"), Some(PaintGate::Text));
         assert_eq!(paint_gate("layout-transition"), Some(PaintGate::Box));
         assert_eq!(paint_gate("bounce-easing"), Some(PaintGate::Box));
         assert_eq!(paint_gate("dark-glow"), Some(PaintGate::Box));

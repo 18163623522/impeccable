@@ -42,10 +42,28 @@ fn collapsed_text_content(dom: &dyn Dom, el: ElId) -> String {
     js::trim(&collapse_ws(&dom.text_content(el))).to_string()
 }
 
-/// JS: checks.mjs#isKickerCardContext(heading, kicker)
+/// How many viewports tall a card-context element may be before it is the
+/// page's frame rather than a card: outreign.io wraps its whole page in
+/// `main > article`, 11,527px tall, and a card on a phone runs under two
+/// screens.
+pub const KICKER_CARD_MAX_VIEWPORTS: f64 = 2.0;
+
+/// JS: checks.mjs#isKickerCardContext(heading, kicker), less a page-scale
+/// ancestor: an `article` (or list item, link, button) more than
+/// [`KICKER_CARD_MAX_VIEWPORTS`] viewports tall holds the page, and a label
+/// and heading inside it share no card. Where the box or the viewport is not
+/// measured the ancestor counts, as before.
 pub fn is_kicker_card_context(dom: &dyn Dom, heading: ElId, kicker: ElId) -> bool {
     match dom.closest(heading, KICKER_CARD_CONTEXT_SELECTOR) {
-        Ok(Some(item)) => dom.contains(item, kicker),
+        Ok(Some(item)) => {
+            let viewport = dom.inner_height();
+            let height = dom.rect(item).height;
+            let page_scale = viewport.is_finite()
+                && viewport > 0.0
+                && height.is_finite()
+                && height > viewport * KICKER_CARD_MAX_VIEWPORTS;
+            !page_scale && dom.contains(item, kicker)
+        }
         _ => false,
     }
 }
@@ -167,7 +185,20 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
         }) {
             continue;
         }
-        if heading_tag == "h1" && heading_font_size >= 48.0 && kicker_letter_spacing >= 1.6 {
+        // The hero rule takes a tracked label over a display h1. Its em
+        // floor reaches only the labels that rule reads: the h1's own
+        // previous sibling, at eyebrow size.
+        if heading_tag == "h1"
+            && heading_font_size >= 48.0
+            && (kicker_letter_spacing >= crate::checks::rules::HERO_EYEBROW_TRACKING_PX
+                || (found.levels == 0
+                    && kicker_font_size <= 14.0
+                    && crate::checks::rules::hero_eyebrow_tracked(
+                        kicker_letter_spacing,
+                        kicker_font_size,
+                        Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
+                    )))
+        {
             continue;
         }
         // A pair a visitor cannot see (a section at `hidden`, an inactive
@@ -380,9 +411,13 @@ pub fn label_near_heading(dom: &dyn Dom, label: ElId, heading: ElId) -> bool {
 }
 
 /// The element that sets a label's type: the label itself when it has text of
-/// its own, else its only element child, at most three levels down. Framer
-/// sets an eyebrow's size, tracking and case on a `p` inside a bare `div`, and
-/// a mono index often sits in a `span` inside a sized column.
+/// its own, else the one element child that holds its text, at most three
+/// levels down. Framer sets an eyebrow's size, tracking and case on a `p`
+/// inside a bare `div`, and a mono index often sits in a `span` inside a sized
+/// column. A chip puts an icon beside its text span (redoubt.agency's flag
+/// svg, uncoverroads.com's status dot): children that hold no text are the
+/// chip's marks, and the one that holds the text sets the type. A wrapper
+/// with two children that both hold text is read as itself.
 pub fn label_type_element(dom: &dyn Dom, label: ElId) -> ElId {
     let mut el = label;
     for _ in 0..3 {
@@ -390,10 +425,14 @@ pub fn label_type_element(dom: &dyn Dom, label: ElId) -> ElId {
             return el;
         }
         let children = dom.children(el);
-        if children.len() != 1 {
+        let mut with_text = children
+            .iter()
+            .copied()
+            .filter(|&c| !js::trim(&dom.text_content(c)).is_empty());
+        let (Some(only), None) = (with_text.next(), with_text.next()) else {
             return el;
-        }
-        el = children[0];
+        };
+        el = only;
     }
     el
 }

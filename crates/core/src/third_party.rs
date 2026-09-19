@@ -47,7 +47,14 @@ pub struct WidgetVendor {
 /// The widget vendors, from the corpus evidence: Taboola recommendation cards
 /// on ynet.co.il and climatempo.com.br (findings 110423, 110711, 123649,
 /// 123650, 123679), and a Swiper carousel's vendor CSS on nubank.com.br
-/// (111379, 111514).
+/// (111379, 111514). Run 28 adds four more (observations-28, section 3):
+/// Slick's track and slide wrappers on lpga.or.jp (141946) and the dot
+/// buttons Slick writes on jyes.com.tw (141986, 142493), SuperSlide's
+/// `div.tempWrap` on scol.com.cn (141745, 141937), react-fast-marquee on
+/// cnnbrasil.com.br (143060, 143061), and Kaltura's player on cencora.com
+/// (143584 to 143586, 143613 to 143615). A vendor listed twice has two
+/// scopes: Slick's structural wrappers hold the site's slides, while the dot
+/// list is Slick's own markup down to the button.
 pub const WIDGET_VENDORS: &[WidgetVendor] = &[
     WidgetVendor {
         name: "Taboola",
@@ -64,6 +71,43 @@ pub const WIDGET_VENDORS: &[WidgetVendor] = &[
         id_prefixes: &["swiper-wrapper-"],
         class_prefixes: &[],
         classes: &["swiper", "swiper-container", "swiper-wrapper", "swiper-slide"],
+    },
+    WidgetVendor {
+        name: "Slick",
+        scope: WidgetScope::OwnElement,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["slick-slider", "slick-list", "slick-track", "slick-slide", "slick-arrow"],
+    },
+    WidgetVendor {
+        name: "Slick",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["slick-dots"],
+    },
+    WidgetVendor {
+        name: "SuperSlide",
+        scope: WidgetScope::OwnElement,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["tempWrap"],
+    },
+    WidgetVendor {
+        // The marquee clones and moves the site's children; what they collide
+        // with or show at rest is the vendor's motion.
+        name: "react-fast-marquee",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &["rfm-"],
+        classes: &[],
+    },
+    WidgetVendor {
+        name: "Kaltura",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &["playkit-"],
+        classes: &["kaltura-player", "kaltura-player-container"],
     },
 ];
 
@@ -114,7 +158,12 @@ pub struct AdTechVendor {
 /// tags back and throws when it patches `document.createElement`. Product
 /// analytics (PostHog) and a site's own bundles and telemetry chunks, ad
 /// code served from the site's own host included, are not on the list and
-/// stay first-party script errors.
+/// stay first-party script errors. Run 28 adds (observations-28, section 3)
+/// the nagich.co.il accessibility overlay on walla.co.il (142928, 142984) and
+/// Chase's shared `Reporting.js` tag library, served from `asset.chase.com`
+/// to jpmorganchase.com (143250); Prisma Media's ad core on
+/// cuisineactuelle.fr throws from its Prebid call (143089, 143154), which
+/// [`AD_TECH_APIS`] names.
 pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
     AdTechVendor { name: "AnyMind", sources: &["anymind360.com"] },
     AdTechVendor { name: "Prebid", sources: &["/prebid"] },
@@ -125,19 +174,23 @@ pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
         name: "Google Ads",
         sources: &["googlesyndication.com", "doubleclick.net", "googleadservices.com"],
     },
+    AdTechVendor { name: "Nagich", sources: &["nagich.co.il"] },
+    AdTechVendor { name: "Chase Reporting", sources: &["asset.chase.com/web/library/digddsautomation/reportingjs/"] },
 ];
 
 /// Ad APIs whose rejection names itself in the message: Chrome removed the
 /// Topics API (`document.browsingTopics() is deprecated and has been
 /// removed`, findings 65354, 65585 on co-trip.jp) and ad scripts still call
 /// it; the Protected Audience calls are the same kind of rejection; AdSense
-/// throws `adsbygoogle.push() error` at slots it cannot fill. Each maps to
+/// throws `adsbygoogle.push() error` at slots it cannot fill, and an ad core
+/// calling a Prebid build that lacks a method names `_prebidjs`. Each maps to
 /// the vendor it names.
 pub const AD_TECH_APIS: &[(&str, &str)] = &[
     ("browsingTopics", "ad tech"),
     ("joinAdInterestGroup", "ad tech"),
     ("runAdAuction", "ad tech"),
     ("adsbygoogle", "Google Ads"),
+    ("_prebidjs", "Prebid"),
 ];
 
 /// The ad-tech vendor behind an uncaught page error, from where it was
@@ -239,6 +292,83 @@ mod tests {
             None
         );
         assert_eq!(ad_tech_vendor("Minified React error #418", Some("at https://example.com/app.js:1:1")), None);
+    }
+
+    #[test]
+    fn run_28_ad_tech_hosts_name_their_vendor() {
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught (in promise) TypeError: ze._prebidjs.getAdserverTargetingForAdUnitCode is not a function",
+                Some("at mapConversionRateInAdserverWithPrebidTargeting, https://tra.scds.pmdstatic.net/advertising-core/5/core-ads.js:1:73446")
+            ),
+            Some("Prebid")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught (in promise) TypeError: e.some is not a function",
+                Some("at i, https://js.nagich.co.il/core/4.6.12/accessibility.js:1:3216")
+            ),
+            Some("Nagich")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught TypeError: Cannot convert undefined or null to object",
+                Some("at o, https://asset.chase.com/web/library/digddsautomation/reportingjs/Reporting.js:1:121552")
+            ),
+            Some("Chase Reporting")
+        );
+        // Chase's own bundles on the same host stay first-party.
+        assert_eq!(
+            ad_tech_vendor("Uncaught TypeError: x is undefined", Some("at a, https://asset.chase.com/web/app/main.js:1:1")),
+            None
+        );
+    }
+
+    #[test]
+    fn run_28_widget_vendors_tag_their_markup() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        // Slick: the list is Slick's, the site's slide content is not; the
+        // dot list is Slick's down to its buttons.
+        let slider = d.add(Some(body), "div");
+        d.set_attr(slider, "class", "banner slick-initialized slick-slider");
+        let list = d.add(Some(slider), "div");
+        d.set_attr(list, "class", "slick-list draggable");
+        let slide = d.add(Some(list), "div");
+        d.set_attr(slide, "class", "slick-slide slick-active");
+        let caption = d.add(Some(slide), "p");
+        let dots = d.add(Some(slider), "ul");
+        d.set_attr(dots, "class", "slick-dots");
+        let dot = d.add(Some(dots), "li");
+        d.set_attr(dot, "id", "slick-slide00");
+        let button = d.add(Some(dot), "button");
+        assert_eq!(widget_vendor(&d, list), Some("Slick"));
+        assert_eq!(widget_vendor(&d, slide), Some("Slick"));
+        assert_eq!(widget_vendor(&d, caption), None);
+        assert_eq!(widget_vendor(&d, button), Some("Slick"));
+        // SuperSlide's wrapper.
+        let wrap = d.add(Some(body), "div");
+        d.set_attr(wrap, "class", "tempWrap");
+        let item = d.add(Some(wrap), "span");
+        assert_eq!(widget_vendor(&d, wrap), Some("SuperSlide"));
+        assert_eq!(widget_vendor(&d, item), None);
+        // react-fast-marquee and Kaltura tag their whole subtree.
+        let marquee = d.add(Some(body), "div");
+        d.set_attr(marquee, "class", "rfm-marquee-container ");
+        let child = d.add(Some(marquee), "div");
+        d.set_attr(child, "class", "rfm-child");
+        let ticker = d.add(Some(child), "span");
+        assert_eq!(widget_vendor(&d, ticker), Some("react-fast-marquee"));
+        let player = d.add(Some(body), "div");
+        d.set_attr(player, "class", "kaltura-player embed-responsive-item");
+        let area = d.add(Some(player), "div");
+        d.set_attr(area, "class", "playkit-video-area");
+        let video = d.add(Some(area), "video");
+        assert_eq!(widget_vendor(&d, video), Some("Kaltura"));
+        // Look-alike classes are not the vendors'.
+        let other = d.add(Some(body), "div");
+        d.set_attr(other, "class", "slick-like rfm tempwrap kaltura");
+        assert_eq!(widget_vendor(&d, other), None);
     }
 
     #[test]

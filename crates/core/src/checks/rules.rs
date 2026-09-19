@@ -1168,7 +1168,7 @@ pub const ICON_TILE_MIN_BG_ALPHA: f64 = 0.05;
 
 /// JS: checks.mjs#checkIconTile
 pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
-    if !is_heading_tag(&opts.heading_tag) {
+    if !is_heading_tag(&opts.heading_tag) && !opts.heading_is_card_title {
         return Vec::new();
     }
     let sibling_tag = match opts.sibling_tag.as_deref() {
@@ -1449,7 +1449,12 @@ pub fn check_hero_eyebrow(opts: &HeroEyebrowOpts) -> Vec<RuleHit> {
     let is_uppercased = opts.sibling_text_transform.as_deref() == Some("uppercase")
         || (text.bytes().any(|b| b.is_ascii_uppercase())
             && !text.bytes().any(|b| b.is_ascii_lowercase()));
-    let is_classic_tracked = is_uppercased && opts.sibling_letter_spacing >= 1.6;
+    let is_classic_tracked = is_uppercased
+        && hero_eyebrow_tracked(
+            opts.sibling_letter_spacing,
+            opts.sibling_font_size,
+            opts.sibling_tracking_floor_em,
+        );
 
     let weight = {
         let n = match opts.sibling_font_weight.as_deref() {
@@ -1684,12 +1689,22 @@ pub(crate) fn glow_is_perceptible(
 
 /// How far the chromatic layers of one shadow value lift `surface` at the
 /// edge of the box (see [`GLOW_MIN_LIFT`]). Neutral layers are elevation, not
-/// glow light, and do not count.
+/// glow light, and do not count, and neither does a layer carrying under half
+/// the light a glow needs ([`GLOW_MIN_STRENGTH_PX`]): Tailwind's `shadow-lg`
+/// in a 0.2 purple adds a 6px layer at 1.2px of light to its 15px one, and
+/// the pair lit nothing on gameghost.manus.space's black page. The layers of
+/// an elevation ramp that each carry some of the light still add up.
 fn glow_surface_lift(value: &str, surface: &Rgba, element_opacity: Option<f64>) -> f64 {
     let opacity = element_opacity.unwrap_or(1.0);
     split_commas_outside_parens(value)
         .into_iter()
-        .filter_map(|layer| find_shadow_color(layer).and_then(|info| info.color))
+        .filter_map(|layer| {
+            let info = find_shadow_color(layer)?;
+            let color = info.color?;
+            let vals = extract_shadow_lengths(layer, Some((info.start, info.end)));
+            let blur = vals.get(2).copied().unwrap_or(0.0);
+            (blur * color.alpha_or_one() * opacity >= GLOW_MIN_STRENGTH_PX / 2.0).then_some(color)
+        })
         .filter(|color| has_chroma(Some(color), Some(30.0)))
         .map(|color| {
             let difference = (color.r - surface.r)
@@ -2079,6 +2094,7 @@ mod tests {
             sibling_border_radius: 8.0,
             has_icon_child: true,
             icon_child_width: 20.0,
+            heading_is_card_title: false,
         };
         assert_eq!(check_icon_tile(&opts(0.1)).len(), 1);
         assert_eq!(check_icon_tile(&opts(0.05)).len(), 1);
@@ -2495,6 +2511,22 @@ mod tests {
         };
         assert!(avatar(0.15).is_empty());
         assert_eq!(avatar(0.4).len(), 1);
+        // Tailwind's `shadow-lg shadow-purple-900/20` on a black page: the 6px
+        // layer carries 1.2px of light and lights nothing, and the 15px layer
+        // alone lifts the page by 14 (gameghost.manus.space).
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+        let shadow_lg = check_glow(&GlowOpts {
+            box_shadow: Some(
+                "oklab(0.381 0.100917 -0.144194 / 0.2) 0px 10px 15px -3px, oklab(0.381 0.100917 -0.144194 / 0.2) 0px 4px 6px -4px"
+                    .to_string(),
+            ),
+            text_shadow: None,
+            effective_bg: Some(black),
+            element_opacity: Some(1.0),
+            element_size: Some((208.0, 36.0)),
+            surface: Some(black),
+        });
+        assert!(shadow_lg.is_empty(), "{shadow_lg:?}");
         // With no resolved fill behind it (a gradient, an image) the lift is
         // not measured, and the strength floor decides as before.
         let unresolved = check_glow(&GlowOpts {

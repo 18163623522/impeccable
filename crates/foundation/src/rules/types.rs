@@ -344,6 +344,12 @@ pub struct IconTileOpts {
     pub sibling_border_radius: f64,
     pub has_icon_child: bool,
     pub icon_child_width: f64,
+    /// The anchor is a card title set on a non-heading tag (shadcn's
+    /// `CardTitle` is a `div.font-semibold`), which the engines recognize
+    /// from its type. `false` keeps the h1 to h6 anchor alone, the JS
+    /// contract the recorded vectors pin.
+    #[serde(default)]
+    pub heading_is_card_title: bool,
 }
 
 // ─── resolveSerif / checkItalicSerif ────────────────────────────────────────
@@ -383,6 +389,34 @@ pub struct HeroEyebrowOpts {
     pub sibling_font_weight: Option<String>,
     pub sibling_color: Option<String>,
     pub sibling_has_accent_dash_pseudo: bool,
+    /// The tracking, in em of the sibling's size, that counts as tracked caps
+    /// alongside the fixed 1.6px floor ([`HERO_EYEBROW_TRACKING_PX`]). The
+    /// engines pass [`HERO_EYEBROW_TRACKING_EM`]; `None` keeps the fixed floor
+    /// alone, which is the JS contract the recorded vectors pin.
+    #[serde(default)]
+    pub sibling_tracking_floor_em: Option<f64>,
+}
+
+/// The fixed tracking floor of the hero eyebrow's tracked-caps signature.
+pub const HERO_EYEBROW_TRACKING_PX: f64 = 1.6;
+
+/// The tracking, in em, at which an uppercase label reads as tracked caps
+/// whatever its size: Tailwind's `tracking-widest` (0.1em) at 12px is 1.2px,
+/// under the fixed floor, and it is the most common eyebrow setting
+/// (redoubt.agency). kicker-above-heading's own floor is 0.06em.
+pub const HERO_EYEBROW_TRACKING_EM: f64 = 0.08;
+
+/// Whether `letter_spacing_px` at `font_size_px` is tracked caps for the hero
+/// eyebrow: at least the fixed floor, or, where the engine passes one, at
+/// least `floor_em` of the size.
+pub fn hero_eyebrow_tracked(letter_spacing_px: f64, font_size_px: f64, floor_em: Option<f64>) -> bool {
+    if letter_spacing_px >= HERO_EYEBROW_TRACKING_PX {
+        return true;
+    }
+    match floor_em {
+        Some(em) if font_size_px > 0.0 => letter_spacing_px > 0.0 && letter_spacing_px >= font_size_px * em - 1e-9,
+        _ => false,
+    }
 }
 
 // ─── checkKickerAboveHeading ────────────────────────────────────────────────

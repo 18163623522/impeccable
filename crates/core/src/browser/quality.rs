@@ -411,6 +411,30 @@ fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
 /// wholly in inline children (`<p><i>…</i></p>`).
 const LINE_PROSE_TAGS: &[&str] = &["p", "li", "dd", "blockquote"];
 
+/// Generic block boxes a CMS or a builder writes prose straight into, with no
+/// `<p>` around it: cencora.com's `div.module__body`, aina-tech.io's
+/// `div.mt-10.text-base` between two measured paragraphs.
+const PROSE_BLOCK_TAGS: &[&str] = &["div", "section", "article", "aside", "main"];
+
+/// Where prose written straight into a generic block is not prose: inside a
+/// control, a link, or an editable field.
+const PROSE_BLOCK_SKIP_SELECTOR: &str = "a, button, label, summary, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], [contenteditable=\"true\"], [contenteditable=\"\"]";
+
+/// Whether `el` is prose written straight into a generic block box: a
+/// [`PROSE_BLOCK_TAGS`] element laid out as a block, holding text of its own
+/// and nothing but phrasing under it, outside any control, and not set as
+/// preformatted text. `line-length` and `body-text-viewport-edge` measure it
+/// the way they measure a `<p>`, from its text runs only: where those cannot
+/// be measured, a generic box is not taken for a paragraph.
+fn is_prose_block(dom: &dyn Dom, el: ElId, tag: &str, has_direct_text: bool) -> bool {
+    has_direct_text
+        && PROSE_BLOCK_TAGS.contains(&tag)
+        && matches!(dom.style(el, "display").as_str(), "block" | "flow-root")
+        && !dom.style(el, "whiteSpace").starts_with("pre")
+        && holds_only_phrasing(dom, el)
+        && closest_or_none(dom, el, PROSE_BLOCK_SKIP_SELECTOR).is_none()
+}
+
 /// The line-height `normal` stands for when counting line boxes: a text rect
 /// one line tall is at most about 1.5em, two lines at least about 2.3em.
 const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
@@ -426,6 +450,40 @@ const TEXT_FILLS_MEASURE: f64 = 0.9;
 /// an em a glyph, which runs 10 to 20% over a narrow sans, so a line within
 /// that of its box may hold as many characters as the box estimate says.
 const LINE_FILLS_MEASURE: f64 = 0.8;
+
+/// The controls whose labels wide tracking may set: links and buttons.
+const TRACKED_CONTROL_LABEL: &str = "a[href], button, [role=\"button\"], [role=\"link\"], [role=\"tab\"]";
+
+/// The letters in `text`: what a reader takes in as a label's length. The
+/// spaces, digits and dots between words of a caps label
+/// ("SCHEDULE AND CREATE 100 SOCIAL VIDEOS IN 20 MINS") are not.
+fn letter_count(text: &str) -> usize {
+    text.chars().filter(|c| c.is_alphabetic()).count()
+}
+
+/// Whether `el`'s text is a label-length run on one line: at most
+/// [`TRACKED_LABEL_MAX_CHARS`] letters, and a text box that does not wrap.
+fn short_one_line_label(dom: &dyn Dom, el: ElId, line_height_px: Option<f64>) -> bool {
+    letter_count(js::trim(&dom.text_content(el))) <= TRACKED_LABEL_MAX_CHARS
+        && !text_wraps_to_multiple_lines(
+            dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
+            line_height_px,
+        )
+}
+
+/// Whether `el` is a label typed in capitals: its text is a capitalized run
+/// ([`is_capitalized_run`]) and a label-length run on one line
+/// ([`short_one_line_label`]). `text-transform` does not say so, the markup
+/// does. With `every_letter`, each letter has to be a capital: a line of
+/// Hangul or kana with one Latin brand name in capitals ("인벤(INVEN)") is
+/// running text, and letters with no case do not make it a label.
+fn typed_caps_label(dom: &dyn Dom, el: ElId, line_height_px: Option<f64>, every_letter: bool) -> bool {
+    let text = dom.text_content(el);
+    let text = js::trim(&text);
+    is_capitalized_run(text)
+        && (!every_letter || text.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase()))
+        && short_one_line_label(dom, el, line_height_px)
+}
 
 /// Characters on a line `width_px` wide at `font_size_px`, with glyphs
 /// `advance_em` wide on average.
@@ -598,7 +656,8 @@ pub fn body_text_gutter_floor(viewport_width: f64) -> f64 {
 
 /// Where a paragraph's body text starts and ends on the x axis, as
 /// `body-text-viewport-edge` reads it, or `None` when the rule does not
-/// measure it: not a `<p>` or `<li>` of more than 40 characters, inside a
+/// measure it: not a `<p>` or `<li>` (or prose written straight into a
+/// generic block, [`is_prose_block`]) of more than 40 characters, inside a
 /// `<nav>` or `<header>`, on its own fill, positioned, half the viewport wide
 /// or less, cut by a scroller or a moving track rather than the page, or
 /// wholly past either side of the viewport.
@@ -609,7 +668,8 @@ pub fn body_text_gutter_floor(viewport_width: f64) -> f64 {
 /// that track's clip rather than the page edge. A box that only hides its
 /// overflow proves no track, so text it cuts at the screen edge counts.
 /// Prose whose words sit wholly in inline children is measured the same
-/// way. Where the text cannot be measured the box stands in, as before.
+/// way. Where the text cannot be measured the box stands in, as before,
+/// except for a generic block, which is measured on its text or not at all.
 fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     let el = q.el;
     let tag = q.tag.as_str();
@@ -620,7 +680,8 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     let spx = |k: &str| style_px(dom, el, k);
     let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
     let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
-    if !((has_direct_text || edge_prose) && q.text_len > 40 && is_edge_tag && viewport_width > 0.0) {
+    let prose_block = !is_edge_tag && is_prose_block(dom, el, tag, has_direct_text);
+    if !((has_direct_text || edge_prose) && q.text_len > 40 && (is_edge_tag || prose_block) && viewport_width > 0.0) {
         return None;
     }
     let in_nav_header = closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
@@ -660,7 +721,7 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
                 (t.left, t.right)
             }
         }
-        None if has_direct_text => (rect.left, rect.right),
+        None if has_direct_text && !prose_block => (rect.left, rect.right),
         None => return None,
     };
     // Text wholly past either side of the viewport meets no edge a reader
@@ -737,8 +798,11 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     // text cannot be measured the box stands in, as before.
     let prose_in_phrasing =
         !has_direct_text && LINE_PROSE_TAGS.contains(&tag) && holds_only_phrasing(dom, el);
+    let prose_block = !QUALITY_TEXT_TAGS.contains(&tag)
+        && (text_len as f64) > line_max
+        && is_prose_block(dom, el, tag, has_direct_text);
     if (has_direct_text || prose_in_phrasing)
-        && QUALITY_TEXT_TAGS.contains(&tag)
+        && (QUALITY_TEXT_TAGS.contains(&tag) || prose_block)
         && rect.width > 0.0
         && (text_len as f64) > line_max
     {
@@ -787,7 +851,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     None
                 }
             }
-            None if has_direct_text => Some(chars_per_line_at(rect.width, text_size, advance)),
+            None if has_direct_text && !prose_block => Some(chars_per_line_at(rect.width, text_size, advance)),
             None => None,
         };
         if let Some(cpl) = estimate.filter(|cpl| *cpl > line_max + 5.0) {
@@ -1179,13 +1243,22 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Tiny body text ---
+    // Body text is running prose. A label set in capitals is not, whether
+    // `text-transform` says so or the capitals are typed into the markup
+    // (adant.ai's "ANIMATION · CINEMATIC 3D" card meta), and neither is a
+    // command set in a monospace face with its whitespace kept (stroq.dev's
+    // terminal mock), which is code whatever its class names.
     if has_direct_text && text_len > 20 && font_size < 12.0 {
         let skip_tags = ["sub", "sup", "code", "kbd", "samp", "var", "caption", "figcaption"];
         let in_ui_context = closest_or_none(dom, el, TINY_TEXT_UI_CONTEXT).is_some();
-        let is_uppercase = st("textTransform") == "uppercase";
+        let is_uppercase = st("textTransform") == "uppercase"
+            || typed_caps_label(dom, el, q.line_height_px, true);
+        let is_code_run = crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
+            && st("whiteSpace").starts_with("pre");
         if !skip_tags.contains(&tag)
             && !in_ui_context
             && !is_uppercase
+            && !is_code_run
             && !is_non_rendered_text(dom, el, tag)
         {
             findings.push(RuleHit::new(
@@ -1268,14 +1341,14 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     // says so outright; capitals typed into the markup do
                     // not, so that reading is held to label size on one
                     // line and running text keeps the rule.
+                    // A link or button label is read at a glance too
+                    // (lpga.or.jp's bold CJK "Instagram" link), held to the
+                    // same size on one line.
+                    let control_label = closest_or_none(dom, el, TRACKED_CONTROL_LABEL).is_some()
+                        && short_one_line_label(dom, el, q.line_height_px);
                     let caps_label = st("textTransform") == "uppercase"
-                        || (text_len <= TRACKED_LABEL_MAX_CHARS
-                            && is_capitalized_run(js::trim(&dom.text_content(el)))
-                            && !text_wraps_to_multiple_lines(
-                                dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
-                                q.line_height_px,
-                            ));
-                    if !caps_label {
+                        || typed_caps_label(dom, el, q.line_height_px, false);
+                    if !caps_label && !control_label {
                         findings.push(RuleHit::new(
                             "wide-tracking",
                             format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
@@ -1650,7 +1723,10 @@ pub fn check_page_overflow_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
     }
     // (element, side, how far its text reaches past that side)
     let mut past: Vec<(ElId, Side, f64)> = Vec::new();
-    for el in dom.query_all(None, "p, li").unwrap_or_default() {
+    for el in dom
+        .query_all(None, "p, li, div, section, article, aside, main")
+        .unwrap_or_default()
+    {
         if !super::driver::element_is_scanned(dom, el) {
             continue;
         }

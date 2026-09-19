@@ -4572,3 +4572,77 @@ review's open issues, for Paul to confirm:
 11. **Live test flake.** `crates/cli/tests/agent_target.rs` and the
     impeccable-live lib tests fail now and then under a full
     `cargo test --workspace` run; older than the branch.
+
+## Recorded 2026-09-18: URL scans hide known consent banners (corpus/fix-consent-hiding)
+
+Paul's decision (2026-09-18): the URL engine hides known consent managers
+before the rule pass runs. It answers known limit 1 of the covered-text
+branch ("Covered text hides real failures") for vendor banners.
+
+One golden changes, `detect-help`: the usage text gains
+`--no-consent-hiding` (three lines after `--no-advisory`). No fixture case
+changes: the oracle scans files, and the static engine is unaffected. The URL
+behavior is pinned by `crates/browser/tests/consent_hiding.rs` over
+`tests/fixtures/consent/`.
+
+- **What is hidden.** Roots and backdrops of the managers in
+  `crates/browser/src/consent.rs`, by vendor ids and classes only. Corpus
+  evidence (runs 20 and 25, 848 captures): OneTrust on 7 sites, Usercentrics
+  on 2, and Cookiebot, TrustArc, Didomi, the open-source Cookie Consent
+  library (centene.com) and Google Funding Choices (ynet.co.il) on 1 each.
+  The other listed vendors have no corpus capture yet.
+- **When.** After the validity gate, after the reveal sweep (a banner that
+  arrives late or on the first scroll), and before the evidence screenshot.
+  An injected `display: none !important` style; nothing is clicked and no
+  consent state is set. Scroll locks are undone only where the manager put
+  them: its own lock classes, and an inline `overflow: hidden` on html/body
+  while its backdrop was up.
+- **Consent wall.** There was no consent-wall detection before this branch
+  (the round-4 note that the gate "already recognizes OneTrust, Cookiebot and
+  Usercentrics" was wrong). The probe now names the managers showing and the
+  text inside them, before hiding, and a small page with under 100 visible
+  characters outside a showing manager (and at least three times as many
+  inside it) is refused as `consent-wall`.
+
+Measure, live (the ratchet cannot replay this: the recorded captures have
+the banners in them). Run 26 recaptured hrsimple.app, theagenticdatacompany.com,
+centene.com, veeza.ai, otto.de and mckesson.com. Against run 25 the counts
+move with page drift (otto.de's deal pages rotate), so each URL was also
+scanned twice at once with the branch binary, with and without
+`--no-consent-hiding`, desktop and 390px:
+
+- Banners hidden (read from `consentHidden`, so only scans with findings
+  show it): OneTrust on every otto.de and mckesson.com scan with findings,
+  Cookiebot on all 6 theagenticdatacompany.com scans, Cookie Consent on
+  every centene.com scan with findings. Run 26's probe records the same
+  managers showing at load on the scans with no findings. None on veeza.ai: its banner is the site's own
+  (`data-cookie-consent`), so it stays, as designed.
+- low-contrast 158 to 156, undersized-ui-text 201 to 195, text-occlusion 0
+  and 0. Every one of those differences is on otto.de and is recommendation
+  tile rotation between the two loads, not the banner. The other rule
+  difference is `layout-transition` on `#CybotCookiebotDialog`, gone from all
+  six theagenticdatacompany.com scans: the finding was the dialog's.
+- Crops: ten run-25 crops that showed a banner were opened next to their
+  run-26 twins (mckesson.com line-length x4, centene.com body text x2, otto.de
+  filter chips x3, theagenticdatacompany.com NEW chip). Every run-26 crop
+  shows the page element; every run-25 one showed the banner.
+- hrsimple.app could not be checked. The domain expired and now serves a
+  GoDaddy parking page (521 characters, 0 findings on all six scans). Its
+  banner was also the site's own (`We value your privacy`, a `lucide-cookie`
+  icon, Tailwind classes, no vendor), so this branch would not have hidden it:
+  the ten findings under it stay covered by design.
+
+### Known limits at merge
+
+1. **Site-made banners still cover text.** hrsimple.app and veeza.ai are the
+   corpus cases. Hiding them needs a generic banner heuristic, which the
+   decision ruled out.
+2. **Scroll-lock data is thin.** No corpus capture shows a vendor lock class
+   on html/body; the two listed (Didomi, Sourcepoint) come from the vendors'
+   own stylesheets, and the inline rule is inferred.
+3. **The corpus harness does not record `Evidence.consent`.** Its
+   `evidence.json` carries the probe's `consent` list (showing before
+   hiding), which names the same managers; recording the matched selectors
+   needs a harness change.
+4. **Tagged CLI findings, untagged evidence findings.** `consentHidden` is
+   added only on the CLI path, so evidence findings replay equal.

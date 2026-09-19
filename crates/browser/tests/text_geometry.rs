@@ -208,22 +208,20 @@ fn the_text_geometry_rules_measure_the_text() {
     // 13): text a sideways scroll or an ellipsis cuts, a band that runs on
     // into a sibling of the same fill, a fill laid on a positioned layer of
     // the same colour, and a chip a transform draws at 0.3. The start side
-    // of a scrolled table and a band beside another colour still report.
+    // of a scrolled table and a band beside another colour still report
+    // (`cramped-padding-edges.html`).
     let cramped = findings(&engine, port, "cramped-padding.html", "cramped-padding");
     assert_cases(
         &cramped,
+        &["flag-card-4", "flag-touching-chip", "flag-price-chip", "flag-price-chip-subpixel"],
+        &["pass-highlight", "pass-step-chip", "pass-price-chip"],
+        "cramped-padding",
+    );
+    let edges = findings(&engine, port, "cramped-padding-edges.html", "cramped-padding");
+    assert_cases(
+        &edges,
+        &["flag-scroll-start", "flag-band-next-differs"],
         &[
-            "flag-card-4",
-            "flag-touching-chip",
-            "flag-price-chip",
-            "flag-price-chip-subpixel",
-            "flag-scroll-start",
-            "flag-band-next-differs",
-        ],
-        &[
-            "pass-highlight",
-            "pass-step-chip",
-            "pass-price-chip",
             "pass-scroll-table",
             "pass-ellipsis-panel",
             "pass-same-band",
@@ -232,6 +230,7 @@ fn the_text_geometry_rules_measure_the_text() {
         ],
         "cramped-padding",
     );
+    assert_eq!(edges.len(), 2, "only the two flag cases: {edges:?}");
     for chip in ["flag-price-chip", "flag-price-chip-subpixel"] {
         let (snippet, _) = cramped
             .iter()

@@ -126,26 +126,6 @@
     /* ── PASS: an inline highlight that wraps is two one-line fragments ── */
     .pass-highlight-copy { width: 240px; font-size: 14px; line-height: 26px; margin: 0; }
     .pass-highlight { background: #fef08a; padding: 0 5px; }
-
-    /* ── Sides a reader sees no edge on (observations-28 row 13) ── */
-    .scroller { width: 300px; overflow-x: auto; border: 1px solid #cbd5e1; border-radius: 12px; }
-    .scroller table { min-width: 520px; border-collapse: collapse; font-size: 14px; }
-    .scroller td { width: 130px; padding: 8px 12px; }
-    .scroller td.bare { padding: 8px 12px 8px 0; }
-    .ellipsis-panel { width: 250px; background: #f8f8f8; border-right: 1px solid #d4d4d4; overflow: hidden; font-size: 13px; }
-    .ellipsis-panel .list { padding: 12px 15px; }
-    .ellipsis-panel .name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .band { background: #f5f5f5; font-size: 14px; }
-    .band-top { margin: 0; padding: 12px 16px 0; }
-    .band-next { padding: 4px 16px 12px; }
-    .band-next.other { background: #e0e7ff; }
-    .layer-host { position: relative; padding: 0 16px; }
-    .layer-host .layer { position: absolute; inset: 0; background: #f5f5f5; }
-    .layer-host .content { position: relative; }
-    .pass-layer-grid { background: #f5f5f5; font-size: 14px; }
-    .pass-layer-grid p { margin: 0; }
-    .scaled { transform: scale(0.3); transform-origin: 0 0; width: 600px; height: 12px; }
-    .pass-scaled-chip { display: inline-block; background: #e8e8ea; padding: 0 6px; font-size: 14px; line-height: 28px; font-style: normal; }
   </style>
 </head>
 <body>
@@ -220,16 +200,6 @@
   const value = "cramped";
   return value;
 }</pre>
-      </div>
-
-      <h3>Sides with a visible edge the text crowds (browser engine only)</h3>
-      <div class="case">
-        <span class="case-label">a table that scrolls sideways in its bordered box: the far side is cut by the scroll, but the first cell's text starts on the box's left edge</span>
-        <div class="scroller flag-scroll-start"><table><tr><td class="bare">Starter plan</td><td>Team plan</td><td>Unlimited seats included</td><td>Enterprise</td></tr></table></div>
-      </div>
-      <div class="case">
-        <span class="case-label">two stacked bands in different colours: the edge between them shows, and the text sits on it</span>
-        <div><div class="band flag-band-next-differs"><p class="band-top">The first band's text runs to its bottom edge with no padding under it at all.</p></div><div class="band band-next other">The next band is painted another colour.</div></div>
       </div>
     </div>
 
@@ -338,28 +308,6 @@
       <div class="case">
         <span class="case-label">an inline highlight with no vertical padding wraps onto two lines: each fragment is one 21px line, not one 43px box</span>
         <div class="pass-highlight-copy">Every estimate is checked against the <span class="pass-highlight">carrier's own estimating guide before it ships</span> to the customer.</div>
-      </div>
-
-      <h3>Sides a reader sees no edge on (browser engine only)</h3>
-      <div class="case">
-        <span class="case-label">a table that scrolls sideways in its bordered box: the text at the far side is cut by the scroll, not crowding the border (outreign.io, onco.cc)</span>
-        <div class="scroller pass-scroll-table"><table><tr><td>Starter plan</td><td>Team plan</td><td>Unlimited seats included</td><td>Enterprise</td></tr></table></div>
-      </div>
-      <div class="case">
-        <span class="case-label">a list title an ellipsis ends inside the list's 15px inset; only the laid-out run reaches the panel's border (inven.co.kr)</span>
-        <div class="ellipsis-panel pass-ellipsis-panel"><div><div class="list"><div class="name"><span>A post title long enough that its ellipsis ends it well inside the panel</span></div></div></div></div>
-      </div>
-      <div class="case">
-        <span class="case-label">two stacked bands in one grey: the edge between them is no edge (cencora.com)</span>
-        <div><div class="band pass-same-band"><p class="band-top">The first band's text runs to its bottom edge with no padding under it at all.</p></div><div class="band band-next">The next band is the same grey.</div></div>
-      </div>
-      <div class="case">
-        <span class="case-label">a grey grid on a section whose grey is an absolutely positioned layer beside the content (hp.com)</span>
-        <div class="layer-host"><div class="layer"></div><div class="content"><div class="pass-layer-grid"><p>The cards start on the section's own gutter, and the grid's grey is the section's grey.</p></div></div></div>
-      </div>
-      <div class="case">
-        <span class="case-label">a chip in a column a transform draws at 0.3 (people.com.cn): the room around its label is measured at that scale</span>
-        <div class="scaled"><i class="pass-scaled-chip"><a>社会·法治</a></i></div>
       </div>
     </div>
   </div>

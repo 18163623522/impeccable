@@ -1807,6 +1807,11 @@ pub fn is_layered_element(dom: &dyn Dom, el: ElId) -> bool {
     false
 }
 
+/// `pointer-events: none`, computed (so inherited).
+fn ignores_pointer_events(dom: &dyn Dom, el: ElId) -> bool {
+    dom.style(el, "pointerEvents") == "none"
+}
+
 /// JS: checks.mjs#elementDirectText(el)
 pub fn element_direct_text(dom: &dyn Dom, el: ElId) -> String {
     js::trim(&direct_text(dom, el)).to_string()
@@ -2026,6 +2031,32 @@ pub fn rect_holds_point(rect: &Rect, x: f64, y: f64) -> bool {
         && y <= rect.bottom + SLACK
 }
 
+/// Whether text answering a probe point may draw over the victim there. Its
+/// glyphs hold the point, or they meet the victim's glyphs somewhere: the
+/// grid is coarse (one row through a single line's middle), so a word lying
+/// under a heading's descenders, or a block label far wider than its words,
+/// is met at points off the other word's glyphs, and the grid cannot say
+/// where the two collide. Only glyphs clear of the victim's (a stretched
+/// link's title below the topic its overlay answers over) cover nothing. A
+/// text rect the capture did not record, on either side, keeps the answer.
+fn glyphs_may_cover(answer: Option<Rect>, victim: Option<&Rect>, x: f64, y: f64) -> bool {
+    let Some(answer) = answer.filter(|r| r.all_finite()) else {
+        return true;
+    };
+    let Some(victim) = victim else {
+        return true;
+    };
+    rect_holds_point(&answer, x, y)
+        || (answer.left < victim.right
+            && victim.left < answer.right
+            && answer.top < victim.bottom
+            && victim.top < answer.bottom)
+}
+
+/// How many ancestors of a hit-test answer text-occlusion asks whether they
+/// are a moving ticker track.
+const MARQUEE_TRACK_MAX_DEPTH: usize = 4;
+
 /// JS: checks.mjs#checkTextOcclusionDOM()
 pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -2050,7 +2081,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         let f = js::to_lower_case(&f);
         f == "left" || f == "right"
     };
-    let is_marqueeish = |el: ElId| -> bool {
+    let names_marquee = |el: ElId| -> bool {
         if dom.tag_name(el) == "MARQUEE" {
             return true;
         }
@@ -2064,6 +2095,34 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         let anim = js::to_lower_case(&dom.style(el, "animationName"));
         MARQUEE_ANIM_RE.is_match(&anim)
+    };
+    // A ticker moves between the capture and the probes, so what a point
+    // answers inside it is a neighbour that slid under the point. The track
+    // that moves is often an ancestor of the span the probe returns
+    // (react-fast-marquee animates `.rfm-marquee`, two levels up), so a few
+    // ancestors are asked too. An ancestor counts only while it moves: an
+    // animation named for a ticker, or a marquee name on a box running an
+    // animation. A page wrapper named `.page-scroller`, or iScroll's
+    // `#scroller`, names a scroller without ticking, and the text under it
+    // collides like any other.
+    let is_marqueeish = |el: ElId| -> bool {
+        if names_marquee(el) {
+            return true;
+        }
+        let mut cur = dom.parent(el);
+        for _ in 0..MARQUEE_TRACK_MAX_DEPTH {
+            let Some(c) = cur else { break };
+            if Some(c) == body {
+                break;
+            }
+            let anim = js::to_lower_case(&dom.style(c, "animationName"));
+            let animated = !anim.is_empty() && anim.split(',').any(|n| js::trim(n) != "none");
+            if animated && (MARQUEE_ANIM_RE.is_match(&anim) || names_marquee(c)) {
+                return true;
+            }
+            cur = dom.parent(c);
+        }
+        false
     };
     let is_pinned_overlay = |el: ElId| -> bool {
         let mut cur = Some(el);
@@ -2174,6 +2233,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
 
+        // The probe is `elementFromPoint`, which passes through anything that
+        // ignores pointer events. Over such text (a floating label laid on its
+        // input) the answer is whatever lies under it, so a box it names may
+        // sit below the text rather than over it, and cannot be counted. Text
+        // it names overlaps the victim whichever of the two is on top.
+        let passes_through = ignores_pointer_events(dom, el);
+        let victim_glyphs = dom.direct_text_rect(el).filter(|r| r.all_finite());
         let mut total = 0usize;
         let mut occluded = 0usize;
         let mut occluder_el: Option<ElId> = None;
@@ -2187,7 +2253,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if is_floated(top) || is_marqueeish(top) || is_pinned_overlay(top) {
                 continue;
             }
-            if effective_opacity_dom(dom, top) <= 0.02 {
+            if effective_opacity_dom(dom, top) <= 0.02 || ignores_pointer_events(dom, top) {
                 continue;
             }
             // An answer naming an element the capture says is not painted
@@ -2200,7 +2266,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
                 continue;
             }
-            let top_own_text = !element_direct_text(dom, top).is_empty();
+            // A label at `font-size: 0` (a hidden link's) draws nothing, and
+            // text covers the point only where its glyphs could: a stretched
+            // link's transparent `::after` answers for the whole card while
+            // its title sits elsewhere.
+            let top_own_text = !element_direct_text(dom, top).is_empty()
+                && !super::painted::under_1px(&dom.style(top, "fontSize"))
+                && glyphs_may_cover(dom.direct_text_rect(top), victim_glyphs.as_ref(), x, y);
             let top_in_svg = closest_or_none(dom, top, "svg").is_some();
             let top_has_text = top_own_text || top_in_svg;
             let top_style = ElStyle { dom, el: top };
@@ -2212,7 +2284,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             // never measured, so it counts for nothing. A box that carries text
             // of its own can still overflow its rect and is kept as text.
             let box_here = rect_holds_point(&dom.rect(top), x, y);
-            if box_here && is_opaque_decorated_box(Some(&top_style)) {
+            if box_here && !passes_through && is_opaque_decorated_box(Some(&top_style)) {
                 occluded += 1;
                 if occluder_el.is_none() {
                     occluder_el = Some(top);
@@ -3013,6 +3085,235 @@ mod tests {
                 class_selector(&d, sib)
             )
         );
+    }
+
+    const PROBE_BASE: &[(&str, &str)] = &[
+        ("display", "block"),
+        ("visibility", "visible"),
+        ("opacity", "1"),
+        ("contentVisibility", "visible"),
+        ("position", "static"),
+        ("cssFloat", "none"),
+        ("animationName", "none"),
+        ("pointerEvents", "auto"),
+        ("fontSize", "16px"),
+    ];
+
+    /// airsoft-verzeichnis.de's Bootstrap `form-floating` label: the hit test
+    /// passes through it and answers with the input under it.
+    #[test]
+    fn text_occlusion_cannot_rank_a_box_under_text_that_ignores_pointer_events() {
+        let run = |pointer_events: &str, input_text: Option<&str>| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let field = d.add(Some(body), "div");
+            d.set_styles(field, PROBE_BASE);
+            d.set_style(field, "position", "relative");
+            d.set_rect(field, 12.0, 104.0, 228.0, 58.0);
+            let label = d.add(Some(field), "label");
+            d.set_styles(label, PROBE_BASE);
+            d.set_styles(label, &[("position", "absolute"), ("pointerEvents", pointer_events)]);
+            d.set_rect(label, 24.0, 112.0, 120.0, 20.0);
+            d.add_text(label, "Emailadresse");
+            let input = d.add(Some(field), if input_text.is_some() { "div" } else { "input" });
+            d.set_styles(input, PROBE_BASE);
+            d.set_styles(input, &[("position", "absolute"), ("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(input, 12.0, 104.0, 228.0, 58.0);
+            if let Some(t) = input_text {
+                d.add_text(input, t);
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        assert_eq!(run("auto", None).len(), 1);
+        assert!(run("none", None).is_empty());
+        // Text it names overlaps the label whichever of the two is on top.
+        let f = run("none", Some("Emailadresse eingeben"));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("overlapping text"), "{f:?}");
+    }
+
+    /// ladepeche.fr's stretched link: its transparent `::after` answers for
+    /// the whole card while its title sits below the topic. drom.ru's hidden
+    /// link carries its label at `font-size: 0`.
+    #[test]
+    fn text_occlusion_counts_text_only_where_its_glyphs_are() {
+        let run = |text_rect: Option<(f64, f64)>, font_size: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let overlay = d.add(Some(body), "div");
+            d.set_styles(overlay, PROBE_BASE);
+            d.set_style(overlay, "position", "absolute");
+            d.set_rect(overlay, 85.0, 700.0, 665.0, 280.0);
+            let topic = d.add(Some(overlay), "div");
+            d.set_styles(topic, PROBE_BASE);
+            d.set_rect(topic, 95.0, 710.0, 120.0, 20.0);
+            d.set_text_rect(topic, 95.0, 711.0, 80.0, 18.0);
+            d.add_text(topic, "Faits divers");
+            let link = d.add(Some(overlay), "a");
+            d.set_styles(link, PROBE_BASE);
+            d.set_styles(link, &[("position", "absolute"), ("fontSize", font_size)]);
+            // The rect the hit test answers for: the overlay's whole card.
+            d.set_rect(link, 85.0, 700.0, 665.0, 280.0);
+            d.add_text(link, "Messe polémique à Carcassonne");
+            if let Some((x, y)) = text_rect {
+                d.set_text_rect(link, x, y, 400.0, 40.0);
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        // The title's glyphs sit at y 800; the topic at y 710 is not under them.
+        assert!(run(Some((95.0, 800.0)), "16px").is_empty());
+        // Glyphs over the topic, and a text rect the capture did not record,
+        // count as before.
+        assert_eq!(run(Some((95.0, 705.0)), "16px").len(), 1);
+        assert_eq!(run(None, "16px").len(), 1);
+        // A label at font-size 0 draws nothing.
+        assert!(run(None, "0px").is_empty());
+    }
+
+    /// v0-dashboard-ui-redesign-nine.vercel.app capture 3762: a mobile
+    /// sidebar leaks under the page header, and its block label "Menu" lies
+    /// wholly under the heading "Team". Both boxes are far wider than their
+    /// words, and the grid spans the label's box; where the two words' glyphs
+    /// meet, the heading counts at every point it answers, or the label would
+    /// score only the share of its box the heading's glyphs cross.
+    #[test]
+    fn text_occlusion_counts_a_heading_over_a_wide_label_where_their_glyphs_meet() {
+        let run = |menu_glyphs: Option<(f64, f64)>| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let aside = d.add(Some(body), "aside");
+            d.set_styles(aside, PROBE_BASE);
+            d.set_style(aside, "position", "absolute");
+            d.set_rect(aside, 0.0, 0.0, 240.0, 400.0);
+            let menu = d.add(Some(aside), "p");
+            d.set_styles(menu, PROBE_BASE);
+            d.set_rect(menu, 16.0, 72.0, 223.0, 15.0);
+            d.add_text(menu, "Menu");
+            if let Some((x, w)) = menu_glyphs {
+                d.set_text_rect(menu, x, 73.0, w, 12.0);
+            }
+            let main = d.add(Some(body), "main");
+            d.set_styles(main, PROBE_BASE);
+            d.set_style(main, "position", "relative");
+            d.set_rect(main, 0.0, 0.0, 390.0, 400.0);
+            let h1 = d.add(Some(main), "h1");
+            d.set_styles(h1, PROBE_BASE);
+            d.set_rect(h1, 16.0, 64.0, 358.0, 28.0);
+            d.add_text(h1, "Team");
+            d.set_text_rect(h1, 16.0, 66.0, 51.0, 23.0);
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        // The label's glyphs lie under the heading's.
+        let f = run(Some((16.0, 32.0)));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("100% covered by overlapping text"), "{f:?}");
+        // Glyphs clear of the heading's are not covered, however wide the box.
+        assert!(run(Some((200.0, 32.0))).is_empty());
+        // A label whose glyphs the capture did not record keeps every answer.
+        assert_eq!(run(None).len(), 1);
+    }
+
+    /// The same capture's "Settings" under a card's h3: the grid's one row
+    /// runs through the label's middle, just below the h3's glyph rect, while
+    /// the two glyph rects overlap by 6px.
+    #[test]
+    fn text_occlusion_counts_a_heading_whose_glyphs_meet_the_label_off_the_grid_row() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let nav = d.add(Some(body), "nav");
+        d.set_styles(nav, PROBE_BASE);
+        d.set_style(nav, "position", "absolute");
+        d.set_rect(nav, 0.0, 300.0, 240.0, 100.0);
+        let label = d.add(Some(nav), "span");
+        d.set_styles(label, PROBE_BASE);
+        d.set_rect(label, 52.0, 330.0, 54.9, 20.0);
+        d.set_text_rect(label, 52.0, 331.0, 54.9, 17.0);
+        d.add_text(label, "Settings");
+        let card = d.add(Some(body), "div");
+        d.set_styles(card, PROBE_BASE);
+        d.set_rect(card, 0.0, 280.0, 390.0, 300.0);
+        let h3 = d.add(Some(card), "h3");
+        d.set_styles(h3, PROBE_BASE);
+        d.set_rect(h3, 41.0, 313.0, 308.0, 28.0);
+        d.set_text_rect(h3, 41.0, 316.0, 125.0, 21.0);
+        d.add_text(h3, "Alexandra Deff");
+        mark_body_descendants(&mut d);
+        let f = check_text_occlusion_dom(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("100% covered by overlapping text"), "{f:?}");
+    }
+
+    /// cnnbrasil.com.br's react-fast-marquee: the track that moves is the
+    /// grandparent of the spans the probes answer with.
+    #[test]
+    fn text_occlusion_skips_answers_inside_a_moving_track() {
+        let run = |animation: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let track = d.add(Some(body), "div");
+            d.set_styles(track, PROBE_BASE);
+            d.set_styles(track, &[("position", "absolute"), ("animationName", animation)]);
+            d.set_rect(track, -100.0, 75.0, 2417.0, 16.0);
+            let child = d.add(Some(track), "div");
+            d.set_styles(child, PROBE_BASE);
+            d.set_rect(child, 117.0, 75.0, 167.0, 16.0);
+            let under = d.add(Some(child), "span");
+            d.set_styles(under, PROBE_BASE);
+            d.set_rect(under, 125.0, 75.0, 40.0, 16.0);
+            d.add_text(under, "VALE3:");
+            let over = d.add(Some(child), "span");
+            d.set_styles(over, PROBE_BASE);
+            d.set_rect(over, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(over, "R$ 73,20");
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        assert!(!run("none").is_empty());
+        assert!(run("scroll").is_empty());
+        assert!(run("rfm-scroll").is_empty());
+    }
+
+    /// A page wrapper that names a scroller without moving (`.page-scroller`,
+    /// iScroll's `#scroller`) silences nothing under it, and neither does a
+    /// ticker track further up than a track sits.
+    #[test]
+    fn text_occlusion_asks_only_nearby_moving_ancestors() {
+        let run = |class: &str, animation: &str, depth: usize| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let wrapper = d.add(Some(body), "div");
+            d.set_styles(wrapper, PROBE_BASE);
+            d.set_styles(wrapper, &[("position", "relative"), ("animationName", animation)]);
+            d.set_attr(wrapper, "class", class);
+            d.set_rect(wrapper, 0.0, 0.0, 1280.0, 800.0);
+            let mut parent = wrapper;
+            for _ in 0..depth {
+                let level = d.add(Some(parent), "div");
+                d.set_styles(level, PROBE_BASE);
+                d.set_rect(level, 0.0, 0.0, 1280.0, 800.0);
+                parent = level;
+            }
+            let under = d.add(Some(parent), "span");
+            d.set_styles(under, PROBE_BASE);
+            d.set_style(under, "position", "absolute");
+            d.set_rect(under, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(under, "Opening hours");
+            let over = d.add(Some(parent), "span");
+            d.set_styles(over, PROBE_BASE);
+            d.set_style(over, "position", "absolute");
+            d.set_rect(over, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(over, "Closed today");
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d).len()
+        };
+        assert_eq!(run("page-scroller", "none", 1), 1);
+        assert_eq!(run("marquee", "none", 1), 1);
+        assert_eq!(run("marquee", "slide", 1), 0);
+        assert_eq!(run("track", "ticker-run", 1), 0);
+        assert_eq!(run("track", "ticker-run", 6), 1);
     }
 
     /// A carousel that advances between the capture and the hit-test answer

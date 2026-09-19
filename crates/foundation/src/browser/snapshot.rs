@@ -67,6 +67,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "animationTimingFunction",
     "aspectRatio",
     "backdropFilter",
+    "backfaceVisibility",
     "background",
     "backgroundClip",
     "backgroundColor",

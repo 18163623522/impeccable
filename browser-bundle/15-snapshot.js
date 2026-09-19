@@ -21,7 +21,7 @@
 // lists agree).
 const __SNAP_STYLE_PROPS = [
   "animationIterationCount", "animationName", "animationTimingFunction",
-  "aspectRatio", "backdropFilter", "background", "backgroundClip",
+  "aspectRatio", "backdropFilter", "backfaceVisibility", "background", "backgroundClip",
   "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundSize",
   "blockSize", "borderBottomColor", "borderBottomWidth", "borderBottomStyle",
   "borderLeftColor", "borderLeftWidth", "borderLeftStyle", "borderRadius",

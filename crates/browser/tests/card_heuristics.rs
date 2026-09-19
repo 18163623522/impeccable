@@ -234,6 +234,8 @@ fn undersized_ui_text_skips_links_inside_markers() {
 fn page_level_misreads_stay_silent() {
     for (fixture, rule) in [
         ("flat-type-hierarchy-h1-tie.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-dropped-role.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-h1-label.html", "flat-type-hierarchy"),
         ("oversized-h1-rendered.html", "oversized-h1"),
         ("first-viewport-column-overflow-outline.html", "first-viewport-column-overflow"),
         ("first-viewport-column-overflow-tabs.html", "first-viewport-column-overflow"),

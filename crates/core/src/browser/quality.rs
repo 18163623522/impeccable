@@ -121,6 +121,77 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
     !colors_nearly_match(Some(&bg), Some(CANVAS_BACKGROUND))
 }
 
+/// Whether the fill `el` paints lies on a layer painting the same colour: a
+/// sibling laid earlier (so painted under it) that covers it, of `el` or of
+/// an ancestor below the first one that paints a background of its own.
+/// hp.com's grey grid sits in a section whose grey is an absolutely
+/// positioned media layer beside the content, not an ancestor, so the
+/// background walk reads the white page behind both and sees an edge no
+/// reader sees.
+fn backdrop_layer_matches(dom: &dyn Dom, el: ElId) -> bool {
+    let bg = dom.style(el, "backgroundColor");
+    if css_color_is_transparent(Some(&bg)) {
+        return false;
+    }
+    let r = dom.rect(el);
+    let mut node = el;
+    for _ in 0..12 {
+        let mut prev = dom.previous_element_sibling(node);
+        while let Some(s) = prev {
+            prev = dom.previous_element_sibling(s);
+            if dom.style(s, "display") == "none" {
+                continue;
+            }
+            let sr = dom.rect(s);
+            let covers = sr.left <= r.left + 1.0
+                && sr.right >= r.right - 1.0
+                && sr.top <= r.top + 1.0
+                && sr.bottom >= r.bottom - 1.0;
+            let fill = dom.style(s, "backgroundColor");
+            if covers && !css_color_is_transparent(Some(&fill)) {
+                return colors_nearly_match(Some(&bg), Some(&fill));
+            }
+        }
+        let Some(parent) = dom.parent(node) else { return false };
+        if !css_color_is_transparent(Some(&dom.style(parent, "backgroundColor"))) {
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+/// Whether the band `el` paints continues past `side` (0 top, 1 right, 2
+/// bottom, 3 left) into a sibling that abuts it there with the same fill:
+/// cencora.com stacks grey bands, and the edge between two of them is no
+/// edge at all.
+fn side_meets_same_fill(dom: &dyn Dom, el: ElId, rect: &Rect, side: usize) -> bool {
+    let bg = dom.style(el, "backgroundColor");
+    if css_color_is_transparent(Some(&bg)) {
+        return false;
+    }
+    let Some(parent) = dom.parent(el) else { return false };
+    dom.children(parent).into_iter().any(|s| {
+        if s == el || dom.style(s, "display") == "none" {
+            return false;
+        }
+        let sr = dom.rect(s);
+        if !(sr.width > 0.0 && sr.height > 0.0) {
+            return false;
+        }
+        let across = |a0: f64, a1: f64, b0: f64, b1: f64| {
+            js::math_min(a1, b1) - js::math_max(a0, b0) >= (a1 - a0) * 0.9
+        };
+        let abuts = match side {
+            0 => (sr.bottom - rect.top).abs() <= 1.5 && across(rect.left, rect.right, sr.left, sr.right),
+            2 => (sr.top - rect.bottom).abs() <= 1.5 && across(rect.left, rect.right, sr.left, sr.right),
+            1 => (sr.left - rect.right).abs() <= 1.5 && across(rect.top, rect.bottom, sr.top, sr.bottom),
+            _ => (sr.right - rect.left).abs() <= 1.5 && across(rect.top, rect.bottom, sr.top, sr.bottom),
+        };
+        abuts && colors_nearly_match(Some(&bg), Some(&dom.style(s, "backgroundColor")))
+    })
+}
+
 /// The part of `inner` that falls inside `outer`, or `None` when the two miss
 /// each other.
 ///
@@ -211,14 +282,22 @@ pub const SMALL_CHIP_HEIGHT_UNDER_PX: f64 = 27.5;
 /// the edge. Only the vertical edges move; a rect already no taller than its
 /// em boxes is returned as it is.
 pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
-    let font_size = parse_float(&dom.style(node, "fontSize"));
+    glyph_band_at(dom, node, t, 1.0)
+}
+
+/// [`glyph_band`] for text drawn at `scale` times its layout size: a
+/// transform that shrinks a whole column (people.com.cn lays its desktop
+/// page into a phone at about 0.3) shrinks the rects but not the computed
+/// font size and line height, which are layout pixels.
+fn glyph_band_at(dom: &dyn Dom, node: ElId, t: &Rect, scale: f64) -> Rect {
+    let font_size = parse_float(&dom.style(node, "fontSize")) * scale;
     if !(font_size.is_finite() && font_size > 0.0) {
         return *t;
     }
-    let own = resolve_length_px(Some(&dom.style(node, "lineHeight")), font_size)
+    let own = resolve_length_px(Some(&dom.style(node, "lineHeight")), font_size / scale)
         .filter(|lh| lh.is_finite() && *lh > 0.0)
-        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-    let pitch = line_pitch_px(dom, node, own);
+        .unwrap_or(font_size / scale * NORMAL_LINE_HEIGHT_EM);
+    let pitch = line_pitch_px(dom, node, own) * scale;
     let lines = text_line_count(t.height, pitch, font_size);
     let content = t.height - (lines - 1.0) * pitch;
     let inset = (content - font_size) / 2.0;
@@ -279,6 +358,65 @@ fn items_each_fit_one_line(dom: &dyn Dom, el: ElId, font_size: f64) -> bool {
     })
 }
 
+/// The scale `el` is drawn at: its on-screen width over its layout width.
+/// 1 unless a transform shrinks it by more than a twentieth, or when the
+/// layout width was not recorded.
+fn drawn_scale(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
+    let layout = dom.offset_width(el);
+    if !(layout.is_finite() && layout > 0.0 && rect.width > 0.0) {
+        return 1.0;
+    }
+    let scale = rect.width / layout;
+    if scale > 0.05 && scale < 0.95 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// How much of `tr`, a text rect of `node`, shows on the x axis once each box
+/// between `node` and `el` (both ends included) that clips x has cut it:
+/// `(left, right, cut_left, cut_right)`, the cut flags saying a clip took off
+/// that end by more than `tolerance` (a line that overshoots a padding-less
+/// box by a pixel or two is text touching its edge, not a line cut off).
+/// `None` when nothing is left. A clip is the box's padding box; an inline
+/// box clips nothing.
+fn visible_x_extent(
+    dom: &dyn Dom,
+    el: ElId,
+    node: ElId,
+    tr: &Rect,
+    tolerance: f64,
+) -> Option<(f64, f64, bool, bool)> {
+    let (mut left, mut right) = (tr.left, tr.right);
+    let (mut cut_left, mut cut_right) = (false, false);
+    let mut cur = dom.parent(node);
+    while let Some(p) = cur {
+        if dom.style(p, "display") != "inline" && crate::browser::text_geometry::clips_x(dom, p) {
+            let pr = dom.rect(p);
+            let inner_left = pr.left + dom.client_left(p).max(0.0);
+            let cw = dom.client_width(p);
+            let inner_right = if cw.is_finite() && cw > 0.0 { inner_left + cw } else { pr.right };
+            if left < inner_left {
+                cut_left |= inner_left - left > tolerance;
+                left = inner_left;
+            }
+            if right > inner_right {
+                cut_right |= right - inner_right > tolerance;
+                right = inner_right;
+            }
+            if right - left < 1.0 {
+                return None;
+            }
+        }
+        if p == el {
+            break;
+        }
+        cur = dom.parent(p);
+    }
+    Some((left, right, cut_left, cut_right))
+}
+
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
 ///
 /// Each candidate is measured by its own text rect, not by its border box: a
@@ -292,8 +430,11 @@ fn items_each_fit_one_line(dom: &dyn Dom, el: ElId, font_size: f64) -> bool {
 /// of declared padding read as enough. Taste call r3-20 (2026-09-18).
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
-    const TEXT_EDGE_THRESHOLD: f64 = 4.0;
-    let small_chip = rect.height > 0.0 && rect.height < SMALL_CHIP_HEIGHT_UNDER_PX;
+    // Rects are screen pixels and the thresholds layout pixels: a box drawn
+    // at a transform's scale is measured at that scale.
+    let scale = drawn_scale(dom, el, rect);
+    let edge_threshold = 4.0 * scale;
+    let small_chip = rect.height > 0.0 && rect.height / scale < SMALL_CHIP_HEIGHT_UNDER_PX;
     let candidates = dom.query_all(Some(el), TEXT_EDGE_QUERY).unwrap_or_default();
     for node in candidates {
         let tag_name = dom.tag_name(node);
@@ -312,10 +453,10 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         // the box first keeps the text measurement, a range walk in the page,
         // off the many candidates that sit well inside.
         let box_sides = [
-            br.top - rect.top <= TEXT_EDGE_THRESHOLD,
-            rect.right - br.right <= TEXT_EDGE_THRESHOLD,
-            rect.bottom - br.bottom <= TEXT_EDGE_THRESHOLD,
-            br.left - rect.left <= TEXT_EDGE_THRESHOLD,
+            br.top - rect.top <= edge_threshold,
+            rect.right - br.right <= edge_threshold,
+            rect.bottom - br.bottom <= edge_threshold,
+            br.left - rect.left <= edge_threshold,
         ];
         if !box_sides.iter().any(|s| *s) {
             continue;
@@ -325,7 +466,7 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         // glyphs are measured rather than the font's content area.
         let nr = match dom.direct_text_rect(node) {
             Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(
-                &if small_chip { glyph_band(dom, node, &t) } else { t },
+                &if small_chip { glyph_band_at(dom, node, &t, scale) } else { t },
                 &br,
             ) {
                 Some(c) => c,
@@ -333,11 +474,19 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
             },
             _ => br,
         };
+        // Only what the clipping boxes on the way leave of the line reaches
+        // an edge. A side where a clip cuts the text is where the line is cut
+        // off (a table scrolled sideways inside the box, a tab strip that
+        // scrolls, a title an ellipsis ends), not where glyphs crowd a
+        // boundary.
+        let Some((left, right, cut_left, cut_right)) = visible_x_extent(dom, el, node, &nr, edge_threshold) else {
+            continue;
+        };
         let sides = [
-            nr.top - rect.top <= TEXT_EDGE_THRESHOLD,
-            rect.right - nr.right <= TEXT_EDGE_THRESHOLD,
-            rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD,
-            nr.left - rect.left <= TEXT_EDGE_THRESHOLD,
+            nr.top - rect.top <= edge_threshold,
+            !cut_right && rect.right - right <= edge_threshold,
+            rect.bottom - nr.bottom <= edge_threshold,
+            !cut_left && left - rect.left <= edge_threshold,
         ];
         // The two remaining tests run only for text that reached an edge.
         if !sides.iter().any(|s| *s) {
@@ -988,7 +1137,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 && !css_color_is_transparent(Some(&outline_color_val))
                 && !outline_style_val.is_empty()
                 && outline_style_val != "none";
-            let bg_visible = has_visible_background_boundary(dom, el);
+            let bg_visible = has_visible_background_boundary(dom, el) && !backdrop_layer_matches(dom, el);
             let any_visible = border_visible.iter().any(|b| *b) || outline_visible || bg_visible;
             if any_visible {
                 let len = |e: ElId, k: &str| {
@@ -1048,7 +1197,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 let side_names = ["top", "right", "bottom", "left"];
                 let mut flush_sides: Vec<&str> = Vec::new();
                 for s in 0..4 {
-                    let bg_bounds_side = bg_visible && !(full_bleed_bg_band && (s == 1 || s == 3));
+                    let bg_bounds_side = bg_visible
+                        && !(full_bleed_bg_band && (s == 1 || s == 3))
+                        && !side_meets_same_fill(dom, el, rect, s);
                     let side_bounded = border_visible[s] || outline_visible || bg_bounds_side;
                     if side_bounded && pad[s] <= PAD_THRESHOLD && !children_insulate[s] && text_flush[s] {
                         flush_sides.push(side_names[s]);
@@ -2314,6 +2465,71 @@ mod tests {
             cramped(&d, touching),
             vec!["<div> \"faq-content__step\": children flush against bg on top/bottom (no inset)"]
         );
+    }
+
+    /// observations-28 row 13: sides a reader sees no edge on. A band that
+    /// runs on into a sibling of the same fill (cencora.com), a fill laid on
+    /// a positioned layer of the same colour (hp.com), and a line a clipping
+    /// box cuts (a table scrolled sideways, a title an ellipsis ends) do not
+    /// crowd a boundary.
+    #[test]
+    fn cramped_padding_reads_the_edges_a_reader_sees() {
+        let band_page = |layer: bool| -> (FakeDom, ElId, ElId, ElId) {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+            let host = d.add(Some(body), "div");
+            d.set_rect(host, 0.0, 100.0, 390.0, 200.0);
+            if layer {
+                let l = d.add(Some(host), "div");
+                d.set_styles(l, &[("position", "absolute"), ("backgroundColor", "rgb(245, 245, 245)")]);
+                d.set_rect(l, 0.0, 100.0, 390.0, 200.0);
+            }
+            let wrap = d.add(Some(host), "div");
+            d.set_rect(wrap, 16.0, 100.0, 358.0, 200.0);
+            let band = d.add(Some(wrap), "div");
+            d.set_attr(band, "class", "band");
+            d.set_rect(band, 16.0, 100.0, 358.0, 48.0);
+            d.set_styles(band, &[("display", "block"), ("position", "static"), ("backgroundColor", "rgb(245, 245, 245)")]);
+            let copy = text_el(&mut d, band, "p", "Copy that runs to the bottom edge", "14px");
+            d.set_styles(copy, &[("paddingTop", "12px"), ("paddingLeft", "16px"), ("paddingRight", "16px")]);
+            d.set_rect(copy, 16.0, 100.0, 358.0, 48.0);
+            d.set_text_rect(copy, 32.0, 127.0, 300.0, 20.0);
+            (d, wrap, band, copy)
+        };
+        let bottom = vec!["<div> \"band\": children flush against bg on bottom (no inset)"];
+        let (mut d, wrap, band, _) = band_page(false);
+        assert_eq!(cramped(&d, band), bottom);
+        // The next band, abutting, is the same grey.
+        let next = d.add(Some(wrap), "div");
+        d.set_rect(next, 16.0, 148.0, 358.0, 40.0);
+        d.set_style(next, "backgroundColor", "rgb(245, 245, 245)");
+        assert!(cramped(&d, band).is_empty(), "same fill below");
+        d.set_style(next, "backgroundColor", "rgb(224, 231, 255)");
+        assert_eq!(cramped(&d, band), bottom, "another fill below");
+        // The grey around the band is a positioned layer under the content.
+        let (d, _, band, _) = band_page(true);
+        assert!(cramped(&d, band).is_empty(), "same fill on a layer");
+
+        // A line cut by a box that clips x (an ellipsis inside the band's
+        // inset) reaches no side of the band.
+        let (mut d, _, band, copy) = band_page(false);
+        d.set_styles(copy, &[("paddingBottom", "12px"), ("paddingRight", "0px")]);
+        d.set_text_rect(copy, 32.0, 112.0, 300.0, 20.0);
+        let name = d.add(Some(copy), "span");
+        d.add_text(name, "A post title an ellipsis ends inside the inset");
+        d.set_styles(name, &[("display", "block"), ("overflowX", "hidden"), ("position", "static")]);
+        d.set_rect(name, 32.0, 112.0, 326.0, 20.0);
+        d.el_mut(name).client_width = 326.0;
+        let run = d.add(Some(name), "span");
+        d.add_text(run, "A post title an ellipsis ends inside the inset");
+        d.set_styles(run, &[("display", "inline"), ("position", "static")]);
+        d.set_rect(run, 32.0, 112.0, 380.0, 20.0);
+        d.set_text_rect(run, 32.0, 112.0, 380.0, 20.0);
+        assert!(cramped(&d, band).is_empty(), "cut by the ellipsis box: {:?}", cramped(&d, band));
+        // Unclipped, the run reaches past the band's right side.
+        d.set_style(name, "overflowX", "visible");
+        assert_eq!(cramped(&d, band), vec!["<div> \"band\": children flush against bg on right (no inset)"]);
     }
 
     #[test]

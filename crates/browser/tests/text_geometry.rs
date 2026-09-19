@@ -204,11 +204,32 @@ fn the_text_geometry_rules_measure_the_text() {
     // the step chip's line box holds them 5px off its edges, the 20px chip's
     // glyphs still reach within 2px. The price chip passes at 27px and
     // reports at 28px and 27.6px, where the content area measures it.
+    // A side a reader sees no edge on is not crowded (observations-28 row
+    // 13): text a sideways scroll or an ellipsis cuts, a band that runs on
+    // into a sibling of the same fill, a fill laid on a positioned layer of
+    // the same colour, and a chip a transform draws at 0.3. The start side
+    // of a scrolled table and a band beside another colour still report.
     let cramped = findings(&engine, port, "cramped-padding.html", "cramped-padding");
     assert_cases(
         &cramped,
-        &["flag-card-4", "flag-touching-chip", "flag-price-chip", "flag-price-chip-subpixel"],
-        &["pass-highlight", "pass-step-chip", "pass-price-chip"],
+        &[
+            "flag-card-4",
+            "flag-touching-chip",
+            "flag-price-chip",
+            "flag-price-chip-subpixel",
+            "flag-scroll-start",
+            "flag-band-next-differs",
+        ],
+        &[
+            "pass-highlight",
+            "pass-step-chip",
+            "pass-price-chip",
+            "pass-scroll-table",
+            "pass-ellipsis-panel",
+            "pass-same-band",
+            "pass-layer-grid",
+            "pass-scaled-chip",
+        ],
         "cramped-padding",
     );
     for chip in ["flag-price-chip", "flag-price-chip-subpixel"] {

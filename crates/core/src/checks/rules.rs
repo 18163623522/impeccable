@@ -1955,25 +1955,26 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
     }
 
     // The ladder is read from the roles whose size the samples settle. When
-    // the heading level a page uses most has no dominant size (cnnbrasil.com.br
-    // sets its thirty h3s at 14, 16 and 20px, ten each), the ladder leaves
-    // out the headings a reader sees most, and what is left says nothing
-    // about the page's hierarchy.
-    let most_used_heading = by_role
-        .iter()
-        .filter(|(role, _)| role != "body")
-        .map(|(_, sizes)| sizes.len())
-        .max()
-        .unwrap_or(0);
-    let mut dropped_most_used = false;
+    // the heading levels with no dominant size hold most of the page's
+    // headings (cnnbrasil.com.br sets its thirty h3s at 14, 16 and 20px, ten
+    // each, against twelve h1 and h2), the ladder leaves out the headings a
+    // reader sees, and what is left says nothing about the page's hierarchy.
+    let (mut settled_headings, mut dropped_headings) = (0usize, 0usize);
     let mut roles: Vec<(String, f64)> = Vec::new();
     for (role, sizes) in by_role {
+        let heading = role != "body";
         match dominant_type_role_size(&role, &sizes) {
-            Some(size) => roles.push((role, size)),
-            None => dropped_most_used |= role != "body" && sizes.len() == most_used_heading,
+            Some(size) => {
+                if heading {
+                    settled_headings += sizes.len();
+                }
+                roles.push((role, size));
+            }
+            None if heading => dropped_headings += sizes.len(),
+            None => {}
         }
     }
-    if dropped_most_used {
+    if dropped_headings > settled_headings {
         return Vec::new();
     }
 
@@ -2212,7 +2213,9 @@ mod tests {
     /// sees. cnnbrasil.com.br sets its thirty h3 headlines at 14, 16 and 20px,
     /// ten each, so the h3 role drops out and a 14/16/16 ladder of body, h1
     /// and h2 reports; phillips66.com's h1 is a 14px form label over 16px
-    /// copy. Neither ladder describes the page, and neither reports.
+    /// copy. Neither ladder describes the page, and neither reports. A tied
+    /// role holding fewer headings than the ladder does stays out as before
+    /// (otto.de's two h2s at 16 and 26px beside an h1, an h3 and an h4).
     #[test]
     fn flat_type_hierarchy_declines_a_ladder_without_the_page_headings() {
         let mut news = vec![("h1", 16.0)];
@@ -2238,6 +2241,13 @@ mod tests {
         // An h1 at the body size still counts.
         label[0] = ("h1", 16.0);
         assert_eq!(check_flat_type_hierarchy_samples(&samples(&label)).len(), 1);
+
+        let mut otto = vec![("h1", 16.0), ("h2", 16.0), ("h2", 26.0), ("h3", 16.0), ("h4", 12.0)];
+        otto.extend([("body", 14.0); 357]);
+        otto.extend([("body", 12.0); 46]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&otto));
+        assert_eq!(hits.len(), 1, "a tied minority role stays out: {hits:?}");
+        assert!(hits[0].snippet.starts_with("Role sizes: h4 12px, body 14px, h1 16px, h3 16px"), "{hits:?}");
     }
 
     #[test]

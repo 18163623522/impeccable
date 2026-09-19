@@ -13,7 +13,7 @@ use crate::checks::rules::{check_kicker_above_heading, KickerCandidate, RuleHit}
 use crate::checks::text_rules::{
     check_em_dash_overuse, check_numbered_section_labels, is_kicker_candidate,
     is_numbered_section_label_candidate, is_repeated_text_container, parse_numbered_label_text,
-    strip_edge_quotes, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
+    strip_edge_quotes, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR, LEADING_DISPLAY_TYPE_PX,
     KickerCandidateInput, NumberedLabelCandidate, NumberedLabelCandidateInput,
     REPEATED_TEXT_CONTAINER_TAGS, REPEATED_TEXT_SKIP_SELECTOR,
 };
@@ -55,8 +55,14 @@ pub fn is_kicker_card_context(dom: &dyn Dom, heading: ElId, kicker: ElId) -> boo
 /// the computed box), shorter than the viewport, whatever its tag. A label in
 /// a card beside its title is the card's metadata, as it is in an `article`
 /// or `li` card: aina-tech.io's white press card names its source ("The
-/// Future Media") over the headline in a `div`.
+/// Future Media") over its 20px h3 headline in a `div`. Only a card title
+/// counts: an h3 or lower set under display size. A section's own heading in
+/// a painted panel (redoubt.agency's h2 in the hero's side panel,
+/// vestra.ai's 40px h3 across a feature band) keeps its eyebrow reported.
 fn kicker_in_painted_card(dom: &dyn Dom, heading: ElId, kicker: ElId) -> bool {
+    if kicker_heading_level(dom, heading) < 3.0 || font_size_of(dom, heading) >= LEADING_DISPLAY_TYPE_PX {
+        return false;
+    }
     let viewport = {
         let h = dom.inner_height();
         if num_truthy(h) {

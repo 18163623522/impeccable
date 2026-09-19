@@ -218,7 +218,9 @@
     /* Round 7: a kicker inside a card drawn by its computed box, not its tag */
     .press-panel { padding: 24px; background: #14161b; border-radius: 16px; }
     .press-card { min-height: 180px; padding: 24px; background: #ffffff; border-radius: 16px; color: #14161b; }
-    .tall-panel { min-height: 900px; padding: 24px; background: #ffffff; border-radius: 16px; }
+    .press-card h3 { font-size: 20px; line-height: 25px; font-weight: 500; }
+    .side-panel { min-height: 300px; padding: 24px; background: #ffffff; border-radius: 16px; }
+    .side-panel h3 { font-size: 40px; line-height: 44px; }
   </style>
 </head>
 <body>
@@ -281,10 +283,18 @@
       </section>
 
       <section class="case">
-        <div class="tall-panel">
-          <span class="kicker">Platform overview</span>
-          <h2>"Label In A Tall Panel"</h2>
-          <p>A painted panel taller than the viewport is a section, not a card, and its eyebrow still flags.</p>
+        <div class="side-panel">
+          <span class="kicker">Practical agency support</span>
+          <h2>"Section Title In A Panel"</h2>
+          <p>A section's own h2 in a painted side panel is no card title, and its eyebrow still flags.</p>
+        </div>
+      </section>
+
+      <section class="case">
+        <div class="side-panel">
+          <span class="kicker">Beyond plans</span>
+          <h3>"Display Title In A Band"</h3>
+          <p>An h3 set at display size across a feature band is a section title too, and its eyebrow still flags.</p>
         </div>
       </section>
     </section>

@@ -312,7 +312,8 @@ fn label_collectors_climb_and_scale() {
             "A Single Kicker Still Flags",
             "Relative Kicker Ceiling",
             "Eyebrow In A Framer Wrapper",
-            "Label In A Tall Panel",
+            "Section Title In A Panel",
+            "Display Title In A Band",
         ],
         &["Label Too Large For Its Heading", "Untracked Caps Label", "Press Card Source"],
     );

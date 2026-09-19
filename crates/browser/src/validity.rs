@@ -12,12 +12,25 @@
 //! Header and HTTP-status signals stand alone. Titles and DOM markers only
 //! count on a small page, because a real page can carry a captcha widget on a
 //! form or be titled "Access denied" in a CMS without being a block page.
+//!
+//! The probe also names the known consent managers ([`crate::consent`]) whose
+//! banner is showing, and how much visible text sits inside them. It runs
+//! before the scan hides those banners, so a page that is nothing but a
+//! consent wall (a small page whose readable text is almost all the
+//! manager's) is refused as one, instead of being scanned empty and reported
+//! clean.
 
 use serde_json::{json, Value};
 
 /// Challenge pages are short. A page with more visible text than this is
 /// treated as content even when its title or a marker looks like a challenge.
 pub const SMALL_PAGE_CHARS: u64 = 3000;
+
+/// A small page with a known consent manager showing is a consent wall when
+/// fewer than this many visible characters lie outside the manager's roots,
+/// and the manager holds at least [`CONSENT_WALL_RATIO`] times as many.
+pub const CONSENT_WALL_OUTSIDE_CHARS: u64 = 100;
+pub const CONSENT_WALL_RATIO: u64 = 3;
 
 /// Titles challenge and block pages use, lowercased and trimmed. Matched by
 /// prefix, so "Access Denied" also covers "Access Denied - Reference #18...".
@@ -61,8 +74,9 @@ pub const CHALLENGE_MARKERS: &[(&str, &str)] = &[
     (".geetest_holder, #nc_1_wrapper, #aliyunCaptcha-sliding-wrapper", "slider-captcha"),
 ];
 
-/// The in-page probe: title, visible text length, final URL, and which
-/// challenge markers are present. Read-only; returns a plain object.
+/// The in-page probe: title, visible text length, final URL, which
+/// challenge markers are present, and which consent managers are showing
+/// with the visible text inside them. Read-only; returns a plain object.
 pub fn probe_js() -> String {
     let markers: Vec<Value> = CHALLENGE_MARKERS
         .iter()
@@ -75,15 +89,19 @@ pub fn probe_js() -> String {
   for (const [selector, label] of markers) {{
     try {{ if (document.querySelector(selector)) found.push(label); }} catch (e) {{}}
   }}
+  {consent}
   const text = (document.body && document.body.innerText) || '';
   return {{
     title: String(document.title || ''),
     textChars: text.replace(/\s+/g, ' ').trim().length,
     href: String(location.href || ''),
     markers: found,
+    consent,
+    consentChars,
   }};
 }})()"#,
-        markers = Value::Array(markers)
+        markers = Value::Array(markers),
+        consent = crate::consent::probe_fragment(),
     )
 }
 
@@ -94,6 +112,10 @@ pub struct PageProbe {
     pub text_chars: u64,
     pub href: String,
     pub markers: Vec<String>,
+    /// Known consent managers whose banner was showing, before any was hidden.
+    pub consent: Vec<String>,
+    /// Visible characters inside those managers' roots.
+    pub consent_chars: u64,
 }
 
 impl PageProbe {
@@ -107,6 +129,12 @@ impl PageProbe {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                 .unwrap_or_default(),
+            consent: v
+                .get("consent")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+                .unwrap_or_default(),
+            consent_chars: v.get("consentChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
         }
     }
 
@@ -116,6 +144,8 @@ impl PageProbe {
             "textChars": self.text_chars,
             "href": self.href,
             "markers": self.markers,
+            "consent": self.consent,
+            "consentChars": self.consent_chars,
         })
     }
 }
@@ -177,6 +207,8 @@ pub enum BlockKind {
     Challenge,
     /// The server answered with a 4xx/5xx status.
     HttpError,
+    /// The page is a known consent manager's wall with next to no page behind it.
+    ConsentWall,
 }
 
 impl BlockKind {
@@ -184,6 +216,7 @@ impl BlockKind {
         match self {
             BlockKind::Challenge => "challenge",
             BlockKind::HttpError => "http-error",
+            BlockKind::ConsentWall => "consent-wall",
         }
     }
 }
@@ -224,6 +257,9 @@ impl PageValidity {
             ),
             BlockKind::HttpError => format!(
                 "the page returned an error ({signals}). Findings would describe the error page, so none are reported."
+            ),
+            BlockKind::ConsentWall => format!(
+                "the page is a consent wall, not the site ({signals}). Findings would describe the consent dialog, so none are reported."
             ),
         })
     }
@@ -280,6 +316,18 @@ pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageV
             evidence: vec![format!("HTTP {status}")],
         };
     }
+    if small && !probe.consent.is_empty() {
+        let outside = probe.text_chars.saturating_sub(probe.consent_chars);
+        if outside < CONSENT_WALL_OUTSIDE_CHARS && probe.consent_chars >= CONSENT_WALL_RATIO * outside {
+            return PageValidity::Blocked {
+                kind: BlockKind::ConsentWall,
+                evidence: vec![
+                    format!("consent manager {}", probe.consent.join(", ")),
+                    format!("{outside} of {} visible characters outside it", probe.text_chars),
+                ],
+            };
+        }
+    }
     PageValidity::Ok
 }
 
@@ -301,7 +349,42 @@ mod tests {
             text_chars,
             href: "https://example.com/".into(),
             markers: markers.iter().map(|m| m.to_string()).collect(),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_page_that_is_only_a_consent_wall_is_refused() {
+        let mut p = probe("Example", 900, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 860;
+        let v = classify(Some(&resp(200, &[])), &p);
+        assert_eq!(
+            v,
+            PageValidity::Blocked {
+                kind: BlockKind::ConsentWall,
+                evidence: vec!["consent manager OneTrust".into(), "40 of 900 visible characters outside it".into()],
+            }
+        );
+        assert!(v.error_message().unwrap().starts_with("the page is a consent wall"));
+    }
+
+    #[test]
+    fn a_consent_banner_over_a_page_is_the_page() {
+        // A short page under a shorter banner.
+        let mut p = probe("Example", 272, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 190;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        let mut p = probe("Example", 2400, &[]);
+        p.consent = vec!["Cookiebot".into()];
+        p.consent_chars = 700;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        // A large page is content whatever the banner holds.
+        let mut p = probe("Example", 40000, &[]);
+        p.consent = vec!["Cookiebot".into()];
+        p.consent_chars = 39900;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
     }
 
     #[test]

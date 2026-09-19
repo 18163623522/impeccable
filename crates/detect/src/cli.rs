@@ -37,6 +37,9 @@ Options:
   --no-inline-ignores Do not honor in-file impeccable-disable* ignore comments
   --no-design-system  Do not load local DESIGN.md / .impeccable/design.json context
   --no-advisory       Suppress advisory findings entirely (e.g. em-dash overuse)
+  --no-consent-hiding URL scans: keep known consent managers' banners
+                      (OneTrust, Cookiebot, ...) on the page instead of hiding
+                      them before the scan
   --help              Show this help message
 
 Advisory findings:
@@ -242,7 +245,8 @@ struct Ctx<'a> {
     /// scanned, which forces exit 1 (#711).
     had_operational_failure: bool,
     /// One line per design system that switched a check off for a scanned
-    /// target (a DESIGN.md that declares a purple), in first-seen order.
+    /// target (a DESIGN.md that declares a purple), and per URL scan note (a
+    /// consent banner the engine hid), in first-seen order.
     design_notes: Vec<String>,
 }
 
@@ -520,6 +524,7 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         // The `impeccable` binary installs no rule pack; a library caller that
         // does sets this before handing the options to an engine.
         rule_pack: None,
+        keep_consent_banners: has(&args, "--no-consent-hiding"),
     };
     let targets: Vec<String> = expand_joined_url_targets(
         args.iter()
@@ -704,16 +709,23 @@ fn scan_targets(
                 ctx.base.clone()
             };
             let result = match (shared, ctx.engines.url) {
-                (Some(s), _) => s.detect_url(target, &url_options),
-                (None, Some(u)) => u.detect_url(target, &url_options),
-                (None, None) => crate::engines::UrlEngine::detect_url(
+                (Some(s), _) => s.detect_url_scan(target, &url_options),
+                (None, Some(u)) => u.detect_url_scan(target, &url_options),
+                (None, None) => crate::engines::UrlEngine::detect_url_scan(
                     &crate::engines::MissingUrlEngine,
                     target,
                     &url_options,
                 ),
             };
             match result {
-                Ok(f) => all.extend(f),
+                Ok(scan) => {
+                    all.extend(scan.findings);
+                    for note in scan.notes {
+                        if !ctx.design_notes.contains(&note) {
+                            ctx.design_notes.push(note);
+                        }
+                    }
+                }
                 Err(e) => {
                     ctx.had_operational_failure = true;
                     ctx.io.err(&format!("Error: {}\n", e.message));

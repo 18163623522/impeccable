@@ -1631,6 +1631,7 @@ impl HookScanOptions {
             viewport: None,
             profile: None,
             rule_pack: None,
+            keep_consent_banners: false,
         }
     }
 }

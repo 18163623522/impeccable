@@ -16,8 +16,10 @@
 //! (`createBrowserDetector()`: `waitUntil: 'load'`, `settleMs: 100`).
 //!
 //! Before any rule runs, the loaded page is classified ([`validity`]): a bot
-//! challenge or an HTTP error page is refused with an error instead of being
-//! scanned and reported clean.
+//! challenge, an HTTP error page, or a page that is only a consent wall is
+//! refused with an error instead of being scanned and reported clean. Then
+//! the banners of known consent managers are hidden ([`consent`]), so every
+//! pass and the screenshot see the page a visitor sees once they dismiss it.
 //!
 //! Two entry points serve measurement work rather than the CLI.
 //! [`detect_url_evidence`] runs the same scan and also returns what a
@@ -27,6 +29,7 @@
 //! measured against saved pages.
 
 pub mod cdp;
+pub mod consent;
 pub mod discovery;
 pub mod fullpage;
 pub mod screenshot_contrast;
@@ -44,11 +47,12 @@ use impeccable_core::browser::snapshot::{Facts, SnapshotDom};
 use impeccable_core::checks::measures::{check_content_hidden_at_rest, ContentHiddenInput};
 use impeccable_core::findings::{try_finding, Finding};
 use impeccable_detect::design_system::DesignSystem;
-use impeccable_detect::engines::{EngineError, ScanOptions, SharedBrowser, UrlEngine};
+use impeccable_detect::engines::{EngineError, ScanOptions, SharedBrowser, UrlEngine, UrlScan};
 use impeccable_detect::profiler::{DetectorProfile, ProfileMeta};
 use serde_json::{json, Map, Value};
 
 use cdp::{Browser, CdpError, Page, Viewport};
+use consent::ConsentReport;
 pub use fullpage::ElementShot;
 use validity::{DocumentResponse, PageProbe, PageValidity};
 
@@ -101,6 +105,10 @@ impl BrowserEngine {
 
 impl UrlEngine for BrowserEngine {
     fn detect_url(&self, url: &str, options: &ScanOptions) -> Result<Vec<Finding>, EngineError> {
+        Ok(self.detect_url_scan(url, options)?.findings)
+    }
+
+    fn detect_url_scan(&self, url: &str, options: &ScanOptions) -> Result<UrlScan, EngineError> {
         detect_url_impl(self, url, options, "networkidle0", 0, None)
     }
 
@@ -126,6 +134,10 @@ pub struct SharedBrowserHandle<'a> {
 
 impl SharedBrowser for SharedBrowserHandle<'_> {
     fn detect_url(&self, url: &str, options: &ScanOptions) -> Result<Vec<Finding>, EngineError> {
+        Ok(self.detect_url_scan(url, options)?.findings)
+    }
+
+    fn detect_url_scan(&self, url: &str, options: &ScanOptions) -> Result<UrlScan, EngineError> {
         if let Some(msg) = self.launch_error.borrow().as_ref() {
             return Err(EngineError::new(msg.clone()));
         }
@@ -325,6 +337,10 @@ pub struct Evidence {
     /// [`Evidence::screenshot`] (past its cut or its right edge), taken with
     /// the element scrolled into view. See [`fullpage`].
     pub element_shots: Vec<ElementShot>,
+    /// The consent managers the scan hid ([`consent`]), with the selectors
+    /// that matched and the scroll locks undone. `None` when hiding was off
+    /// ([`ScanOptions::keep_consent_banners`]) or the page was blocked.
+    pub consent: Option<ConsentReport>,
 }
 
 /// A full-page screenshot taken after the scan. Its pixels line up with
@@ -467,7 +483,7 @@ fn detect_url_impl(
     wait_until: &str,
     settle_ms: u64,
     external: Option<&mut Browser>,
-) -> Result<Vec<Finding>, EngineError> {
+) -> Result<UrlScan, EngineError> {
     // JS `const { href: url, credentials } = splitScanUrl(rawUrl)` (issue #657):
     // everything below (goto, profile targets, finding output) sees the
     // redacted href only.
@@ -495,8 +511,9 @@ fn detect_url_impl(
         }
     };
 
+    let mut consent = ConsentReport::default();
     let scanned = scan_on_browser(
-        browser, url, credentials, options, wait_until, settle_ms, profile, None,
+        browser, url, credentials, options, wait_until, settle_ms, profile, None, &mut consent,
     );
     // finally: close page (inside scan_page) and the browser when owned.
     if owns_browser {
@@ -504,8 +521,26 @@ fn detect_url_impl(
             step(profile, "load", "close-browser", url, || b.close());
         }
     }
-    let (findings, _) = results_to_findings(url, scanned?, options.design_system.as_deref())?;
-    Ok(findings)
+    let (mut findings, _) = results_to_findings(url, scanned?, options.design_system.as_deref())?;
+    let mut notes = Vec::new();
+    if !consent.hidden.is_empty() {
+        let names = json!(consent.hidden);
+        for f in findings.iter_mut() {
+            f.extras.insert("consentHidden".into(), names.clone());
+        }
+        notes.push(consent_note(url, &consent.hidden));
+    }
+    Ok(UrlScan { findings, notes })
+}
+
+/// The text-mode note for a scan that hid consent banners.
+fn consent_note(url: &str, hidden: &[String]) -> String {
+    let (names, noun) = match hidden {
+        [one] => (one.clone(), "banner"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "banners"),
+        [] => (String::new(), "banner"),
+    };
+    format!("Hid the {names} consent {noun} on {url} before scanning. Pass --no-consent-hiding to scan it.")
 }
 
 /// Run the URL engine's scan on a browser the caller owns and also return
@@ -523,6 +558,7 @@ pub fn detect_url_evidence(
 ) -> Result<(Vec<Finding>, Evidence), EngineError> {
     let (url, credentials) = split_scan_url(url);
     let mut evidence = Evidence::default();
+    let mut consent = ConsentReport::default();
     let results = scan_on_browser(
         browser,
         &url,
@@ -532,7 +568,13 @@ pub fn detect_url_evidence(
         settle_ms,
         options.profile.as_deref(),
         Some((&mut evidence, request)),
-    )?;
+        &mut consent,
+    );
+    let blocked = evidence.validity.as_ref().is_some_and(PageValidity::is_blocked);
+    if !options.keep_consent_banners && !blocked {
+        evidence.consent = Some(consent);
+    }
+    let results = results?;
     let (findings, origins) = results_to_findings(&url, results, options.design_system.as_deref())?;
     evidence.origins = origins;
     Ok((findings, evidence))
@@ -691,6 +733,7 @@ fn scan_on_browser(
     settle_ms: u64,
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    consent: &mut ConsentReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     let (vw, vh) = options.viewport.unwrap_or((1280, 800));
     let viewport = Viewport {
@@ -700,7 +743,7 @@ fn scan_on_browser(
     let page = step(profile, "load", "new-page", url, || browser.new_page()).map_err(cdp_err);
     match page {
         Ok(page) => scan_page(
-            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence,
+            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence, consent,
         ),
         Err(e) => Err(e),
     }
@@ -718,6 +761,7 @@ fn scan_page(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    consent: &mut ConsentReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     let outcome = scan_page_inner(
         &mut page,
@@ -729,6 +773,7 @@ fn scan_page(
         viewport,
         profile,
         evidence,
+        consent,
     );
     step(profile, "load", "close-page", url, || page.close());
     outcome
@@ -765,6 +810,7 @@ fn scan_page_inner(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     mut evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    consent: &mut ConsentReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     step(profile, "load", "set-viewport", url, || {
         page.set_viewport(viewport)
@@ -805,6 +851,17 @@ fn scan_page_inner(
         };
     }
 
+    // Hide known consent managers' banners and backdrops, and undo the scroll
+    // lock they applied, before anything is swept or measured. Never a click
+    // and never a consent choice: an injected style paints the page without
+    // the manager's layer. The validity probe above ran first, so a page that
+    // is only a consent wall was refused rather than scanned empty.
+    let hide_consent = !options.keep_consent_banners;
+    if hide_consent {
+        step(profile, "load", "hide-consent", url, || hide_consent_banners(page, consent))
+            .map_err(cdp_err)?;
+    }
+
     // Inject the plain-JS snapshot producer (no WebAssembly runs in the page).
     step(profile, "scan", "inject-snapshot-script", url, || {
         snapshot_engine::ensure_snapshot_js(page)
@@ -822,6 +879,13 @@ fn scan_page_inner(
     // checks skip an element at effective opacity <= 0.02, so a capture taken
     // before the sweep hides whole pages of text from the rule pass.
     step(profile, "scan", "reveal-sweep", url, || reveal_sweep(page)).map_err(cdp_err)?;
+
+    // A manager that injects its banner late (after load, or on the first
+    // scroll) is hidden here, before the capture every pass reads.
+    if hide_consent {
+        step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent))
+            .map_err(cdp_err)?;
+    }
 
     // The one capture every pass below reads: the rule pass, the hidden-text
     // measure, and the visual pass share this DOM, so a hit test any of them
@@ -909,6 +973,10 @@ fn scan_page_inner(
     results.extend(visual);
 
     if let Some((ev, request)) = evidence {
+        // And once more before the screenshot, so the crops match the capture.
+        if hide_consent {
+            let _ = hide_consent_banners(page, consent);
+        }
         let mut selectors: Vec<String> = Vec::new();
         for r in &results {
             if let Some(s) = &r.selector {
@@ -1132,6 +1200,14 @@ fn capture_post_scan(
         }
         Err(e) => ev.screenshot_error = Some(e.message),
     }
+}
+
+/// Run the consent hide step ([`consent::hide_js`]) and fold what it hid into
+/// `report`. Idempotent; each run also catches a banner injected since the last.
+fn hide_consent_banners(page: &mut Page<'_>, report: &mut ConsentReport) -> Result<(), CdpError> {
+    let v = page.evaluate_value(&consent::hide_js())?;
+    report.merge(&v);
+    Ok(())
 }
 
 /// The `measureContentHiddenAfterReveal` reveal sweep: scroll the page top to

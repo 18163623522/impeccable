@@ -264,8 +264,10 @@ pub mod origin {
     pub const CONTENT_HIDDEN: &str = "content-hidden";
     /// Uncaught page errors. Recorded, not replayable.
     pub const SCRIPT_ERROR: &str = "script-error";
-    /// The visual-contrast pass (image and pixel reads). Recorded, not
-    /// replayable.
+    /// The visual-contrast pass (image and pixel reads), and the rule pass's
+    /// `low-contrast` verdicts on text it hands to that pass
+    /// (`visual::routed_reason`), which the pixels replace where they give a
+    /// verdict and which stand where they do not. Recorded, not replayable.
     pub const VISUAL_CONTRAST: &str = "visual-contrast";
 }
 
@@ -616,9 +618,14 @@ pub fn replay_url_scan(
     let dom = snapshot_engine::parse_snapshot(snapshot).map_err(cdp_err)?;
     dom.add_facts(facts);
     let collected = collect_browser_findings(&dom, &config);
+    let handed = handed_over(&dom, &collected.groups);
     let mut unanswered = dom.take_needs().hit_tests.len();
     let groups = serialize_findings(&dom, &collected.groups);
     let mut results = results_from_groups(groups.as_array().map(Vec::as_slice).unwrap_or(&[]));
+    // The verdicts the live scan hands to the pixels are reported under the
+    // visual-contrast origin, which a replay does not reproduce.
+    hand_over(&mut results, &handed);
+    results.retain(|r| r.origin == origin::SCAN);
     let measured = measure_hidden_text_dom(&dom);
     unanswered += dom.take_needs().hit_tests.len();
     results.extend(content_hidden_results(
@@ -704,6 +711,40 @@ fn results_from_groups(groups: &[Value]) -> Vec<RawResult> {
         }
     }
     out
+}
+
+/// Per result of `results_from_groups(serialize_findings(dom, groups))`, in
+/// order: whether it is a `low-contrast` verdict on text the element pass
+/// hands to the pixels ([`impeccable_core::browser::visual::routed_reason`]).
+/// The live scan lets a pixel verdict replace such a verdict, so it is the
+/// visual-contrast pass's to report, and a replay leaves it out.
+fn handed_over(dom: &SnapshotDom, groups: &[impeccable_core::browser::FindingGroup]) -> Vec<bool> {
+    let mut out = Vec::new();
+    for g in groups {
+        let mut routed: Option<bool> = None;
+        for f in &g.findings {
+            let handed = f.type_ == "low-contrast"
+                && *routed.get_or_insert_with(|| {
+                    impeccable_core::browser::visual::routed_reason(dom, g.el).is_some()
+                });
+            out.push(handed);
+        }
+    }
+    out
+}
+
+/// Move the verdicts [`handed_over`] marks to [`origin::VISUAL_CONTRAST`].
+/// Results that do not line up with the marks (never expected) stay in the
+/// scan origin, the same way live and in a replay.
+fn hand_over(results: &mut [RawResult], handed: &[bool]) {
+    if handed.len() != results.len() {
+        return;
+    }
+    for (r, handed) in results.iter_mut().zip(handed) {
+        if *handed {
+            r.origin = origin::VISUAL_CONTRAST;
+        }
+    }
 }
 
 fn content_hidden_results(
@@ -917,10 +958,17 @@ fn scan_page_inner(
     let mut serialized_groups: Vec<Value> = Vec::new();
     let mut results = step_findings(profile, "scan", "browser-scan", url, || {
         let facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
-        let collected = snapshot_engine::resolve_needs_recording(
+        // Which verdicts the element pass hands to the pixels is decided here,
+        // inside the recorded rounds, so a replay reads it off the same
+        // capture and the same hit-test answers.
+        let (collected, handed) = snapshot_engine::resolve_needs_recording(
             &base,
             page,
-            |d| collect_browser_findings(d, &config),
+            |d| {
+                let collected = collect_browser_findings(d, &config);
+                let handed = handed_over(d, &collected.groups);
+                (collected, handed)
+            },
             facts,
         )
         .map_err(cdp_err)?;
@@ -929,6 +977,7 @@ fn scan_page_inner(
             .cloned()
             .unwrap_or_default();
         let mut results = results_from_groups(&serialized_groups);
+        hand_over(&mut results, &handed);
         // One serialized group per finding group, one result per finding, in
         // order. Anything else leaves the elements unset, and the evidence
         // resolves those selectors as before.
@@ -981,10 +1030,12 @@ fn scan_page_inner(
     let (mut visual, superseded) =
         run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
     // The element pass's verdict on text it hands over (paint the walk never
-    // read under it, an outline) is replaced where the pixels gave one.
+    // read under it, an outline) is replaced where the pixels gave one. Only
+    // the verdicts `hand_over` moved to the visual-contrast origin can go: the
+    // scan origin is what a replay reproduces, and a replay has no pixels.
     if !superseded.is_empty() {
         results.retain(|r| {
-            !(r.origin == origin::SCAN
+            !(r.origin == origin::VISUAL_CONTRAST
                 && r.id == "low-contrast"
                 && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
         });

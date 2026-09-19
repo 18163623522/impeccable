@@ -40,6 +40,7 @@ const REPLAY_FIXTURES: &[&str] = &[
     // Copies part way past a carousel clip and the page edge, measured on
     // their text rects.
     "on-screen.html",
+    "unread-surface-contrast.html",
 ];
 
 fn fixtures_dir() -> PathBuf {

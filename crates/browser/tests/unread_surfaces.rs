@@ -18,13 +18,16 @@
 //! - A glow over a light panel laid on a dark section is not on a dark
 //!   background; one under a translucent vignette still is.
 //! - A page laid out wider than the phone scores its right column.
+//! - The element pass's verdict on text it hands to the pixels (the outlined
+//!   sticker) is the visual-contrast pass's to keep or replace, so a replay
+//!   of the recording reproduces the scan origin exactly.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
-use impeccable_browser::BrowserEngine;
+use impeccable_browser::{detect_url_evidence, origin, replay_url_scan, BrowserEngine, EvidenceRequest};
 use impeccable_detect::engines::{ScanOptions, UrlEngine};
 
 fn fixtures_dir() -> PathBuf {
@@ -174,5 +177,57 @@ fn a_page_wider_than_the_phone_scores_its_right_column() {
     assert!(
         snippet(&flagged, "low-contrast", "#pass-parked-drawer-label").is_none(),
         "{flagged:#?}"
+    );
+}
+
+#[test]
+fn verdicts_the_pixels_replace_stay_out_of_the_replayed_scan() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/unread-surface-contrast.html");
+    let options = ScanOptions::default();
+    let mut browser = engine.launch().expect("launch");
+    let (live, evidence) =
+        detect_url_evidence(&mut browser, &url, &options, "networkidle0", 0, &EvidenceRequest::default())
+            .expect("evidence scan");
+    let selector = |f: &impeccable_core::findings::Finding| {
+        f.extras.get("selector").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    };
+    // The pixels read the outlined sticker and pass it, which drops the
+    // element pass's verdict on it. That verdict was never the scan
+    // origin's: a replay has no pixels to drop it with.
+    let sticker: Vec<(&str, String)> = live
+        .iter()
+        .zip(&evidence.origins)
+        .filter(|(f, _)| f.antipattern == "low-contrast" && selector(f) == "#pass-outline-sticker")
+        .map(|(f, o)| (*o, f.snippet.clone()))
+        .collect();
+    assert!(sticker.is_empty(), "{sticker:?}");
+
+    let replay = replay_url_scan(
+        &url,
+        evidence.scan_snapshot.as_deref().expect("scan snapshot"),
+        &evidence.scan_facts,
+        None,
+        &options,
+    )
+    .expect("replay");
+    assert_eq!(replay.unanswered_hit_tests, 0);
+    let replayable: Vec<&impeccable_core::findings::Finding> = live
+        .iter()
+        .zip(&evidence.origins)
+        .filter(|(_, o)| **o == origin::SCAN || **o == origin::CONTENT_HIDDEN)
+        .map(|(f, _)| f)
+        .collect();
+    let replayed: Vec<&impeccable_core::findings::Finding> = replay.findings.iter().collect();
+    assert_eq!(replayed, replayable, "replay differs from the live scan");
+    assert!(
+        !replayed.iter().any(|f| f.antipattern == "low-contrast" && selector(f) == "#pass-outline-sticker"),
+        "{replayed:#?}"
+    );
+    // Verdicts the pass reads from the capture alone are still the scan's.
+    assert!(
+        replayed.iter().any(|f| f.antipattern == "low-contrast" && selector(f) == "#flag-dim-on-dark-panel"),
+        "{replayed:#?}"
     );
 }

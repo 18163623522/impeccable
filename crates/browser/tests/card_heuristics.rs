@@ -239,6 +239,7 @@ fn page_level_misreads_stay_silent() {
         ("oversized-h1-rendered.html", "oversized-h1"),
         ("first-viewport-column-overflow-outline.html", "first-viewport-column-overflow"),
         ("first-viewport-column-overflow-tabs.html", "first-viewport-column-overflow"),
+        ("first-viewport-column-overflow-clipped.html", "first-viewport-column-overflow"),
         ("em-dash-pricing-matrix.html", "em-dash-overuse"),
     ] {
         let Some(findings) = scan(fixture) else {
@@ -311,8 +312,9 @@ fn label_collectors_climb_and_scale() {
             "A Single Kicker Still Flags",
             "Relative Kicker Ceiling",
             "Eyebrow In A Framer Wrapper",
+            "Label In A Tall Panel",
         ],
-        &["Label Too Large For Its Heading", "Untracked Caps Label"],
+        &["Label Too Large For Its Heading", "Untracked Caps Label", "Press Card Source"],
     );
 
     let Some(findings) = scan("numbered-section-labels.html") else {

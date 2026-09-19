@@ -50,6 +50,35 @@ pub fn is_kicker_card_context(dom: &dyn Dom, heading: ElId, kicker: ElId) -> boo
     }
 }
 
+/// Whether `kicker` sits in the card that holds `heading`: the nearest
+/// ancestor of the heading drawn as a card (a boundary of its own, read from
+/// the computed box), shorter than the viewport, whatever its tag. A label in
+/// a card beside its title is the card's metadata, as it is in an `article`
+/// or `li` card: aina-tech.io's white press card names its source ("The
+/// Future Media") over the headline in a `div`.
+fn kicker_in_painted_card(dom: &dyn Dom, heading: ElId, kicker: ElId) -> bool {
+    let viewport = {
+        let h = dom.inner_height();
+        if num_truthy(h) {
+            h
+        } else {
+            800.0
+        }
+    };
+    let body = dom.body();
+    let mut cur = dom.parent(heading);
+    while let Some(c) = cur {
+        if Some(c) == body {
+            return false;
+        }
+        if super::page_checks::is_card_like_dom(dom, c) {
+            return dom.rect(c).height < viewport && dom.contains(c, kicker);
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
 static HEADING_LEVEL_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^h([1-6])$").expect("HEADING_LEVEL_RE"));
 
@@ -131,7 +160,7 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
         if super::dom::closest_or_none(dom, kicker, KICKER_SKIP_SELECTOR).is_some() {
             continue;
         }
-        if is_kicker_card_context(dom, heading, kicker) {
+        if is_kicker_card_context(dom, heading, kicker) || kicker_in_painted_card(dom, heading, kicker) {
             continue;
         }
         let heading_tag = tag_lower(dom, heading);

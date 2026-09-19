@@ -2532,6 +2532,34 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     findings
 }
 
+/// How far down `d` (laid out at `dr`) shows: its bottom, or the bottom of
+/// the nearest box between it and the row `row` (both ends included) that
+/// clips or scrolls on y, when that ends sooner. cuisineactuelle.fr's tile
+/// column runs eleven tiles into a 610px box that scrolls them, inside a
+/// section that hides the rest; the column a reader sees ends at 610px.
+fn column_visible_bottom(dom: &dyn Dom, d: ElId, dr: &Rect, row: ElId) -> f64 {
+    let mut bottom = dr.bottom;
+    let mut cur = dom.parent(d);
+    while let Some(p) = cur {
+        let y = {
+            let v = dom.style(p, "overflowY");
+            if v.is_empty() {
+                dom.style(p, "overflow").split_whitespace().last().unwrap_or("").to_string()
+            } else {
+                v
+            }
+        };
+        if matches!(y.as_str(), "hidden" | "clip" | "auto" | "scroll") && dom.style(p, "display") != "inline" {
+            bottom = math_min(bottom, dom.rect(p).bottom);
+        }
+        if p == row {
+            break;
+        }
+        cur = dom.parent(p);
+    }
+    bottom
+}
+
 /// JS: checks.mjs#checkFirstViewportColumnOverflowDOM()
 pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -2625,7 +2653,7 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 }
                 let dr = dom.rect(d);
                 if dr.width > 0.0 && dr.height > 0.0 {
-                    content_bottom = math_max(content_bottom, dr.bottom);
+                    content_bottom = math_max(content_bottom, column_visible_bottom(dom, d, &dr, el));
                 }
             }
             // A column with nothing painted in its own flow (a collapsed
@@ -3327,6 +3355,16 @@ mod tests {
         );
         d.set_rect(b_in, 640.0, 0.0, 600.0, 900.0);
         assert!(check_first_viewport_column_overflow_dom(&d).is_empty());
+
+        // observations-28 row 27: the tall column's box scrolls its content
+        // at 700px (cuisineactuelle.fr's tile list), so it ends where it is
+        // clipped, and the short column is short again.
+        d.set_rect(b_in, 640.0, 0.0, 600.0, 300.0);
+        d.set_styles(a, &[("overflowY", "auto")]);
+        d.set_rect(a, 0.0, 0.0, 640.0, 700.0);
+        assert!(check_first_viewport_column_overflow_dom(&d).is_empty(), "clipped at 700px");
+        d.set_styles(a, &[("overflowY", "visible")]);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "unclipped");
     }
 
     /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline

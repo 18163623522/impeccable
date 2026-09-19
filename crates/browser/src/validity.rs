@@ -14,11 +14,15 @@
 //! form or be titled "Access denied" in a CMS without being a block page.
 //!
 //! The probe also names the known consent managers ([`crate::consent`]) whose
-//! banner is showing, and how much visible text sits inside them. It runs
-//! before the scan hides those banners, so a page that is nothing but a
-//! consent wall (a small page whose readable text is almost all the
-//! manager's) is refused as one, instead of being scanned empty and reported
-//! clean.
+//! banner is showing, how much visible text sits inside them, and what content
+//! lies outside them. It runs before the scan hides those banners, so a page
+//! that is nothing but a consent wall (hiding the manager would leave next to
+//! nothing: no more than a line of text, no form control, no sizable image)
+//! is refused as one, instead of being scanned empty and reported clean. A
+//! short page that carries an ordinary banner (a sign-in form, a splash page,
+//! an image-first portfolio) is a page, and is scanned. With the banners kept
+//! (`--no-consent-hiding`) the gate is off: that scan reads the banner, which
+//! is what the flag asks for.
 
 use serde_json::{json, Value};
 
@@ -28,9 +32,11 @@ pub const SMALL_PAGE_CHARS: u64 = 3000;
 
 /// A small page with a known consent manager showing is a consent wall when
 /// fewer than this many visible characters lie outside the manager's roots,
-/// and the manager holds at least [`CONSENT_WALL_RATIO`] times as many.
-pub const CONSENT_WALL_OUTSIDE_CHARS: u64 = 100;
-pub const CONSENT_WALL_RATIO: u64 = 3;
+/// nothing else shows outside them (no form control and no image, video or
+/// frame of 10,000 square pixels or more, see [`crate::consent`]), and the
+/// manager holds at least [`CONSENT_WALL_MIN_CHARS`] characters itself.
+pub const CONSENT_WALL_OUTSIDE_CHARS: u64 = 20;
+pub const CONSENT_WALL_MIN_CHARS: u64 = 100;
 
 /// Titles challenge and block pages use, lowercased and trimmed. Matched by
 /// prefix, so "Access Denied" also covers "Access Denied - Reference #18...".
@@ -98,6 +104,7 @@ pub fn probe_js() -> String {
     markers: found,
     consent,
     consentChars,
+    consentOutside,
   }};
 }})()"#,
         markers = Value::Array(markers),
@@ -116,6 +123,8 @@ pub struct PageProbe {
     pub consent: Vec<String>,
     /// Visible characters inside those managers' roots.
     pub consent_chars: u64,
+    /// Visible form controls and sizable media outside those roots (up to 20).
+    pub consent_outside: u64,
 }
 
 impl PageProbe {
@@ -135,6 +144,7 @@ impl PageProbe {
                 .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                 .unwrap_or_default(),
             consent_chars: v.get("consentChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
+            consent_outside: v.get("consentOutside").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
         }
     }
 
@@ -146,6 +156,7 @@ impl PageProbe {
             "markers": self.markers,
             "consent": self.consent,
             "consentChars": self.consent_chars,
+            "consentOutside": self.consent_outside,
         })
     }
 }
@@ -267,7 +278,9 @@ impl PageValidity {
 
 /// Classify a loaded page. `response` is `None` when no main-document
 /// response was seen (a `file://` URL, or a same-document navigation).
-pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageValidity {
+/// `consent_wall` turns the consent-wall gate on; a scan that keeps the
+/// banners turns it off.
+pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, consent_wall: bool) -> PageValidity {
     let mut challenge: Vec<String> = Vec::new();
     if let Some(r) = response {
         if let Some(action) = r.header("x-amzn-waf-action") {
@@ -316,19 +329,28 @@ pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageV
             evidence: vec![format!("HTTP {status}")],
         };
     }
-    if small && !probe.consent.is_empty() {
+    if consent_wall && small && !probe.consent.is_empty() {
         let outside = probe.text_chars.saturating_sub(probe.consent_chars);
-        if outside < CONSENT_WALL_OUTSIDE_CHARS && probe.consent_chars >= CONSENT_WALL_RATIO * outside {
+        if outside < CONSENT_WALL_OUTSIDE_CHARS
+            && probe.consent_outside == 0
+            && probe.consent_chars >= CONSENT_WALL_MIN_CHARS
+        {
             return PageValidity::Blocked {
                 kind: BlockKind::ConsentWall,
                 evidence: vec![
                     format!("consent manager {}", probe.consent.join(", ")),
                     format!("{outside} of {} visible characters outside it", probe.text_chars),
+                    "no control or image outside it".to_string(),
                 ],
             };
         }
     }
     PageValidity::Ok
+}
+
+/// [`classify_with`] with every gate on, the consent wall included.
+pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageValidity {
+    classify_with(response, probe, true)
 }
 
 #[cfg(test)]
@@ -355,7 +377,7 @@ mod tests {
 
     #[test]
     fn a_page_that_is_only_a_consent_wall_is_refused() {
-        let mut p = probe("Example", 900, &[]);
+        let mut p = probe("Example", 872, &[]);
         p.consent = vec!["OneTrust".into()];
         p.consent_chars = 860;
         let v = classify(Some(&resp(200, &[])), &p);
@@ -363,10 +385,43 @@ mod tests {
             v,
             PageValidity::Blocked {
                 kind: BlockKind::ConsentWall,
-                evidence: vec!["consent manager OneTrust".into(), "40 of 900 visible characters outside it".into()],
+                evidence: vec![
+                    "consent manager OneTrust".into(),
+                    "12 of 872 visible characters outside it".into(),
+                    "no control or image outside it".into(),
+                ],
             }
         );
         assert!(v.error_message().unwrap().starts_with("the page is a consent wall"));
+        // A scan that keeps the banners reads the wall instead.
+        assert_eq!(classify_with(Some(&resp(200, &[])), &p, false), PageValidity::Ok);
+    }
+
+    #[test]
+    fn a_short_page_under_a_banner_is_the_page() {
+        // The review's sign-in page: an h1, two fields, a hint and a button
+        // under a OneTrust bar. 48 characters of its own and four controls.
+        let mut p = probe("Sign in", 411, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 363;
+        p.consent_outside = 4;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        // An image-first page: a caption's worth of text and a large image.
+        let mut p = probe("Portfolio", 380, &[]);
+        p.consent = vec!["Cookiebot".into()];
+        p.consent_chars = 372;
+        p.consent_outside = 1;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        // A line of its own text and nothing else is still more than a wall.
+        let mut p = probe("Splash", 400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 370;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        // An empty page under a two-word banner is not a wall either.
+        let mut p = probe("Example", 60, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 60;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
     }
 
     #[test]

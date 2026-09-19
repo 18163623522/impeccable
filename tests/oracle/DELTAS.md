@@ -4592,17 +4592,35 @@ behavior is pinned by `crates/browser/tests/consent_hiding.rs` over
   library (centene.com) and Google Funding Choices (ynet.co.il) on 1 each.
   The other listed vendors have no corpus capture yet.
 - **When.** After the validity gate, after the reveal sweep (a banner that
-  arrives late or on the first scroll), and before the evidence screenshot.
+  arrives late or on the first scroll), right after the capture (a pass that
+  changes the page triggers a second capture, so the capture, the live hit
+  tests and the pixel reads agree), and before the evidence screenshot.
+  Every pass is best-effort: a failed one hides nothing and the scan goes on.
   An injected `display: none !important` style; nothing is clicked and no
   consent state is set. Scroll locks are undone only where the manager put
   them: its own lock classes, and an inline `overflow: hidden` on html/body
-  while its backdrop was up.
+  while its backdrop was up, unless the page is an app shell (an element at
+  least half the viewport tall that scrolls itself), whose body lock is the
+  site's.
+- **Borlabs.** Only `#BorlabsCookieBox` and `#BorlabsCookieBoxWrap`. The
+  shared `.brlbs-cmpnt-container` class was dropped in review: Borlabs
+  Cookie 3 also puts it on its content blockers (the YouTube and Maps
+  placeholders), which are page content.
 - **Consent wall.** There was no consent-wall detection before this branch
   (the round-4 note that the gate "already recognizes OneTrust, Cookiebot and
-  Usercentrics" was wrong). The probe now names the managers showing and the
-  text inside them, before hiding, and a small page with under 100 visible
-  characters outside a showing manager (and at least three times as many
-  inside it) is refused as `consent-wall`.
+  Usercentrics" was wrong). The probe now names the managers showing, the
+  text inside them, and the visible form controls and media of 10,000 square
+  pixels or more outside them, before hiding. A small page is refused as
+  `consent-wall` only when hiding would leave next to nothing: under 20
+  visible characters outside a showing manager, no control or sizable image
+  outside it, and at least 100 characters inside it. The first version
+  (under 100 characters outside, three times as many inside) refused a
+  sign-in page under a OneTrust bar in review, 48 characters of its own plus
+  a form, which base scanned and reported correctly; that page is now
+  `tests/fixtures/consent/short-page.html`. With `--no-consent-hiding` the
+  gate is off and the wall is scanned with its banner, which is what the
+  flag asks for. No capture in runs 26 and 27 comes near the gate: the two
+  mckesson.com pages under 3000 characters keep about 2400 of their own.
 
 Measure, live (the ratchet cannot replay this: the recorded captures have
 the banners in them). Run 26 recaptured hrsimple.app, theagenticdatacompany.com,
@@ -4632,6 +4650,20 @@ scanned twice at once with the branch binary, with and without
   icon, Tailwind classes, no vendor), so this branch would not have hidden it:
   the ten findings under it stay covered by design.
 
+After review (run 27, same six sites, same command): the counts against run
+26 are unchanged on every site but otto.de (low-contrast 158 to 156,
+undersized-ui-text 198 to 206, text-occlusion 0 and 0; otto.de's deal tiles
+rotate), and all 36 captures are `ok`. Ten run-25 crops that showed a
+consent layer were opened next to their run-27 twins: mckesson.com
+line-length x2 (the OneTrust bar over the paragraph, now the paragraph),
+centene.com body text x2 (the cc-window box, now the italic copy),
+otto.de mobile filter chips x3 (112172 to 112174: "Cookies und andere
+Technologien erlauben?", now the "von OTTO", "Damen" and "schwarz" chips),
+otto.de mobile cramped-padding (the OneTrust heading, now the promo module),
+and theagenticdatacompany.com undersized-ui-text at both widths (Cookiebot's
+"Preferences" toggle, now the "NEW" chip). All ten now show the flagged
+page element.
+
 ### Known limits at merge
 
 1. **Site-made banners still cover text.** hrsimple.app and veeza.ai are the
@@ -4639,7 +4671,9 @@ scanned twice at once with the branch binary, with and without
    decision ruled out.
 2. **Scroll-lock data is thin.** No corpus capture shows a vendor lock class
    on html/body; the two listed (Didomi, Sourcepoint) come from the vendors'
-   own stylesheets, and the inline rule is inferred.
+   own stylesheets, and the inline rule is inferred. A site that locks body
+   scroll for its own modal (not an app shell) while a vendor backdrop is
+   also up is unlocked too.
 3. **The corpus harness does not record `Evidence.consent`.** Its
    `evidence.json` carries the probe's `consent` list (showing before
    hiding), which names the same managers; recording the matched selectors

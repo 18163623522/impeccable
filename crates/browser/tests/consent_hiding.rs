@@ -10,7 +10,10 @@
 //!   underlay and an inline scroll lock on `<body>`: caught by the hide pass
 //!   after the reveal sweep, recorded in the evidence, and the lock undone.
 //! - A notice the site wrote itself (generic names, no vendor) stays.
-//! - A page that is only a consent wall is refused as one.
+//! - A page that is only a consent wall is refused as one; with the banners
+//!   kept it is scanned, since the banner is what that scan asked for.
+//! - A short page under an ordinary banner (a sign-in form) is not a wall.
+//! - An app shell's own body lock stays when a manager's backdrop shows.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -181,10 +184,10 @@ fn a_page_that_is_only_a_consent_wall_is_refused() {
     let Some(engine) = engine() else { return };
     let port = serve();
     let url = format!("http://127.0.0.1:{port}/wall.html");
-    for options in [ScanOptions::default(), KEEP] {
-        let err = engine.detect_url(&url, &options).expect_err("a consent wall must not scan");
-        assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager OneTrust, "), "{}", err.message);
-    }
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager OneTrust, "), "{}", err.message);
+    // With the banners kept, the gate is off and the dialog is what is read.
+    engine.detect_url(&url, &KEEP).expect("a kept consent wall scans");
     let mut browser = engine.launch().expect("launch");
     let (findings, evidence) =
         detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
@@ -194,4 +197,37 @@ fn a_page_that_is_only_a_consent_wall_is_refused() {
     assert_eq!(evidence.validity.as_ref().unwrap().to_value()["status"], "consent-wall");
     assert_eq!(evidence.probe.as_ref().unwrap().consent, vec!["OneTrust"]);
     assert!(evidence.consent.is_none());
+}
+
+#[test]
+fn a_short_page_under_a_banner_is_scanned_not_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/short-page.html");
+    let scan = engine.detect_url_scan(&url, &ScanOptions::default()).expect("a sign-in page is a page");
+    let found = flagged(&scan.findings);
+    assert!(has(&found, "low-contrast", "#hint"), "{found:#?}");
+    assert!(!has(&found, "low-contrast", "#onetrust-policy-text"), "{found:#?}");
+    let kept = engine.detect_url_scan(&url, &KEEP).expect("kept, it scans too");
+    let found = flagged(&kept.findings);
+    assert!(has(&found, "low-contrast", "#onetrust-policy-text"), "{found:#?}");
+}
+
+#[test]
+fn an_app_shells_own_body_lock_stays() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/app-shell.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    let consent = evidence.consent.as_ref().expect("consent report");
+    assert_eq!(consent.hidden, vec!["OneTrust"]);
+    // The backdrop was showing, so only the app-shell check kept the lock.
+    assert!(consent.matched[0].1.iter().any(|s| s == ".onetrust-pc-dark-filter"), "{:?}", consent.matched);
+    assert!(consent.unlocked.is_empty(), "{:?}", consent.unlocked);
+    let snapshot = evidence.scan_snapshot.as_deref().unwrap();
+    assert!(snapshot.contains("overflow: hidden"), "the body keeps its own lock");
 }

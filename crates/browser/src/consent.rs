@@ -146,7 +146,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
     },
     ConsentManager {
         name: "Borlabs Cookie",
-        roots: &["#BorlabsCookieBox", "#BorlabsCookieBoxWrap", ".brlbs-cmpnt-container"],
+        roots: &["#BorlabsCookieBox", "#BorlabsCookieBoxWrap"],
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
@@ -226,8 +226,10 @@ const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.qu
     return false;
   };"#;
 
-/// A probe fragment: `consentShowing(managers)` returns the names of the
-/// managers whose roots are showing, and the visible text inside those roots.
+/// A probe fragment. Defines `consent` (the names of the managers whose roots
+/// are showing), `consentChars` (the visible text inside those roots) and
+/// `consentOutside` (visible form controls and sizable media outside them,
+/// counted up to 20).
 pub fn probe_fragment() -> String {
     format!(
         r#"const consentManagers = {managers};
@@ -243,23 +245,53 @@ pub fn probe_fragment() -> String {
   for (const el of consentRoots) {{
     if (consentRoots.some(o => o !== el && o.contains(el))) continue;
     consentChars += (el.innerText || '').replace(/\s+/g, ' ').trim().length;
+  }}
+  // Content outside the managers that is not text: a form control of any
+  // size, or an image, video, canvas, SVG or frame of at least
+  // {media_px} square pixels. A sign-in form or an image-first page has
+  // little text of its own and is still a page.
+  let consentOutside = 0;
+  if (consentRoots.length) {{
+    const inside = el => consentRoots.some(r => r.contains(el));
+    for (const el of q({controls})) {{
+      if (consentOutside >= 20) break;
+      if (!inside(el) && boxShows(el)) consentOutside++;
+    }}
+    for (const el of q({media})) {{
+      if (consentOutside >= 20) break;
+      if (inside(el) || !boxShows(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width * r.height >= {media_px}) consentOutside++;
+    }}
   }}"#,
         managers = managers_json(),
         showing = SHOWING_JS,
+        controls = json!(OUTSIDE_CONTROLS),
+        media = json!(OUTSIDE_MEDIA),
+        media_px = OUTSIDE_MEDIA_MIN_AREA,
     )
 }
 
+/// Form controls that make a page more than its consent wall, wherever they
+/// sit outside a manager's roots.
+pub const OUTSIDE_CONTROLS: &str = "input:not([type='hidden']), select, textarea, button";
+/// Media that make a page more than its consent wall, when at least
+/// [`OUTSIDE_MEDIA_MIN_AREA`] square pixels (a logo is smaller).
+pub const OUTSIDE_MEDIA: &str = "img, svg, video, canvas, iframe, object, embed";
+pub const OUTSIDE_MEDIA_MIN_AREA: u32 = 10_000;
+
 /// The hide step. Idempotent: run it once before the reveal sweep and again
 /// right before the capture, to catch a manager that injects its banner late.
-/// Returns `{ hidden: [name], matched: { name: [selector] }, unlocked: [what] }`
-/// for the managers it found showing this time.
+/// Returns `{ hidden: [name], matched: { name: [selector] }, unlocked: [what],
+/// changed }` for the managers it found showing this time; `changed` is
+/// whether this run altered the page (a new rule, an inline hide, an unlock).
 pub fn hide_js() -> String {
     format!(
         r#"(() => {{
   const managers = {managers};
   const STYLE_ID = {style_id};
   {showing}
-  const out = {{ hidden: [], matched: {{}}, unlocked: [] }};
+  const out = {{ hidden: [], matched: {{}}, unlocked: [], changed: false }};
   const present = [];
   for (const m of managers) {{
     const sels = m.roots.concat(m.backdrops).filter(s => q(s).length > 0);
@@ -289,17 +321,18 @@ pub fn hide_js() -> String {
   const rules = [];
   for (const {{ sels }} of present) for (const s of sels) rules.push(s + ' {{ display: none !important; }}');
   const text = rules.join('\n');
-  if (style.textContent !== text) style.textContent = text;
+  if (style.textContent !== text) {{ style.textContent = text; out.changed = true; }}
   // A manager that sets `display` inline with !important outranks the rule.
   for (const {{ sels }} of present) for (const s of sels) for (const el of q(s)) {{
     try {{
-      if (getComputedStyle(el).display !== 'none') el.style.setProperty('display', 'none', 'important');
+      if (getComputedStyle(el).display !== 'none') {{ el.style.setProperty('display', 'none', 'important'); out.changed = true; }}
     }} catch (e) {{}}
   }}
   // Undo the scroll lock the manager applied, and only that: its own classes
   // on <html> and <body>, and an inline overflow: hidden on either while its
-  // backdrop was up (a modal consent layer locks the page that way). A
-  // site's own overflow is left alone.
+  // backdrop was up (a modal consent layer locks the page that way) and the
+  // page is not an app shell that scrolls inside itself. A site's own
+  // overflow is left alone.
   const html = document.documentElement;
   const body = document.body;
   for (const {{ m }} of present) {{
@@ -307,7 +340,22 @@ pub fn hide_js() -> String {
     for (const c of m.htmlLock) if (html.classList.contains(c)) {{ html.classList.remove(c); out.unlocked.push('html.' + c); }}
     if (body) for (const c of m.bodyLock) if (body.classList.contains(c)) {{ body.classList.remove(c); out.unlocked.push('body.' + c); }}
   }}
-  if (showingBackdrop.length) {{
+  // An app shell locks <body> itself and scrolls an inner container that
+  // fills the viewport. That lock is the site's, whatever the manager did,
+  // so it stays.
+  const appShell = () => {{
+    const all = body ? body.querySelectorAll('*') : [];
+    const vh = window.innerHeight || 0;
+    for (let i = 0; i < all.length && i < 5000; i++) {{
+      const el = all[i];
+      if (el.clientHeight < vh * 0.5 || el.scrollHeight <= el.clientHeight + 1) continue;
+      if (present.some(({{ sels }}) => sels.some(s => {{ try {{ return !!el.closest(s); }} catch (e) {{ return false; }} }}))) continue;
+      const oy = getComputedStyle(el).overflowY;
+      if (oy === 'auto' || oy === 'scroll') return true;
+    }}
+    return false;
+  }};
+  if (showingBackdrop.length && !appShell()) {{
     for (const [el, tag] of [[html, 'html'], [body, 'body']]) {{
       if (!el) continue;
       for (const p of ['overflow', 'overflow-y']) {{
@@ -318,6 +366,7 @@ pub fn hide_js() -> String {
       }}
     }}
   }}
+  if (out.unlocked.length) out.changed = true;
   return out;
 }})()"#,
         managers = managers_json(),

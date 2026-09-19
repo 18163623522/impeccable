@@ -782,7 +782,10 @@ fn scan_page(
 /// Probe the loaded page and classify it. A probe that fails because the page
 /// navigated underneath it (a challenge redirecting on its own) is retried
 /// once after a short wait.
-fn check_validity(page: &mut Page<'_>) -> Result<(Option<DocumentResponse>, PageProbe, PageValidity), CdpError> {
+fn check_validity(
+    page: &mut Page<'_>,
+    consent_wall: bool,
+) -> Result<(Option<DocumentResponse>, PageProbe, PageValidity), CdpError> {
     let js = validity::probe_js();
     let raw = match page.evaluate_value(&js) {
         Ok(v) => v,
@@ -795,7 +798,7 @@ fn check_validity(page: &mut Page<'_>) -> Result<(Option<DocumentResponse>, Page
     let response = page
         .main_document_response()
         .and_then(|r| DocumentResponse::from_cdp(&r));
-    let verdict = validity::classify(response.as_ref(), &probe);
+    let verdict = validity::classify_with(response.as_ref(), &probe, consent_wall);
     Ok((response, probe, verdict))
 }
 
@@ -832,9 +835,12 @@ fn scan_page_inner(
         });
     }
 
-    // A challenge or error page is not the site: refuse to report on it.
+    // A challenge or error page is not the site: refuse to report on it. Nor
+    // is a consent wall, unless the scan keeps the banners: then the banner
+    // is what the caller asked to read.
+    let hide_consent = !options.keep_consent_banners;
     let (response, probe, verdict) =
-        step(profile, "load", "validity", url, || check_validity(page)).map_err(cdp_err)?;
+        step(profile, "load", "validity", url, || check_validity(page, hide_consent)).map_err(cdp_err)?;
     let blocked = verdict.error_message();
     if let Some((ev, _)) = evidence.as_mut() {
         ev.response = response;
@@ -855,11 +861,11 @@ fn scan_page_inner(
     // lock they applied, before anything is swept or measured. Never a click
     // and never a consent choice: an injected style paints the page without
     // the manager's layer. The validity probe above ran first, so a page that
-    // is only a consent wall was refused rather than scanned empty.
-    let hide_consent = !options.keep_consent_banners;
+    // is only a consent wall was refused rather than scanned empty. Every hide
+    // pass is best-effort: a failed one leaves the banner showing, the way a
+    // scan with `--no-consent-hiding` reads the page.
     if hide_consent {
-        step(profile, "load", "hide-consent", url, || hide_consent_banners(page, consent))
-            .map_err(cdp_err)?;
+        step(profile, "load", "hide-consent", url, || hide_consent_banners(page, consent));
     }
 
     // Inject the plain-JS snapshot producer (no WebAssembly runs in the page).
@@ -883,8 +889,7 @@ fn scan_page_inner(
     // A manager that injects its banner late (after load, or on the first
     // scroll) is hidden here, before the capture every pass reads.
     if hide_consent {
-        step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent))
-            .map_err(cdp_err)?;
+        step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
     }
 
     // The one capture every pass below reads: the rule pass, the hidden-text
@@ -892,7 +897,13 @@ fn scan_page_inner(
     // answers is answered for all three. The sweep leaves the page revealed and
     // scrolled to the top, which is the scroll-0 snapshot the in-page path
     // measured and analyzed.
-    let base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
+    let mut base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
+    // A banner that arrived around the capture is hidden, and the page
+    // captured again, so the capture, the live hit tests and the pixel reads
+    // all see the page without it.
+    if hide_consent && step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent)) {
+        base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
+    }
     let base = snapshot_engine::parse_snapshot(&base_json).map_err(cdp_err)?;
     if let Some((ev, _)) = evidence.as_mut() {
         ev.scan_snapshot = Some(base_json);
@@ -1203,11 +1214,17 @@ fn capture_post_scan(
 }
 
 /// Run the consent hide step ([`consent::hide_js`]) and fold what it hid into
-/// `report`. Idempotent; each run also catches a banner injected since the last.
-fn hide_consent_banners(page: &mut Page<'_>, report: &mut ConsentReport) -> Result<(), CdpError> {
-    let v = page.evaluate_value(&consent::hide_js())?;
-    report.merge(&v);
-    Ok(())
+/// `report`. Idempotent; each run also catches a banner injected since the
+/// last. Best-effort: a failed evaluation hides nothing and is not an error.
+/// Returns whether this run changed the page.
+fn hide_consent_banners(page: &mut Page<'_>, report: &mut ConsentReport) -> bool {
+    match page.evaluate_value(&consent::hide_js()) {
+        Ok(v) => {
+            report.merge(&v);
+            v.get("changed").and_then(Value::as_bool).unwrap_or(false)
+        }
+        Err(_) => false,
+    }
 }
 
 /// The `measureContentHiddenAfterReveal` reveal sweep: scroll the page top to

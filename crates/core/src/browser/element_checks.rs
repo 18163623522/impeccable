@@ -7136,6 +7136,140 @@ mod tests {
         assert!(bare.iter().any(|h| h.id == "low-contrast" && h.snippet.contains("on #ffffff")), "{bare:?}");
     }
 
+    /// A white card below the fold, its `::before` set to `pseudo`, holding
+    /// a grey note (`tag`), which fails on the card's white.
+    fn note_in_card(tag: &str, pseudo: &[(&str, &str)], card_styles: &[(&str, &str)]) -> Vec<RuleHit> {
+        let (mut d, body) = page();
+        let card = bare_box(&mut d, body, "div", (0.0, 2000.0, 420.0, 200.0));
+        d.set_styles(
+            card,
+            &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)"), ("isolation", "auto")],
+        );
+        d.set_styles(card, card_styles);
+        for (prop, value) in pseudo {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        let text = d.add(Some(card), tag);
+        visible(&mut d, text);
+        d.add_text(text, "Billed yearly");
+        d.set_rect(text, 28.0, 2100.0, 80.0, 21.0);
+        d.set_styles(
+            text,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(156, 163, 175)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        colors(&d, text)
+    }
+
+    #[test]
+    fn a_pseudo_off_the_text_or_beneath_the_card_leaves_the_verdict() {
+        let badge: &[(&str, &str)] = &[
+            ("content", "\"MOST POPULAR\""),
+            ("position", "absolute"),
+            ("display", "block"),
+            ("width", "104px"),
+            ("height", "21px"),
+            ("top", "-12px"),
+            ("left", "296px"),
+            ("right", "20px"),
+            ("bottom", "191px"),
+            ("backgroundColor", "rgb(194, 65, 12)"),
+            ("backgroundImage", "none"),
+            ("transform", "none"),
+            ("zIndex", "auto"),
+        ];
+        let on_white = |hits: &[RuleHit]| {
+            hits.iter().any(|h| h.id == "low-contrast" && h.snippet.ends_with("text #9ca3af on #ffffff"))
+        };
+        // visiby.net 3806: a corner badge, on a note and a link below the
+        // fold. It neither drops the verdict nor reprints it against itself.
+        for tag in ["p", "a"] {
+            let hits = note_in_card(tag, badge, &[]);
+            assert!(on_white(&hits), "{tag}: {hits:?}");
+        }
+        // A neubrutalist offset shadow and a ring behind the card's white.
+        let mut shadow = badge.to_vec();
+        shadow.extend([
+            ("content", "\"\""),
+            ("top", "0px"),
+            ("left", "0px"),
+            ("width", "420px"),
+            ("height", "200px"),
+            ("backgroundColor", "rgb(0, 0, 0)"),
+            ("transform", "matrix(1, 0, 0, 1, 8, 8)"),
+            ("zIndex", "-1"),
+        ]);
+        for tag in ["p", "a"] {
+            let hits = note_in_card(tag, &shadow, &[]);
+            assert!(on_white(&hits), "{tag}: {hits:?}");
+        }
+        // The same shadow in a capture that did not record the pseudo's
+        // `z-index` cannot be placed: the verdict stands as it did, and a
+        // link is waived as it was.
+        let mut unrecorded = shadow.clone();
+        unrecorded.push(("zIndex", ""));
+        assert!(on_white(&note_in_card("p", &unrecorded, &[])));
+        assert!(!reports_contrast(&note_in_card("a", &unrecorded, &[])));
+        // Over the card's fill (the card opens its own stacking context), the
+        // black panel is the surface, and the grey passes on it.
+        assert!(!reports_contrast(&note_in_card("p", &shadow, &[("zIndex", "0")])));
+    }
+
+    #[test]
+    fn a_negative_layer_under_a_section_fill_leaves_the_verdict() {
+        let section = |tag: &str, isolation: &str, ink: &str| {
+            let (mut d, body) = page();
+            let sec = bare_box(&mut d, body, "section", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_styles(
+                sec,
+                &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)"), ("isolation", isolation)],
+            );
+            let layer = bare_box(&mut d, sec, "div", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_styles(
+                layer,
+                &[
+                    ("position", "absolute"),
+                    ("zIndex", "-10"),
+                    ("backgroundImage", "linear-gradient(135deg, rgb(15, 23, 42), rgb(30, 41, 59))"),
+                ],
+            );
+            let content = bare_box(&mut d, sec, "div", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_style(content, "position", "relative");
+            let text = d.add(Some(content), tag);
+            visible(&mut d, text);
+            d.add_text(text, "Every workspace includes guest seats");
+            d.set_rect(text, 20.0, 2100.0, 400.0, 24.0);
+            d.set_styles(
+                text,
+                &[
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("color", ink),
+                    ("fontSize", "16px"),
+                    ("fontWeight", "400"),
+                    ("webkitBackgroundClip", "border-box"),
+                ],
+            );
+            colors(&d, text)
+        };
+        const FAINT: &str = "rgb(209, 213, 219)";
+        for tag in ["p", "a"] {
+            let hits = section(tag, "auto", FAINT);
+            assert!(
+                hits.iter().any(|h| h.id == "low-contrast" && h.snippet.ends_with("on #ffffff")),
+                "{tag}: {hits:?}"
+            );
+        }
+        // In an isolated section the layer shows, and faint copy passes on it.
+        assert!(!reports_contrast(&section("p", "isolate", FAINT)));
+        // A capture that did not record `isolation` keeps the verdict.
+        assert!(reports_contrast(&section("p", "", FAINT)));
+    }
+
     #[test]
     fn a_faint_layer_over_the_walked_surface_keeps_the_walk_verdict() {
         // coldtea.ai's footer grain: a texture tile at 0.085 over the page the

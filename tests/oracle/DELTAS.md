@@ -4920,3 +4920,110 @@ cohorts, 801 captures):
     `snapshot_engine::analyze_visual_contrast` takes the routed budget.
     `screenshot_contrast` gains `measure_visual_contrast_candidate` and
     `PixelMeasure`. The wasm module exports `vc_media_sample`.
+
+### Revised 2026-09-19 after review: paint beneath a fill, paint off the text
+
+The review found pricing and feature cards losing real failures below the
+fold, and a misprinted finding. The climb read a positioned `::before` or
+`::after` as the text's surface whenever it was as large as the text run,
+wherever it sat, and before the host's own fill. With that revision's wider
+use of the climb, that answer dropped or reprinted any tag's verdict wherever
+the hit-test stacks could not answer. A negative `z-index` sibling was read
+past an opaque ancestor fill in the same way.
+
+- **A pseudo-element is placed before it decides anything.** Its box is
+  worked out from the containing block (the nearest positioned or
+  transformed box, less its borders), its pixel offsets and size, and its
+  transform. A translation moves the box. A rotation, scale or skew gives the
+  bounds of the transformed box about its centre, which only rules the
+  pseudo out, since it may not fill them. A pseudo whose box does not cover
+  the text is not its surface. Example: a "Most popular" badge at a card's
+  corner (visiby.net 3806 and 3809 printed `1.2:1 — text #8b8d87 on #c96442
+  (layer on article.pc)` and now print `3.0:1 — text #8b8d87 on #faefe6`).
+  A pseudo the capture cannot place (a fixed pseudo, `auto` offsets, a 3D
+  transform) keeps the old size test.
+- **A pseudo-element at `z-index` below zero is under the host's fill** unless the host opens
+  its own stacking context. The same holds for a negative `z-index` box under
+  an opaque fill or gradient between it and its stacking context. Examples: the
+  neubrutalist offset shadow and the ring drawn with `::before { z-index: -1 }`
+  behind a white card, and the `absolute inset-0 -z-10` gradient inside a
+  `relative bg-white` section. That paint is skipped, and the fill ends the climb as the
+  walk's surface. Stacking contexts are read from `z-index`, opacity,
+  `transform`, `translate`/`rotate`/`scale`, `filter`, `backdrop-filter`,
+  `mix-blend-mode`, `clip-path`, masks, `perspective`, `contain`, the
+  matching `will-change`, fixed and sticky positioning, and `isolation`. A
+  Tailwind `isolate` class stands in for `isolation` where the capture did
+  not record it.
+- **What the capture cannot place decides no verdict of its own.**
+  - A pseudo whose box or paint order is uncertain, or a negative layer
+    under a fill whose stacking context is unknown (a capture older than
+    `isolation` or the pseudo's `z-index`), is read by the climb as before.
+    The SAFE_TAGS path waives against it as it did.
+  - `unread_verdict` calls it `Unknown` (`found_order`): the verdict stands
+    outside the SAFE_TAGS path, nothing is reprinted against it, and the
+    URL engine's second pixel budget takes it.
+  - `dark-glow`'s surface read ignores it.
+- **The capture records more.** The capture adds `isolation` to the style
+  properties, and `zIndex` and `translate` to the pseudo-element properties.
+
+The fixture `unread-surface-contrast.html` gains eight cases below the fold.
+Five should flag against white: the badged card's note, the offset-shadow
+card's note and link, the ringed card's note, and the note over a hidden
+`-z-10` layer. Three should pass: light copy on the same layer in an
+`isolate` section, on a stretched dark `::before`, and on a `z-index: -1`
+dark `::before` in a card that opens its own context. The revision before
+this one reported none of the four notes and the link. Base (156c3150)
+reports the four notes, waives the link on the offset shadow, and reports
+all three pass cases against white.
+
+Goldens re-recorded and read: `detect-fixture-json-unread-surface-contrast-html`
+and `detect-fixture-text-unread-surface-contrast-html` add the eight new
+cases' static findings (6 to 14; the static engine places no pseudo-element
+and no layer). `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+`detect-dir-quiet-all-fixtures`, `detect-no-advisory-json` and
+`detect-no-advisory-text` add exactly those 8 (694 to 702), none removed.
+
+Corpus (`reports/ratchet/round7-surfaces-rev-28-ratchet-28.json`, 801
+captures; full lists from an uncapped copy of the harness):
+
+- **low-contrast 6,471 to 6,425.** 163 removed, 117 added, no severity
+  moves.
+  - **Removed by label:** pattern-absent 152, confirmed-harmful 3,
+    real-harmless 1, unjudged 7.
+  - **Removed by cohort:** cohort 1 lost 9 (confirmed-harmful 3,
+    unjudged 6), cohort 2 lost 1 (unjudged), and cohort 3 lost 153
+    (pattern-absent 152, real-harmless 1).
+  - **Added by cohort:** cohort 1 35, cohort 2 7, cohort 3 75.
+- **Against the revision before this one:** 5 more removed and 9 more added,
+  and the visiby.net pair changes as above.
+  - **The 3 violations are colour-pair moves.** yungching.com.tw 3369 and
+    3375 report `#ffaa01 on #fbf0da` on the FAQ's first "STEP" label
+    instead of its seventh, with the same snippet. The earlier copy sat under
+    a rotated circle decoration, and the old size test waived it; its bounds
+    lie off the label. thairath.co.th 3422 and yungching.com.tw's "expand
+    all" move the same way. The crops show the earlier copies visible and
+    failing the same way.
+  - **The new additions.** yna.co.kr 3337: white "IR" on `#add3ff`, 1.6:1,
+    beside two banner images that do not reach it. yna.co.kr 3337 and 3346:
+    white on the blue banner gradient, 3.5:1 and 4.3:1, which a
+    half-overlapping `::before` image had waived. jyes.com.tw 4093, 4098
+    and 4101: a goldenrod heading on white, 2.2:1, under a tab pane whose
+    fade-out `::after` sits 800px lower. All three are real in the crops.
+  - **One addition dropped.** yungching.com.tw 3369's `#949494` card label
+    was added under the old answer. It now sits under a rotated decoration
+    whose bounds do cover it, so it is uncertain and waived as base waived it.
+- **Live** (home pages, the revision before this one against this one):
+  arbiproseller-app.vercel.app 14 and 14, myrecomy.com 3 and 3, vestra.ai 14
+  and 14. visiby.net/pricing prints the grey unit at 3.0:1 on `#faefe6`
+  where the revision before printed 1.2:1 on the badge's orange.
+
+Known limits added:
+
+1. **Old captures cannot place paint beneath a fill.** Replays of captures
+   without `isolation` or the pseudo's `z-index` read such paint as before
+   and decide no verdict from it.
+2. **`transform-origin` is assumed to be the centre** for a transformed
+   pseudo-element, whose origin the capture does not record.
+3. **Two review notes stay open.** A closed drawer parked right of an
+   unclipped mobile page now widens the page (`wide.html`). Pixel findings
+   on links are not grouped by colour pair.

@@ -428,10 +428,279 @@ fn is_svg(dom: &dyn Dom, node: ElId) -> bool {
     dom.namespace_uri(node) == impeccable_foundation::browser::snapshot::NS_SVG
 }
 
-/// A `::before` or `::after` stretched over at least the text and painting
-/// something. A small pseudo (an underline, a bullet, a badge dot) is not a
-/// surface, and neither is one laid out inline.
+/// Where a layer paints against the fills around it, for a layer whose
+/// place in paint order is in question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// Over the fills between it and the text: a reader sees it.
+    Over,
+    /// Beneath an opaque fill that is under the text too: nobody sees it
+    /// there.
+    Under,
+    /// The capture does not say which.
+    Unknown,
+}
+
+/// Whether a box opens a stacking context, so a negative `z-index` layer
+/// inside it paints over its background rather than under it. `None` where
+/// nothing the capture recorded opens one and it did not record `isolation`
+/// (a capture older than that property); a Tailwind `isolate` class answers
+/// for it there.
+fn opens_stacking_context(dom: &dyn Dom, n: ElId) -> Option<bool> {
+    if box_layer(dom, n).context.is_some() {
+        return Some(true);
+    }
+    let value = |prop: &str| js::to_lower_case(js::trim(&dom.style(n, prop)));
+    let set = |prop: &str, off: &str| {
+        let v = value(prop);
+        !v.is_empty() && v != off
+    };
+    let position = value("position");
+    if position == "fixed" || position == "sticky" {
+        return Some(true);
+    }
+    let effects = [
+        ("filter", "none"),
+        ("backdropFilter", "none"),
+        ("mixBlendMode", "normal"),
+        ("clipPath", "none"),
+        ("maskImage", "none"),
+        ("webkitMaskImage", "none"),
+        ("perspective", "none"),
+        ("translate", "none"),
+        ("rotate", "none"),
+        ("scale", "none"),
+    ];
+    if effects.iter().any(|(prop, off)| set(prop, off)) {
+        return Some(true);
+    }
+    let contain = value("contain");
+    if ["paint", "layout", "strict", "content"].iter().any(|k| contain.contains(k)) {
+        return Some(true);
+    }
+    let will = value("willChange");
+    if [
+        "transform",
+        "opacity",
+        "filter",
+        "z-index",
+        "translate",
+        "rotate",
+        "scale",
+        "isolation",
+        "mix-blend-mode",
+        "perspective",
+    ]
+    .iter()
+    .any(|k| will.contains(k))
+    {
+        return Some(true);
+    }
+    match value("isolation").as_str() {
+        "isolate" => Some(true),
+        "" => {
+            let class = dom.attr(n, "class").unwrap_or_default();
+            class
+                .split_ascii_whitespace()
+                .any(|t| t == "isolate")
+                .then_some(true)
+        }
+        _ => Some(false),
+    }
+}
+
+/// Where a negative `z-index` layer hung from `start` paints: in the nearest
+/// stacking context above it, beneath every in-flow background inside that
+/// context. An opaque fill (or opaque gradient) on `start` or on a box above
+/// it, before a stacking context is met, is painted over the layer, and the
+/// text sits on that fill: the `absolute inset-0 -z-10` gradient inside a
+/// `relative bg-white` section is hidden, the same layer inside an
+/// `isolate` section shows. The document's own surface hides nothing: the
+/// root is a stacking context, and `body`'s colour is the canvas's.
+fn negative_layer_order(dom: &dyn Dom, start: ElId) -> Order {
+    let mut unknown = false;
+    let mut cur = Some(start);
+    for _ in 0..LAYER_MAX_LEVELS {
+        let Some(n) = cur else { break };
+        let tag = tag_lower(dom, n);
+        if tag == "body" || tag == "html" {
+            break;
+        }
+        match opens_stacking_context(dom, n) {
+            Some(true) => return Order::Over,
+            Some(false) => {}
+            None => unknown = true,
+        }
+        if paints_opaque_color(dom, n).is_some()
+            || matches!(gradient_surface(dom, n), Some(Paint::Gradient { .. }))
+        {
+            return if unknown { Order::Unknown } else { Order::Under };
+        }
+        cur = dom.parent(n);
+    }
+    Order::Over
+}
+
+/// A pixel length a computed style gives, `None` for `auto` or anything else.
+fn px_length(raw: &str) -> Option<f64> {
+    let raw = js::trim(raw);
+    if !raw.ends_with("px") {
+        return None;
+    }
+    let v = parse_float(raw);
+    v.is_finite().then_some(v)
+}
+
+/// Where a computed `transform` (with the `translate` property, where
+/// recorded) puts a box of `rect`: the box itself for a translation, or,
+/// for a rotation, a scale or a skew, the bounds of the transformed box about
+/// its centre (the default `transform-origin`, which the capture does not
+/// record for a pseudo-element), with `false` for "not exact": the box paints
+/// inside those bounds but may not fill them. `None` for a transform this
+/// cannot read (a 3D matrix).
+fn transformed_box(rect: Rect, transform: &str, translate: &str) -> Option<(Rect, bool)> {
+    let (w, h) = (rect.width, rect.height);
+    let mut m = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let transform = js::trim(transform);
+    if !transform.is_empty() && transform != "none" {
+        let inner = transform.strip_prefix("matrix(")?.strip_suffix(')')?;
+        let v: Vec<f64> = inner.split(',').map(|t| parse_float(js::trim(t))).collect();
+        if v.len() != 6 || v.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        m.copy_from_slice(&v);
+    }
+    let translate = js::trim(translate);
+    if !translate.is_empty() && translate != "none" {
+        let axis = |t: &str, size: f64| {
+            if let Some(pct) = t.strip_suffix('%') {
+                let v = parse_float(pct);
+                v.is_finite().then_some(v / 100.0 * size)
+            } else {
+                px_length(t)
+            }
+        };
+        let mut tokens = translate.split_ascii_whitespace();
+        m[4] += axis(tokens.next()?, w)?;
+        if let Some(t) = tokens.next() {
+            m[5] += axis(t, h)?;
+        }
+    }
+    let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+    let exact = near(m[0], 1.0) && near(m[1], 0.0) && near(m[2], 0.0) && near(m[3], 1.0);
+    let (cx, cy) = (rect.left + w / 2.0, rect.top + h / 2.0);
+    let corners = [(-w / 2.0, -h / 2.0), (w / 2.0, -h / 2.0), (-w / 2.0, h / 2.0), (w / 2.0, h / 2.0)];
+    let placed: Vec<(f64, f64)> = corners
+        .iter()
+        .map(|&(x, y)| (cx + m[0] * x + m[2] * y + m[4], cy + m[1] * x + m[3] * y + m[5]))
+        .collect();
+    let (l, r) = placed.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, r), p| (l.min(p.0), r.max(p.0)));
+    let (t, b) = placed.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(t, b), p| (t.min(p.1), b.max(p.1)));
+    Some((Rect::from_xywh(l, t, r - l, b - t), exact))
+}
+
+/// The padding box an absolutely positioned child of `host` is placed in:
+/// the nearest positioned or transformed box, the host included. `None`
+/// where that is the initial containing block, or an inline box, whose
+/// geometry the capture does not give.
+fn containing_block(dom: &dyn Dom, host: ElId) -> Option<Rect> {
+    let mut cur = Some(host);
+    for _ in 0..LAYER_MAX_LEVELS {
+        let n = cur?;
+        let tag = tag_lower(dom, n);
+        if tag == "html" || tag == "body" {
+            return None;
+        }
+        let position = dom.style(n, "position");
+        let position = js::trim(&position);
+        let transform = dom.style(n, "transform");
+        let transform = js::trim(&transform);
+        let positioned = !position.is_empty() && position != "static";
+        if positioned || (!transform.is_empty() && transform != "none") {
+            let display = dom.style(n, "display");
+            if display == "inline" || display == "contents" {
+                return None;
+            }
+            let border = |side: &str| px_length(&dom.style(n, side)).unwrap_or(0.0);
+            let r = dom.rect(n);
+            let (bl, bt) = (border("borderLeftWidth"), border("borderTopWidth"));
+            let (br, bb) = (border("borderRightWidth"), border("borderBottomWidth"));
+            return Some(Rect::from_xywh(
+                r.left + bl,
+                r.top + bt,
+                (r.width - bl - br).max(0.0),
+                (r.height - bt - bb).max(0.0),
+            ));
+        }
+        cur = dom.parent(n);
+    }
+    None
+}
+
+/// The box an absolutely positioned `::before` / `::after` paints: its
+/// offsets and size in its containing block, moved by its transform
+/// ([`transformed_box`], whose `false` says the pseudo paints somewhere
+/// inside the box but may not fill it). `None` where the capture does not
+/// place it (a fixed pseudo, a size or offsets it did not resolve to pixels,
+/// a 3D transform).
+fn pseudo_box(dom: &dyn Dom, node: ElId, which: &str) -> Option<(Rect, bool)> {
+    let get = |prop: &str| dom.pseudo_style(node, which, prop).unwrap_or_default();
+    if js::trim(&get("position")) != "absolute" {
+        return None;
+    }
+    let (w, h) = (px_length(&get("width"))?, px_length(&get("height"))?);
+    let cb = containing_block(dom, node)?;
+    let left = px_length(&get("left")).or_else(|| px_length(&get("right")).map(|r| cb.width - r - w))?;
+    let top = px_length(&get("top")).or_else(|| px_length(&get("bottom")).map(|b| cb.height - b - h))?;
+    let laid_out = Rect::from_xywh(cb.left + left, cb.top + top, w, h);
+    transformed_box(laid_out, &get("transform"), &get("translate"))
+}
+
+/// Where a positioned pseudo-element paints against its host's background
+/// and the fills above it. At `z-index: auto` or above it paints over them;
+/// below zero it paints in the nearest stacking context, over the host's
+/// fill only where the host opens that context itself
+/// ([`negative_layer_order`]): the offset shadow or ring a card draws with
+/// `::before { z-index: -1 }` behind its white fill is hidden under it. A
+/// capture that did not record the pseudo's `z-index` is sure only where
+/// nothing it could hide beneath has a fill.
+fn pseudo_order(dom: &dyn Dom, node: ElId, which: &str) -> Order {
+    let z = dom.pseudo_style(node, which, "zIndex").unwrap_or_default();
+    let z = js::trim(&z);
+    if z == "auto" {
+        return Order::Over;
+    }
+    if z.is_empty() {
+        return match negative_layer_order(dom, node) {
+            Order::Over => Order::Over,
+            _ => Order::Unknown,
+        };
+    }
+    let v = parse_float(z);
+    if !v.is_finite() {
+        return Order::Unknown;
+    }
+    if v >= 0.0 {
+        Order::Over
+    } else {
+        negative_layer_order(dom, node)
+    }
+}
+
+/// A `::before` or `::after` painting something over the whole text run.
+/// A small pseudo (an underline, a bullet, a badge dot) is not a surface,
+/// and neither is one laid out inline, one placed off the text (a "Most
+/// popular" badge at a card's corner) or one painted beneath an opaque fill
+/// ([`pseudo_order`]).
 fn pseudo_paint(dom: &dyn Dom, node: ElId, text: &Rect) -> Option<Paint> {
+    pseudo_paint_placed(dom, node, text).map(|(paint, _)| paint)
+}
+
+/// [`pseudo_paint`], and whether the capture places it for certain: its box
+/// is known to cover the text, and its order against the fills around it is
+/// known. An uncertain one decides what it always did (the SAFE_TAGS path
+/// waives against it) but no verdict of its own ([`found_order`]).
+fn pseudo_paint_placed(dom: &dyn Dom, node: ElId, text: &Rect) -> Option<(Paint, bool)> {
     for which in ["::before", "::after"] {
         let get = |prop: &str| dom.pseudo_style(node, which, prop).unwrap_or_default();
         let content = get("content");
@@ -450,23 +719,35 @@ fn pseudo_paint(dom: &dyn Dom, node: ElId, text: &Rect) -> Option<Paint> {
         if position != "absolute" && position != "fixed" {
             continue;
         }
-        let (w, h) = (parse_float(&get("width")), parse_float(&get("height")));
-        if !(w >= text.width - 4.0 && h >= text.height - 4.0) {
+        let placed = match pseudo_box(dom, node, which) {
+            Some((b, _)) if !rect_covers(&b, text) => continue,
+            Some((_, exact)) => exact,
+            None => {
+                let (w, h) = (parse_float(&get("width")), parse_float(&get("height")));
+                if !(w >= text.width - 4.0 && h >= text.height - 4.0) {
+                    continue;
+                }
+                false
+            }
+        };
+        let order = pseudo_order(dom, node, which);
+        if order == Order::Under {
             continue;
         }
+        let certain = placed && order == Order::Over;
         let image = get("backgroundImage");
         if URL_RE.is_match(&image) {
-            return Some(Paint::Picture);
+            return Some((Paint::Picture, certain));
         }
         if GRADIENT_RE.is_match(&image) {
-            return Some(Paint::Unmodelled);
+            return Some((Paint::Unmodelled, certain));
         }
         if let Some(c) = parse_rgb_or_any(&get("backgroundColor")) {
             if c.alpha_or_one() >= 0.9 {
-                return Some(Paint::PseudoFill(c));
+                return Some((Paint::PseudoFill(c), certain));
             }
             if c.alpha_or_one() > 0.1 {
-                return Some(Paint::Unmodelled);
+                return Some((Paint::Unmodelled, certain));
             }
         }
     }
@@ -667,6 +948,18 @@ fn layer_in_box(
     }
     let layer = inner_layer(outer, box_layer(dom, node));
     let beneath = paints_beneath(layer.0, text_layer, earlier);
+    // A negative `z-index` layer that an opaque fill between it and its
+    // stacking context paints over, nothing in it is seen: the dark
+    // `-z-10` gradient inside a `relative bg-white` section.
+    if beneath
+        && layer.1
+        && !outer.1
+        && layer.0 < FLOW_LAYER
+        && text_layer >= FLOW_LAYER
+        && dom.parent(node).is_some_and(|p| negative_layer_order(dom, p) == Order::Under)
+    {
+        return None;
+    }
     let covers = rect_covers(&dom.rect(node), text);
     let skipped = skip.contains(&node);
     if covers && beneath && !skipped && MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
@@ -1097,13 +1390,53 @@ fn hang_of(dom: &dyn Dom, el: ElId, node: ElId) -> Option<ElId> {
     None
 }
 
+/// Whether the capture places the paint the climb found on `found` for
+/// certain against the fills around it: a pseudo-element whose box or
+/// `z-index` it did not record, or a negative `z-index` layer under a fill
+/// whose stacking context it cannot tell (a capture older than
+/// `isolation`), is [`Order::Unknown`]. The climb reads such paint as it
+/// always did; a verdict of its own it does not decide.
+fn found_order(dom: &dyn Dom, el: ElId, text: &Rect, found: ElId) -> Order {
+    if let Some((_, certain)) = pseudo_paint_placed(dom, found, text) {
+        if !certain {
+            return Order::Unknown;
+        }
+    }
+    let Some(hang) = hang_of(dom, el, found) else {
+        return Order::Over;
+    };
+    if hang == found {
+        return Order::Over;
+    }
+    // The stacking context the found box paints in, seen from the box both
+    // hang from: the outermost one opened below it.
+    let mut context = None;
+    let mut cur = Some(found);
+    for _ in 0..LAYER_MAX_LEVELS {
+        let Some(n) = cur else { break };
+        if n == hang {
+            break;
+        }
+        if let Some(z) = box_layer(dom, n).context {
+            context = Some((n, z));
+        }
+        cur = dom.parent(n);
+    }
+    match context {
+        Some((n, z)) if z < FLOW_LAYER => dom
+            .parent(n)
+            .map_or(Order::Over, |p| negative_layer_order(dom, p)),
+        _ => Order::Over,
+    }
+}
+
 /// The colours an opaque fill or gradient the climb found (`under`) paints,
 /// where it hides everything beneath it: not faded by its box, not a picture,
 /// not paint whose colours the capture does not give. `el` is the element
 /// whose surface it is.
 pub fn opaque_detached_span(dom: &dyn Dom, el: ElId, under: (LayerUnder, Option<ElId>)) -> Option<(Rgba, Rgba)> {
     let found = under.1?;
-    if layer_fade(dom, found, el) < 0.999 {
+    if layer_fade(dom, found, el) < 0.999 || found_order(dom, el, &dom.rect(el), found) != Order::Over {
         return None;
     }
     match under.0 {
@@ -1234,6 +1567,9 @@ pub fn unread_reading(
         return unknown;
     }
     let text = dom.direct_text_rect(el).unwrap_or_else(|| dom.rect(el));
+    if found_order(dom, el, &text, found) != Order::Over {
+        return unknown;
+    }
     let hosts = icon_hosts(dom, el);
     let mut chain = vec![UnreadLayer::new(dom, el, under.0, found)];
     let mut skip = vec![found];
@@ -1244,6 +1580,9 @@ pub fn unread_reading(
         }
         match climb_layers(dom, el, el, &text, &hosts, &skip) {
             (next, Some(node)) if !matches!(next, LayerUnder::Ancestor | LayerUnder::Undecided) => {
+                if found_order(dom, el, &text, node) != Order::Over {
+                    return unknown;
+                }
                 chain.push(UnreadLayer::new(dom, el, next, node));
                 skip.push(node);
             }
@@ -3515,6 +3854,161 @@ mod tests {
         assert_eq!(layer_under_text(&d, a), LayerUnder::Ancestor);
         d.set_style(card, "backgroundImage", "linear-gradient(rgba(40, 20, 90, 0.5), rgba(70, 30, 150, 0.5))");
         assert_eq!(layer_under_text(&d, a), LayerUnder::Picture, "a translucent card shows the photo");
+    }
+
+    /// A white card below the fold holding a short note, with its
+    /// `::before` set to `pseudo`.
+    fn card_with_pseudo(pseudo: &[(&str, &str)]) -> (FakeDom, ElId, ElId) {
+        let mut d = FakeDom::new();
+        let (_, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let card = d.add(Some(body), "div");
+        d.set_rect(card, 0.0, 2000.0, 420.0, 200.0);
+        d.set_styles(
+            card,
+            &[
+                ("position", "relative"),
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("opacity", "1"),
+                ("isolation", "auto"),
+            ],
+        );
+        for (prop, value) in pseudo {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        let p = text_run(&mut d, card, "p", "Billed yearly", (28.0, 2100.0, 80.0, 21.0));
+        (d, card, p)
+    }
+
+    const BADGE: &[(&str, &str)] = &[
+        ("content", "\"MOST POPULAR\""),
+        ("position", "absolute"),
+        ("display", "block"),
+        ("width", "104px"),
+        ("height", "21px"),
+        ("top", "-12px"),
+        ("left", "296px"),
+        ("right", "20px"),
+        ("bottom", "191px"),
+        ("backgroundColor", "rgb(17, 24, 39)"),
+        ("backgroundImage", "none"),
+        ("transform", "none"),
+        ("zIndex", "auto"),
+    ];
+
+    #[test]
+    fn a_pseudo_decides_only_where_it_paints_over_the_text() {
+        let dark = Rgba::new(17.0, 24.0, 39.0, 1.0);
+        // visiby.net 3806: a "Most popular" badge at the card's corner is as
+        // large as the note, and nowhere near it.
+        let (mut d, card, p) = card_with_pseudo(BADGE);
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Ancestor, "a corner badge");
+        // Stretched over the card, it is the surface.
+        for (prop, value) in [("top", "0px"), ("left", "0px"), ("width", "420px"), ("height", "200px")] {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        assert_eq!(layer_under_text_found(&d, p), (LayerUnder::Detached(dark), Some(card)));
+        assert_eq!(found_order(&d, p, &d.rect(p), card), Order::Over);
+        // An offset shadow at `z-index: -1` paints beneath the card's white.
+        d.set_pseudo_style(card, "::before", "zIndex", "-1");
+        d.set_pseudo_style(card, "::before", "transform", "matrix(1, 0, 0, 1, 8, 8)");
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Ancestor, "an offset shadow");
+        // A card that opens its own stacking context paints it over its fill.
+        d.set_style(card, "zIndex", "0");
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Detached(dark), "in the card's own context");
+        d.set_style(card, "zIndex", "auto");
+        // A capture that did not record the pseudo's `z-index` reads it as it
+        // always did, but cannot say it is over the card's fill.
+        d.set_pseudo_style(card, "::before", "zIndex", "");
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Detached(dark));
+        assert_eq!(found_order(&d, p, &d.rect(p), card), Order::Unknown);
+        // With no fill for it to hide beneath, the order does not matter.
+        d.set_style(card, "backgroundColor", "rgba(0, 0, 0, 0)");
+        assert_eq!(found_order(&d, p, &d.rect(p), card), Order::Over);
+        d.set_style(card, "backgroundColor", "rgb(255, 255, 255)");
+        // A pseudo the capture cannot place (rotated) keeps the old size
+        // test, and is not placed for certain either.
+        d.set_pseudo_style(card, "::before", "zIndex", "auto");
+        d.set_pseudo_style(card, "::before", "transform", "matrix(0.7, 0.7, -0.7, 0.7, 0, 0)");
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Detached(dark));
+        assert_eq!(found_order(&d, p, &d.rect(p), card), Order::Unknown);
+        // yungching.com.tw: a rotated decoration whose bounds lie off the
+        // text is not under it.
+        for (prop, value) in [("top", "-12px"), ("left", "296px"), ("width", "104px"), ("height", "21px")] {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Ancestor, "a rotated corner decoration");
+    }
+
+    #[test]
+    fn a_translated_pseudo_is_placed_where_it_moved() {
+        let (mut d, card, _) = card_with_pseudo(BADGE);
+        // The badge moved down over the note by the `translate` property.
+        d.set_pseudo_style(card, "::before", "translate", "-250px 105px");
+        d.set_pseudo_style(card, "::before", "width", "110px");
+        assert_eq!(pseudo_box(&d, card, "::before").map(|(r, e)| (r.left, r.top, e)), Some((46.0, 2093.0, true)));
+        d.set_pseudo_style(card, "::before", "translate", "-100% 500%");
+        assert_eq!(pseudo_box(&d, card, "::before").map(|(r, e)| (r.left, r.top, e)), Some((186.0, 2093.0, true)));
+        // Rotated a half turn about its centre it covers the same box, but
+        // only the bounds are known.
+        d.set_pseudo_style(card, "::before", "translate", "none");
+        d.set_pseudo_style(card, "::before", "transform", "matrix(-1, 0, 0, -1, 0, 0)");
+        let (r, exact) = pseudo_box(&d, card, "::before").unwrap();
+        assert_eq!((r.left.round(), r.top.round(), r.width.round(), r.height.round(), exact), (296.0, 1988.0, 110.0, 21.0, false));
+        d.set_pseudo_style(card, "::before", "transform", "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)");
+        assert_eq!(pseudo_box(&d, card, "::before"), None);
+    }
+
+    #[test]
+    fn a_negative_layer_under_an_ancestor_fill_is_hidden() {
+        // `section.relative.bg-white > (div.absolute.inset-0.-z-10, content)`:
+        // Chrome paints the section's white over the layer.
+        let mut d = FakeDom::new();
+        let (_, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let section = d.add(Some(body), "section");
+        d.set_rect(section, 0.0, 2000.0, 1280.0, 400.0);
+        d.set_styles(
+            section,
+            &[
+                ("position", "relative"),
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("opacity", "1"),
+                ("isolation", "auto"),
+            ],
+        );
+        let layer = d.add(Some(section), "div");
+        d.set_rect(layer, 0.0, 2000.0, 1280.0, 400.0);
+        d.set_styles(
+            layer,
+            &[
+                ("position", "absolute"),
+                ("zIndex", "-10"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", "linear-gradient(135deg, rgb(15, 23, 42), rgb(30, 41, 59))"),
+                ("opacity", "1"),
+            ],
+        );
+        let content = d.add(Some(section), "div");
+        d.set_rect(content, 0.0, 2000.0, 1280.0, 400.0);
+        d.set_styles(content, &[("position", "relative"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+        let p = text_run(&mut d, content, "p", "Guest seats", (20.0, 2100.0, 300.0, 24.0));
+        assert_eq!(layer_under_text(&d, p), LayerUnder::Ancestor, "hidden under the section's white");
+        // An isolated section paints the layer over its own fill.
+        d.set_style(section, "isolation", "isolate");
+        assert_eq!(layer_under_text_found(&d, p).1, Some(layer));
+        // A capture that did not record `isolation` reads the layer as it
+        // always did, and cannot say which of the two it is.
+        d.set_style(section, "isolation", "");
+        assert_eq!(layer_under_text_found(&d, p).1, Some(layer));
+        assert_eq!(found_order(&d, p, &d.rect(p), layer), Order::Unknown);
+        // Tailwind's `isolate` class says it there.
+        d.set_attr(section, "class", "relative isolate bg-white");
+        assert_eq!(found_order(&d, p, &d.rect(p), layer), Order::Over);
+        // A section with no fill of its own hides nothing.
+        d.set_attr(section, "class", "relative");
+        d.set_style(section, "backgroundColor", "rgba(0, 0, 0, 0)");
+        assert_eq!(found_order(&d, p, &d.rect(p), layer), Order::Over);
     }
 
     #[test]

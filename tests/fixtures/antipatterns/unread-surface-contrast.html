@@ -27,10 +27,24 @@
        - a glow on a light panel laid over a dark section is not "on dark
          background"; one under a dark vignette still is.
 
+       - below the fold, where no hit test answers and only the climb reads
+         the layers, a pseudo-element or a negative z-index layer decides
+         only where it paints over the text: a "Most popular" badge at a
+         card's corner, an offset shadow or ring drawn with
+         `::before { z-index: -1 }` behind a white card, and a `-z-10`
+         gradient inside a `relative` white section are under the card's or
+         the section's fill, and grey copy on that white still fails; the
+         same `-z-10` gradient in an `isolate` section, a stretched dark
+         `::before` over a card, and a `z-index: -1` dark `::before` in a card
+         that opens its own stacking context are the surface, and light copy
+         on them passes.
+
        The static HTML engine has no layout, so it scores what the cascade
        gives against the page: the dim copy, and two pass cases, the emerald
        copy and the outlined sticker; both glows as on dark, plus its
-       page-level dark glow. The URL behavior is pinned by
+       page-level dark glow; and every card and section case below the
+       fold against white, the three light pass cases included, since it
+       places no pseudo-element and no layer. The URL behavior is pinned by
        crates/browser/tests/unread_surfaces.rs. */
     * { box-sizing: border-box; }
     body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #111; background: #fff; }
@@ -92,6 +106,25 @@
     .pricing img { position: absolute; left: 0; top: 0; width: 560px; height: 120px; }
     .pricing .inner { position: relative; padding: 48px 24px; }
     .faint-link { font-size: 14px; line-height: 21px; color: rgba(255, 255, 255, 0.3); text-decoration: none; }
+
+    .plan { position: relative; width: 420px; margin: 24px 0 16px; padding: 28px; background-color: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; }
+    .plan::before { content: "MOST POPULAR"; position: absolute; top: -12px; right: 20px; padding: 4px 10px;
+      border-radius: 999px; background-color: #111827; color: #ffffff; font: 600 11px/13px system-ui; letter-spacing: 0.08em; }
+    .plan p, .offset p, .ring p, .hidden-layer p { margin: 0; font-size: 14px; line-height: 21px; }
+    .offset { position: relative; width: 420px; margin: 0 0 24px; padding: 24px; background-color: #ffffff; border: 2px solid #000000; }
+    .offset::before { content: ""; position: absolute; inset: 0; transform: translate(8px, 8px); background-color: #000000; z-index: -1; }
+    .ring { position: relative; width: 420px; margin: 0 0 16px; padding: 24px; background-color: #ffffff; border-radius: 12px; }
+    .ring::before { content: ""; position: absolute; inset: -3px; border-radius: 14px; background-color: #312e81; z-index: -1; }
+    .hidden-layer { position: relative; width: 560px; margin: 0 0 16px; padding: 24px; background-color: #ffffff; }
+    .hidden-layer .deep { position: absolute; inset: 0; z-index: -10; background-image: linear-gradient(135deg, #0f172a, #1e293b); }
+    .hidden-layer .inner { position: relative; }
+    .hidden-layer.isolate { isolation: isolate; }
+    .overlay-card { position: relative; width: 420px; margin: 0 0 16px; padding: 24px; background-color: #ffffff; }
+    .overlay-card::before { content: ""; position: absolute; inset: 0; background-color: #0f172a; }
+    .overlay-card p { position: relative; margin: 0; font-size: 14px; line-height: 21px; }
+    .context-card { position: relative; z-index: 0; width: 420px; margin: 0 0 16px; padding: 24px; background-color: #ffffff; }
+    .context-card::before { content: ""; position: absolute; inset: 0; z-index: -1; background-color: #1e1b4b; }
+    .context-card p { margin: 0; font-size: 14px; line-height: 21px; }
   </style>
 </head>
 <body>
@@ -183,9 +216,17 @@
         <img alt="" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mPQVQ7FihiGlgQAFLgpQXwfaUgAAAAASUVORK5CYII=">
         <div class="inner"><a class="faint-link" id="flag-faint-link-below-fold" href="#pricing">View full pricing details</a></div>
       </div>
+      <div class="plan"><p id="flag-note-in-badged-card" style="color: #9ca3af">Billed yearly</p></div>
+      <div class="offset"><p id="flag-note-in-offset-card" style="color: #d1d5db">Shared workspaces and single sign-on</p>
+        <a class="pale-link" id="flag-link-in-offset-card" href="#team" style="color: #a1a1aa">See every feature</a></div>
+      <div class="ring"><p id="flag-note-in-ringed-card" style="color: #b8bcc4">Dedicated manager and custom contracts</p></div>
+      <div class="hidden-layer"><div class="deep"></div><div class="inner"><p id="flag-note-over-hidden-layer" style="color: #c4c8cf">Every workspace includes guest seats</p></div></div>
     </div>
     <div class="col">
       <h2>Should pass below the fold</h2>
+      <div class="hidden-layer isolate"><div class="deep"></div><div class="inner"><p id="pass-light-on-isolated-layer" style="color: #e5e7eb">Light copy on a layer the section shows</p></div></div>
+      <div class="overlay-card"><p id="pass-light-on-dark-pseudo" style="color: #e2e8f0">Light copy on a stretched dark pseudo-element</p></div>
+      <div class="context-card"><p id="pass-light-on-context-pseudo" style="color: #ede9fe">Light copy on a pseudo-element in its own context</p></div>
     </div>
   </div>
 </body>

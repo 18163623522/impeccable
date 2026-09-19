@@ -10,6 +10,11 @@
 //!   faint link over a photo below the fold, are flagged from pixels; a white
 //!   caption on a scrim over a dark photo and outlined sticker type pass.
 //! - A card photo faded to 0.16 over its white card is read faded.
+//! - Below the fold, a pseudo-element or negative z-index layer is the
+//!   surface only where it paints over the text: a corner badge, an offset
+//!   shadow or ring behind a white card, and a `-z-10` layer under a white
+//!   section's fill leave grey copy failing on white; the same layer in an
+//!   `isolate` section and a dark `::before` over a card pass light copy.
 //! - A glow over a light panel laid on a dark section is not on a dark
 //!   background; one under a translucent vignette still is.
 //! - A page laid out wider than the phone scores its right column.
@@ -107,6 +112,11 @@ fn surfaces_off_the_ancestor_chain_are_read_where_they_paint() {
         "#flag-link-over-grain",
         "#flag-cream-copy-on-photo",
         "#flag-faint-link-below-fold",
+        "#flag-note-in-badged-card",
+        "#flag-note-in-offset-card",
+        "#flag-link-in-offset-card",
+        "#flag-note-in-ringed-card",
+        "#flag-note-over-hidden-layer",
     ] {
         assert!(
             snippet(&flagged, "low-contrast", selector).is_some(),
@@ -119,11 +129,27 @@ fn surfaces_off_the_ancestor_chain_are_read_where_they_paint() {
         "#pass-svg-initial",
         "#pass-outline-sticker",
         "#pass-card-over-faded-photo",
+        "#pass-light-on-isolated-layer",
+        "#pass-light-on-dark-pseudo",
+        "#pass-light-on-context-pseudo",
     ] {
         assert!(
             snippet(&flagged, "low-contrast", selector).is_none(),
             "low-contrast on {selector} was flagged in {flagged:#?}"
         );
+    }
+    // A pseudo-element off the text or beneath the card's fill, and a
+    // negative z-index layer under the section's fill, are not the surface:
+    // the grey copy is printed against the white it sits on.
+    for selector in [
+        "#flag-note-in-badged-card",
+        "#flag-note-in-offset-card",
+        "#flag-link-in-offset-card",
+        "#flag-note-in-ringed-card",
+        "#flag-note-over-hidden-layer",
+    ] {
+        let s = snippet(&flagged, "low-contrast", selector).unwrap_or_default();
+        assert!(s.ends_with(" on #ffffff"), "{selector}: {s}");
     }
     // Dim copy is printed against the gradient it sits on.
     let dim = snippet(&flagged, "low-contrast", "#flag-dim-on-dark-panel").unwrap_or_default();

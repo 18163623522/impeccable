@@ -14,13 +14,22 @@
 //! bounded by the depth of the element, and the driver asks it only for
 //! elements that produced a gated finding.
 //!
+//! Besides what hides a box, the predicate knows what hides the paint inside
+//! one: fallback content of a media element, a face turned away under
+//! `backface-visibility: hidden`, and for the Text gate text set under 1px.
+//! A placeholder inked transparent is skipped where the placeholder is
+//! scored, and a word part way through a scripted colour reveal where its
+//! contrast is ([`colour_mid_reveal`]).
+//!
 //! What it cannot decide it keeps: a property or metric the capture did not
 //! record (a snapshot older than the measurement) never removes a finding.
 //!
 //! Rules that name an element other than the one they report on, or that report
 //! on the page, ask the predicate about it themselves: `clipped-overflow-container`
 //! about the positioned child it names ([`unpainted_inside`], which leaves the
-//! container's own clip to the rule), `nested-cards` about the inner card,
+//! container's own clip to the rule) and about the container
+//! ([`unpainted_text_box`]), `side-tab`'s border path about the card
+//! ([`unpainted_text_box`]), `nested-cards` about the inner card,
 //! `kicker-above-heading` about the heading and the label above it,
 //! `text-occlusion` about the covered text, the text or box covering it and
 //! the card a headline overhangs, and the page-level CSS-text forms in
@@ -62,6 +71,17 @@ pub enum Unpainted {
     /// The box has no width or no height, and none of its content shows past
     /// that edge.
     NoArea,
+    /// A text measurement's text is set at a font size under 1px, and no
+    /// descendant sets it larger: a Slick dot's `font-size: 0` label, a link
+    /// laid over a card whose words only a screen reader reads.
+    NoFontSize,
+    /// The element is fallback content of a `<video>`, `<audio>`, `<canvas>`
+    /// or `<iframe>` (the "your browser does not support video" line), which a
+    /// browser that renders the element never paints.
+    FallbackContent,
+    /// The element or an ancestor is a face turned away from the viewer under
+    /// `backface-visibility: hidden`: the back of a flip card at rest.
+    TurnedAway,
 }
 
 /// Which predicate a rule's findings pass through.
@@ -97,14 +117,20 @@ pub enum OwnOpacity {
 }
 
 /// The rules that measure one element's text. Style tells about the page
-/// (gradient text, fonts, borders) describe authored CSS whatever state is
-/// showing and are not gated; `italic-serif-display` reports one heading's
-/// display treatment, which a visitor meets only where the heading is shown.
+/// (fonts, borders) describe authored CSS whatever state is showing and are
+/// not gated; `italic-serif-display` reports one heading's display
+/// treatment, which a visitor meets only where the heading is shown, and
+/// `gradient-text` the treatment of one element's text, which a label inside
+/// a closed menu or a watermark nobody sees never shows. The border path of
+/// `side-tab` and the container of `clipped-overflow-container` ask
+/// [`unpainted_text_box`] themselves, since their rule ids also cover forms
+/// the gate does not apply to.
 pub const PAINT_GATED_TEXT_RULES: &[&str] = &[
     "all-caps-body",
     "body-text-viewport-edge",
     "cramped-padding",
     "extreme-negative-tracking",
+    "gradient-text",
     "gray-on-color",
     "italic-serif-display",
     "justified-text",
@@ -147,7 +173,7 @@ pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing"
 /// selector matches is painted at capture. The match is tested on the base
 /// predicate alone, with no area test, because the selector may name a
 /// pseudo-element (`.node::after`) whose host has no box of its own.
-pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "pulsing-dot"];
+pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "gradient-text", "pulsing-dot"];
 
 /// Which gate a rule's findings pass through, or `None` for an ungated rule.
 pub fn paint_gate(rule_id: &str) -> Option<PaintGate> {
@@ -193,8 +219,20 @@ pub fn unpainted_for(dom: &dyn Dom, el: ElId, gate: PaintGate) -> Option<Unpaint
         PaintGate::Toggle => unpainted_at_capture(dom, el, OwnOpacity::Toggled).or_else(|| no_area(dom, el)),
         PaintGate::Text => unpainted_walk(dom, el, OwnOpacity::Counts, None, &mut Visible::floored(TEXT_MIN_VISIBLE_SHARE))
             .or_else(|| no_text(dom, el))
+            .or_else(|| no_font_size(dom, el))
             .or_else(|| no_area(dom, el)),
     }
+}
+
+/// Why the box of `el`, a container of text, is not painted for a rule about
+/// that box (the border path of `side-tab`, the clip of
+/// `clipped-overflow-container`), or `None` when it is: the Text gate's walk,
+/// with its visible-share floor, and its area test, but not its test for
+/// text, since a card that holds only an image, or whose words sit in a
+/// descendant a later element carries, still shows its edge.
+pub fn unpainted_text_box(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
+    unpainted_walk(dom, el, OwnOpacity::Counts, None, &mut Visible::floored(TEXT_MIN_VISIBLE_SHARE))
+        .or_else(|| no_area(dom, el))
 }
 
 /// Whether `el`'s text shows across its whole width at rest: no clipping
@@ -339,6 +377,9 @@ fn unpainted_walk(
     if is_visually_hidden_box(dom, el) {
         return Some(Unpainted::VisuallyHidden);
     }
+    if turned_away(dom, el) {
+        return Some(Unpainted::TurnedAway);
+    }
 
     match own {
         OwnOpacity::Toggled => {
@@ -396,6 +437,12 @@ fn unpainted_walk(
         if display == "none" || js::to_lower_case(&dom.style(p, "contentVisibility")) == "hidden" {
             return Some(Unpainted::NotRendered);
         }
+        if FALLBACK_HOST_TAGS.contains(&tag_lower(dom, p).as_str()) {
+            return Some(Unpainted::FallbackContent);
+        }
+        if turned_away(dom, p) {
+            return Some(Unpainted::TurnedAway);
+        }
         if Some(p) == clip_root {
             clip_tests = false;
         }
@@ -447,6 +494,13 @@ fn unpainted_walk(
             if viewport_w > 0.0 && viewport_h > 0.0 && misses(&fr, 0.0, viewport_w, 0.0, viewport_h) {
                 return Some(Unpainted::OutsideDocument);
             }
+        }
+        // Nor can a page scroll sideways to what a viewport layer holds past
+        // its left or right edge: a drawer parked at x 540 inside a fixed
+        // header on a 390px phone. Only the x axis: a smooth-scroll layer
+        // keeps its page below the fold and moves it into view.
+        if viewport_w > 0.0 && misses_axis(band.left, band.right, band.width, 0.0, viewport_w) {
+            return Some(Unpainted::OutsideDocument);
         }
         return None;
     }
@@ -601,10 +655,80 @@ const TEXT_CONTROL_TAGS: &[&str] = &["input", "textarea", "select"];
 /// The direct text is asked first, which settles every element that carries
 /// its own words without reading the subtree.
 fn no_text(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
-    if has_direct_text_longer_than(dom, el, 0) || TEXT_CONTROL_TAGS.contains(&tag_lower(dom, el).as_str()) {
+    let tag = tag_lower(dom, el);
+    // The text inside a media element or a canvas is what a browser that
+    // cannot render it shows instead; one that renders it paints the media.
+    if FALLBACK_HOST_TAGS.contains(&tag.as_str()) {
+        return Some(Unpainted::FallbackContent);
+    }
+    if has_direct_text_longer_than(dom, el, 0) || TEXT_CONTROL_TAGS.contains(&tag.as_str()) {
         return None;
     }
     js::trim(&dom.text_content(el)).is_empty().then_some(Unpainted::NoText)
+}
+
+/// The elements whose content is fallback: a browser that renders the
+/// element paints the media, the canvas bitmap or the frame, never the
+/// markup inside it. `<object>` is left out, since it shows its content when
+/// the resource fails to load, which a capture does not record.
+const FALLBACK_HOST_TAGS: &[&str] = &["audio", "canvas", "iframe", "video"];
+
+/// A text measurement whose text is set under 1px: the element's computed
+/// font size parses below 1px, and no descendant that carries text of its own
+/// sets a size of 1px or more (the gap-collapsing `font-size: 0` on a row of
+/// inline blocks, whose children set their own). A size that does not parse
+/// keeps the finding. The subtree is read only once the element's own size
+/// is under 1px.
+fn no_font_size(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
+    if !under_1px(&dom.style(el, "fontSize")) {
+        return None;
+    }
+    let sized_text = dom.query_all(Some(el), "*").unwrap_or_default().into_iter().any(|d| {
+        has_direct_text_longer_than(dom, d, 0) && !under_1px(&dom.style(d, "fontSize"))
+    });
+    (!sized_text).then_some(Unpainted::NoFontSize)
+}
+
+/// A computed `font-size` that parses to a size under 1px.
+pub fn under_1px(font_size: &str) -> bool {
+    let n = js::parse_float(font_size);
+    n.is_finite() && n < 1.0
+}
+
+/// Whether `node` is a face turned away under `backface-visibility: hidden`:
+/// its own `transform` is a 3D matrix that points its front away from the
+/// viewer (a negative z scale, as `rotateY(180deg)` gives), and nothing above
+/// it rotates in 3D, which could turn it back (a flip card's inner box on
+/// hover). A property the capture did not record, an individual `rotate` or
+/// `scale` on the face, or a 3D transform above it keeps the element. The
+/// walk calls this for the element and each ancestor, so a face hides its
+/// whole subtree; only a face found reads the chain above it.
+fn turned_away(dom: &dyn Dom, node: ElId) -> bool {
+    if dom.style(node, "backfaceVisibility") != "hidden" || !faces_away(&dom.style(node, "transform")) {
+        return false;
+    }
+    let individual_none = |el: ElId, prop: &str| matches!(dom.style(el, prop).as_str(), "none" | "");
+    if !(individual_none(node, "rotate") && individual_none(node, "scale")) {
+        return false;
+    }
+    let mut up = dom.parent(node);
+    while let Some(a) = up {
+        if dom.style(a, "transform").starts_with("matrix3d(") || !individual_none(a, "rotate") {
+            return false;
+        }
+        up = dom.parent(a);
+    }
+    true
+}
+
+/// Whether a computed `transform` is a 3D matrix whose z axis points away
+/// from the viewer (`m33` below 0).
+fn faces_away(transform: &str) -> bool {
+    let Some(body) = transform.strip_prefix("matrix3d(").and_then(|b| b.strip_suffix(')')) else {
+        return false;
+    };
+    let values: Vec<f64> = body.split(',').map(|v| js::parse_float(js::trim(v))).collect();
+    values.len() == 16 && values.iter().all(|v| v.is_finite()) && values[10] < 0.0
 }
 
 /// A box with no width or no height shows nothing when its content cannot
@@ -769,7 +893,23 @@ fn is_script_scroll_frame(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) ->
         Some(h) => h,
         None => viewport_h,
     };
-    fold > 0.0 && cr.height >= fold - 1.0 && has_overflow(dom.scroll_height(p), dom.client_height(p))
+    fold > 0.0
+        && cr.height >= fold - 1.0
+        && has_overflow(dom.scroll_height(p), dom.client_height(p))
+        && !capped_by_max_height(dom, p, cr)
+}
+
+/// Whether a box stands at its `max-height`: a "read more" panel held at
+/// 1000px over a spec table, a collapsed description. A scroll library sizes
+/// its frame with `height` (the viewport's, or a fixed layer's), so a box
+/// its `max-height` stops is a collapsed panel whose clip is what a visitor
+/// sees. A value that is not a length (`none`, or none recorded) caps nothing.
+fn capped_by_max_height(dom: &dyn Dom, p: ElId, cr: &Rect) -> bool {
+    let value = dom.style(p, "maxHeight");
+    let Some(px) = value.strip_suffix("px").map(js::parse_float) else {
+        return false;
+    };
+    px.is_finite() && px > 0.0 && (cr.height - px).abs() <= 1.0
 }
 
 fn is_viewport_layer(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_w: f64, viewport_h: f64) -> bool {
@@ -874,7 +1014,7 @@ fn page_width(dom: &dyn Dom, viewport_w: f64) -> f64 {
 /// at 0 that also carries `loading="lazy"` or sits over a sibling image is
 /// skipped.
 fn is_state_layer(dom: &dyn Dom, el: ElId) -> bool {
-    if declares_opacity_animation(dom, el) {
+    if declares_opacity_animation(dom, el) || lazy_raster_pending(dom, el) {
         return true;
     }
     if !declares_opacity_transition(dom, el) || effective_opacity_dom(dom, el) > TRANSPARENT_FLOOR {
@@ -886,6 +1026,12 @@ fn is_state_layer(dom: &dyn Dom, el: ElId) -> bool {
 /// `transition-property` / `transition-duration` pair `opacity` or `all` with
 /// a non-zero duration (the lists repeat to the longer one).
 fn declares_opacity_transition(dom: &dyn Dom, el: ElId) -> bool {
+    declares_transition_of(dom, el, "opacity")
+}
+
+/// `transition-property` / `transition-duration` pair `property` or `all`
+/// with a non-zero duration (the lists repeat to the longer one).
+fn declares_transition_of(dom: &dyn Dom, el: ElId, property: &str) -> bool {
     let props = dom.style(el, "transitionProperty");
     let durations = dom.style(el, "transitionDuration");
     let props: Vec<&str> = props.split(',').map(js::trim).collect();
@@ -894,7 +1040,73 @@ fn declares_opacity_transition(dom: &dyn Dom, el: ElId) -> bool {
         return false;
     }
     props.iter().enumerate().any(|(i, p)| {
-        (*p == "opacity" || *p == "all") && css_time_seconds(durations[i % durations.len()]) > 0.0
+        (*p == property || *p == "all") && css_time_seconds(durations[i % durations.len()]) > 0.0
+    })
+}
+
+/// How many words of a run have to carry their own inline colour before the
+/// run reads as a scripted colour reveal.
+const REVEAL_RUN_MIN_WORDS: usize = 3;
+
+/// Whether `el`'s colour is one frame of a scripted colour reveal rather
+/// than its colour at rest: a scroll-linked "words light up as you read"
+/// paragraph, where a script writes each word's (or letter's) `color` into
+/// its `style` attribute and the word transitions `color` to it. The element
+/// is such a word and transitions `color`, and its parent, or failing that
+/// its grandparent (a letter-by-letter reveal wraps each word in a span of
+/// its own), holds at least [`REVEAL_RUN_MIN_WORDS`] words of its tag, itself
+/// included. A word a script has not reached yet is still in its start
+/// colour, which is no colour a reader is asked to read. A row of chips whose
+/// selected one React styles inline paints a fill and a border too, and is
+/// not a word run.
+pub fn colour_mid_reveal(dom: &dyn Dom, el: ElId) -> bool {
+    if !is_reveal_word(dom, el) || !declares_transition_of(dom, el, "color") {
+        return false;
+    }
+    let tag = js::to_lower_case(&dom.tag_name(el));
+    let holds_run = |run: ElId| {
+        dom.query_all(Some(run), &tag)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|&w| is_reveal_word(dom, w))
+            .take(REVEAL_RUN_MIN_WORDS)
+            .count()
+            >= REVEAL_RUN_MIN_WORDS
+    };
+    let parent = dom.parent(el);
+    parent.is_some_and(holds_run) || parent.and_then(|p| dom.parent(p)).is_some_and(holds_run)
+}
+
+/// The declarations a colour reveal writes into a word's `style` attribute.
+const REVEAL_STYLE_PROPS: &[&str] = &["color", "opacity", "transition", "will-change"];
+
+/// An inline word whose `style` attribute sets its `color` and nothing but
+/// what a colour reveal writes beside it (its transition, an opacity).
+fn is_reveal_word(dom: &dyn Dom, el: ElId) -> bool {
+    if !matches!(dom.style(el, "display").as_str(), "inline" | "inline-block") {
+        return false;
+    }
+    let Some(style) = dom.attr(el, "style") else {
+        return false;
+    };
+    let names: Vec<String> = style
+        .split(';')
+        .filter_map(|decl| decl.split_once(':'))
+        .map(|(name, _)| js::to_lower_case(js::trim(name)))
+        .collect();
+    names.iter().any(|n| n == "color")
+        && names
+            .iter()
+            .all(|n| REVEAL_STYLE_PROPS.contains(&n.as_str()) || n.starts_with("transition-"))
+}
+
+/// Whether the element's `style` attribute declares `property`.
+fn inline_declares(dom: &dyn Dom, el: ElId, property: &str) -> bool {
+    dom.attr(el, "style").is_some_and(|style| {
+        style
+            .split(';')
+            .filter_map(|decl| decl.split_once(':'))
+            .any(|(name, _)| js::to_lower_case(js::trim(name)) == property)
     })
 }
 
@@ -965,6 +1177,58 @@ fn marks_lazy_loading(dom: &dyn Dom, el: ElId) -> bool {
             token.contains("lazy") || token.contains("loading") || token.contains("preload")
         })
     })
+}
+
+/// Whether a raster is a lazy-loading library's image that has not been
+/// shown yet, which the library fades in once its source arrives:
+///
+/// - a load-state attribute says it has not loaded (`data-loaded="false"`,
+///   or vanilla-lazyload's `data-ll-status` at anything but `loaded`);
+/// - a library holds its source (`data-src`, `data-srcset`, ...) and the
+///   element has no `src` of its own yet;
+/// - a class on the raster or its parent names lazy loading (`lazy`,
+///   `lazyload`, `lazy-load-image-background`) and none names the loaded
+///   state (`lazyloaded`, `lazy-load-image-loaded`), while the raster sits
+///   at rest at 0 or a script is tweening its inline `opacity` (jQuery
+///   lazyload's `fadeIn`, caught in its first frames).
+///
+/// The native `loading="lazy"` attribute alone does not count: Next.js
+/// images carry it by default, and an image held buried behind it is still
+/// reported.
+fn lazy_raster_pending(dom: &dyn Dom, el: ElId) -> bool {
+    if dom.attr(el, "data-loaded").is_some_and(|v| js::to_lower_case(js::trim(&v)) == "false") {
+        return true;
+    }
+    if dom.attr(el, "data-ll-status").is_some_and(|v| js::to_lower_case(js::trim(&v)) != "loaded") {
+        return true;
+    }
+    let holds_source = LAZY_ATTRS
+        .iter()
+        .filter(|name| !matches!(**name, "data-loaded" | "data-ll-status"))
+        .any(|name| dom.attr(el, name).is_some());
+    if holds_source && dom.attr(el, "src").map_or(true, |v| js::trim(&v).is_empty()) {
+        return true;
+    }
+    let tokens: Vec<String> = [Some(el), dom.parent(el)]
+        .into_iter()
+        .flatten()
+        .flat_map(|node| {
+            class_attr(dom, node)
+                .split_ascii_whitespace()
+                .map(js::to_lower_case)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if !tokens.iter().any(|t| t.contains("lazy")) || tokens.iter().any(|t| t.contains("loaded")) {
+        return false;
+    }
+    effective_opacity_dom(dom, el) <= TRANSPARENT_FLOOR || inline_opacity_declared(dom, el)
+}
+
+/// Whether the element's `style` attribute declares `opacity`: the value a
+/// script tween writes on each frame.
+fn inline_opacity_declared(dom: &dyn Dom, el: ElId) -> bool {
+    inline_declares(dom, el, "opacity")
 }
 
 const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
@@ -1056,6 +1320,296 @@ mod tests {
 
     fn raster(d: &FakeDom, el: ElId) -> Option<Unpainted> {
         unpainted_at_capture(d, el, OwnOpacity::Measured)
+    }
+
+    fn text(d: &FakeDom, el: ElId) -> Option<Unpainted> {
+        unpainted_for(d, el, PaintGate::Text)
+    }
+
+    /// jyes.com.tw's Slick dots: the label of each dot is `font-size: 0`.
+    #[test]
+    fn text_set_under_1px_is_not_painted_for_text_rules() {
+        let (mut d, body) = page();
+        let dot = d.add(Some(body), "button");
+        d.set_style(dot, "fontSize", "0px");
+        d.set_rect(dot, 574.0, 568.0, 12.0, 12.0);
+        d.add_text(dot, "1");
+        assert_eq!(text(&d, dot), Some(Unpainted::NoFontSize));
+        // The box rules still see the dot.
+        assert_eq!(unpainted_for(&d, dot, PaintGate::Box), None);
+
+        // A row that collapses the gaps between inline blocks with
+        // `font-size: 0` shows the text its children set larger.
+        let row = d.add(Some(body), "div");
+        d.set_style(row, "fontSize", "0px");
+        d.set_rect(row, 40.0, 200.0, 600.0, 20.0);
+        d.add_text(row, " ");
+        let item = d.add(Some(row), "span");
+        d.set_style(item, "fontSize", "14px");
+        d.set_rect(item, 40.0, 200.0, 80.0, 20.0);
+        d.add_text(item, "Pricing");
+        assert_eq!(text(&d, row), None);
+        assert_eq!(text(&d, item), None);
+
+        // A size that does not parse keeps the text.
+        d.set_style(dot, "fontSize", "");
+        assert_eq!(text(&d, dot), None);
+        assert!(under_1px("0.5px"));
+        assert!(!under_1px("1px"));
+        assert!(!under_1px(""));
+    }
+
+    /// stroq.dev's "your browser does not support video" line inside the
+    /// case-study `<video>`.
+    #[test]
+    fn fallback_content_of_a_media_element_is_not_painted() {
+        let (mut d, body) = page();
+        let video = d.add(Some(body), "video");
+        d.set_rect(video, 61.0, 1863.0, 1158.0, 650.0);
+        d.add_text(video, "Your browser does not support the video tag.");
+        assert_eq!(text(&d, video), Some(Unpainted::FallbackContent));
+        // The media box itself paints.
+        assert_eq!(unpainted_for(&d, video, PaintGate::Box), None);
+
+        for tag in ["video", "audio", "canvas", "iframe"] {
+            let host = d.add(Some(body), tag);
+            d.set_rect(host, 40.0, 100.0, 300.0, 150.0);
+            let p = d.add(Some(host), "p");
+            d.set_rect(p, 40.0, 100.0, 300.0, 20.0);
+            d.add_text(p, "Download the file instead.");
+            assert_eq!(why(&d, p), Some(Unpainted::FallbackContent), "{tag}");
+        }
+
+        // `<object>` shows its content when the resource fails to load.
+        let object = d.add(Some(body), "object");
+        d.set_rect(object, 40.0, 400.0, 300.0, 150.0);
+        let p = d.add(Some(object), "p");
+        d.set_rect(p, 40.0, 400.0, 300.0, 20.0);
+        d.add_text(p, "The chart could not load.");
+        assert_eq!(why(&d, p), None);
+    }
+
+    /// aisdr.com's guide cards: the back of each is `rotateY(180deg)` under
+    /// `backface-visibility: hidden`.
+    #[test]
+    fn a_face_turned_away_is_not_painted() {
+        const FLIPPED: &str = "matrix3d(-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -1, 0, 0, 0, 0, 1)";
+        let (mut d, body) = page();
+        let card = d.add(Some(body), "div");
+        d.set_styles(card, &[("position", "relative"), ("transform", "none"), ("rotate", "none")]);
+        d.set_rect(card, 175.0, 1971.0, 296.0, 233.0);
+        let back = d.add(Some(card), "div");
+        d.set_styles(back, &[("position", "absolute"), ("transform", FLIPPED), ("backfaceVisibility", "hidden"), ("rotate", "none"), ("scale", "none")]);
+        d.set_rect(back, 175.0, 1971.0, 296.0, 233.0);
+        let copy = d.add(Some(back), "p");
+        d.set_rect(copy, 196.0, 1992.0, 254.0, 90.0);
+        d.add_text(copy, "Are you overhyping the AI?");
+        assert_eq!(why(&d, copy), Some(Unpainted::TurnedAway));
+        assert_eq!(why(&d, back), Some(Unpainted::TurnedAway));
+
+        // The front face, and a back face whose backface shows, are painted.
+        let front = d.add(Some(card), "div");
+        d.set_styles(front, &[("transform", "none"), ("backfaceVisibility", "hidden")]);
+        d.set_rect(front, 175.0, 1971.0, 296.0, 233.0);
+        assert_eq!(why(&d, front), None);
+        d.set_style(back, "backfaceVisibility", "visible");
+        assert_eq!(why(&d, copy), None);
+
+        // A capture that did not record the property keeps it.
+        d.set_style(back, "backfaceVisibility", "");
+        assert_eq!(why(&d, copy), None);
+
+        // The card turned by a 3D transform of its own (a flip on hover) may
+        // face the back towards the viewer, so it is kept.
+        d.set_style(back, "backfaceVisibility", "hidden");
+        d.set_style(card, "transform", FLIPPED);
+        assert_eq!(why(&d, copy), None);
+        d.set_style(card, "transform", "none");
+        d.set_style(card, "rotate", "y 180deg");
+        assert_eq!(why(&d, copy), None);
+
+        // A 2D mirror turns nothing away.
+        d.set_style(card, "rotate", "none");
+        d.set_style(back, "transform", "matrix(-1, 0, 0, 1, 0, 0)");
+        assert_eq!(why(&d, copy), None);
+    }
+
+    /// bt.cn's mobile drawer: parked at x 540 on a 390px phone, inside a
+    /// fixed header whose `backdrop-filter` makes it the drawer's containing
+    /// block.
+    #[test]
+    fn a_viewport_layer_holds_nothing_past_the_viewport_sides() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 390.0, 844.0);
+        d.set_rect(body, 0.0, 0.0, 390.0, 844.0);
+        d.el_mut(html).scroll_width = 390.0;
+        d.inner_width = 390.0;
+        d.inner_height = 844.0;
+        resolved(&mut d, html);
+        resolved(&mut d, body);
+        let header = d.add(Some(body), "header");
+        resolved(&mut d, header);
+        d.set_styles(header, &[("position", "fixed"), ("backdropFilter", "blur(12px)")]);
+        d.set_rect(header, 0.0, 0.0, 390.0, 60.0);
+        let drawer = d.add(Some(header), "div");
+        resolved(&mut d, drawer);
+        d.set_style(drawer, "position", "fixed");
+        d.set_rect(drawer, 540.0, 0.0, 240.0, 844.0);
+        let label = d.add(Some(drawer), "span");
+        d.set_rect(label, 594.0, 186.0, 16.0, 22.0);
+        d.add_text(label, "AI");
+        assert_eq!(why(&d, label), Some(Unpainted::OutsideDocument));
+
+        // Opened, the drawer is on screen.
+        d.set_rect(drawer, 150.0, 0.0, 240.0, 844.0);
+        d.set_rect(label, 204.0, 186.0, 16.0, 22.0);
+        assert_eq!(why(&d, label), None);
+
+        // Below the fold of a viewport layer is what a smooth-scroll page
+        // brings into view.
+        d.set_rect(label, 204.0, 1400.0, 16.0, 22.0);
+        assert_eq!(why(&d, label), None);
+    }
+
+    /// jyes.com.tw's spec table under a "read more" panel held at
+    /// `max-height: 1000px`, taller than the phone's viewport.
+    #[test]
+    fn a_panel_held_at_its_max_height_is_not_a_scroll_frame() {
+        let (mut d, body) = page();
+        let panel = d.add(Some(body), "div");
+        d.set_styles(panel, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("maxHeight", "1000px")]);
+        d.set_rect(panel, 20.0, 4516.0, 350.0, 1000.0);
+        d.el_mut(panel).client_height = 999.0;
+        d.el_mut(panel).scroll_height = Some(2968.0);
+        let cell = d.add(Some(panel), "td");
+        d.set_rect(cell, 173.0, 6076.0, 195.0, 149.0);
+        d.add_text(cell, "B1/B3/B5/B8");
+        assert_eq!(why(&d, cell), Some(Unpainted::ClippedOut));
+        let shown = d.add(Some(panel), "p");
+        d.set_rect(shown, 40.0, 4600.0, 300.0, 40.0);
+        assert_eq!(why(&d, shown), None);
+
+        // A frame sized by `height` (the scroll libraries' way) keeps what
+        // lies below its bottom edge, and so does a cap it does not reach.
+        d.set_style(panel, "maxHeight", "none");
+        assert_eq!(why(&d, cell), None);
+        d.set_style(panel, "maxHeight", "1200px");
+        assert_eq!(why(&d, cell), None);
+        d.set_style(panel, "maxHeight", "100%");
+        assert_eq!(why(&d, cell), None);
+    }
+
+    /// zigzag.kr (`data-loaded="false"`), thairath.co.th
+    /// (react-lazy-load-image-component before its `-loaded` class) and
+    /// jyes.com.tw (jQuery lazyload's `fadeIn` in its first frames).
+    #[test]
+    fn a_lazy_image_a_library_has_not_shown_is_a_state_layer() {
+        let (mut d, body) = page();
+        let wrap = d.add(Some(body), "div");
+        d.set_rect(wrap, 40.0, 400.0, 400.0, 400.0);
+        let img = d.add(Some(wrap), "img");
+        d.set_rect(img, 40.0, 400.0, 400.0, 400.0);
+        d.set_style(img, "opacity", "0");
+        assert_eq!(raster(&d, img), None);
+
+        d.set_attr(img, "data-loaded", "false");
+        assert_eq!(raster(&d, img), Some(Unpainted::StateLayer));
+        d.set_attr(img, "data-loaded", "true");
+        assert_eq!(raster(&d, img), None);
+
+        // A library that holds the source while the element has none.
+        d.set_attr(img, "data-src", "/photo.jpg");
+        assert_eq!(raster(&d, img), Some(Unpainted::StateLayer));
+        d.set_attr(img, "src", "/photo.jpg");
+        assert_eq!(raster(&d, img), None);
+
+        // A lazy-loading class on the parent, before the loaded class.
+        d.set_attr(wrap, "class", "lazy-load-image-background blur");
+        assert_eq!(raster(&d, img), Some(Unpainted::StateLayer));
+        d.set_attr(wrap, "class", "lazy-load-image-background blur lazy-load-image-loaded");
+        assert_eq!(raster(&d, img), None);
+
+        // A faint value is a fade only while a script tweens it inline.
+        d.set_attr(wrap, "class", "pic");
+        d.set_attr(img, "class", "lazy");
+        d.set_style(img, "opacity", "0.0688");
+        assert_eq!(raster(&d, img), None);
+        d.set_attr(img, "style", "display: inline; opacity: 0.0688;");
+        assert_eq!(raster(&d, img), Some(Unpainted::StateLayer));
+
+        // The native attribute alone is Next.js's default, not a library.
+        let native = d.add(Some(body), "img");
+        d.set_rect(native, 40.0, 900.0, 400.0, 400.0);
+        d.set_style(native, "opacity", "0");
+        d.set_attr(native, "loading", "lazy");
+        assert_eq!(raster(&d, native), None);
+    }
+
+    /// v0-evasion-website.vercel.app: each word of a paragraph lights up as
+    /// the reader scrolls, written into its `style` attribute.
+    #[test]
+    fn a_word_part_way_through_a_colour_reveal_is_not_at_rest() {
+        let (mut d, body) = page();
+        let p = d.add(Some(body), "p");
+        d.set_rect(p, 40.0, 1200.0, 600.0, 40.0);
+        let mut words = Vec::new();
+        for w in ["Words", "light", "up", "later"] {
+            let span = d.add(Some(p), "span");
+            d.set_styles(span, &[("display", "inline"), ("transitionProperty", "color, background-color"), ("transitionDuration", "0.15s")]);
+            d.set_attr(span, "style", "color: rgb(228, 228, 231);");
+            d.add_text(span, w);
+            words.push(span);
+        }
+        assert!(colour_mid_reveal(&d, words[0]));
+
+        // Without the transition the colour is where it rests.
+        for &w in &words {
+            d.set_style(w, "transitionDuration", "0s");
+        }
+        assert!(!colour_mid_reveal(&d, words[0]));
+
+        // Two coloured words are an emphasis, not a reveal.
+        for &w in &words {
+            d.set_style(w, "transitionDuration", "0.15s");
+        }
+        d.set_attr(words[2], "style", "");
+        d.set_attr(words[3], "style", "font-weight: 600;");
+        assert!(!colour_mid_reveal(&d, words[0]));
+
+        // zoptron.framer.ai reveals letter by letter, one span per word: a
+        // two-letter word's letters count with the rest of the paragraph.
+        let q = d.add(Some(body), "p");
+        d.set_style(q, "display", "flex");
+        d.set_rect(q, 40.0, 1400.0, 600.0, 40.0);
+        let mut letters = Vec::new();
+        for word in ["an", "idea"] {
+            let w = d.add(Some(q), "span");
+            for c in word.chars() {
+                let l = d.add(Some(w), "span");
+                d.set_styles(l, &[("display", "inline"), ("transitionProperty", "color"), ("transitionDuration", "0.2s")]);
+                d.set_attr(l, "style", "transition: color 0.2s ease-in-out; color: rgb(50, 61, 73);");
+                d.add_text(l, &c.to_string());
+                letters.push(l);
+            }
+        }
+        assert!(colour_mid_reveal(&d, letters[0]));
+
+        // clipto.com's chips: the selected one styled inline with its fill.
+        let row = d.add(Some(body), "div");
+        d.set_style(row, "display", "flex");
+        let mut chips = Vec::new();
+        for _ in 0..4 {
+            let chip = d.add(Some(row), "button");
+            d.set_styles(chip, &[("display", "inline-flex"), ("transitionProperty", "all"), ("transitionDuration", "0.15s")]);
+            d.set_attr(chip, "style", "background-color: #D97757; color: #FFFFFF;");
+            chips.push(chip);
+        }
+        assert!(!colour_mid_reveal(&d, chips[0]));
+        for &c in &chips {
+            d.set_style(c, "display", "inline");
+        }
+        assert!(!colour_mid_reveal(&d, chips[0]));
     }
 
     #[test]
@@ -1841,7 +2395,7 @@ mod tests {
         ];
         retain_painted(&d, a, &mut findings);
         let ids: Vec<&str> = findings.iter().map(|f| f.type_.as_str()).collect();
-        assert_eq!(ids, vec!["gradient-text"]);
+        assert!(ids.is_empty(), "{ids:?}");
 
         // Painted, every finding stays.
         d.set_rect(wrap, 40.0, 300.0, 400.0, 40.0);
@@ -1854,7 +2408,7 @@ mod tests {
         assert_eq!(kept.len(), 3);
 
         assert_eq!(paint_gate("content-hidden-at-rest"), None);
-        assert_eq!(paint_gate("gradient-text"), None);
+        assert_eq!(paint_gate("gradient-text"), Some(PaintGate::Text));
         assert_eq!(paint_gate("layout-transition"), Some(PaintGate::Box));
         assert_eq!(paint_gate("bounce-easing"), Some(PaintGate::Box));
         assert_eq!(paint_gate("dark-glow"), Some(PaintGate::Box));

@@ -1073,6 +1073,12 @@ pub fn check_placeholder_colors(
     placeholder_text: &str,
     mut text_color: Rgba,
 ) -> Vec<RuleHit> {
+    // A placeholder inked at (nearly) zero alpha paints nothing: Bootstrap's
+    // floating labels and `placeholder:text-transparent` hide it so a label
+    // can take its place.
+    if text_color.alpha_or_one() <= TRANSPARENT_INK_FLOOR {
+        return Vec::new();
+    }
     // `visible_text` is the host's own ink; the placeholder paints its own.
     let host_ink_cleared;
     let opts = if opts.visible_text.is_some() {

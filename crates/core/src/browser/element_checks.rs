@@ -137,7 +137,7 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     } else {
         None
     };
-    check_borders(
+    let mut hits = check_borders(
         &tag,
         &Sides {
             top: widths[0],
@@ -158,7 +158,14 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             tab_context: is_tab_context_element(dom, el),
             corners,
         },
-    )
+    );
+    // A side-tab is a card of text with a coloured edge; a card a visitor
+    // cannot see (in a tab pane at opacity 0, a slide parked off its track)
+    // shows no edge. Asked only once the border path has reported.
+    if hits.iter().any(|h| h.id == "side-tab") && crate::browser::painted::unpainted_text_box(dom, el).is_some() {
+        hits.retain(|h| h.id != "side-tab");
+    }
+    hits
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────
@@ -1021,14 +1028,23 @@ pub fn check_element_colors_dom(
     let decorative = std::cell::OnceCell::new();
     let is_decorative =
         || *decorative.get_or_init(|| super::decorative_text::is_decorative_text_dom(dom, el));
+    // A word caught part way through a scripted colour reveal is not at the
+    // colour it rests at, so no contrast verdict is about what a reader
+    // reads, and it claims no colour pair. Asked once, only of an element
+    // that failed.
+    let mid_reveal = std::cell::OnceCell::new();
+    let at_rest = |h: &RuleHit| {
+        (h.id != "low-contrast" && h.id != "gray-on-color")
+            || !*mid_reveal.get_or_init(|| crate::browser::painted::colour_mid_reveal(dom, el))
+    };
     let mut findings = crate::checks::rules::check_colors_deduped_shaped(
         &color_opts,
         seen,
         Some(claim),
         &is_decorative,
-        &mut |h: &RuleHit| safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h),
+        &mut |h: &RuleHit| safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h) && at_rest(h),
     );
-    findings.retain(|h| verdict_stands(h));
+    findings.retain(|h| verdict_stands(h) && at_rest(h));
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -2121,8 +2137,9 @@ re!(CAROUSEL_ROLE_RE, r"(?-u:\b)(carousel|slider)(?-u:\b)");
 /// marquee, a comparison frame. Read as whole words of a class list or an id
 /// ([`measures::ident_words`]), so a BEM element name and a camelCase id count.
 pub const VIEWPORT_IDENT_WORDS: &[&str] = &[
-    "carousel", "comparison", "compare", "fisheye", "flickity", "marquee", "owl", "preview",
-    "scroller", "slider", "slideshow", "splide", "split", "swiper", "ticker", "viewport",
+    "carousel", "comparison", "compare", "fisheye", "flickity", "marquee", "owl", "preview", "reel",
+    "rolling", "scroller", "slick", "slider", "slideshow", "splide", "split", "swiper", "tempwrap",
+    "ticker", "viewport",
 ];
 /// Two-word viewport names (`demo-area`).
 pub const VIEWPORT_IDENT_PAIRS: &[(&str, &str)] =
@@ -2427,7 +2444,9 @@ fn clip_container_can_own_finding(dom: &dyn Dom, el: ElId) -> bool {
 /// Nested clips repeat one decision about the same layer. The clip nearest
 /// the child is the one that cuts it first and the one whose component the
 /// layer belongs to, so an outer container defers to any clipping container
-/// between it and the child that traps the same layer.
+/// between it and the child that traps the same layer. A nearer carousel or
+/// ticker window counts too: it cuts the layer on purpose, and the outer clip
+/// cuts nothing that window has not already hidden.
 fn nearer_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
     let mut current = dom.parent(child);
     while let Some(inner) = current {
@@ -2435,7 +2454,8 @@ fn nearer_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
             return false;
         }
         if let Some((clip_x, clip_y)) = clipped_axes(dom, inner) {
-            if clip_container_can_own_finding(dom, inner)
+            if super::driver::element_is_scanned(dom, inner)
+                && !clipping_container_is_page_shell(dom, inner)
                 && clip_traps_child(dom, inner, child, clip_x, clip_y)
             {
                 return true;
@@ -2484,6 +2504,13 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         // the finding, so only the rest of the predicate is asked.
         if crate::browser::painted::unpainted_inside(dom, child, el).is_some() {
             continue;
+        }
+        // The container itself has to be shown for its clip to cut anything
+        // a visitor sees: a hero slide parked past its carousel, a closed
+        // off-canvas menu at x -360. Asked once, for the first trapped child;
+        // an unpainted container hides every child it traps.
+        if crate::browser::painted::unpainted_text_box(dom, el).is_some() {
+            return Vec::new();
         }
         return vec![RuleHit::new(
             "clipped-overflow-container",
@@ -4774,6 +4801,123 @@ mod tests {
         assert_eq!(clip_hits("promo__panel-next", "", true), 1);
         // A longer word is still not the word.
         assert_eq!(clip_hits("jswiper-track", "", false), 1);
+    }
+
+    /// lpga.or.jp, scol.com.cn, inven.co.kr, aajtak.in: Slick's `slick-list`,
+    /// SuperSlide's `tempWrap`, a rolling notice list and Taboola's reel.
+    #[test]
+    fn clipped_overflow_reads_more_carousel_words() {
+        fn clip_hits(host_class: &str, child_class: Option<&str>) -> usize {
+            let (mut d, body) = page();
+            let host = d.add(Some(body), "div");
+            d.set_attr(host, "class", host_class);
+            d.set_styles(host, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+            d.set_rect(host, 100.0, 100.0, 600.0, 55.0);
+            if let Some(c) = child_class {
+                let track = d.add(Some(host), "div");
+                d.set_attr(track, "class", c);
+                d.set_rect(track, 100.0, 100.0, 600.0, 55.0);
+            }
+            let layer = d.add(Some(host), "div");
+            d.add_text(layer, "Next caption");
+            d.set_style(layer, "position", "absolute");
+            d.set_rect(layer, 720.0, 100.0, 600.0, 55.0);
+            check_element_clipped_overflow_dom(&d, host).len()
+        }
+        assert_eq!(clip_hits("promo-window", None), 1);
+        assert_eq!(clip_hits("slick-list draggable", None), 0);
+        assert_eq!(clip_hits("tempWrap", None), 0);
+        assert_eq!(clip_hits("notice-list notice_rolling", None), 0);
+        assert_eq!(clip_hits("trc_rbox_div", Some("tbl-recommendation-reel")), 0);
+    }
+
+    /// aajtak.in: the Taboola reel's window traps its back arrow, so the ad
+    /// slot around it does not report the same arrow.
+    #[test]
+    fn clipped_overflow_defers_to_a_nearer_carousel_window() {
+        let (mut d, body) = page();
+        let slot = d.add(Some(body), "div");
+        d.set_attr(slot, "class", "ad-slot");
+        d.set_styles(slot, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(slot, 0.0, 100.0, 390.0, 300.0);
+        let reel = d.add(Some(slot), "div");
+        d.set_attr(reel, "class", "reel-window");
+        d.set_styles(reel, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "relative")]);
+        d.set_rect(reel, 0.0, 100.0, 390.0, 300.0);
+        let arrow = d.add(Some(reel), "button");
+        d.set_style(arrow, "position", "absolute");
+        d.set_rect(arrow, -60.0, 200.0, 40.0, 40.0);
+        assert!(check_element_clipped_overflow_dom(&d, slot).is_empty());
+        assert!(check_element_clipped_overflow_dom(&d, reel).is_empty());
+        // A plain nearer clip still owns the finding, as before.
+        d.set_attr(reel, "class", "rbox");
+        assert!(check_element_clipped_overflow_dom(&d, slot).is_empty());
+        assert_eq!(check_element_clipped_overflow_dom(&d, reel).len(), 1);
+    }
+
+    /// hp.com's hero slides parked at x 1290 in their carousel track, and
+    /// cuisineactuelle.fr's closed off-canvas menu at x -360.
+    #[test]
+    fn clipped_overflow_needs_the_container_shown() {
+        let (mut d, body) = page();
+        let menu = d.add(Some(body), "nav");
+        d.set_rect(menu, -360.0, 0.0, 360.0, 800.0);
+        let item = d.add(Some(menu), "li");
+        d.set_styles(item, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "relative")]);
+        d.set_rect(item, -360.0, 100.0, 360.0, 48.0);
+        d.add_text(item, "Recettes");
+        let tip = d.add(Some(item), "div");
+        d.set_style(tip, "position", "absolute");
+        d.set_rect(tip, -60.0, 160.0, 200.0, 40.0);
+        d.add_text(tip, "Voir toutes les recettes");
+        assert!(check_element_clipped_overflow_dom(&d, item).is_empty());
+        d.set_rect(menu, 0.0, 0.0, 360.0, 800.0);
+        d.set_rect(item, 0.0, 100.0, 360.0, 48.0);
+        d.set_rect(tip, 300.0, 160.0, 200.0, 40.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, item).len(), 1);
+    }
+
+    /// adant.ai's week grid in an inactive tab pane at opacity 0.
+    #[test]
+    fn side_tab_border_path_skips_a_card_nobody_sees() {
+        let (mut d, body) = page();
+        let pane = d.add(Some(body), "div");
+        d.set_rect(pane, 0.0, 0.0, 600.0, 400.0);
+        let card = d.add(Some(pane), "div");
+        d.set_rect(card, 0.0, 0.0, 300.0, 100.0);
+        d.add_text(card, "Week one: publish the first video");
+        d.set_styles(
+            card,
+            &[
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "3px"),
+                ("borderLeftColor", "rgb(225, 29, 72)"),
+                ("borderRadius", "10px"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+            ],
+        );
+        assert_eq!(check_element_borders_dom(&d, card).len(), 1);
+        d.set_style(pane, "opacity", "0");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+    }
+
+    /// Bootstrap's floating labels and `placeholder:text-transparent` hide the
+    /// placeholder so a label can take its place.
+    #[test]
+    fn placeholder_inked_transparent_is_not_scored() {
+        let (mut d, body) = page();
+        let input = d.add(Some(body), "input");
+        visible(&mut d, input);
+        d.set_attr(input, "placeholder", "Emailadresse");
+        d.set_rect(input, 12.0, 104.0, 228.0, 58.0);
+        d.set_styles(input, &[("backgroundColor", "rgb(255, 255, 255)"), ("color", "rgb(33, 48, 12)"), ("fontSize", "16px"), ("fontWeight", "400"), ("webkitBackgroundClip", "border-box")]);
+        d.set_pseudo_style(input, "::placeholder", "color", "rgba(0, 0, 0, 0)");
+        d.add_selector(input, ":placeholder-shown");
+        assert!(!colors(&d, input).iter().any(|h| h.id == "low-contrast"), "{:?}", colors(&d, input));
+        d.set_pseudo_style(input, "::placeholder", "color", "rgba(0, 0, 0, 0.2)");
+        assert!(colors(&d, input).iter().any(|h| h.id == "low-contrast"));
     }
 
     /// visiby.net's word rotator and dadastudio.framer.website's closing h1.

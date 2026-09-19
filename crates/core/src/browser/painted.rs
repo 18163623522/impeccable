@@ -896,20 +896,23 @@ fn is_script_scroll_frame(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) ->
     fold > 0.0
         && cr.height >= fold - 1.0
         && has_overflow(dom.scroll_height(p), dom.client_height(p))
-        && !capped_by_max_height(dom, p, cr)
+        && !capped_by_max_height(dom, p, cr, js::math_max(fold, viewport_h))
 }
 
 /// Whether a box stands at its `max-height`: a "read more" panel held at
 /// 1000px over a spec table, a collapsed description. A scroll library sizes
 /// its frame with `height` (the viewport's, or a fixed layer's), so a box
 /// its `max-height` stops is a collapsed panel whose clip is what a visitor
-/// sees. A value that is not a length (`none`, or none recorded) caps nothing.
-fn capped_by_max_height(dom: &dyn Dom, p: ElId, cr: &Rect) -> bool {
+/// sees. A frame capped at the viewport's height (`height: 100vh; max-height:
+/// 100vh`) is still the viewport's frame, so the cap has to stand taller than
+/// the viewport. A value that is not a length (`none`, or none recorded)
+/// caps nothing.
+fn capped_by_max_height(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_h: f64) -> bool {
     let value = dom.style(p, "maxHeight");
     let Some(px) = value.strip_suffix("px").map(js::parse_float) else {
         return false;
     };
-    px.is_finite() && px > 0.0 && (cr.height - px).abs() <= 1.0
+    px.is_finite() && px > viewport_h + 1.0 && (cr.height - px).abs() <= 1.0
 }
 
 fn is_viewport_layer(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_w: f64, viewport_h: f64) -> bool {
@@ -1052,29 +1055,57 @@ const REVEAL_RUN_MIN_WORDS: usize = 3;
 /// than its colour at rest: a scroll-linked "words light up as you read"
 /// paragraph, where a script writes each word's (or letter's) `color` into
 /// its `style` attribute and the word transitions `color` to it. The element
-/// is such a word and transitions `color`, and its parent, or failing that
-/// its grandparent (a letter-by-letter reveal wraps each word in a span of
-/// its own), holds at least [`REVEAL_RUN_MIN_WORDS`] words of its tag, itself
-/// included. A word a script has not reached yet is still in its start
-/// colour, which is no colour a reader is asked to read. A row of chips whose
-/// selected one React styles inline paints a fill and a border too, and is
-/// not a word run.
+/// is such a word and transitions `color`, and either its parent holds at
+/// least [`REVEAL_RUN_MIN_WORDS`] such words of its tag as children, itself
+/// included, or it is one letter and its grandparent's words hold that many
+/// such letters between them (a letter-by-letter reveal wraps each word in a
+/// span of its own). A reveal wraps every word it lights, so a run with a bare
+/// word of its own is prose an editor coloured in places (a TinyMCE span, a
+/// link a theme transitions), and not a reveal. A word a script has not
+/// reached yet is still in its start colour, which is no colour a reader is
+/// asked to read. A row of chips whose selected one React styles inline paints
+/// a fill and a border too, and is not a word run.
 pub fn colour_mid_reveal(dom: &dyn Dom, el: ElId) -> bool {
     if !is_reveal_word(dom, el) || !declares_transition_of(dom, el, "color") {
         return false;
     }
-    let tag = js::to_lower_case(&dom.tag_name(el));
-    let holds_run = |run: ElId| {
-        dom.query_all(Some(run), &tag)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|&w| is_reveal_word(dom, w))
-            .take(REVEAL_RUN_MIN_WORDS)
-            .count()
-            >= REVEAL_RUN_MIN_WORDS
+    let tag = dom.tag_name(el);
+    let is_word = |w: ElId| dom.tag_name(w) == tag && is_reveal_word(dom, w);
+    let Some(parent) = dom.parent(el) else {
+        return false;
     };
-    let parent = dom.parent(el);
-    parent.is_some_and(holds_run) || parent.and_then(|p| dom.parent(p)).is_some_and(holds_run)
+    if has_direct_text_longer_than(dom, parent, 0) {
+        return false;
+    }
+    let words = dom.children(parent).into_iter().filter(|&w| is_word(w)).take(REVEAL_RUN_MIN_WORDS).count();
+    if words >= REVEAL_RUN_MIN_WORDS {
+        return true;
+    }
+    if !is_one_letter(dom, el) {
+        return false;
+    }
+    let Some(run) = dom.parent(parent) else {
+        return false;
+    };
+    if has_direct_text_longer_than(dom, run, 0) {
+        return false;
+    }
+    let mut letters = 0;
+    for word in dom.children(run) {
+        if has_direct_text_longer_than(dom, word, 0) {
+            continue;
+        }
+        letters += dom.children(word).into_iter().filter(|&l| is_word(l) && is_one_letter(dom, l)).count();
+        if letters >= REVEAL_RUN_MIN_WORDS {
+            return true;
+        }
+    }
+    false
+}
+
+/// An element whose text is one character of its own, and nothing inside it.
+fn is_one_letter(dom: &dyn Dom, el: ElId) -> bool {
+    dom.children(el).is_empty() && js::trim(&super::dom::direct_text(dom, el)).chars().count() == 1
 }
 
 /// The declarations a colour reveal writes into a word's `style` attribute.
@@ -1498,6 +1529,15 @@ mod tests {
         assert_eq!(why(&d, cell), None);
         d.set_style(panel, "maxHeight", "100%");
         assert_eq!(why(&d, cell), None);
+
+        // A frame capped at the viewport's own height (`height: 100vh;
+        // max-height: 100vh`) is the viewport's frame, not a collapsed panel.
+        let vh = d.inner_height();
+        d.set_rect(panel, 0.0, 0.0, 1280.0, vh);
+        d.el_mut(panel).client_height = vh;
+        d.set_style(panel, "maxHeight", &format!("{vh}px"));
+        d.set_rect(cell, 40.0, 1600.0, 195.0, 40.0);
+        assert_eq!(why(&d, cell), None);
     }
 
     /// zigzag.kr (`data-loaded="false"`), thairath.co.th
@@ -1610,6 +1650,65 @@ mod tests {
             d.set_style(c, "display", "inline");
         }
         assert!(!colour_mid_reveal(&d, chips[0]));
+    }
+
+    /// Copy an editor coloured by hand under a theme's colour transition is
+    /// at rest: a reveal wraps every word it lights, so bare words beside the
+    /// coloured ones, or whole words where the grandparent path wants
+    /// letters, are prose.
+    #[test]
+    fn editor_coloured_copy_under_a_transition_is_at_rest() {
+        let (mut d, body) = page();
+        let inline_word = |d: &mut FakeDom, parent: ElId, tag: &str, text: &str| {
+            let w = d.add(Some(parent), tag);
+            d.set_styles(w, &[("display", "inline"), ("transitionProperty", "all"), ("transitionDuration", "0.3s")]);
+            d.set_attr(w, "style", "color: #b0b0b0;");
+            d.add_text(w, text);
+            w
+        };
+
+        // A footer list: each link alone in its item, whole words under the ul.
+        let ul = d.add(Some(body), "ul");
+        let mut links = Vec::new();
+        for text in ["About us", "Careers", "Press", "Contact"] {
+            let li = d.add(Some(ul), "li");
+            links.push(inline_word(&mut d, li, "a", text));
+        }
+        assert!(!colour_mid_reveal(&d, links[0]));
+
+        // Three paragraphs, one editor-coloured link each.
+        let article = d.add(Some(body), "div");
+        let mut para_links = Vec::new();
+        for text in ["one link", "another link", "a third link"] {
+            let p = d.add(Some(article), "p");
+            d.add_text(p, "Some copy with ");
+            para_links.push(inline_word(&mut d, p, "a", text));
+            d.add_text(p, " inside.");
+        }
+        assert!(!colour_mid_reveal(&d, para_links[0]));
+
+        // TinyMCE runs in a sentence that also carries bare words.
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "Shipping is free ");
+        let runs: Vec<ElId> = ["on orders", "within the EU", "three to five days"]
+            .into_iter()
+            .map(|t| inline_word(&mut d, p, "span", t))
+            .collect();
+        d.add_text(p, " in most regions.");
+        assert!(!colour_mid_reveal(&d, runs[0]));
+
+        // The same runs with every word wrapped are a reveal.
+        let q = d.add(Some(body), "p");
+        let wrapped: Vec<ElId> = ["on", "orders", "within"].into_iter().map(|t| inline_word(&mut d, q, "span", t)).collect();
+        assert!(colour_mid_reveal(&d, wrapped[0]));
+        // A word nested one level down is not a letter.
+        let r = d.add(Some(body), "p");
+        let mut nested = Vec::new();
+        for t in ["on", "orders", "within"] {
+            let holder = d.add(Some(r), "span");
+            nested.push(inline_word(&mut d, holder, "span", t));
+        }
+        assert!(!colour_mid_reveal(&d, nested[0]));
     }
 
     #[test]

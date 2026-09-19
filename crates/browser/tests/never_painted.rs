@@ -90,11 +90,17 @@ fn paint_that_never_reaches_the_screen_is_not_scored() {
         ("text-occlusion", "#flag-label-covered"),
         ("text-occlusion", "#flag-overlap-under"),
         ("text-occlusion", "#flag-brand-label"),
+        ("text-occlusion", "#flag-kicker-under"),
     ] {
         assert!(on(want.0, want.1), "missing {want:?} in {flagged:#?}");
     }
     // Words in an inline colour that no transition moves are at rest.
     assert!(reports("low-contrast", "text #e2e2e6 on #ffffff"), "{flagged:#?}");
+    // Copy an editor coloured under a theme's transition is not a reveal:
+    // the footer list, the one-link paragraphs and the TinyMCE spans.
+    for pair in ["text #b1b1b1 on #ffffff", "text #a9a9aa on #ffffff", "text #c4c4c5 on #ffffff"] {
+        assert!(reports("low-contrast", pair), "missing {pair} in {flagged:#?}");
+    }
 
     let passed: Vec<&(String, String, String)> = flagged
         .iter()

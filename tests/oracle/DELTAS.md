@@ -4731,7 +4731,7 @@ are new (`detect-fixture-json-never-painted-html`,
 `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
 `detect-dir-quiet-all-fixtures`, `detect-scope-type`,
 `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json` and
-`detect-no-advisory-text` gain its findings and nothing else (686 to 714
+`detect-no-advisory-text` gain its findings and nothing else (686 to 717
 counted, 124 to 125 advisory). Every change is URL-engine behavior, and the
 static engine reports what it can see in both columns of the fixture, as the
 painted-gate fixtures before it do. The URL behavior is pinned by
@@ -4767,8 +4767,10 @@ every should-pass case, the branch none.
 - **A panel held at its max-height is not a scroll frame** (row 13). The
   script-scroll-frame exception (a box at least as tall as the fold that
   hides overflow) no longer applies to a box standing at its computed
-  `max-height` in px: jyes.com.tw's spec table under a 1000px "read more"
-  panel on a 844px phone.
+  `max-height` in px when that cap is taller than the viewport: jyes.com.tw's
+  spec table under a 1000px "read more" panel on a 844px phone. A frame
+  capped at the viewport's own height (`height: 100vh; max-height: 100vh`)
+  is still a scroll frame.
 - **Lazy images not shown yet** (row 9). A raster under the state-layer
   opacity is a state layer when `data-loaded="false"`, `data-ll-status` is
   not `loaded`, a library holds its source with no `src` of its own, or a
@@ -4778,9 +4780,13 @@ every should-pass case, the branch none.
 - **A colour reveal caught part way** (row 12). low-contrast and
   gray-on-color skip, and claim no colour pair for, a word whose `style`
   attribute sets its colour (with nothing but its transition or opacity
-  beside it) while it transitions `color`, in a parent or grandparent with at
-  least three such words. A chip row styled inline with its fill is not a
-  word run.
+  beside it) while it transitions `color`, when its parent holds at least
+  three such words as children, or when it is one letter and its
+  grandparent's words hold three such letters. The run's container holds no
+  bare word of its own (a reveal wraps every word it lights). A chip row
+  styled inline with its fill is not a word run, and neither is copy an
+  editor coloured under a theme's transition: a footer list of coloured
+  links, one coloured link per paragraph, TinyMCE spans in a sentence.
 - **Gates that were missing** (rows 11, 16, 20). `gradient-text` joins
   `PAINT_GATED_TEXT_RULES` and `PAINT_GATED_PAGE_FORMS` (its page form stands
   only where its selector matches something painted, so gating the element
@@ -4798,10 +4804,16 @@ every should-pass case, the branch none.
 - **text-occlusion** (rows 7, 15). Over text that ignores pointer events the
   probe answers with what is under it, so a box it names is not counted
   (text it names still is: overlap is overlap either way). An answer counts
-  as text only where its own glyphs are: its direct-text rect must hold the
-  point (a rect the capture did not record keeps the answer) and its size
-  must be 1px or more. Marquee words and animations are asked of the
-  answer's ancestors up to the body, cached per element.
+  as text only where its glyphs could cover the victim: its direct-text rect
+  holds the point, or it meets the victim's direct-text rect somewhere (the
+  grid is one row through a single line's middle and cannot say where two
+  words collide), or either rect was not recorded; and its size must be 1px
+  or more. A text answer whose glyphs lie clear of the victim's (a stretched
+  link's title below the topic its overlay answers over) covers nothing.
+  Marquee words are asked of the answer itself as before; up to four of its
+  ancestors count only while they move (an animation named for a ticker, or
+  a marquee name on a box running an animation), so a still wrapper named
+  `.page-scroller` silences nothing.
 
 ### Measure: run 28 ratchet (801 captures, all three cohorts)
 
@@ -4811,7 +4823,7 @@ r7-never-painted-28`. Removed, by label (cohort):
 | Rule | Base | Removed | Added | Removed by label | By cohort |
 |---|---|---|---|---|---|
 | buried-raster | 198 | 188 | 0 | pattern-absent 176, unjudged 12 | c1 185, c3 3 |
-| text-occlusion | 77 | 54 | 1 | pattern-absent 44, unjudged 10 | c1 17, c2 3, c3 34 |
+| text-occlusion | 77 | 51 | 3 | pattern-absent 44, unjudged 7 | c1 17, c3 34 |
 | low-contrast | 6471 | 58 | 0 | pattern-absent 33, confirmed-harmful 20, unjudged 5 | c1 4, c2 2, c3 52 |
 | clipped-overflow-container | 108 | 32 | 0 | pattern-absent 28, unjudged 4 | c1 6, c3 26 |
 | cramped-padding | 194 | 9 | 0 | pattern-absent 9 | c3 9 |
@@ -4820,10 +4832,13 @@ r7-never-painted-28`. Removed, by label (cohort):
 | gradient-text | 332 | 3 | 0 | real-harmless 3 | c1 3 |
 | layout-transition | 346 | 1 | 0 | unjudged 1 | c1 1 |
 
-No severity moved. The one addition is a snippet change, not a new finding:
-v0-dashboard-ui-redesign-nine.vercel.app's "Menu" label goes from "100%
-covered by overlapping text" to "63%", once the probe points outside the
-heading's glyphs stop counting.
+No severity moved. The three additions are snippet changes, not new
+findings: ynet.co.il's city label (126214, 126350, 126591) goes from "67%
+covered by overlapping text (button.accessibility-icon-new)" to "50% covered
+by overlapping text (button.searchBtn)". The accessibility button's glyphs
+end left of the label, so its answers (its icon) no longer count; the search
+label's glyphs overlap the city's (x 163 to 176 of 132 to 176), and the crop
+(crops/64.jpg) shows the two words printed over each other.
 
 **The 20 confirmed-harmful removals are not the harmful copies.** They are
 jyes.com.tw's spec-table section labels (white on `#7cc4ea`, 1.9:1) in the
@@ -4841,15 +4856,13 @@ no placeholder), 127029 (nubank's CPF label readable), 143368 (hp.com, slide
 127461 (drom.ru's "Belgee" readable), 142010 (jyes's lazy image shown), 139710
 (v0-evasion's "Experience" in its revealed black), 132017 (adant.ai, no
 striped card), 125511 (zigzag.kr, the capture's viewport), and ynet.co.il
-126214 (below).
+126214 (above).
 
 ### Known limits at merge
 
-1. **ynet.co.il 126214 (unjudged)** goes: the accessibility button's glyphs
-   end at x 115 and the city label starts at 132, so the probes that answered
-   with the button met its icon, a `background-image` the occlusion rule
-   never counts as a box. The header collision the judges confirmed (126213,
-   the temperature under the search label) still reports.
+1. **ynet.co.il 126214 (unjudged)** keeps reporting, under a new occluder
+   (see above). The header collision the judges confirmed (126213, the
+   temperature under the search label) still reports as it was.
 2. **Flip faces in recorded captures.** The corpus snapshots carry no
    `backfaceVisibility`, so aisdr.com's backs (140791, 140828 and the
    ai-color-palette findings on them) keep reporting until the next capture.
@@ -4868,3 +4881,59 @@ striped card), 125511 (zigzag.kr, the capture's viewport), and ynet.co.il
 6. **slotListWrapper** (ynet.co.il) and a marquee two levels down (adant.ai)
    are not on the word list; the brief named slick-list, tempWrap, rolling
    and reel.
+
+### Revised after review
+
+An independent review found two regressions in the first version, and three
+open issues cost little to close. Each fix has a should-flag twin in
+`never-painted.html` that the first version dropped and the base engine
+reports, pinned by `crates/browser/tests/never_painted.rs`.
+
+- **Glyphs against boxes (text-occlusion).** The first version counted a text
+  answer only where its own glyphs held the probe point, while the points
+  still spanned the victim's whole box. A block label wider than its words,
+  lying wholly under a heading's words, then scored only the share of its box
+  the heading's glyphs crossed: v0-dashboard-ui-redesign-nine.vercel.app's
+  "Menu" (135418, 135518) and "Settings" under a card's h3 (135526, whose
+  single probe row passes below the h3's glyph rect while the two glyph rects
+  overlap by 6px). The probe points cannot move, since a recording answers
+  only the grid's, so an answer's glyphs now count wherever they meet the
+  victim's glyphs. All three report as on base, at 100%.
+- **Editor colour is not a reveal (low-contrast).** The reveal needed only an
+  inline colour, a colour transition and three such words anywhere under the
+  parent or grandparent, which a footer list of coloured links, one coloured
+  link per paragraph, or TinyMCE spans in a sentence also have. The run is
+  now the parent's children, or, for a single letter, its grandparent's
+  words' letters, and a container with a bare word of its own is prose.
+  zoptron.framer.ai and v0-evasion-website.vercel.app still clear.
+- **Moving ancestors only (text-occlusion).** Marquee words were asked of
+  every ancestor up to the body, so a page wrapper named `.page-scroller`
+  (or iScroll's `#scroller`) silenced every collision under it. Ancestors,
+  up to four, now count only while they run an animation named for a ticker
+  or carry a marquee name and an animation. cnnbrasil.com.br's
+  react-fast-marquee (`.rfm-marquee`, animation `scroll`) still clears.
+- **A frame capped at the viewport (row 13).** `height: 100vh; max-height:
+  100vh` read as a collapsed panel and dropped the page below the fold; the
+  cap must now stand taller than the viewport. Unit-tested
+  (`a_panel_held_at_its_max_height_is_not_a_scroll_frame`); the fixture page
+  cannot host a page-sized frame.
+
+Seven goldens change again, from the fixture alone: its three new
+low-contrast twins, which the static engine sees (inline colours), join
+`detect-fixture-json-never-painted-html`,
+`detect-fixture-text-never-painted-html` and the five sweeps that list every
+fixture (714 to 717 counted), and nothing else moves. The text-occlusion and page-scroller twins are
+URL-engine only.
+
+Ratchet (`scripts/ratchet.sh <worktree> r7-never-painted-rev ratchet --run
+28 --label r7-never-painted-rev-28`): identical to the first version except
+text-occlusion, which removes 51 (was 54) and re-snippets 3 (was 1). The 20
+violations are the same jyes.com.tw ids. Crops opened for removals that
+stand: 126906, 127461, 127467, 141186, 142360, 143060, 134472, 139710,
+142837, 143317, 127029, 143465, 143530, 142490, and ynet.co.il's 64.jpg for
+the re-snippeted city label.
+
+Still open from the review: text that ignores pointer events under an opaque
+box above it goes unreported (the probe cannot rank the two; paint order
+could), and a horizontally scroll-jacked gallery pinned in a fixed layer
+reads as unpainted past the viewport's right edge.

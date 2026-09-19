@@ -22,6 +22,15 @@
        link's overlay, a link label at font-size 0, and overlapping text in
        a ticker track.
 
+       Two should-flag twins pin what those skips must not reach: a block
+       label lying wholly under a wider heading, whose box is far wider than
+       its words (occlusion measures both sides by their glyphs), and copy
+       an editor coloured by hand under a theme's colour transition (a footer
+       list, one link per paragraph, TinyMCE spans in a sentence), which no
+       script is revealing. The should-flag cells sit in a page wrapper
+       named page-scroller that does not move: only a moving track near the
+       text silences a collision.
+
        Each pass case wears colours of its own, so the page's one report of
        a colour pair never hides it.
 
@@ -108,6 +117,13 @@
     /* Word runs. */
     .words { margin: 0; font-size: 24px; line-height: 32px; }
     .word-reveal { transition: color 0.15s; }
+    .cms a, .cms span { transition: all 0.3s ease-in-out; text-decoration: none; }
+    .cms-list { display: flex; gap: 16px; margin: 0; padding: 0; list-style: none; }
+    .cms p { margin: 0 0 4px; }
+
+    /* A block label under a wider heading's words. */
+    .kicker { position: absolute; top: 40px; left: 0; width: 270px; margin: 0; font-size: 11px; line-height: 15px; color: #555555; }
+    .kicker-heading { position: absolute; top: 32px; left: 0; width: 270px; margin: 0; font-size: 24px; line-height: 28px; font-weight: 700; color: #151515; }
   </style>
 </head>
 <body>
@@ -120,6 +136,7 @@
     <section class="col" data-col="flag">
       <h2 class="col-label">Should flag</h2>
 
+      <div class="page-scroller">
       <div class="cells">
         <div class="cell">
           <h3 class="case-label">Label under its field</h3>
@@ -142,6 +159,13 @@
             <a class="brand-link-shown" href="#audi">Audi models</a>
           </div>
         </div>
+
+        <div class="cell">
+          <h3 class="case-label">A block label under a heading's words</h3>
+          <p class="kicker" id="flag-kicker-under">Menu</p>
+          <div class="kicker-heading">Team</div>
+        </div>
+      </div>
       </div>
 
       <div class="case">
@@ -188,6 +212,13 @@
       <div class="case">
         <h3 class="case-label">Words in their own colour</h3>
         <p class="words" id="flag-words"><span style="color: rgb(226, 226, 230)">Every</span> <span style="color: rgb(226, 226, 230)">word</span> <span style="color: rgb(226, 226, 230)">stays</span> <span style="color: rgb(226, 226, 230)">pale</span></p>
+      </div>
+
+      <div class="case cms">
+        <h3 class="case-label">Copy an editor coloured, under a transition</h3>
+        <ul class="cms-list"><li><a href="#about" style="color: #b1b1b1;">About us</a></li><li><a href="#careers" style="color: #b1b1b1;">Careers</a></li><li><a href="#press" style="color: #b1b1b1;">Press</a></li><li><a href="#contact" style="color: #b1b1b1;">Contact</a></li></ul>
+        <div><p>First paragraph with <a href="#one" style="color: #a9a9aa;">one link</a> inside.</p><p>Second paragraph with <a href="#two" style="color: #a9a9aa;">another link</a> here.</p><p>Third with <a href="#three" style="color: #a9a9aa;">a third link</a> too.</p></div>
+        <p>Shipping is free <span style="color: #c4c4c5;">on orders</span> over fifty euros <span style="color: #c4c4c5;">within the EU</span> and takes <span style="color: #c4c4c5;">three to five days</span> in most regions.</p>
       </div>
 
       <div class="case">

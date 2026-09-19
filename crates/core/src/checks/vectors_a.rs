@@ -256,6 +256,7 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 sibling_border_radius: to_number(f(0, "siblingBorderRadius")),
                 has_icon_child: truthy(f(0, "hasIconChild")),
                 icon_child_width: to_number(f(0, "iconChildWidth")),
+                heading_is_card_title: false,
             };
             hits_to_js(&rules::check_icon_tile(&opts))
         }
@@ -297,6 +298,8 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 sibling_font_weight: opt_str(f(0, "siblingFontWeight")),
                 sibling_color: opt_str(f(0, "siblingColor")),
                 sibling_has_accent_dash_pseudo: truthy(f(0, "siblingHasAccentDashPseudo")),
+                sibling_tracking_floor_em: None,
+                sibling_holds_time: false,
             };
             hits_to_js(&rules::check_hero_eyebrow(&opts))
         }

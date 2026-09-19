@@ -120,11 +120,12 @@ pub enum OwnOpacity {
 /// (fonts, borders) describe authored CSS whatever state is showing and are
 /// not gated; `italic-serif-display` reports one heading's display
 /// treatment, which a visitor meets only where the heading is shown, and
-/// `gradient-text` the treatment of one element's text, which a label inside
-/// a closed menu or a watermark nobody sees never shows. The border path of
-/// `side-tab` and the container of `clipped-overflow-container` ask
-/// [`unpainted_text_box`] themselves, since their rule ids also cover forms
-/// the gate does not apply to.
+/// `gradient-text` the ramp painted on one run of text, which a label inside
+/// a closed menu (bt.cn's mobile dropdown, observations-28 row 20) or a
+/// watermark nobody sees never shows. The border path of `side-tab` and the
+/// container of `clipped-overflow-container` ask [`unpainted_text_box`]
+/// themselves, since their rule ids also cover forms the gate does not apply
+/// to.
 pub const PAINT_GATED_TEXT_RULES: &[&str] = &[
     "all-caps-body",
     "body-text-viewport-edge",
@@ -2492,9 +2493,10 @@ mod tests {
             BrowserFinding::new("italic-serif-display", "italic serif h1 (playfair display) at 60px"),
             BrowserFinding::new("blinking-cursor", "i.caret — 5x10px blinking cursor"),
         ];
+        findings.push(BrowserFinding::new("font-overuse-stand-in", "an ungated style tell"));
         retain_painted(&d, a, &mut findings);
         let ids: Vec<&str> = findings.iter().map(|f| f.type_.as_str()).collect();
-        assert!(ids.is_empty(), "{ids:?}");
+        assert_eq!(ids, vec!["font-overuse-stand-in"]);
 
         // Painted, every finding stays.
         d.set_rect(wrap, 40.0, 300.0, 400.0, 40.0);

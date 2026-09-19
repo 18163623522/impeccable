@@ -42,10 +42,28 @@ fn collapsed_text_content(dom: &dyn Dom, el: ElId) -> String {
     js::trim(&collapse_ws(&dom.text_content(el))).to_string()
 }
 
-/// JS: checks.mjs#isKickerCardContext(heading, kicker)
+/// How many viewports tall a card-context element may be before it is the
+/// page's frame rather than a card: outreign.io wraps its whole page in
+/// `main > article`, 11,527px tall, and a card on a phone runs under two
+/// screens.
+pub const KICKER_CARD_MAX_VIEWPORTS: f64 = 2.0;
+
+/// JS: checks.mjs#isKickerCardContext(heading, kicker), less a page-scale
+/// ancestor: an `article` (or list item, link, button) more than
+/// [`KICKER_CARD_MAX_VIEWPORTS`] viewports tall holds the page, and a label
+/// and heading inside it share no card. Where the box or the viewport is not
+/// measured the ancestor counts, as before.
 pub fn is_kicker_card_context(dom: &dyn Dom, heading: ElId, kicker: ElId) -> bool {
     match dom.closest(heading, KICKER_CARD_CONTEXT_SELECTOR) {
-        Ok(Some(item)) => dom.contains(item, kicker),
+        Ok(Some(item)) => {
+            let viewport = dom.inner_height();
+            let height = dom.rect(item).height;
+            let page_scale = viewport.is_finite()
+                && viewport > 0.0
+                && height.is_finite()
+                && height > viewport * KICKER_CARD_MAX_VIEWPORTS;
+            !page_scale && dom.contains(item, kicker)
+        }
         _ => false,
     }
 }
@@ -202,7 +220,26 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
         }) {
             continue;
         }
-        if heading_tag == "h1" && heading_font_size >= 48.0 && kicker_letter_spacing >= 1.6 {
+        // The hero rule takes a tracked label over a display h1. Its em
+        // floor reaches only the labels that rule reads (the h1's own
+        // previous sibling, at eyebrow size), and under the fixed 1.6px floor
+        // the label is handed off only where the hero rule reports it: that
+        // rule reads case from text-transform and typed capitals (not
+        // small-caps) and passes over a dated meta line, so a label it leaves
+        // is kept here.
+        if heading_tag == "h1"
+            && heading_font_size >= 48.0
+            && (kicker_letter_spacing >= crate::checks::rules::HERO_EYEBROW_TRACKING_PX
+                || (found.levels == 0
+                    && kicker_font_size <= 14.0
+                    && crate::checks::rules::hero_eyebrow_tracked(
+                        kicker_letter_spacing,
+                        kicker_font_size,
+                        Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
+                    )
+                    && !super::element_checks::check_element_hero_eyebrow_dom(dom, heading)
+                        .is_empty()))
+        {
             continue;
         }
         // A pair a visitor cannot see (a section at `hidden`, an inactive
@@ -415,9 +452,13 @@ pub fn label_near_heading(dom: &dyn Dom, label: ElId, heading: ElId) -> bool {
 }
 
 /// The element that sets a label's type: the label itself when it has text of
-/// its own, else its only element child, at most three levels down. Framer
-/// sets an eyebrow's size, tracking and case on a `p` inside a bare `div`, and
-/// a mono index often sits in a `span` inside a sized column.
+/// its own, else the one element child that holds its text, at most three
+/// levels down. Framer sets an eyebrow's size, tracking and case on a `p`
+/// inside a bare `div`, and a mono index often sits in a `span` inside a sized
+/// column. A chip puts an icon beside its text span (redoubt.agency's flag
+/// svg, uncoverroads.com's status dot): children that hold no text are the
+/// chip's marks, and the one that holds the text sets the type. A wrapper
+/// with two children that both hold text is read as itself.
 pub fn label_type_element(dom: &dyn Dom, label: ElId) -> ElId {
     let mut el = label;
     for _ in 0..3 {
@@ -425,10 +466,14 @@ pub fn label_type_element(dom: &dyn Dom, label: ElId) -> ElId {
             return el;
         }
         let children = dom.children(el);
-        if children.len() != 1 {
+        let mut with_text = children
+            .iter()
+            .copied()
+            .filter(|&c| !js::trim(&dom.text_content(c)).is_empty());
+        let (Some(only), None) = (with_text.next(), with_text.next()) else {
             return el;
-        }
-        el = children[0];
+        };
+        el = only;
     }
     el
 }
@@ -617,6 +662,45 @@ mod tests {
         d.set_style(h2, "fontSize", "24px");
         d.set_rect(h2, 40.0, 324.0, 600.0, 32.0);
         assert_eq!(check_kicker_above_heading_dom(&d).len(), 1);
+    }
+
+    /// The kicker rule hands a label over a display h1 to the hero rule only
+    /// where the hero rule reports it. A small-caps kicker at 0.1em is not
+    /// caps to the hero rule, so it stays a kicker; the same label set in
+    /// uppercase goes to the hero rule.
+    #[test]
+    fn kicker_hands_off_only_what_the_hero_rule_reports() {
+        let hero = |d: &mut FakeDom, body: ElId, y: f64, variant: &str, transform: &str, heading: &str| {
+            let sec = d.add(Some(body), "section");
+            let kicker = d.add(Some(sec), "p");
+            d.add_text(kicker, "new in version four");
+            d.set_styles(
+                kicker,
+                &[
+                    ("fontSize", "13px"),
+                    ("letterSpacing", "1.3px"),
+                    ("textTransform", transform),
+                    ("fontVariant", variant),
+                    ("fontVariantCaps", variant),
+                ],
+            );
+            d.set_rect(kicker, 40.0, y, 240.0, 18.0);
+            let h = d.add(Some(sec), "h1");
+            d.add_text(h, heading);
+            d.set_style(h, "fontSize", "56px");
+            d.set_rect(h, 40.0, y + 30.0, 900.0, 64.0);
+        };
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        hero(&mut d, body, 100.0, "small-caps", "none", "The workspace that thinks");
+        let hits = check_kicker_above_heading_dom(&d);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("new in version four"));
+
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        hero(&mut d, body, 100.0, "normal", "uppercase", "The workspace that thinks");
+        assert!(check_kicker_above_heading_dom(&d).is_empty());
     }
 
     /// demotv.lol's hero pair in a section at `hidden`, and exxonmobil.com's

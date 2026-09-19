@@ -5591,3 +5591,252 @@ corpus/integration:
    text-occlusion.
 6. **The impeccable-live `dev_url::answers_whatever_scheme_the_page_uses`**
    test failed once for the implementer, likely flaky under load.
+
+## Recorded 2026-09-18: recall bugs and gates from run 28 (corpus/round7-recall-and-gates)
+
+Round 7's recall branch, from `reports/walkthroughs-28.md` (misses) and
+`reports/observations-28.md` (rows 5, 18 to 21, 26; section 3's vendor and
+ad-tech evidence; section 6's branch 5). Nothing here revisits a taste call:
+the vendor and ad-tech lists grow under decisions r4-p24 and r3-31 as
+written, and every other change fixes a measurement. The contract is in
+`docs/CLI-CONTRACT.md` ("Round 7 recall and gates", the validity gate, and
+the vendor and ad-tech bullets).
+
+1. **Prose written into a div** (walkthroughs-28 issue 3). `line-length` and
+   `body-text-viewport-edge` (element and page-level forms) measure a `div`,
+   `section`, `article`, `aside` or `main` laid out as a block with text of
+   its own and only phrasing inside, outside any control, link or editable
+   field and not preformatted, on its text runs only. aina-tech.io's
+   `div.mt-10.text-base` and cencora.com's `div.module__body` report like the
+   `p` siblings beside them. `is_prose_block` in `quality.rs`.
+2. **Label collectors** (issue 2). `label_type_element` reads the one child
+   that holds text when the others hold none (a flag svg, a status dot).
+   `hero-eyebrow-chip` reads its sibling through it, and its tracked-caps
+   floor is 1.6px or 0.08em (`HeroEyebrowOpts::sibling_tracking_floor_em`;
+   the recorded vectors pass `None`, which keeps the JS contract), so
+   Tailwind's `tracking-widest` at 12px counts (redoubt.agency). The kicker
+   rule hands such a label to the hero rule instead of reporting it too, only
+   where the hero rule reads it (the h1's own previous sibling, 14px or
+   less). A card-context ancestor taller than two viewports is the page's
+   frame, not a card (outreign.io's `main > article`). `icon-tile-stack`
+   anchors on a bold block `div` or `span` title (shadcn's `CardTitle`) and
+   reads `oklab()` tile fills (kin-ai.replit.app).
+3. **Small text** (row 5, row 26, the coachcall.ai miss). The element
+   contrast pass scores a box under 10px tall that holds a line of its own
+   text at 8px or more. `tiny-text` skips a label typed in capitals (every
+   letter a capital, 40 letters or fewer, one line) and a monospace run with
+   its whitespace kept. `wide-tracking` counts a caps label's letters, not its
+   characters, and skips a one-line link or button label.
+4. **Validity** (walkthroughs-28 misfire 10). HUMAN Security's (PerimeterX's)
+   "Press & hold" sheet, `iframe#px-captcha-modal` fixed over the viewport,
+   is a challenge on a page of any size while it shows. The four target.com
+   captures of run 28 (4166, 4168, 4170, 4172) carry it; 4174 and 4175 do
+   not. The probe records `overlays` only when one shows, so every other
+   capture's evidence is byte-identical.
+5. **Vendors.** Widgets: Slick (structural elements, and the dot list as a
+   subtree), SuperSlide (`tempWrap`), react-fast-marquee (`rfm-` subtree) and
+   Kaltura (`playkit-`, `kaltura-player` subtree). Ad tech: Nagich
+   (`nagich.co.il`), Chase Reporting (`asset.chase.com/.../reportingjs/`),
+   and a message naming `_prebidjs` (Prebid). The inline `ConsentManager`
+   hook on mrtarget.de has no host and stays an error.
+6. **What paints** (branch 5). `ai-color-palette`'s gradient form skips a box
+   whose gradient, sampled over its border box, shows one colour (a hard-stop
+   hover wipe on a 203% tile, jpmorganchase.com), unless a layer is clipped to
+   the padding or content box; one element reports the rule once (the
+   computed form over the class form, and `gradient-text` over both gradient
+   forms). `gradient-text` is behind the Text gate and skips a ramp under
+   0.15 alpha (vestra.ai's watermark); its stylesheet form does not stand when
+   every element computing a clipped gradient is unpainted or under the
+   floor. `gpt-thin-border-wide-shadow` reads a gradient ancestor's stops
+   (uncoverroads.com's aurora band). `dark-glow`'s lift counts only layers
+   with half the strength floor, and its selector-less stylesheet form
+   defers to the element form when an element's computed shadow carries the
+   declaration.
+
+Goldens:
+
+- New: the json and text cases of `prose-div.html`, `label-collectors.html`,
+  `icon-tile-card-title.html`, `small-text-labels.html`,
+  `paint-that-shows.html`, `third-party-widgets-carousels.html` and
+  `script-error-ad-tech-hosts.html`. They are URL-engine fixtures and carry
+  only their static findings here; `crates/browser/tests/recall_and_gates.rs`
+  holds the URL assertions, and `tests/fixtures/validity/` the challenge
+  pages it serves.
+- `detect-fixture-json-text-occlusion-html`,
+  `detect-fixture-text-text-occlusion-html`: text-occlusion.html's
+  `pass-eyebrow` ("Family Italian on the waterfront", 14px uppercase at
+  0.1em over a 96px h1) moves from `kicker-above-heading` to
+  `hero-eyebrow-chip (tracked-caps)`: the static engine's hand-off follows the
+  em floor. It stays one finding, and it was never a text-occlusion case.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-scope-type`,
+  `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: the same move plus the new fixtures' static
+  findings (686 to 709 counted, 124 to 132 advisory in the text sweep).
+  Nothing else moved.
+- The generated browser asset was regenerated with `cargo xtask bundle`.
+
+**Corpus.** `round7-recall-and-gates-28` against run 28 (801 captures,
+cohorts 1 to 3), replayed per capture with the base and branch engines for
+the cohort split. Removed, added, tagged or moved, by rule:
+
+| Rule | c1 | c2 | c3 | Labels of the removed |
+|---|---|---|---|---|
+| ai-color-palette | -35 | -28 | -35 | 92 of 98 are the one-per-element rule: the element keeps its computed form or its gradient-text finding (18 confirmed-harmful, all of them this kind). The other 6 are one-colour boxes: jpmorganchase.com's hover wipes (5, pattern-absent) and blueprintbuddy-b2c.lovable.app's near-flat navy card (1) |
+| body-text-viewport-edge | +21, -1 | +7, -1 | +9 | the two removals are page-level findings renamed: drom.ru and centene.com now count 15 and 16 blocks, the prose divs included |
+| line-length | +23 | +11 | +17 | |
+| icon-tile-stack | | +2 | +40 | kin-ai.replit.app's feature cards 40; covera-agents.com's oklab tile 2 |
+| hero-eyebrow-chip | +6, -1 | +4 | +4 | soc-workflows' `accent-bold` chip now reads `tracked-caps` |
+| kicker-above-heading | +17, -5 | +1, -1 | +6 | the 6 removed are handed to hero-eyebrow-chip on the same label (2 confirmed-harmful: adant.ai's "Blog") |
+| numbered-section-labels | | | +24 | outreign.io and arbiproseller-app.vercel.app |
+| tiny-text | -26 | -2 | | adant.ai's typed-caps card meta and stroq.dev's terminal mock (26 pattern-absent), v0-compute-11's monospace texture |
+| wide-tracking | -1 | | -6 | all pattern-absent: adant.ai's caps eyebrow, pool-web-eight's card number in a button, lpga.or.jp's link labels |
+| low-contrast | +1 | | +4, 11 tagged | coachcall.ai's 9px timestamps 4 (the walkthrough miss); tags on Slick dots and react-fast-marquee quotes |
+| dark-glow | -6 | -8 | -15 | 10 disputed, 5 pattern-absent, the rest unjudged: stylesheet forms an element form had read, and Tailwind `shadow-lg` at 0.2 |
+| gpt-thin-border-wide-shadow | | | -12 | all pattern-absent (uncoverroads.com) |
+| gradient-text | | | -2 | pattern-absent (vestra.ai's watermark) |
+| tagged, severity kept | | | clipped-overflow-container 3, layout-transition 6, text-occlusion 7 | Slick, SuperSlide, Kaltura, react-fast-marquee |
+| script-error | | | 7 to advisory | all real-harmless, classed offline over the recorded findings: Prebid via Prisma Media's ad core 4 (cuisineactuelle.fr), Nagich 2 (walla.co.il), Chase Reporting 1 (jpmorganchase.com) |
+
+Violations: 22, none a finding leaving the report: 18 ai-color-palette
+findings on elements that still report the rule or gradient-text, 2
+page-level renames, 2 kicker hand-offs.
+
+### Known limits at merge
+
+1. **Row 18's stop alpha is not floored.** A 0.25 floor would remove the
+   judged misfires (coldtea.ai's 0.2 glow, outreign.io's 0.15), but it also
+   removes arbiproseller-app.vercel.app's 0.15 cyan section glow, which both
+   judges call harmful, and a 20% violet overlay an earlier round calibrated
+   as visible. The judged misfires are glows something covers, not faint
+   ones; the floor stays at 0.15.
+2. **Row 20's corner glyph is not fixed.** uncoverroads.com's single digit
+   in a 266px ramp box sees a third of the ramp (28 levels on the green
+   channel), more than coachcall.ai's centred short headings see of theirs:
+   measuring the ramp over the ink box cannot tell the misfire from the tell,
+   so it is not measured.
+3. **bt.cn's closed mobile menu still reports gradient-text.** The Text gate
+   applies, but the drawer is a fixed box whose containing block the snapshot
+   cannot decide (an unrecorded containment property), and the gate keeps an
+   undecided fixed layer.
+4. **The validity gate cannot be ratcheted.** Replays read the recorded
+   snapshots; the four target.com captures stay in the corpus until a
+   recapture, where they will be refused as challenges.
+5. **One finding per element (P32).** observations-28 files the
+   gradient-text and ai-color-palette pair as premise question P32, and this
+   branch implements the brief's reading of it. If Paul decides P32 the other
+   way, `drop_covered_palette_forms` in `driver.rs` is the one place to undo.
+6. **Prose divs add findings on CMS pages.** albayan.ae's article divs at a
+   10px phone gutter report as their `p` would (the 12px floor, r3-34);
+   vibe-genomics.replit.app's padded callouts report line-length.
+
+### Revised at review: the hero rule's em floor and the kicker hand-off
+
+The review found two ways the em floor reported the wrong thing.
+
+1. **A dated meta line read as an eyebrow.** The 0.08em floor reaches the
+   most common tracked setting of a blog's date line (Tailwind's
+   `tracking-widest` at 12px), and the hero rule, unlike the kicker rule, had
+   no meta test: `"Sep 2, 2026"` in a `<time>` over a 56px h1 reported in
+   both engines, and so did copperhead.sh's `div.post-eyebrow`
+   ("Engineering/2 September 2026", capture 3785, which holds a `<time>`).
+   Under the fixed 1.6px floor a label that is or holds a `<time>`, or that
+   names a year (the year clause of `KICKER_META_TEXT_RE`, now
+   `KICKER_META_YEAR_RE`), is not tracked caps
+   (`HeroEyebrowOpts::sibling_holds_time`, `false` in the vectors). At 1.6px
+   and up nothing changes, so a dated line tracked that wide still reports
+   as it did on base.
+2. **The kicker hand-off dropped labels the hero rule leaves.** The hand-off
+   under 1.6px followed the em floor alone, but the hero rule reads case
+   from `text-transform` and typed capitals, not `font-variant: small-caps`,
+   which the kicker rule accepts: a 13px small-caps kicker at 0.1em over a
+   56px h1 reported on base and nothing on the branch. Under 1.6px the
+   collectors (`text_collectors.rs`, and the static copy in `adapters.rs`)
+   now hand a label off only when `hero-eyebrow-chip` reports it on that h1.
+   The 1.6px hand-off is base's and is unchanged.
+
+Goldens: new json and text cases for `eyebrow-hand-off.html` (both engines:
+a small-caps kicker that stays a kicker and a tracked eyebrow the hero rule
+takes, against a dated line and a `<time>` that report nothing), and the
+sweeps (`detect-dir-*`, `detect-scope-type`, `detect-scope-both`,
+`detect-no-advisory-*`) gain its two findings (709 to 711). No other golden
+moved.
+
+Corpus, `round7-recall-and-gates-r2-28` against run 28: one finding differs
+from the first version of this branch, copperhead.sh 3785's dated line,
+which leaves `hero-eyebrow-chip` (c2 +5 becomes +4 in the table above; base
+reported it under neither rule). Every other count, the 22 violations and
+the 7 script-error moves are unchanged.
+
+Known limit: base's own 1.6px hand-off is left as it was, so a small-caps
+kicker tracked 1.6px or wider over a display h1 still reports under neither
+rule, and a dated line tracked that wide still reports as an eyebrow.
+
+### Known limits at merge (from the review)
+
+Open issues the review of the revision left, carried here at the merge into
+corpus/integration:
+
+1. **P32 is still an open premise question.** `drop_covered_palette_forms`
+   (crates/core/src/browser/driver.rs) removes 18 confirmed-harmful
+   ai-color-palette findings. Each is still reported through gradient-text
+   or the computed form on the same element at the same severity, but the
+   palette hue is no longer named when gradient-text wins ("Cyan gradient
+   background" becomes "background-clip: text + gradient").
+2. **Row 5's hand-off to undersized-ui-text was not built.** tiny-text skips
+   typed-caps labels outright, so adant.ai's 9.5px caps card meta
+   ("ANIMATION · CINEMATIC 3D", 11 findings on captures 3625 and 3630, both
+   judges harm yes, undersized-ui-text the right rule) is now silent, as
+   text-transform caps already were. undersized-ui-text's 20-character limit
+   leaves any non-interactive caps label over 20 characters unreported.
+3. **The ai-color-palette one-colour skip samples at 1/6 to 5/6 of the
+   box,** which understates a ramp. It drops a visible subtle navy-to-teal
+   card (blueprintbuddy-b2c.lovable.app 128931, endpoints 13, 18 and 21
+   levels apart), close-stop animated shimmer bands (grad2.html section.a,
+   200% `#7c3aed` to `#9333ea`) and a purple-only 400% animated hero
+   (gradients.html). The body-level palette finding still reports on those
+   pages.
+4. **react-fast-marquee's Subtree scope tags site-authored ticker colours as
+   third-party:** cnnbrasil.com.br 4118's `#ef4444`-on-white low-contrast,
+   harmful to both judges, now ends "(third-party: react-fast-marquee)".
+   Severity is unchanged. Swiper's OwnElement scope keeps a site's own slide
+   text untagged.
+5. **Prose-div recall on fine print (P27), unjudged.** line-length and
+   body-text-viewport-edge now report legal fine print written into divs
+   (tryrote.com `div.foot-legal`, capitalone.com footnotes,
+   volkswagen-group.com's consumption disclaimer), a third-party map
+   attribution (phillips66.com `div.esri-attribution__sources`) and albayan.ae
+   CMS divs at a 10px phone gutter (consistent with r3-34).
+6. **hero-eyebrow-chip reads `label_type_element(sibling)`.** Where the
+   wrapper sets an accent colour and the text child is transparent gradient
+   text, accent-bold stops matching. Not seen in the corpus.
+7. **Overlap with round7-never-painted, resolved at the merge.** Both
+   branches add gradient-text to `PAINT_GATED_TEXT_RULES` (kept once), and
+   never-painted gates gradient-text's page form in
+   `PAINT_GATED_PAGE_FORMS` while this branch adds
+   `clipped_gradients_all_silent`; the page form now has to pass both. In
+   `check_element_colors_dom` the gradient-text ramp check runs after the
+   surfaces rescore and the never-painted `at_rest` drop.
+8. **Not replayable:** the validity overlay gate and the new ad-tech hosts.
+   target.com is refused only on recapture, and the script-error moves were
+   classed offline.
+9. **Not fixed (DELTAS known limits above):** row 18's stop-alpha floor
+   (coldtea.ai 132291/132556, outreign.io 139783), row 20's corner glyph
+   (uncoverroads), and bt.cn's closed-menu gradient text.
+10. **One existing golden moved:** text-occlusion.html's 0.1em eyebrow over
+    a 96px h1 moves from kicker-above-heading to hero-eyebrow-chip (reviewed
+    above).
+11. **Carousel windows, resolved at the merge.** This branch tags
+    clipped-overflow-container on Slick's `slick-list` and SuperSlide's
+    `tempWrap` as third-party (lpga.or.jp 141946, scol.com.cn 141745 and
+    141937), while round7-never-painted reads both as carousel windows and
+    drops the finding outright. Silence wins, so there is nothing left to
+    tag: `third-party-widgets-carousels.html` moves those two cells to
+    should-pass (`#pass-slick-list`, `#pass-superslide-wrap`) and
+    `run_28_widget_vendors_are_named` asserts they report nothing. The
+    vendor scopes stay (unit-tested in third_party.rs), and the Slick dot,
+    marquee, Kaltura and untagged site-button cells are unchanged. No
+    golden moved (the static engine measures no clip).
+12. **The `dev_url::answers_whatever_scheme_the_page_uses` flake** failed
+    once in the merged full workspace run and passed three times on its
+    own.

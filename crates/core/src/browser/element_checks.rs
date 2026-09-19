@@ -8,7 +8,9 @@ use super::background::{
     read_own_background_color, resolve_background_info, resolve_text_gradient_stops, resolve_text_surface,
     surface_label, BackgroundInfo, TextSurface,
 };
-use crate::checks::gradient_geometry::{self as geo, Box2};
+use crate::checks::gradient_geometry::{
+    self as geo, gradient_paint_under_text, BackgroundLayers, Box2, PaintBox, UnderText,
+};
 use super::dom::{
     class_attr, class_attr_or_prop, closest_or_none, direct_text, has_direct_text_longer_than,
     matches_or_false, pf0, safe_id, style_px, tag_lower, Dom, ElId, ElStyle, Rect,
@@ -835,6 +837,87 @@ fn fold_surface_opacity(
     Some(fg)
 }
 
+/// The largest stop alpha, times the element's opacity, under which a
+/// gradient clipped to text is a watermark rather than coloured type:
+/// vestra.ai's `span.lp-wm` paints its ramp at 6 to 8%.
+const GRADIENT_TEXT_MIN_STOP_ALPHA: f64 = 0.15;
+
+/// How far apart, on any channel, two painted colours are before a reader
+/// sees two colours rather than one. A box whose samples all sit within it
+/// shows one fill.
+const RAMP_MIN_CHANNEL_DELTA: f64 = 12.0;
+
+/// What `node`'s own gradient layers paint inside `text`, from its computed
+/// background geometry ([`geo::gradient_paint_under_text`]).
+pub(crate) fn own_gradient_under(dom: &dyn Dom, node: ElId, text: &Rect) -> UnderText {
+    let rect = dom.rect(node);
+    let px = |prop: &str| style_px(dom, node, prop);
+    let paint = PaintBox {
+        border_box: Box2::new(rect.left, rect.top, rect.width, rect.height),
+        border: [
+            px("borderTopWidth"),
+            px("borderRightWidth"),
+            px("borderBottomWidth"),
+            px("borderLeftWidth"),
+        ],
+        padding: [px("paddingTop"), px("paddingRight"), px("paddingBottom"), px("paddingLeft")],
+    };
+    let image = dom.style(node, "backgroundImage");
+    let size = dom.style(node, "backgroundSize");
+    let position = dom.style(node, "backgroundPosition");
+    let shorthand = dom.style(node, "background");
+    let layers = BackgroundLayers { image: &image, size: &size, position: &position, shorthand: &shorthand };
+    gradient_paint_under_text(&layers, &paint, &Box2::new(text.left, text.top, text.width, text.height))
+}
+
+/// Whether the painted samples show one colour: every sample within
+/// [`RAMP_MIN_CHANNEL_DELTA`] of the first on every channel, alpha included.
+fn samples_are_one_colour(samples: &[Rgba]) -> bool {
+    let Some(first) = samples.first() else {
+        return false;
+    };
+    samples.iter().all(|c| {
+        (c.r - first.r).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.g - first.g).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.b - first.b).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.alpha_or_one() - first.alpha_or_one()).abs() * 255.0 < RAMP_MIN_CHANNEL_DELTA
+    })
+}
+
+/// Whether a gradient clipped to `el`'s text paints type a reader sees: its
+/// strongest stop is at least [`GRADIENT_TEXT_MIN_STOP_ALPHA`] once the
+/// element's own opacity is applied (an ancestor's is left to the Text gate,
+/// as [`ai_palette_is_visible`] explains). Where the stops
+/// cannot be read the finding stands, as before.
+///
+/// How much of the ramp the glyphs show is not read. uncoverroads.com's
+/// single digit in the corner of a 266px ramp box sees about a third of the
+/// ramp, 28 levels on the green channel, and coachcall.ai's centred short
+/// headings see a quarter of theirs: geometry cannot tell the judged misfire
+/// from the tell.
+pub(crate) fn gradient_text_paints_a_ramp(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    let stops = parse_gradient_colors(Some(&image));
+    if stops.is_empty() {
+        return true;
+    }
+    let strongest = stops.iter().map(|c| c.alpha_or_one()).fold(0.0, f64::max);
+    strongest * own_opacity(dom, el) >= GRADIENT_TEXT_MIN_STOP_ALPHA
+}
+
+/// The smallest type [`box_holds_a_text_line`] reads as a line of text.
+const SHORT_LINE_MIN_FONT_PX: f64 = 8.0;
+
+/// Whether a box under 10px tall is one line of the text it holds: its type
+/// is at least [`SHORT_LINE_MIN_FONT_PX`], and the box is at least nine
+/// tenths of the font size tall, so the glyphs fit in it.
+fn box_holds_a_text_line(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let font_size = parse_float(&dom.style(el, "fontSize"));
+    font_size.is_finite()
+        && font_size >= SHORT_LINE_MIN_FONT_PX
+        && rect.height >= font_size * 0.9
+}
+
 /// JS: checks.mjs#checkElementColorsDOM(el)
 pub fn check_element_colors_dom(
     dom: &dyn Dom,
@@ -856,7 +939,12 @@ pub fn check_element_colors_dom(
         && dom
             .parent(el)
             .is_some_and(|p| !js::trim(&direct_text(dom, p)).is_empty());
-    if rect.height < 10.0 || (rect.width < 10.0 && !narrow_run) {
+    // The same holds on the other axis: a whole line of 9px text set tight
+    // (coachcall.ai's 148 x 9.45px chat timestamps) is under 10px tall and
+    // still read. A box as tall as the glyphs it holds is a line of text, not
+    // a mark.
+    let short_line = has_direct_text && rect.width >= 10.0 && box_holds_a_text_line(dom, el, &rect);
+    if (rect.height < 10.0 && !short_line) || (rect.width < 10.0 && !narrow_run) {
         return Vec::new();
     }
     if dom.style(el, "visibility") == "hidden" || effective_opacity_dom(dom, el) <= 0.02 {
@@ -1153,6 +1241,9 @@ pub fn check_element_colors_dom(
             }
         }
     }
+    if findings.iter().any(|h| h.id == "gradient-text") && !gradient_text_paints_a_ramp(dom, el) {
+        findings.retain(|h| h.id != "gradient-text");
+    }
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -1192,7 +1283,8 @@ pub fn check_element_colors_dom(
 /// JS: checks.mjs#checkElementIconTileDOM(el)
 pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
-    if !HEADING_TAGS.contains(&tag.as_str()) {
+    let card_title = !HEADING_TAGS.contains(&tag.as_str()) && is_card_title(dom, el, &tag);
+    if !HEADING_TAGS.contains(&tag.as_str()) && !card_title {
         return Vec::new();
     }
     let Some(found) = super::text_collectors::label_before_heading(dom, el) else {
@@ -1223,7 +1315,8 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         sibling_width: sib_rect.width,
         sibling_height: sib_rect.height,
         sibling_bottom: sib_rect.bottom,
-        sibling_bg_color: parse_rgb(Some(&dom.style(sibling, "backgroundColor"))),
+        // Tailwind 4 computes `bg-primary/10` to an `oklab(... / 0.1)` fill.
+        sibling_bg_color: parse_rgb_or_any(&dom.style(sibling, "backgroundColor")),
         sibling_bg_image: Some(dom.style(sibling, "backgroundImage")),
         sibling_border_width: math_max(
             style_px(dom, sibling, "borderTopWidth"),
@@ -1236,7 +1329,40 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             .map(|r| r.width)
             .filter(|w| num_truthy(*w))
             .unwrap_or(0.0),
+        heading_is_card_title: card_title,
     })
+}
+
+/// The weight and size a card title set on a `div` carries: shadcn's
+/// `CardTitle` is `div.font-semibold` at `text-lg` or `text-2xl`.
+const CARD_TITLE_MIN_WEIGHT: f64 = 600.0;
+const CARD_TITLE_MIN_PX: f64 = 16.0;
+/// The longest text a card title holds.
+const CARD_TITLE_MAX_CHARS: usize = 80;
+
+/// Whether `el` is a card title set on a non-heading tag: a `div` or `span`
+/// laid out as a block, outside any heading, whose own text is one short
+/// bold line (kin-ai.replit.app's shadcn feature cards). The tile rule
+/// anchors on it as on a heading. A `p` is copy, not a title: a dropzone's
+/// bold prompt under its upload icon stays silent.
+fn is_card_title(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+    if !matches!(tag, "div" | "span") {
+        return false;
+    }
+    if !matches!(dom.style(el, "display").as_str(), "block" | "flow-root") {
+        return false;
+    }
+    let text = js::trim(&direct_text(dom, el)).to_string();
+    let len = utf16_len(&text);
+    if !(2..=CARD_TITLE_MAX_CHARS).contains(&len) || !dom.children(el).is_empty() {
+        return false;
+    }
+    let weight = parse_float(&dom.style(el, "fontWeight"));
+    let size = parse_float(&dom.style(el, "fontSize"));
+    if !(weight >= CARD_TITLE_MIN_WEIGHT && size >= CARD_TITLE_MIN_PX) {
+        return false;
+    }
+    closest_or_none(dom, el, "h1, h2, h3, h4, h5, h6, [role=\"heading\"], a, button, label").is_none()
 }
 
 /// The box a tile is drawn on. A `display: contents` wrapper generates no box,
@@ -1362,6 +1488,9 @@ pub fn check_element_hero_eyebrow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let Some(sibling) = dom.previous_element_sibling(el) else {
         return Vec::new();
     };
+    // A chip wraps its text in a span beside an icon or inside a bare box:
+    // the element holding the text sets its size, case and tracking.
+    let ty = super::text_collectors::label_type_element(dom, sibling);
     check_hero_eyebrow(&HeroEyebrowOpts {
         heading_tag: tag,
         heading_text: Some(dom.text_content(el)),
@@ -1374,12 +1503,18 @@ pub fn check_element_hero_eyebrow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         .is_some(),
         sibling_tag: Some(tag_lower(dom, sibling)),
         sibling_text: Some(dom.text_content(sibling)),
-        sibling_text_transform: Some(dom.style(sibling, "textTransform")),
-        sibling_font_size: style_px(dom, sibling, "fontSize"),
-        sibling_letter_spacing: style_px(dom, sibling, "letterSpacing"),
-        sibling_font_weight: Some(dom.style(sibling, "fontWeight")),
-        sibling_color: Some(dom.style(sibling, "color")),
+        sibling_text_transform: Some(dom.style(ty, "textTransform")),
+        sibling_font_size: style_px(dom, ty, "fontSize"),
+        sibling_letter_spacing: style_px(dom, ty, "letterSpacing"),
+        sibling_font_weight: Some(dom.style(ty, "fontWeight")),
+        sibling_color: Some(dom.style(ty, "color")),
         sibling_has_accent_dash_pseudo: dom_accent_dash_pseudo(dom, sibling),
+        sibling_tracking_floor_em: Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
+        sibling_holds_time: tag_lower(dom, sibling) == "time"
+            || dom
+                .query_all(Some(sibling), "time")
+                .map(|t| !t.is_empty())
+                .unwrap_or(false),
     })
 }
 
@@ -1728,6 +1863,21 @@ fn ai_palette_gradient_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
     }
     if gradient_occluded_by_media_child(dom, el, &rect) {
         return None;
+    }
+    // What the box shows at rest: a hover wipe drawn as two hard stops on a
+    // tile twice the box's width (jpmorganchase.com's buttons) shows one of
+    // its colours, a flat fill. The samples read every layer over the whole
+    // border box, so a layer clipped to the padding or content box (a white
+    // fill over a gradient border ring, joongang.co.kr) is not measured.
+    // Where the geometry cannot be read, the stops decide as before.
+    let clip = dom.style(el, "backgroundClip");
+    let clipped_to_border_box = clip.is_empty() || clip.split(',').all(|c| js::trim(c) == "border-box");
+    if clipped_to_border_box {
+        if let UnderText::Paint(samples) = own_gradient_under(dom, el, &rect) {
+            if samples_are_one_colour(&samples) {
+                return None;
+            }
+        }
     }
     let opacity = own_opacity(dom, el);
     let mut painted = 0usize;
@@ -2090,6 +2240,21 @@ fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     // edge only where it shows against the fill it rims (the surface, when the
     // element paints none). Where a surface cannot be read, as before.
     let surface = painted_surface_under(dom, el);
+    // Under a gradient ancestor there is no one surface, but there are its
+    // stops: a halo that shows over at most half of them lands on a surface
+    // it does not change (uncoverroads.com's near-black halo on an aurora band
+    // that is near-black but for 6 to 8% tints).
+    if surface.is_none() {
+        if let Some(surfaces) = gradient_surfaces_under(dom, el) {
+            let shows = surfaces
+                .iter()
+                .filter(|s| gpt_border_shadow_halo_blur_px_over(Some(&box_shadow), Some(s)).is_some())
+                .count();
+            if shows * 2 <= surfaces.len() {
+                return None;
+            }
+        }
+    }
     let blur = gpt_border_shadow_halo_blur_px_over(Some(&box_shadow), surface.as_ref())?;
     let fill = surface.map(|s| own_fill_over(dom, el, &s));
     let style = ElStyle { dom, el };
@@ -2148,6 +2313,63 @@ pub(crate) fn painted_surface_under(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
         surface = composite_color_over(layer, &surface);
     }
     Some(surface)
+}
+
+/// The colours a box is painted onto when one ancestor between it and the
+/// first opaque fill paints a gradient: each of the gradient's stops,
+/// composited with the translucent fills above and below it, over that fill
+/// (or the light canvas). `None` where [`painted_surface_under`] reads one
+/// surface, or where the walk meets a picture, a second gradient, or a
+/// colour that does not parse.
+pub(crate) fn gradient_surfaces_under(dom: &dyn Dom, el: ElId) -> Option<Vec<Rgba>> {
+    // Top first; each layer is the colours it may paint.
+    let mut layers: Vec<Vec<Rgba>> = Vec::new();
+    let mut gradients = 0usize;
+    let mut current = dom.parent(el);
+    let mut base: Option<Rgba> = None;
+    while let Some(p) = current {
+        let image = dom.style(p, "backgroundImage");
+        if !image.is_empty() && image != "none" {
+            let lower = image.to_ascii_lowercase();
+            if lower.contains("url(") || !lower.contains("gradient") {
+                return None;
+            }
+            let stops = parse_gradient_colors(Some(&image));
+            if stops.is_empty() {
+                return None;
+            }
+            gradients += 1;
+            layers.push(stops);
+        }
+        let raw = dom.style(p, "backgroundColor");
+        if !measures::css_color_is_transparent(Some(&raw)) {
+            let color = parse_any_color(Some(&raw))?;
+            if color.alpha_or_one() >= 0.999 {
+                base = Some(color);
+                break;
+            }
+            layers.push(vec![color]);
+        }
+        current = dom.parent(p);
+    }
+    if gradients != 1 {
+        return None;
+    }
+    let base = match base {
+        Some(b) => b,
+        None if super::quality::canvas_is_light(&dom.style(el, "colorScheme")) => {
+            parse_any_color(Some(super::quality::CANVAS_BACKGROUND))?
+        }
+        None => return None,
+    };
+    let mut surfaces = vec![base];
+    for layer in layers.iter().rev() {
+        surfaces = surfaces
+            .iter()
+            .flat_map(|s| layer.iter().map(move |c| composite_color_over(c, s)))
+            .collect();
+    }
+    Some(surfaces)
 }
 
 /// `el`'s own background colour composited over `surface`, or `surface` when

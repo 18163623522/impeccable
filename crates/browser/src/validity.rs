@@ -12,6 +12,9 @@
 //! Header and HTTP-status signals stand alone. Titles and DOM markers only
 //! count on a small page, because a real page can carry a captcha widget on a
 //! form or be titled "Access denied" in a CMS without being a block page.
+//! A known bot manager's challenge sheet showing over the viewport counts on
+//! any page ([`CHALLENGE_OVERLAYS`]): it is laid over a page already rendered
+//! behind it.
 //!
 //! The probe also names the known consent managers ([`crate::consent`]) whose
 //! banner is showing, how much visible text sits inside them, and what content
@@ -80,11 +83,30 @@ pub const CHALLENGE_MARKERS: &[(&str, &str)] = &[
     (".geetest_holder, #nc_1_wrapper, #aliyunCaptcha-sliding-wrapper", "slider-captcha"),
 ];
 
+/// Challenge sheets a bot manager lays over the real page it has already
+/// rendered, so the page behind is a full page and the small-page gate never
+/// applies. Each entry is `(selector, label)`; one counts only while it is
+/// showing and covers at least [`CHALLENGE_OVERLAY_MIN_COVER`] of the
+/// viewport. HUMAN Security (formerly PerimeterX) serves its "Press & hold"
+/// check as `iframe#px-captcha-modal`, fixed over the whole viewport at
+/// z-index 2147483647 (target.com, run 28 captures 4166, 4168, 4170, 4172,
+/// whose pages load `client.px-cloud.net` as `script#humanSensor`).
+pub const CHALLENGE_OVERLAYS: &[(&str, &str)] = &[("#px-captcha-modal, #px-captcha-wrapper", "human-press-and-hold")];
+
+/// The share of the viewport a challenge overlay covers before it stands in
+/// front of the page.
+pub const CHALLENGE_OVERLAY_MIN_COVER: f64 = 0.5;
+
 /// The in-page probe: title, visible text length, final URL, which
-/// challenge markers are present, and which consent managers are showing
-/// with the visible text inside them. Read-only; returns a plain object.
+/// challenge markers are present, which challenge overlays are showing over
+/// the page, and which consent managers are showing with the visible text
+/// inside them. Read-only; returns a plain object.
 pub fn probe_js() -> String {
     let markers: Vec<Value> = CHALLENGE_MARKERS
+        .iter()
+        .map(|(selector, label)| json!([selector, label]))
+        .collect();
+    let overlays: Vec<Value> = CHALLENGE_OVERLAYS
         .iter()
         .map(|(selector, label)| json!([selector, label]))
         .collect();
@@ -95,6 +117,21 @@ pub fn probe_js() -> String {
   for (const [selector, label] of markers) {{
     try {{ if (document.querySelector(selector)) found.push(label); }} catch (e) {{}}
   }}
+  const overlayMarkers = {overlays};
+  const overlays = [];
+  const vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+  for (const [selector, label] of overlayMarkers) {{
+    try {{
+      for (const el of document.querySelectorAll(selector)) {{
+        const cs = getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) <= 0.02) continue;
+        const r = el.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        if (vw > 0 && vh > 0 && (w * h) / (vw * vh) >= {cover}) {{ overlays.push(label); break; }}
+      }}
+    }} catch (e) {{}}
+  }}
   {consent}
   const text = (document.body && document.body.innerText) || '';
   return {{
@@ -102,12 +139,15 @@ pub fn probe_js() -> String {
     textChars: text.replace(/\s+/g, ' ').trim().length,
     href: String(location.href || ''),
     markers: found,
+    overlays,
     consent,
     consentChars,
     consentOutside,
   }};
 }})()"#,
         markers = Value::Array(markers),
+        overlays = Value::Array(overlays),
+        cover = CHALLENGE_OVERLAY_MIN_COVER,
         consent = crate::consent::probe_fragment(),
     )
 }
@@ -119,6 +159,8 @@ pub struct PageProbe {
     pub text_chars: u64,
     pub href: String,
     pub markers: Vec<String>,
+    /// Challenge overlays ([`CHALLENGE_OVERLAYS`]) showing over the page.
+    pub overlays: Vec<String>,
     /// Known consent managers whose banner was showing, before any was hidden.
     pub consent: Vec<String>,
     /// Visible characters inside those managers' roots.
@@ -138,6 +180,11 @@ impl PageProbe {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                 .unwrap_or_default(),
+            overlays: v
+                .get("overlays")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+                .unwrap_or_default(),
             consent: v
                 .get("consent")
                 .and_then(Value::as_array)
@@ -149,7 +196,7 @@ impl PageProbe {
     }
 
     pub fn to_value(&self) -> Value {
-        json!({
+        let mut v = json!({
             "title": self.title,
             "textChars": self.text_chars,
             "href": self.href,
@@ -157,7 +204,13 @@ impl PageProbe {
             "consent": self.consent,
             "consentChars": self.consent_chars,
             "consentOutside": self.consent_outside,
-        })
+        });
+        // Named only when one shows, so a page with none records what it did
+        // before overlays were probed.
+        if !self.overlays.is_empty() {
+            v["overlays"] = json!(self.overlays);
+        }
+        v
     }
 }
 
@@ -302,6 +355,11 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
                 challenge.push(format!("challenge host {host}"));
             }
         }
+    }
+    // A challenge sheet over a rendered page blocks it whatever the page
+    // behind it holds.
+    for o in &probe.overlays {
+        challenge.push(format!("overlay {o}"));
     }
     let small = probe.text_chars <= SMALL_PAGE_CHARS;
     if small {
@@ -521,6 +579,30 @@ mod tests {
     }
 
     #[test]
+    fn a_press_and_hold_sheet_over_a_rendered_page_is_a_challenge() {
+        // target.com, run 28: HUMAN Security's `iframe#px-captcha-modal` over
+        // the home page, 2270 visible characters and no challenge title.
+        let mut p = probe("Target : Expect More. Pay Less.", 2270, &[]);
+        p.overlays = vec!["human-press-and-hold".into()];
+        assert_eq!(
+            classify(Some(&resp(200, &[])), &p),
+            PageValidity::Blocked {
+                kind: BlockKind::Challenge,
+                evidence: vec!["overlay human-press-and-hold".into()],
+            }
+        );
+        // On a large page it still stands in front of the site.
+        p.text_chars = 40000;
+        assert!(classify(Some(&resp(200, &[])), &p).is_blocked());
+        // With no sheet showing, the same page is the page.
+        p.overlays.clear();
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        let v = p.to_value();
+        assert!(v.get("overlays").is_none(), "{v}");
+        assert_eq!(PageProbe::from_value(&v), p);
+    }
+
+    #[test]
     fn http_error_without_challenge_signals() {
         let v = classify(Some(&resp(404, &[])), &probe("Page not found", 400, &[]));
         assert_eq!(
@@ -554,7 +636,7 @@ mod tests {
     #[test]
     fn probe_js_embeds_every_marker() {
         let js = probe_js();
-        for (selector, label) in CHALLENGE_MARKERS {
+        for (selector, label) in CHALLENGE_MARKERS.iter().chain(CHALLENGE_OVERLAYS) {
             assert!(js.contains(label));
             assert!(js.contains(&selector.replace('\'', "'")));
         }

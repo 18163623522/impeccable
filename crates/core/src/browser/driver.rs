@@ -1025,10 +1025,45 @@ fn drop_covered_class_forms(findings: &mut Vec<BrowserFinding>) {
         })
         .map(|f| f.type_.clone())
         .collect();
-    if computed.is_empty() {
+    if !computed.is_empty() {
+        findings.retain(|f| !(f.detail.ends_with(CLASS_FORM_SUFFIX) && computed.contains(&f.type_)));
+    }
+    drop_covered_palette_forms(findings);
+}
+
+/// ai-color-palette reports one finding per element and concern. Its class
+/// forms (`Purple/violet gradient (Tailwind)`, `text-purple-600 on heading`)
+/// name what its computed forms read off the same element, so a computed
+/// form speaks for them. And a gradient clipped to the text is what
+/// gradient-text reports: the palette's gradient forms on that element are a
+/// second report of one fill (observations-28, round 7 branch 5).
+fn drop_covered_palette_forms(findings: &mut Vec<BrowserFinding>) {
+    let palette = |f: &BrowserFinding| f.type_ == "ai-color-palette";
+    let is_gradient_form = |f: &BrowserFinding| {
+        palette(f) && (f.detail.ends_with(" gradient background") || f.detail == "Purple/violet gradient (Tailwind)")
+    };
+    let is_class_text_form = |f: &BrowserFinding| {
+        palette(f) && f.detail.starts_with("text-") && f.detail.ends_with(" on heading")
+    };
+    let computed_gradient = findings
+        .iter()
+        .any(|f| palette(f) && f.detail.ends_with(" gradient background"));
+    let computed_text = findings
+        .iter()
+        .any(|f| palette(f) && f.detail.starts_with("Purple/violet text (") && f.detail.ends_with(" on heading"));
+    let clipped_gradient = findings.iter().any(|f| f.type_ == "gradient-text");
+    if !(computed_gradient || computed_text || clipped_gradient) {
         return;
     }
-    findings.retain(|f| !(f.detail.ends_with(CLASS_FORM_SUFFIX) && computed.contains(&f.type_)));
+    findings.retain(|f| {
+        if clipped_gradient && is_gradient_form(f) {
+            return false;
+        }
+        if computed_gradient && palette(f) && f.detail == "Purple/violet gradient (Tailwind)" {
+            return false;
+        }
+        !(computed_text && is_class_text_form(f))
+    });
 }
 
 /// Whether the page's painted root background is dark: the first of `html`
@@ -1103,7 +1138,9 @@ fn reconcile_page_level_forms(
         let stands = match item.finding.type_.as_str() {
             // Both page forms describe one treatment, text clipped to a
             // gradient, and the element forms read it off every element.
-            "gradient-text" => element_findings("gradient-text").is_empty(),
+            "gradient-text" => {
+                element_findings("gradient-text").is_empty() && !clipped_gradients_all_silent(dom)
+            }
             "bounce-easing" => {
                 let page = bounce_declarations(&item.finding.detail);
                 !element_findings("bounce-easing").iter().any(|f| {
@@ -1127,6 +1164,30 @@ fn reconcile_page_level_forms(
         }
     }
     out
+}
+
+/// Whether every element on the page that computes a gradient clipped to its
+/// text was measured silent by the element form: not painted at capture, or
+/// painting no ramp on its glyphs (a watermark, one colour over the text).
+/// Then the stylesheet's declaration shows nothing either. With no such
+/// element (the clip sits on a pseudo-element), or one the element form did
+/// not read (a wrapper of per-word spans), the text form stands as before.
+fn clipped_gradients_all_silent(dom: &dyn Dom) -> bool {
+    let clipped: Vec<ElId> = dom
+        .query_all(None, "*")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&el| {
+            let clip = dom.style(el, "webkitBackgroundClip");
+            let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
+            clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
+        })
+        .collect();
+    !clipped.is_empty()
+        && clipped.into_iter().all(|el| {
+            super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
+                || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
+        })
 }
 
 /// One bounce declaration as a finding names it.
@@ -1217,6 +1278,19 @@ fn dark_glow_page_form_stands(
     }
     let claims_dark = item.finding.detail.ends_with("on dark page");
     let (Some(selector), Some(hosts)) = (item.selector.as_deref(), item.matches.as_ref()) else {
+        // No rule to name (an inline `style` attribute, a keyframe step):
+        // the declaration reaches the page through the elements whose
+        // computed shadow carries it, and the element form read each of
+        // those, its size, opacity, surface and paint at capture, and
+        // reported it or measured no glow (liquid-log-glow.lovable.app's
+        // progress fill at width 0, jyes.com.tw's loading toast). Only a
+        // declaration no element computes is left to the text.
+        let casters = glow_declaration(&item.finding.detail)
+            .map(|(prop, hex)| elements_casting_glow(dom, &prop, &hex))
+            .unwrap_or_default();
+        if !casters.is_empty() {
+            return false;
+        }
         if !claims_dark {
             return true;
         }

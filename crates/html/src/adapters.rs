@@ -262,7 +262,23 @@ pub fn collect_kicker_candidates(doc: &StaticDocument) -> Vec<KickerCandidate> {
         }) {
             continue;
         }
-        if heading_tag == "h1" && heading_font_size >= 48.0 && kicker_letter_spacing >= 1.6 {
+        // The hero rule takes a tracked label over a display h1, at eyebrow
+        // size once its em floor is what counts. Under the fixed 1.6px floor
+        // the label is handed off only where the hero rule reports it: that
+        // rule reads case from text-transform and typed capitals (not
+        // small-caps) and passes over a dated meta line, so a label it leaves
+        // is kept here.
+        if heading_tag == "h1"
+            && heading_font_size >= 48.0
+            && (kicker_letter_spacing >= 1.6
+                || (kicker_font_size <= 14.0
+                    && impeccable_core::checks::rules::hero_eyebrow_tracked(
+                        kicker_letter_spacing,
+                        kicker_font_size,
+                        Some(impeccable_core::checks::rules::HERO_EYEBROW_TRACKING_EM),
+                    )
+                    && !check_element_hero_eyebrow(&heading, heading_style, "h1").is_empty()))
+        {
             continue;
         }
         candidates.push(KickerCandidate {
@@ -1138,6 +1154,7 @@ pub fn check_element_icon_tile(el: &StaticElement<'_>, tag: &str) -> Vec<RuleHit
         sibling_border_radius: resolve_border_radius_px(sib_style, sib_width),
         has_icon_child: icon_child.is_some() || has_inline_emoji_icon,
         icon_child_width: icon_width,
+        heading_is_card_title: false,
     })
 }
 
@@ -1197,6 +1214,9 @@ pub fn check_element_hero_eyebrow(
         sibling_font_weight: Some(font_weight_raw.to_string()),
         sibling_color: Some(color_raw.to_string()),
         sibling_has_accent_dash_pseudo: el.doc.has_accent_dash_pseudo(sibling.id()),
+        sibling_tracking_floor_em: Some(impeccable_core::checks::rules::HERO_EYEBROW_TRACKING_EM),
+        sibling_holds_time: sibling.tag_lower() == "time"
+            || sibling.query_selector("time").is_some(),
     })
 }
 

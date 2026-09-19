@@ -4716,3 +4716,353 @@ From the review, checked against the merged code:
     (`a_right_to_left_page_records_where_its_screenshot_starts`, browser
     launch under load); the next full run and three runs of that file
     passed.
+
+## Recorded 2026-09-18: surfaces off the ancestor chain (corpus/round7-surfaces)
+
+Corpus run 28, `observations-28.md` section 6 branch 1: rows 1 (sibling
+layers), 3 (scrims over photos), 10 (text-shadow outlines), the sampled-pass
+washes and SVG initials of row 27, and row 21's "on dark background" read off
+a dark root; plus the walkthrough misses in `walkthroughs-28.md` issue 1 that
+belong here (a link or span with no fill over a picture, the hit test's blind
+spots below the fold and through `pointer-events: none`, and the page width
+measured against the window).
+
+- **Every contrast path asks the structural climb.** The SAFE_TAGS path asked
+  `layer_under_text`; every other element relied on the hit-test stacks,
+  which answer only in the viewport and never list a layer that ignores
+  pointer events. Now every failing `low-contrast` verdict asks the climb.
+  Outside the SAFE_TAGS path its own finding counts where the stacks cannot
+  answer, already see unread paint, or confirm the walk only because the
+  layer ignores pointer events or is an SVG shape.
+- **A covering gradient beside the text is unread paint.** `own_paint` read a
+  gradient only when drawn larger than its box, so an `absolute inset-0
+  bg-gradient-to-br` sibling painted nothing to the climb. A gradient that
+  paints a surface on a box that is nobody's ancestor is now
+  `LayerUnder::Gradient` (opaque stops, as the channel-wise least and greatest)
+  or `Unmodelled` (a translucent stop). It uses the stacks' own texture tests
+  (`text_layers::gradient_surface_stops`). An ancestor painting an opaque
+  gradient ends the climb, as its fill does, since the walk scores its stops.
+  An SVG shape drawn around the text (at most three times the text box plus
+  16px) is unmodelled paint; one behind a whole section is decoration.
+- **Unread paint is read for what it can make of the surface**
+  (`visual::unread_verdict`). The climb is asked again past each translucent
+  layer, up to four, until it reaches paint that hides what is beneath or the
+  walk's own ground. The walk's translucent layers are put over or under that
+  paint by the box each hangs from. Over that span of surfaces:
+  - a verdict that **fails everywhere** stands, also where the stacks see
+    unread paint. Where the walk named a flat colour more than 24 away from
+    the span, and the span's colours are known (fills and gradients), it is
+    printed against the surface it reads best on: `3.2:1 (need 4.5:1) — text
+    #5b6c7f on #0a1f0e (layer on div.absolute)`.
+  - a verdict that **passes everywhere** is dropped. Examples: light copy on
+    a dark hero gradient, and white card copy on a dark panel, where the walk
+    read the white page.
+  - a verdict that **depends on what the paint shows** (a photo, an SVG
+    shape's unknown fill) stands outside the SAFE_TAGS path, as it did (fail
+    safe). The SAFE_TAGS path waives it, as it did.
+- **The pixel pass reads what the element pass hands over.** A second
+  candidate budget, `maxRoutedCandidates`, takes text over unread paint whose
+  verdict depends on the paint, ink in exactly the walk's surface colour over
+  it, links and spans with no fill among them, and outlined text.
+  - **The first budget is unchanged.** Its 12 candidates are selected exactly
+    as before; the URL engine passes 12 routed slots after them, and the
+    in-page bundle passes none.
+  - **Routed candidates go to the screenshot pass.** They carry `routed` and
+    the reason `unread layer` or `text outline`, which the sampled pass
+    refuses. A first-budget candidate the element pass hands over carries
+    `routed` only, and the sampled pass reads it as before.
+  - **The pixels' verdict replaces the element pass's.** Where the pixel
+    pass gives a verdict, pass or fail, on a routed selector, the URL engine
+    drops the element pass's `low-contrast` finding on it. Where it gives
+    none, the element verdict stays.
+  - **The extra reads are capped.** Reads the first budget would not have
+    made stop after 4 seconds, or after 4 slow reads in a row that gave no
+    verdict (lpga.or.jp's carousels, about a second a read).
+- **Outlines.** `-webkit-text-stroke` (width and colour, now in the capture)
+  in a colour of its own, or two or more opaque text-shadow layers blurred at
+  most 2px and offset in opposing directions, is an outline. The element
+  pass keeps its verdict. The pixel pass reads the rendered colours
+  (`preferRenderedForeground`), and its hide style now also clears
+  `-webkit-text-stroke-color`, and `fill` and `stroke` on SVG `text` and
+  `tspan`, so an initial's glyphs can be diffed.
+- **The sampled pass reads a faded picture faded.** A picture whose own box
+  or wrapper is faded (below the nearest box that also holds the text) is
+  composited at that opacity, not read raw. Examples: phillips66.com's card
+  photos at 0.16, thairath.co.th's 0.1 slide wrapper. A picture that cannot
+  be read (a tainted image, a refused video frame) ends the walk rather than
+  letting the page white under a hero video answer. Both walks share this
+  (`visual::media_sample`, `vc_media_sample`).
+- **dark-glow's dark claim reads the surface under the element.** Where
+  that form fired, an opaque detached fill or gradient under the element's box is
+  its surface; a light panel laid over a dark section is not dark. A picture
+  or a translucent layer leaves the claim as the walk made it.
+- **The page's width is the document's** (`overlaps_page_width`): on a page
+  laid out wider than the phone, the right column's links and spans are
+  scored (inven.co.kr's 14 pairs at 390px).
+- **Pixel budget.** The pixel pass's candidate budget goes from 12 to 24 per
+  scan (the second 12 for handed-over text only). Measured live, a read costs
+  about 80 to 190ms on the pages checked, so the second budget costs under
+  two seconds there. lpga.or.jp, where every read takes about a second and
+  none resolves, is bounded by the four-miss cap.
+
+Goldens re-recorded from the binary and read finding by finding:
+
+- `detect-fixture-json-unread-surface-contrast-html`,
+  `detect-fixture-text-unread-surface-contrast-html`: new, 6 findings. The
+  static engine has no layout: it scores the dim copy, the emerald copy and
+  the outlined sticker against the page, both glows as on dark, and its
+  page-level dark glow.
+- `detect-fixture-json-wide-page-contrast-html`,
+  `detect-fixture-text-wide-page-contrast-html`: new, 2 findings, the right
+  column label and the parked drawer's label (no layout).
+- `detect-dir-json-all-fixtures`, `detect-no-advisory-json`: exactly the new
+  fixtures' 8 added, none removed (810 to 818, 686 to 694);
+  `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`,
+  `detect-no-advisory-text` the same.
+
+The URL behavior is pinned by `crates/browser/tests/unread_surfaces.rs`.
+Scanned with the base binary (156c3150), the fixture misses the dim copy, the
+grain link, the cream copy on the pointer-events-none photo and the faint
+link below the fold. It reports the outlined sticker (`1.2:1`), the faded card
+photo (`browser contrast 1.9:1 via canvas-img-underlay`) and the glow on the
+light panel. `a_title_cut_by_the_viewport_edge_is_answered_from_what_is_visible`
+now ends its photo at the viewport's edge, since the climb reads a photo under
+the whole run. `paint_under_the_text_that_the_walk_never_read_leaves_no_verdict`
+now expects the 40% violet tint to report, since the near-white ink fails
+over every surface it can make; a 90% dark scrim still prints nothing.
+
+Corpus (`reports/ratchet/round7-surfaces-28-ratchet-28.json`, all three
+cohorts, 801 captures):
+
+- **low-contrast 6,471 to 6,419.** 158 removed, 106 added, 0 violations, no
+  severity moves.
+  - **By label:** pattern-absent 152, real-harmless 1, unjudged 5.
+  - **By cohort:** cohort 3 removed 153 (pattern-absent 152, real-harmless 1)
+    and added 72; cohort 1 removed 4 unjudged (sapo.vn's dark cards,
+    becomeautonomous.com's dark tab) and added 27; cohort 2 removed 1 (fabadda.com, a
+    4.4:1 advisory) and added 7.
+  - **The removals by site:** arbiproseller-app.vercel.app 136 (its whole row 1 set: the
+    emerald nav, the tinted icon tiles, the `#cecece` cards, the white strong;
+    2 of them are the dim paragraph re-scored against its dark gradient), aisdr.com 6
+    (row 3's glow-framed prices), pool-web-eight.vercel.app 8 (outlined brand letters over
+    blurred blobs, a pair move to the next copy), zettabrasil.com.br 2, vestra.ai 1.
+  - **The additions:** 62 are the page width on wide mobile pages
+    (inven.co.kr 45, yahoo.co.jp 6, drom.ru 5, news.cn 5, people.com.cn 1). The rest are
+    verdicts the unread paint decides as failing (ktb.gov.tr's search button
+    on its white panel, bt.cn's white tab on the green slider, visiby.net's
+    grey unit on its orange card, vestra.ai's calendar over a faded painting),
+    rescores (arbiproseller-app.vercel.app 4, vestra.ai) and SAFE_TAGS pair moves
+    (pool-web-eight.vercel.app 8).
+  - **Crops opened:** 14 removed findings (sapo.vn, becomeautonomous.com,
+    fabadda.com, arbiproseller-app.vercel.app x7, zettabrasil.com.br, aisdr.com x2, and
+    the clipto.com chips of an earlier revision). Every kept removal shows
+    readable light text on a dark surface. fabadda.com's is borderline: grey
+    on pink, a 4.4:1 advisory.
+  - **Revised during the ratchet:** an earlier revision removed clipto.com's 12
+    pastel chips (real 3:1 fails) under a blurred blob. The walk had ended on
+    a gradient and named no ground. The ground under that gradient is now
+    read, and the chips report.
+- **Live** (branch against 156c3150, the same moment, home pages):
+  - arbiproseller-app.vercel.app: low-contrast 80 to 14.
+  - myrecomy.com: 4 to 3. The cream hero's h1 and subline go; "Join today"
+    (miss 317) reports from pixels at 2.5:1.
+  - vestra.ai: 14 to 14. The hero kicker is re-measured from pixels at
+    2.4:1, and "The autonomous loop" (miss 319) reports at 2.6:1.
+  - phillips66.com: 11 to 4. The scrim eyebrows and the sampled washes go;
+    3 pixel findings arrive, 2 of them nav links over the hero video.
+  - zettabrasil.com.br: 14 to 11.
+  - aisdr.com: 27 to 25.
+  - pool-web-eight.vercel.app: 10 to 7 (outlines read from pixels).
+  - lpga.or.jp: 21 to 21, at the same scan time once capped.
+  - walla.co.il: an earlier live pair read 24 to 10. Its 14 scrim headlines
+    were measured at 13 to 20:1 and replaced, and 8 unreadable ones kept
+    their verdict.
+  - hp.com and a later walla.co.il pair returned no findings to either binary.
+
+### Known limits at merge
+
+1. **The ratchet cannot see the pixel pass.** Replays keep every verdict the
+   pixels would replace, so row 3's scrims over photos (walla.co.il, lpga.or.jp),
+   the hero-video and pointer-events-none cases, and outlined text show no
+   change there. Their live effect is above, and it depends on the page
+   letting the two screenshots agree.
+2. **A new hit test in a replay goes unanswered.** The climb's hit-test
+   fallback asks points the capture never recorded; in a replay they fail
+   safe (the verdict stands) where a live scan may answer.
+3. **A picture's colours stay unknown.** Text over a photo prints the walk's
+   numbers until the pixels replace them, and myrecomy.com's "on dark
+   background" glow (139432, 139515) stands: its cream hero is a `url()`
+   photo, which no surface span describes.
+4. **Rescores print the best case.** A verdict re-scored over known paint
+   prints the ratio the text reaches on its best surface in the span.
+   Rescoring applies only where the walk named a flat colour.
+5. **The SAFE_TAGS path waives more.** It waives a verdict that depends on
+   paint it never read. That paint now includes translucent gradients and
+   SVG shapes, so a colour pair can move to a later copy
+   (pool-web-eight.vercel.app).
+6. **The in-page bundle has no second budget.** The extension and the live
+   overlay pass no routed slots. Their verdicts over unread paint stand
+   unless the paint decides them.
+7. **The pixel budget is bounded, not unlimited.** Beyond 12 handed-over
+   candidates, or once the time or miss cap is hit, the element verdict
+   stands. The time cap makes a slow page's output depend on its speed.
+8. **Not changed from row 27:** yna.co.kr's icon sprite (125322), sapo.vn's
+   straddling gradient panel (127441) and microsoft.com's shadow-host ink
+   (130007) read as before.
+9. **Stroke needs a new capture.** `webkitTextStrokeColor` and
+   `webkitTextStrokeWidth` are recorded from this capture on; older
+   snapshots read no stroke.
+10. **API.** `LayerUnder` gains `Gradient`. `visual` gains
+    `layer_under_text_found`, `layer_under_rect`, `layer_matches_surface`,
+    `surface_unread`, `unread_verdict`, `unread_reading`, `UnreadVerdict`,
+    `UnreadReading`, `Rescore`, `opaque_detached_span`, `contrast_threshold`,
+    `routed_reason`, `text_outlined`, `layer_fade` and `media_sample`.
+    `snapshot_engine::analyze_visual_contrast` takes the routed budget.
+    `screenshot_contrast` gains `measure_visual_contrast_candidate` and
+    `PixelMeasure`. The wasm module exports `vc_media_sample`.
+
+### Revised 2026-09-19 after review: paint beneath a fill, paint off the text
+
+The review found pricing and feature cards losing real failures below the
+fold, and a misprinted finding. The climb read a positioned `::before` or
+`::after` as the text's surface whenever it was as large as the text run,
+wherever it sat, and before the host's own fill. With that revision's wider
+use of the climb, that answer dropped or reprinted any tag's verdict wherever
+the hit-test stacks could not answer. A negative `z-index` sibling was read
+past an opaque ancestor fill in the same way.
+
+- **A pseudo-element is placed before it decides anything.** Its box is
+  worked out from the containing block (the nearest positioned or
+  transformed box, less its borders), its pixel offsets and size, and its
+  transform. A translation moves the box. A rotation, scale or skew gives the
+  bounds of the transformed box about its centre, which only rules the
+  pseudo out, since it may not fill them. A pseudo whose box does not cover
+  the text is not its surface. Example: a "Most popular" badge at a card's
+  corner (visiby.net 3806 and 3809 printed `1.2:1 — text #8b8d87 on #c96442
+  (layer on article.pc)` and now print `3.0:1 — text #8b8d87 on #faefe6`).
+  A pseudo the capture cannot place (a fixed pseudo, `auto` offsets, a 3D
+  transform) keeps the old size test.
+- **A pseudo-element at `z-index` below zero is under the host's fill** unless the host opens
+  its own stacking context. The same holds for a negative `z-index` box under
+  an opaque fill or gradient between it and its stacking context. Examples: the
+  neubrutalist offset shadow and the ring drawn with `::before { z-index: -1 }`
+  behind a white card, and the `absolute inset-0 -z-10` gradient inside a
+  `relative bg-white` section. That paint is skipped, and the fill ends the climb as the
+  walk's surface. Stacking contexts are read from `z-index`, opacity,
+  `transform`, `translate`/`rotate`/`scale`, `filter`, `backdrop-filter`,
+  `mix-blend-mode`, `clip-path`, masks, `perspective`, `contain`, the
+  matching `will-change`, fixed and sticky positioning, and `isolation`. A
+  Tailwind `isolate` class stands in for `isolation` where the capture did
+  not record it.
+- **What the capture cannot place decides no verdict of its own.**
+  - A pseudo whose box or paint order is uncertain, or a negative layer
+    under a fill whose stacking context is unknown (a capture older than
+    `isolation` or the pseudo's `z-index`), is read by the climb as before.
+    The SAFE_TAGS path waives against it as it did.
+  - `unread_verdict` calls it `Unknown` (`found_order`): the verdict stands
+    outside the SAFE_TAGS path, nothing is reprinted against it, and the
+    URL engine's second pixel budget takes it.
+  - `dark-glow`'s surface read ignores it.
+- **The capture records more.** The capture adds `isolation` to the style
+  properties, and `zIndex` and `translate` to the pseudo-element properties.
+
+The fixture `unread-surface-contrast.html` gains eight cases below the fold.
+Five should flag against white: the badged card's note, the offset-shadow
+card's note and link, the ringed card's note, and the note over a hidden
+`-z-10` layer. Three should pass: light copy on the same layer in an
+`isolate` section, on a stretched dark `::before`, and on a `z-index: -1`
+dark `::before` in a card that opens its own context. The revision before
+this one reported none of the four notes and the link. Base (156c3150)
+reports the four notes, waives the link on the offset shadow, and reports
+all three pass cases against white.
+
+Goldens re-recorded and read: `detect-fixture-json-unread-surface-contrast-html`
+and `detect-fixture-text-unread-surface-contrast-html` add the eight new
+cases' static findings (6 to 14; the static engine places no pseudo-element
+and no layer). `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+`detect-dir-quiet-all-fixtures`, `detect-no-advisory-json` and
+`detect-no-advisory-text` add exactly those 8 (694 to 702), none removed.
+
+Corpus (`reports/ratchet/round7-surfaces-rev-28-ratchet-28.json`, 801
+captures; full lists from an uncapped copy of the harness):
+
+- **low-contrast 6,471 to 6,425.** 163 removed, 117 added, no severity
+  moves.
+  - **Removed by label:** pattern-absent 152, confirmed-harmful 3,
+    real-harmless 1, unjudged 7.
+  - **Removed by cohort:** cohort 1 lost 9 (confirmed-harmful 3,
+    unjudged 6), cohort 2 lost 1 (unjudged), and cohort 3 lost 153
+    (pattern-absent 152, real-harmless 1).
+  - **Added by cohort:** cohort 1 35, cohort 2 7, cohort 3 75.
+- **Against the revision before this one:** 5 more removed and 9 more added,
+  and the visiby.net pair changes as above.
+  - **The 3 violations are colour-pair moves.** yungching.com.tw 3369 and
+    3375 report `#ffaa01 on #fbf0da` on the FAQ's first "STEP" label
+    instead of its seventh, with the same snippet. The earlier copy sat under
+    a rotated circle decoration, and the old size test waived it; its bounds
+    lie off the label. thairath.co.th 3422 and yungching.com.tw's "expand
+    all" move the same way. The crops show the earlier copies visible and
+    failing the same way.
+  - **The new additions.** yna.co.kr 3337: white "IR" on `#add3ff`, 1.6:1,
+    beside two banner images that do not reach it. yna.co.kr 3337 and 3346:
+    white on the blue banner gradient, 3.5:1 and 4.3:1, which a
+    half-overlapping `::before` image had waived. jyes.com.tw 4093, 4098
+    and 4101: a goldenrod heading on white, 2.2:1, under a tab pane whose
+    fade-out `::after` sits 800px lower. All three are real in the crops.
+  - **One addition dropped.** yungching.com.tw 3369's `#949494` card label
+    was added under the old answer. It now sits under a rotated decoration
+    whose bounds do cover it, so it is uncertain and waived as base waived it.
+- **Live** (home pages, the revision before this one against this one):
+  arbiproseller-app.vercel.app 14 and 14, myrecomy.com 3 and 3, vestra.ai 14
+  and 14. visiby.net/pricing prints the grey unit at 3.0:1 on `#faefe6`
+  where the revision before printed 1.2:1 on the badge's orange.
+
+Known limits added:
+
+1. **Old captures cannot place paint beneath a fill.** Replays of captures
+   without `isolation` or the pseudo's `z-index` read such paint as before
+   and decide no verdict from it.
+2. **`transform-origin` is assumed to be the centre** for a transformed
+   pseudo-element, whose origin the capture does not record.
+3. **Two review notes stay open.** A closed drawer parked right of an
+   unclipped mobile page now widens the page (`wide.html`). Pixel findings
+   on links are not grouped by colour pair.
+
+### Known limits at merge (from the review)
+
+Open issues the review of the revision left, carried here at the merge into
+corpus/integration:
+
+1. **A parked drawer widens the page.** Page width is now the document's, so
+   on an unclipped mobile page a closed drawer parked to the right
+   (`absolute; left:100%`, or `right:0; translateX(110%)`) widens the root's
+   scroll width and its labels are scored (review pages wide.html
+   `#e-drawer1` and wide2.html `#f-right` at 390x844; base does not report
+   them). Run 28 had no such case: all 62 of its document-width additions
+   are real.
+2. **Pixel link findings are not grouped by colour pair.** Eight white nav
+   links over a cream photo give eight findings (photo.html); the SAFE_TAGS
+   element path reported one per colour pair.
+3. **A rescore can still name a box that is not under the text** when the
+   text never paints: arbiproseller 3936/3938 "to order", clipped inside a
+   scroll list, prints `3.0:1 ... on #2857be (layer on a.inline-flex)`. The
+   base finding was already pattern-absent; the class belongs to
+   round7-never-painted (text that never paints).
+4. **gameghost.manus.space 3957** adds 2 findings on text under a
+   full-viewport "click to enter fullscreen" blur overlay (harness row 28d).
+5. **context.dev 3649/3655.** Tab labels and the `https://` prefix are real
+   fails at about 3.4 to 4:1 but print the walk's `#6786db` / `#a7b9ea`
+   surface. The walk was already inaccurate there; UnreadSurface plus Fails
+   standing makes it visible.
+6. **A letterpress emboss counts as an outline.** Two opposing sharp
+   text-shadows, one dark, read as an outline; the pixel pass reads the
+   shadow in, so pale grey captions move from warning 2.2:1 to advisory 4.2
+   to 4.3:1 (outline.html `#d4` to `#d6`). The finding is still reported.
+7. **The ratchet cannot see the pixel pass.** Scrims, video,
+   pointer-events-none photos and outlines are measured only live, and the
+   4 s cap makes a slow page's output depend on machine speed.
+8. **The implementer's known limits 1 to 10 above stand:** myrecomy's
+   dark-glow over a cream `url()` photo, yna/sapo/microsoft from row 27,
+   stroke recorded only in new captures, the public API growth (the
+   `analyze_visual_contrast` signature changed), and the `dev_url` port-race
+   flake in crates/live.

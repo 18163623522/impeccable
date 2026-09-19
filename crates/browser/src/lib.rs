@@ -969,10 +969,26 @@ fn scan_page_inner(
     ));
 
     let analyses = step(profile, "visual-contrast", "browser-analyze", url, || {
-        snapshot_engine::analyze_visual_contrast(page, &base, 12.0, true)
+        snapshot_engine::analyze_visual_contrast(
+            page,
+            &base,
+            VISUAL_CONTRAST_MAX_CANDIDATES,
+            VISUAL_CONTRAST_MAX_ROUTED,
+            true,
+        )
     })
     .map_err(cdp_err)?;
-    let mut visual = run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    let (mut visual, superseded) =
+        run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    // The element pass's verdict on text it hands over (paint the walk never
+    // read under it, an outline) is replaced where the pixels gave one.
+    if !superseded.is_empty() {
+        results.retain(|r| {
+            !(r.origin == origin::SCAN
+                && r.id == "low-contrast"
+                && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
+        });
+    }
     for r in visual.iter_mut() {
         tag_widget_vendor(&base, r);
     }
@@ -1001,6 +1017,32 @@ fn scan_page_inner(
     }
     Ok(results)
 }
+
+/// The visual-contrast pass's candidates per scan: text whose reasons say
+/// the element pass's colours may not describe what paints, in document
+/// order.
+const VISUAL_CONTRAST_MAX_CANDIDATES: f64 = 12.0;
+
+/// And a second budget, after those, for text the element pass hands over
+/// instead of scoring (`visual::routed_reason`): text over paint the contrast
+/// walk never read, links and spans among it, and outlined text. Each one
+/// costs a pair of clipped screenshots; the first budget is unchanged, so a
+/// page with nothing to hand over is measured exactly as before.
+const VISUAL_CONTRAST_MAX_ROUTED: f64 = 12.0;
+
+/// The pixel reads the visual pass makes only because the element pass
+/// handed the text over (a candidate of the second budget, or one of the
+/// first whose element verdict would have kept it from the pixels) stop once
+/// they have spent this long, or once this many in a row gave no verdict (a
+/// page whose carousels repaint every box between the two shots, at about a
+/// second a read on lpga.or.jp). What they leave unread keeps the element
+/// pass's verdict, as it did before. A page whose reads are quick (about
+/// 150ms each) spends under two seconds on all twelve.
+const ROUTED_PIXEL_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+const ROUTED_PIXEL_MISSES: usize = 4;
+/// A read that gave no verdict counts toward [`ROUTED_PIXEL_MISSES`] only
+/// when its screenshots were taken.
+const ROUTED_PIXEL_SLOW_MISS: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// At most this many counted script errors per scan, and separately at
 /// most this many ad-tech ones.
@@ -1260,7 +1302,16 @@ fn run_visual_contrast_fallback(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     target: &str,
-) -> Result<Vec<RawResult>, EngineError> {
+) -> Result<(Vec<RawResult>, Vec<String>), EngineError> {
+    // Text the element pass hands over rather than scores (see
+    // `visual::routed_reason`): its element verdict does not keep the pixels
+    // from reading it, and the pixels' verdict replaces that one.
+    let routed: Vec<String> = browser_analyses
+        .iter()
+        .filter(|a| a.get("routed").is_some_and(|r| !r.is_null()))
+        .filter_map(|a| a.get("selector").and_then(Value::as_str))
+        .map(String::from)
+        .collect();
     let existing_low_contrast: Vec<String> = serialized_groups
         .iter()
         .filter(|g| {
@@ -1314,9 +1365,10 @@ fn run_visual_contrast_fallback(
         .iter()
         .filter(|c| {
             let sel = c.get("selector").and_then(Value::as_str);
-            !existing_low_contrast
+            (!existing_low_contrast
                 .iter()
                 .any(|s| Some(s.as_str()) == sel)
+                || routed.iter().any(|s| Some(s.as_str()) == sel))
                 && !browser_resolved.iter().any(|s| Some(s.as_str()) == sel)
         })
         .collect();
@@ -1331,28 +1383,62 @@ fn run_visual_contrast_fallback(
             "document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} })",
         );
     }
+    let mut superseded: Vec<String> = Vec::new();
+    let mut routed_spent = std::time::Duration::ZERO;
+    let mut routed_misses = 0usize;
     for candidate in filtered {
+        let sel = candidate.get("selector").and_then(Value::as_str);
+        // A read the first budget's rules would not have made.
+        let extra = routed.iter().any(|s| Some(s.as_str()) == sel)
+            && (candidate.get("reasons").and_then(Value::as_array).is_some_and(|rs| {
+                rs.iter().any(|r| matches!(r.as_str(), Some("unread layer") | Some("text outline")))
+            }) || existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel));
+        if extra && (routed_spent >= ROUTED_PIXEL_BUDGET || routed_misses >= ROUTED_PIXEL_MISSES) {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let mut measured = false;
         let result = step_findings(profile, "visual-contrast", "pixel-diff", target, || {
-            let f = screenshot_contrast::capture_visual_contrast_candidate(
+            let m = screenshot_contrast::measure_visual_contrast_candidate(
                 page,
                 candidate,
                 viewport.width as f64,
             )
             .map_err(cdp_err)?;
+            measured = m.measured;
             Ok::<_, EngineError>(
-                f.map(|f| {
-                    vec![RawResult {
-                        selector: selector_of(candidate),
-                        severity: f.severity.unwrap_or_default(),
-                        ..RawResult::new(origin::VISUAL_CONTRAST, f.id.to_string(), f.snippet)
-                    }]
-                })
-                .unwrap_or_default(),
+                m.finding
+                    .map(|f| {
+                        vec![RawResult {
+                            selector: selector_of(candidate),
+                            severity: f.severity.unwrap_or_default(),
+                            ..RawResult::new(origin::VISUAL_CONTRAST, f.id.to_string(), f.snippet)
+                        }]
+                    })
+                    .unwrap_or_default(),
             )
         })?;
+        if extra {
+            let spent = started.elapsed();
+            routed_spent += spent;
+            // A read refused before its screenshots costs nothing and says
+            // nothing about the page.
+            if measured {
+                routed_misses = 0;
+            } else if spent >= ROUTED_PIXEL_SLOW_MISS {
+                routed_misses += 1;
+            }
+        }
+        if measured {
+            if let Some(s) = sel {
+                if routed.iter().any(|r| r == s) {
+                    superseded.push(s.to_string());
+                }
+            }
+        }
         findings.extend(result);
     }
-    Ok(findings)
+    Ok((findings, superseded))
 }
 
 fn truthy(v: Option<&Value>) -> bool {

@@ -291,6 +291,36 @@ fn background_images(dom: &dyn Dom, node: ElId, image: &str) -> Images {
     }
 }
 
+/// The colours a box's gradient background paints as a surface, at
+/// `opacity`, for the structural layer climb (`visual::layer_under_text`),
+/// read the way the stacks read a gradient under the text. `None` where the
+/// box paints no gradient, or only decoration: a dot grid, hairlines, a small
+/// repeating cell, a masked layer, a wash at most [`FAINT_PAINT`] strong, or a
+/// box at [`TEXTURE_MAX_OPACITY`] or below. A `url()` layer is a picture, and
+/// the climb reads it before this.
+pub(crate) fn gradient_surface_stops(dom: &dyn Dom, node: ElId, opacity: f64) -> Option<Vec<Rgba>> {
+    let image = dom.style(node, "backgroundImage");
+    let image = js::trim(&image);
+    if image.is_empty() || image == "none" || !js::to_lower_case(image).contains("gradient(") {
+        return None;
+    }
+    if opacity <= TEXTURE_MAX_OPACITY || masked(dom, node) || faint_gradient_wash(image, opacity) {
+        return None;
+    }
+    match background_images(dom, node, image) {
+        Images::Gradient(stops) if !stops.is_empty() => Some(
+            stops
+                .into_iter()
+                .map(|c| Rgba {
+                    a: Some(c.alpha_or_one() * opacity),
+                    ..c
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 fn detached_paint(dom: &dyn Dom, node: ElId) -> Option<Paint> {
     if js::trim(&dom.style(node, "visibility")) == "hidden" {
         return None;

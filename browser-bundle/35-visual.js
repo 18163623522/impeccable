@@ -117,13 +117,14 @@ function createVisualContrast(IO) {
     for (const { node, kind } of nodes) {
       let sample;
       if (kind === 'img') {
-        sample = await sampleImageElement(node, point);
+        sample = await core('vc_media_sample', IO.handle(node), IO.handle(el), __j(await sampleImageElement(node, point)));
       } else if (kind === 'raster') {
         const intrinsic = IO.intrinsicRaster(node);
         const sourcePoint = await core('vc_raster_source_point', IO.handle(node), intrinsic[0], intrinsic[1], point.x, point.y);
         // Outside the drawable: nothing sampled, nothing to say.
         if (!sourcePoint) continue;
-        sample = await core('vc_raster_finish', IO.handle(node), __j(await sampleDrawablePixel(node, intrinsic, sourcePoint)));
+        const raster = await core('vc_raster_finish', IO.handle(node), __j(await sampleDrawablePixel(node, intrinsic, sourcePoint)));
+        sample = await core('vc_media_sample', IO.handle(node), IO.handle(el), __j(raster));
       } else if (kind === 'unreadable') {
         // Paint this walk cannot read (vector artwork).
         sample = await core('vc_unreadable_stack_sample', IO.handle(node));

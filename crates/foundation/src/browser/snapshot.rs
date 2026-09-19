@@ -118,6 +118,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "insetInline",
     "insetInlineEnd",
     "insetInlineStart",
+    "isolation",
     "left",
     "letterSpacing",
     "lineHeight",
@@ -174,6 +175,8 @@ pub const STYLE_PROPS: &[&str] = &[
     "webkitLineClamp",
     "webkitMaskImage",
     "webkitTextFillColor",
+    "webkitTextStrokeColor",
+    "webkitTextStrokeWidth",
     "whiteSpace",
     "width",
     "willChange",
@@ -201,6 +204,8 @@ pub const PSEUDO_PROPS: &[&str] = &[
     "borderRadius",
     "transform",
     "visibility",
+    "zIndex",
+    "translate",
 ];
 
 /// One child of an element: an element (by id) or a text node's data.

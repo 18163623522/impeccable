@@ -35,6 +35,13 @@ pub static KICKER_META_TEXT_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("KICKER_META_TEXT_RE")
 });
 
+/// The year clause of [`KICKER_META_TEXT_RE`]: a four-digit year from 1900 to
+/// 2099 standing as its own word, which marks a dated meta line ("Sep 2,
+/// 2026", "Engineering / 2 September 2026").
+pub static KICKER_META_YEAR_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(r"(?-u:\b)(19|20){d}{{2}}(?-u:\b)", d = D)).expect("KICKER_META_YEAR_RE")
+});
+
 /// JS: checks.mjs#KICKER_DOC_NUMBERING_RE (JS `/i`).
 pub static KICKER_DOC_NUMBERING_RE: Lazy<Regex> = Lazy::new(|| {
     let words = [

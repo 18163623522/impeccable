@@ -1449,7 +1449,15 @@ pub fn check_hero_eyebrow(opts: &HeroEyebrowOpts) -> Vec<RuleHit> {
     let is_uppercased = opts.sibling_text_transform.as_deref() == Some("uppercase")
         || (text.bytes().any(|b| b.is_ascii_uppercase())
             && !text.bytes().any(|b| b.is_ascii_lowercase()));
+    // The em floor reaches the common tracked setting of a blog's date line
+    // (Tailwind's tracking-widest at 12px is 1.2px), so under the fixed
+    // floor a dated line is the post's meta, not an eyebrow: a `<time>`, or
+    // text naming a year. At the fixed floor and above nothing changes.
+    let em_floor_only = opts.sibling_letter_spacing < HERO_EYEBROW_TRACKING_PX;
+    let dated_meta = em_floor_only
+        && (opts.sibling_holds_time || crate::checks::text_rules::KICKER_META_YEAR_RE.is_match(text));
     let is_classic_tracked = is_uppercased
+        && !dated_meta
         && hero_eyebrow_tracked(
             opts.sibling_letter_spacing,
             opts.sibling_font_size,
@@ -2020,6 +2028,44 @@ mod tests {
 
     fn rgb(r: f64, g: f64, b: f64) -> Rgba {
         Rgba::new(r, g, b, 1.0)
+    }
+
+    fn hero_opts(text: &str, tag: &str, spacing: f64) -> HeroEyebrowOpts {
+        HeroEyebrowOpts {
+            heading_tag: "h1".to_string(),
+            heading_text: Some("How we rebuilt the scheduler".to_string()),
+            heading_font_size: 60.0,
+            heading_in_application_context: false,
+            sibling_tag: Some(tag.to_string()),
+            sibling_text: Some(text.to_string()),
+            sibling_text_transform: Some("uppercase".to_string()),
+            sibling_font_size: 12.0,
+            sibling_letter_spacing: spacing,
+            sibling_font_weight: Some("500".to_string()),
+            sibling_color: Some("rgb(85, 85, 85)".to_string()),
+            sibling_has_accent_dash_pseudo: false,
+            sibling_tracking_floor_em: Some(HERO_EYEBROW_TRACKING_EM),
+            sibling_holds_time: tag == "time",
+        }
+    }
+
+    /// copperhead.sh: "Engineering/2 September 2026" at 0.1em over a post's
+    /// h1 is the post's meta. Under the fixed floor a year or a `<time>`
+    /// keeps the em floor from calling it tracked caps; at 1.6px and up the
+    /// rule reads as it always did.
+    #[test]
+    fn hero_eyebrow_em_floor_passes_over_a_dated_meta_line() {
+        assert!(check_hero_eyebrow(&hero_opts("Engineering · 2 September 2026", "p", 1.2)).is_empty());
+        assert!(check_hero_eyebrow(&hero_opts("Sep 2, 2026", "time", 1.2)).is_empty());
+        assert!(check_hero_eyebrow(&hero_opts("Sep 2", "time", 1.2)).is_empty());
+        assert_eq!(check_hero_eyebrow(&hero_opts("Now in public beta", "p", 1.2)).len(), 1);
+        // Not a year: a version or a count stays an eyebrow.
+        assert_eq!(check_hero_eyebrow(&hero_opts("Version 3000 is here", "p", 1.2)).len(), 1);
+        // At the fixed floor the date line reports, as it did before.
+        assert_eq!(
+            check_hero_eyebrow(&hero_opts("Engineering · 2 September 2026", "p", 1.8)).len(),
+            1
+        );
     }
 
     /// swipeloan.in: light gray on #04002d, a navy that reads as black.

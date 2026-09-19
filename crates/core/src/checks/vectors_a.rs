@@ -299,6 +299,7 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 sibling_color: opt_str(f(0, "siblingColor")),
                 sibling_has_accent_dash_pseudo: truthy(f(0, "siblingHasAccentDashPseudo")),
                 sibling_tracking_floor_em: None,
+                sibling_holds_time: false,
             };
             hits_to_js(&rules::check_hero_eyebrow(&opts))
         }

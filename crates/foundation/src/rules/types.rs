@@ -395,6 +395,11 @@ pub struct HeroEyebrowOpts {
     /// alone, which is the JS contract the recorded vectors pin.
     #[serde(default)]
     pub sibling_tracking_floor_em: Option<f64>,
+    /// Whether the sibling is, or holds, a `<time>` element. A dated line
+    /// above a post's h1 is the post's meta, not an eyebrow; the em floor
+    /// alone does not make it tracked caps. `false` is the JS contract.
+    #[serde(default)]
+    pub sibling_holds_time: bool,
 }
 
 /// The fixed tracking floor of the hero eyebrow's tracked-caps signature.

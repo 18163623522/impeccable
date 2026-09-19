@@ -1386,6 +1386,11 @@ pub fn check_element_hero_eyebrow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         sibling_color: Some(dom.style(ty, "color")),
         sibling_has_accent_dash_pseudo: dom_accent_dash_pseudo(dom, sibling),
         sibling_tracking_floor_em: Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
+        sibling_holds_time: tag_lower(dom, sibling) == "time"
+            || dom
+                .query_all(Some(sibling), "time")
+                .map(|t| !t.is_empty())
+                .unwrap_or(false),
     })
 }
 

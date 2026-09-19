@@ -8,6 +8,9 @@
 //! - `label-collectors.html`: a chip's text span sets its type beside an
 //!   icon, the hero eyebrow's tracking floor is 0.08em, and an article taller
 //!   than two viewports is not a card.
+//! - `eyebrow-hand-off.html`: a dated meta line is not a hero eyebrow under
+//!   the fixed tracking floor, and a small-caps kicker the hero rule does not
+//!   read stays a kicker.
 //! - `icon-tile-card-title.html`: a bold div title anchors the tile rule.
 //! - `small-text-labels.html`: tiny-text and wide-tracking leave typed-caps
 //!   labels, terminal commands and link labels alone; a 9px line is scored
@@ -140,6 +143,24 @@ fn label_collectors_read_the_text_that_sets_the_label() {
     let numbered: Vec<&str> = of(&f, "numbered-section-labels").iter().map(|h| h.snippet.as_str()).collect();
     assert!(numbered.iter().any(|s| s.contains("\"Say who you want\"")), "{numbered:?}");
     assert!(!numbered.iter().any(|s| s.contains("numbered card") || s.contains("numbers itself")), "{numbered:?}");
+}
+
+#[test]
+fn the_eyebrow_hand_off_keeps_dated_meta_and_small_caps_straight() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let f = scan(&engine, port, "eyebrow-hand-off.html");
+    let hero: Vec<&str> = of(&f, "hero-eyebrow-chip").iter().map(|h| h.snippet.as_str()).collect();
+    assert!(hero.iter().any(|s| s.contains("\"Now in public beta\"")), "{hero:?}");
+    // A dated line and a <time> over a post's h1 are its meta, not an eyebrow.
+    assert!(!hero.iter().any(|s| s.contains("September") || s.contains("Sep 2")), "{hero:?}");
+    // The hero rule does not read small-caps as caps, so the kicker keeps it.
+    let kickers: Vec<&str> = of(&f, "kicker-above-heading").iter().map(|h| h.snippet.as_str()).collect();
+    assert!(kickers.iter().any(|s| s.contains("\"new in version four\"")), "{kickers:?}");
+    assert!(!kickers.iter().any(|s| s.contains("public beta")), "{kickers:?}");
+    for id in ["#pass-dated-meta", "#pass-time-meta"] {
+        assert!(on(&f, "kicker-above-heading", id).is_empty(), "{id}: {f:#?}");
+    }
 }
 
 #[test]

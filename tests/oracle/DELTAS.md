@@ -4811,7 +4811,7 @@ the cohort split. Removed, added, tagged or moved, by rule:
 | body-text-viewport-edge | +21, -1 | +7, -1 | +9 | the two removals are page-level findings renamed: drom.ru and centene.com now count 15 and 16 blocks, the prose divs included |
 | line-length | +23 | +11 | +17 | |
 | icon-tile-stack | | +2 | +40 | kin-ai.replit.app's feature cards 40; covera-agents.com's oklab tile 2 |
-| hero-eyebrow-chip | +6, -1 | +5 | +4 | soc-workflows' `accent-bold` chip now reads `tracked-caps` |
+| hero-eyebrow-chip | +6, -1 | +4 | +4 | soc-workflows' `accent-bold` chip now reads `tracked-caps` |
 | kicker-above-heading | +17, -5 | +1, -1 | +6 | the 6 removed are handed to hero-eyebrow-chip on the same label (2 confirmed-harmful: adant.ai's "Blog") |
 | numbered-section-labels | | | +24 | outreign.io and arbiproseller-app.vercel.app |
 | tiny-text | -26 | -2 | | adant.ai's typed-caps card meta and stroq.dev's terminal mock (26 pattern-absent), v0-compute-11's monospace texture |
@@ -4854,3 +4854,45 @@ page-level renames, 2 kicker hand-offs.
 6. **Prose divs add findings on CMS pages.** albayan.ae's article divs at a
    10px phone gutter report as their `p` would (the 12px floor, r3-34);
    vibe-genomics.replit.app's padded callouts report line-length.
+
+### Revised at review: the hero rule's em floor and the kicker hand-off
+
+The review found two ways the em floor reported the wrong thing.
+
+1. **A dated meta line read as an eyebrow.** The 0.08em floor reaches the
+   most common tracked setting of a blog's date line (Tailwind's
+   `tracking-widest` at 12px), and the hero rule, unlike the kicker rule, had
+   no meta test: `"Sep 2, 2026"` in a `<time>` over a 56px h1 reported in
+   both engines, and so did copperhead.sh's `div.post-eyebrow`
+   ("Engineering/2 September 2026", capture 3785, which holds a `<time>`).
+   Under the fixed 1.6px floor a label that is or holds a `<time>`, or that
+   names a year (the year clause of `KICKER_META_TEXT_RE`, now
+   `KICKER_META_YEAR_RE`), is not tracked caps
+   (`HeroEyebrowOpts::sibling_holds_time`, `false` in the vectors). At 1.6px
+   and up nothing changes, so a dated line tracked that wide still reports
+   as it did on base.
+2. **The kicker hand-off dropped labels the hero rule leaves.** The hand-off
+   under 1.6px followed the em floor alone, but the hero rule reads case
+   from `text-transform` and typed capitals, not `font-variant: small-caps`,
+   which the kicker rule accepts: a 13px small-caps kicker at 0.1em over a
+   56px h1 reported on base and nothing on the branch. Under 1.6px the
+   collectors (`text_collectors.rs`, and the static copy in `adapters.rs`)
+   now hand a label off only when `hero-eyebrow-chip` reports it on that h1.
+   The 1.6px hand-off is base's and is unchanged.
+
+Goldens: new json and text cases for `eyebrow-hand-off.html` (both engines:
+a small-caps kicker that stays a kicker and a tracked eyebrow the hero rule
+takes, against a dated line and a `<time>` that report nothing), and the
+sweeps (`detect-dir-*`, `detect-scope-type`, `detect-scope-both`,
+`detect-no-advisory-*`) gain its two findings (709 to 711). No other golden
+moved.
+
+Corpus, `round7-recall-and-gates-r2-28` against run 28: one finding differs
+from the first version of this branch, copperhead.sh 3785's dated line,
+which leaves `hero-eyebrow-chip` (c2 +5 becomes +4 in the table above; base
+reported it under neither rule). Every other count, the 22 violations and
+the 7 script-error moves are unchanged.
+
+Known limit: base's own 1.6px hand-off is left as it was, so a small-caps
+kicker tracked 1.6px or wider over a display h1 still reports under neither
+rule, and a dated line tracked that wide still reports as an eyebrow.

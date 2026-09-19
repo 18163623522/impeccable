@@ -186,8 +186,12 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
             continue;
         }
         // The hero rule takes a tracked label over a display h1. Its em
-        // floor reaches only the labels that rule reads: the h1's own
-        // previous sibling, at eyebrow size.
+        // floor reaches only the labels that rule reads (the h1's own
+        // previous sibling, at eyebrow size), and under the fixed 1.6px floor
+        // the label is handed off only where the hero rule reports it: that
+        // rule reads case from text-transform and typed capitals (not
+        // small-caps) and passes over a dated meta line, so a label it leaves
+        // is kept here.
         if heading_tag == "h1"
             && heading_font_size >= 48.0
             && (kicker_letter_spacing >= crate::checks::rules::HERO_EYEBROW_TRACKING_PX
@@ -197,7 +201,9 @@ pub fn collect_kicker_candidates(dom: &dyn Dom) -> Vec<KickerCandidate> {
                         kicker_letter_spacing,
                         kicker_font_size,
                         Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
-                    )))
+                    )
+                    && !super::element_checks::check_element_hero_eyebrow_dom(dom, heading)
+                        .is_empty()))
         {
             continue;
         }
@@ -621,6 +627,45 @@ mod tests {
         d.set_style(h2, "fontSize", "24px");
         d.set_rect(h2, 40.0, 324.0, 600.0, 32.0);
         assert_eq!(check_kicker_above_heading_dom(&d).len(), 1);
+    }
+
+    /// The kicker rule hands a label over a display h1 to the hero rule only
+    /// where the hero rule reports it. A small-caps kicker at 0.1em is not
+    /// caps to the hero rule, so it stays a kicker; the same label set in
+    /// uppercase goes to the hero rule.
+    #[test]
+    fn kicker_hands_off_only_what_the_hero_rule_reports() {
+        let hero = |d: &mut FakeDom, body: ElId, y: f64, variant: &str, transform: &str, heading: &str| {
+            let sec = d.add(Some(body), "section");
+            let kicker = d.add(Some(sec), "p");
+            d.add_text(kicker, "new in version four");
+            d.set_styles(
+                kicker,
+                &[
+                    ("fontSize", "13px"),
+                    ("letterSpacing", "1.3px"),
+                    ("textTransform", transform),
+                    ("fontVariant", variant),
+                    ("fontVariantCaps", variant),
+                ],
+            );
+            d.set_rect(kicker, 40.0, y, 240.0, 18.0);
+            let h = d.add(Some(sec), "h1");
+            d.add_text(h, heading);
+            d.set_style(h, "fontSize", "56px");
+            d.set_rect(h, 40.0, y + 30.0, 900.0, 64.0);
+        };
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        hero(&mut d, body, 100.0, "small-caps", "none", "The workspace that thinks");
+        let hits = check_kicker_above_heading_dom(&d);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("new in version four"));
+
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        hero(&mut d, body, 100.0, "normal", "uppercase", "The workspace that thinks");
+        assert!(check_kicker_above_heading_dom(&d).is_empty());
     }
 
     /// demotv.lol's hero pair in a section at `hidden`, and exxonmobil.com's

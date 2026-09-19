@@ -172,7 +172,9 @@ fn the_text_geometry_rules_measure_the_text() {
     // Bold titles of two lines or fewer, or in a -webkit-box line clamp, are
     // exempt (taste call r3-03), a clamp that hides nothing included; bold
     // body text of four lines, a weight-500 title, regular copy in a clamp and
-    // bold text a max-height clip shows three lines of keep the floor.
+    // bold text a max-height clip shows three lines of keep the floor. A flex
+    // row is measured run by run: short runs wrapped as whole items pass, a
+    // run long enough to wrap in its item keeps the floor.
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
     assert_cases(
         &leading,
@@ -183,8 +185,10 @@ fn the_text_geometry_rules_measure_the_text() {
             "medium-slot-title",
             "clamped-regular-blurb",
             "bold-clipped-summary",
+            "flex-long-run",
         ],
         &[
+            "items-row",
             "teaser-copy",
             "link-run",
             "bold-slot-title",
@@ -194,7 +198,7 @@ fn the_text_geometry_rules_measure_the_text() {
         ],
         "tight-leading",
     );
-    assert_eq!(leading.len(), 9, "the nine flag cases: {leading:?}");
+    assert_eq!(leading.len(), 10, "the ten flag cases: {leading:?}");
 
     // A chip under 27.5px tall is measured by its glyphs (taste call r3-20):
     // the step chip's line box holds them 5px off its edges, the 20px chip's
@@ -241,6 +245,8 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-free-space-pre",
             "pass-free-space-headline",
             "pass-under-hairline",
+            "pass-hover-tooltip",
+            "pass-corner-badge",
         ],
         "text-overflow",
     );

@@ -2589,24 +2589,30 @@ fn generated_content_unmeasured(dom: &dyn Dom, el: ElId) -> bool {
 
 /// The rects of what `el`'s descendants paint, for deciding whether its
 /// overflow is seen: text by its text rect, replaced elements and painted
-/// boxes by their border boxes. A descendant with no text that is absolutely
-/// or fixed positioned (a ripple layer), or that paints nothing (an empty
-/// wrapper, a `min-width` reserve), adds nothing of its own. A descendant that
-/// clips on the x axis keeps its content inside its own box. `unmeasured` is
-/// set when a descendant carries generated content no rect covers.
+/// boxes by their border boxes. A descendant that is absolutely or fixed
+/// positioned is out of the flow `el` lays out: a ripple layer, a hover
+/// tooltip parked above a link (clipto.com's QR card at opacity 0), a badge
+/// pinned past a tab's corner (coachcall.ai's `-right-8` "Popular"). Its
+/// author placed it there, its text is not `el`'s text running out of its
+/// box, and it adds nothing, text or not. So does a descendant that paints
+/// nothing (an empty wrapper, a `min-width` reserve). A descendant that clips
+/// on the x axis keeps its content inside its own box. `unmeasured` is set
+/// when a descendant carries generated content no rect covers.
 fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, unmeasured: &mut bool) {
     for child in dom.children(el) {
         if dom.style(child, "display") == "none" {
             continue;
         }
+        // Generated content no rect covers leaves the overflow unmeasured,
+        // on a positioned descendant too: what it adds cannot be told apart.
         if generated_content_unmeasured(dom, child) {
             *unmeasured = true;
         }
-        let has_text = !js::trim(&dom.text_content(child)).is_empty();
         let position = dom.style(child, "position");
-        if !has_text && (position == "absolute" || position == "fixed") {
+        if position == "absolute" || position == "fixed" {
             continue;
         }
+        let has_text = !js::trim(&dom.text_content(child)).is_empty();
         let r = dom.rect(child);
         let has_area = r.all_finite() && r.width > 0.0 && r.height > 0.0;
         if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str()) {
@@ -5531,6 +5537,35 @@ mod tests {
         let hits = check_element_text_overflow_dom(&d, cell);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "div.cell overflows its box by 40px");
+    }
+
+    /// observations-28 row 24: `scrollWidth` counts absolutely positioned
+    /// descendants. coachcall.ai's tab carries a "Popular" badge pinned past
+    /// its corner, into the next tab; the tab's own text fits its box.
+    #[test]
+    fn text_overflow_leaves_out_positioned_descendants() {
+        let (mut d, body) = page();
+        let tab = d.add(Some(body), "button");
+        visible(&mut d, tab);
+        d.set_attr(tab, "class", "tab");
+        d.add_text(tab, "ACCOUNTABILITY");
+        d.set_rect(tab, 16.0, 128.0, 120.0, 40.0);
+        d.set_text_rect(tab, 16.0, 141.0, 120.0, 17.0);
+        d.el_mut(tab).client_width = 120.0;
+        d.el_mut(tab).client_height = 40.0;
+        d.el_mut(tab).scroll_width = 152.0;
+        d.set_styles(tab, &[("display", "block"), ("position", "relative"), ("overflowX", "visible"), ("fontSize", "14px")]);
+        let badge = d.add(Some(tab), "div");
+        visible(&mut d, badge);
+        d.add_text(badge, "Popular");
+        d.set_rect(badge, 109.0, 124.0, 59.0, 16.0);
+        d.set_text_rect(badge, 116.0, 124.0, 45.0, 15.0);
+        d.set_styles(badge, &[("position", "absolute"), ("backgroundColor", "rgb(219, 234, 254)")]);
+        neighbor(&mut d, body, 168.0, 128.0, 60.0, 40.0, "Pricing");
+        assert!(check_element_text_overflow_dom(&d, tab).is_empty(), "positioned badge");
+        // The same badge laid out in flow is the tab's content running out.
+        d.set_style(badge, "position", "static");
+        assert_eq!(check_element_text_overflow_dom(&d, tab).len(), 1, "in-flow badge");
     }
 
     #[test]

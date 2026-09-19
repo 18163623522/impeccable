@@ -228,6 +228,57 @@ pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
     Rect::from_xywh(t.left, t.top + inset, t.width, t.height - inset * 2.0)
 }
 
+/// The widest a glyph of `c` sets, in ems, as an upper bound: a full-width
+/// CJK, kana or Hangul glyph is an em, a capital runs to about three
+/// quarters, and every other glyph of a proportional face stays under 0.7em.
+fn glyph_advance_bound_em(c: char) -> f64 {
+    let cp = c as u32;
+    let wide = matches!(cp,
+        0x1100..=0x115F | 0x2E80..=0x303F | 0x3040..=0x33FF | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x20000..=0x3FFFF);
+    if wide {
+        1.05
+    } else if c.is_uppercase() {
+        0.8
+    } else {
+        0.7
+    }
+}
+
+/// Whether `el` is a flex or grid container whose own text is split into
+/// several runs, each an anonymous item too short to wrap in the box. Each
+/// run then sets one line: the union of their rects is two or more rows of
+/// items (outreign.io's wrapped row of "100 free lead searches", "14-day
+/// trial", ...), not two line boxes of one run, and there is no leading
+/// between lines to crowd. A single run, or any run long enough that it could
+/// wrap by the widest advance a face sets, is measured as before.
+fn items_each_fit_one_line(dom: &dyn Dom, el: ElId, font_size: f64) -> bool {
+    let display = dom.style(el, "display");
+    if !matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid") {
+        return false;
+    }
+    let runs: Vec<String> = dom
+        .direct_text_nodes(el)
+        .into_iter()
+        .map(|t| collapse_ws(js::trim(&t)))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if runs.len() < 2 {
+        return false;
+    }
+    let content_width = dom.client_width(el)
+        - js::math_max(0.0, style_px(dom, el, "paddingLeft"))
+        - js::math_max(0.0, style_px(dom, el, "paddingRight"));
+    if !(content_width.is_finite() && content_width > 0.0 && font_size > 0.0) {
+        return false;
+    }
+    runs.iter().all(|run| {
+        let width: f64 = run.chars().map(glyph_advance_bound_em).sum::<f64>() * font_size;
+        width < content_width
+    })
+}
+
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
 ///
 /// Each candidate is measured by its own text rect, not by its border box: a
@@ -1127,7 +1178,8 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             let shown = js::math_round(ratio * 100.0) / 100.0;
             if ratio > 0.0 && shown < 1.3 {
                 let text_rect = dom.direct_text_rect(el).unwrap_or(*rect);
-                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES;
+                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES
+                    && !items_each_fit_one_line(dom, el, font_size);
                 // A bold run of two rendered lines or fewer, or one in a line
                 // clamp, is a title set on a div or span: it gets the heading
                 // exemption. Lines a clipping box cuts off do not render.
@@ -3210,6 +3262,39 @@ mod tests {
         // A block strut that cannot be resolved leaves the run's own value.
         d.set_style(block, "lineHeight", "normal");
         assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.00x (need >=1.3)"]);
+    }
+
+    /// observations-28 row 25: outreign.io's hero meta row is a flex
+    /// container whose three short text runs wrap as whole items onto two
+    /// rows. The union of their rects is two rows tall, but no run has a
+    /// second line box. A run long enough to wrap in the box is measured as
+    /// before, and so is a single run.
+    #[test]
+    fn tight_leading_reads_flex_text_runs_as_items() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let row = d.add(Some(body), "p");
+        d.add_text(row, "100 free lead searches");
+        let sep = d.add(Some(row), "span");
+        d.set_rect(sep, 182.0, 674.0, 1.0, 12.0);
+        d.add_text(row, "14-day trial on paid plans");
+        d.add(Some(row), "span");
+        d.add_text(row, "Built with you on a call");
+        d.set_styles(
+            row,
+            &[("display", "flex"), ("fontSize", "12px"), ("lineHeight", "15px"), ("position", "static")],
+        );
+        d.set_rect(row, 27.0, 673.0, 336.0, 34.0);
+        d.set_text_rect(row, 43.3, 673.0, 292.4, 34.0);
+        d.el_mut(row).client_width = 336.0;
+        assert!(snippets(&d, row, "tight-leading").is_empty(), "short runs, whole items");
+        // A block that sets the same text as one run wraps its lines.
+        d.set_style(row, "display", "block");
+        assert_eq!(snippets(&d, row, "tight-leading"), vec!["line-height 1.25x (need >=1.3)"]);
+        // A run wider than the box wraps inside its own item.
+        d.set_style(row, "display", "flex");
+        d.el_mut(row).client_width = 150.0;
+        assert_eq!(snippets(&d, row, "tight-leading"), vec!["line-height 1.25x (need >=1.3)"]);
     }
 
     /// walkthroughs-20 note 13: tchibo.de sets its teaser headlines as

@@ -104,6 +104,19 @@
       <a class="box pass-ripple" href="#" style="display: inline-flex; position: relative; overflow: hidden; width: 120px">Shop now<span style="position: absolute; display: block; width: 340px; height: 340px; left: -110px; top: -150px"></span></a>
       <a class="box pass-image-replacement" href="#" style="display: block; overflow: hidden; text-indent: -9999px; height: 20px">Internet access plans</a>
       <div class="box pass-reserve">Durable streams on <span style="display: inline-block; min-width: 220px">storage</span></div>
+      <!-- scrollWidth counts absolutely positioned descendants too. A hover
+           tooltip parked above a platform name at opacity 0 (clipto.com) and
+           a badge pinned past a tab's corner (coachcall.ai's "Popular") are
+           placed there by their author, beside the next item; neither is the
+           element's own text running out of its box. -->
+      <div class="row pass-positioned-row" style="padding: 48px 0 0">
+        <span class="pass-hover-tooltip" style="display: inline-block; position: relative">iOS<span style="position: absolute; left: 0; bottom: 100%; width: 184px; opacity: 0; background: #fff">Scan to download the app</span></span>
+        <span>Android</span>
+      </div>
+      <div class="row" style="display: flex; column-gap: 32px; padding: 12px 0 0">
+        <button class="pass-corner-badge" style="position: relative; border: 0; background: none; font: inherit; padding: 12px 0 8px">ACCOUNTABILITY<span style="position: absolute; top: -4px; right: -32px; padding: 0 6px; font-size: 12px; background: #dbeafe; border-radius: 999px">Popular</span></button>
+        <button style="border: 0; background: none; font: inherit; padding: 12px 0 8px">Pricing</button>
+      </div>
     </section>
   </div>
 

@@ -212,6 +212,13 @@
       .lrow { display: flex; gap: 24px; }
       .lrow > div { flex: 1; }
       .lrow h2 { margin: 16px 0 48px; }
+      /* PASS: a label at body size set apart by colour, italics or a light weight
+         (cnnbrasil.com.br's grey section links, outreign.io's italic eyebrows) */
+      .kick-grey { color: #9ca3af; text-decoration: none; }
+      .kick-italic { font-style: italic; }
+      .kick-light { font-weight: 100; }
+      /* PASS: a band painted with a background image, not a colour (jyes.com.tw) */
+      .img-band { background-image: linear-gradient(#ececec, #ececec); padding: 25px 0; }
     </style>
     <h1>Wrapper spacing</h1>
 
@@ -298,6 +305,38 @@ npx impeccable detect src/</pre>
       <p class="blk">A closing paragraph above a heading that ends a box drawing a rule under it.</p>
       <div class="ruled above-10 below-36"><h3>Pass Heading Ends Ruled Box</h3></div>
       <p class="blk">The rule under the box ends the heading's box, so this content belongs to the next one.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a news card whose grey section link sits a few pixels above its headline.</p>
+      <div class="above-24"><a class="kick-grey" href="#">Política</a><div><h3 class="below-24">Pass Grey Kicker</h3></div></div>
+      <p class="blk">The grey link is the headline's label, so the cluster starts at the link, twenty-four pixels under the block above.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then an italic eyebrow at body size twelve pixels above a section title.</p>
+      <p class="kick-italic above-24">Five screens</p>
+      <h2 class="above-12 below-24">Pass Italic Eyebrow</h2>
+      <p class="blk">The italic line is the title's label, and the cluster sits twenty-four pixels from both neighbours.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a hairline eyebrow at body size twelve pixels above a section title.</p>
+      <p class="kick-light above-24">Compare plans</p>
+      <h2 class="above-12 below-24">Pass Light Eyebrow</h2>
+      <p class="blk">The weight sets the line apart from the copy around it, so it is read as the title's label.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph, then a grey sentence ten pixels above the next title, too long to read as a label.</p>
+      <p class="kick-grey above-24">Filed under politics and the week in review</p>
+      <h2 class="above-10 below-48">Flag Grey Sentence Above</h2>
+      <p class="blk">A sentence is content of its own whatever its colour, so the title sits ten pixels under it and forty-eight above this.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph directly above a band whose grey is a background image rather than a colour.</p>
+      <div class="img-band"><h2 class="below-40">Pass Image Band Heading</h2><p class="blk">The band's edge separates the title from the paragraph above, as a colour band's does.</p></div>
     </section>
   </section>
 </main>

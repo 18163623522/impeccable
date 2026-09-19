@@ -5,7 +5,9 @@
 //! misread once the rule pass ran after the reveal sweep: an eyebrow wrapped
 //! in its own box, a block that ends in a rule, an accordion trigger that ends
 //! its row, a caption under its photo, a title band that draws its own rules,
-//! and a standfirst behind a `display: contents` wrapper.
+//! and a standfirst behind a `display: contents` wrapper. Round 7 adds labels
+//! at body size set apart by colour, italics or a hairline weight, and a band
+//! painted with a background image.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -92,6 +94,8 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         // layout row that shares a class with its neighbour repeats nothing.
         "\"Flag Code Block Above\" has 12px above vs 36px below",
         "\"Flag Title Alone In A Row\" has 16px above vs 48px below",
+        // A grey line too long to read as a label is still content.
+        "\"Flag Grey Sentence Above\" has 10px above vs 48px below",
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(heading)),
@@ -100,5 +104,5 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
     }
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
-    assert_eq!(snippets.len(), 15, "{snippets:?}");
+    assert_eq!(snippets.len(), 16, "{snippets:?}");
 }

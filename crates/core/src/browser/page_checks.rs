@@ -21,7 +21,7 @@ use crate::checks::embedded_content::{
 };
 use crate::checks::measures::{
     cream_from_class_list, is_cream_color, is_opaque_decorated_box,
-    is_screen_reader_only_text_style, SrOnlyMetrics, StyleMap,
+    is_screen_reader_only_text_style, resolve_length_px, SrOnlyMetrics, StyleMap,
 };
 use crate::checks::rules::{
     check_flat_type_hierarchy_samples, flat_type_hierarchy_severity, is_card_like_from_props,
@@ -812,8 +812,10 @@ fn rhythm_overlaps_x(sr: &Rect, rect: &Rect) -> bool {
     math_min(sr.right, rect.right) - math_max(sr.left, rect.left) >= 8.0
 }
 
-/// A box that paints an edge on `side` ("Top" or "Bottom"): a background,
-/// a border on that side, or a shadow.
+/// A box that paints an edge on `side` ("Top" or "Bottom"): a background
+/// colour or image, a border on that side, or a shadow. A band painted with
+/// `background-image` (jyes.com.tw's grey news band is a `url()` texture) has
+/// an edge a reader sees as plainly as one painted with a colour.
 fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     if rhythm_is_contents(dom, el) {
         return false;
@@ -822,6 +824,10 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
         if bg.alpha_or_one() > 0.05 {
             return true;
         }
+    }
+    let image = dom.style(el, "backgroundImage");
+    if !image.is_empty() && image != "none" {
+        return true;
     }
     if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
         return true;
@@ -1061,8 +1067,75 @@ fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: 
         if cased.len() >= 3 && cased.iter().all(|c| c.is_uppercase()) {
             return true;
         }
+        if rhythm_set_apart(dom, line, heading, e) {
+            return true;
+        }
     }
     false
+}
+
+/// The longest line, in UTF-16 units, that reads as a label on colour,
+/// italics or weight alone. cnnbrasil.com.br's section links ("Política",
+/// "Eleições") and outreign.io's italic eyebrows ("Five screens", "Compare
+/// plans") are a word or two; a sentence closing the block above is longer.
+const RHYTHM_SET_APART_MAX_CHARS: usize = 40;
+
+/// How far apart, on any channel, two text colours must be to read as two
+/// colours: grey-400 on a black card, purple on off-white.
+const RHYTHM_COLOUR_STEP: f64 = 32.0;
+
+/// How much lighter than the text around it a line must be set to stand
+/// apart on weight alone: a hairline 100 or 200 italic against 400 body copy.
+const RHYTHM_LIGHTER_WEIGHT_STEP: f64 = 300.0;
+
+fn rhythm_colours_differ(dom: &dyn Dom, a: ElId, b: ElId) -> bool {
+    let (Some(ca), Some(cb)) = (
+        parse_any_color(Some(&dom.style(a, "color"))),
+        parse_any_color(Some(&dom.style(b, "color"))),
+    ) else {
+        return false;
+    };
+    (ca.r - cb.r).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.g - cb.g).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.b - cb.b).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.alpha_or_one() - cb.alpha_or_one()).abs() >= 0.25
+}
+
+fn rhythm_is_italic(dom: &dyn Dom, el: ElId) -> bool {
+    let style = dom.style(el, "fontStyle");
+    style.starts_with("italic") || style.starts_with("oblique")
+}
+
+/// A short line at body size that a reader still sees as a label: one
+/// rendered line of a few words whose colour, italics or much lighter weight
+/// sets it apart both from the text it sits in (its container's own type)
+/// and from the heading under it. A grey category link over a black
+/// headline, a purple italic eyebrow over a white title. A date or a closing
+/// sentence set like the copy around it stays content of its own.
+fn rhythm_set_apart(dom: &dyn Dom, line: ElId, heading: ElId, words: ElId) -> bool {
+    let Some(container) = dom.parent(line) else { return false };
+    if utf16_len(js::trim(&collapse_ws(&dom.text_content(line)))) > RHYTHM_SET_APART_MAX_CHARS {
+        return false;
+    }
+    let size = rhythm_font_size(dom, words);
+    let pitch = resolve_length_px(Some(&dom.style(words, "lineHeight")), size)
+        .filter(|lh| lh.is_finite() && *lh > 0.0)
+        .unwrap_or(size * 1.2);
+    let one_line = dom
+        .direct_text_rect(words)
+        .map_or(false, |t| t.height > 0.0 && t.height < math_max(pitch, size * 1.2) * 1.5);
+    if !one_line {
+        return false;
+    }
+    if rhythm_colours_differ(dom, words, container) && rhythm_colours_differ(dom, words, heading) {
+        return true;
+    }
+    if rhythm_is_italic(dom, words) && !rhythm_is_italic(dom, container) && !rhythm_is_italic(dom, heading) {
+        return true;
+    }
+    let weight = parse_font_weight(&dom.style(words, "fontWeight"));
+    let around = parse_font_weight(&dom.style(container, "fontWeight"));
+    weight.is_finite() && around.is_finite() && weight <= around - RHYTHM_LIGHTER_WEIGHT_STEP
 }
 
 fn rhythm_painted_background(dom: &dyn Dom, el: ElId) -> Option<crate::color::Rgba> {

@@ -813,9 +813,8 @@ fn rhythm_overlaps_x(sr: &Rect, rect: &Rect) -> bool {
 }
 
 /// A box that paints an edge on `side` ("Top" or "Bottom"): a background
-/// colour or image, a border on that side, or a shadow. A band painted with
-/// `background-image` (jyes.com.tw's grey news band is a `url()` texture) has
-/// an edge a reader sees as plainly as one painted with a colour.
+/// colour, a background image that covers the box ([`rhythm_image_band`]),
+/// a border on that side, or a shadow.
 fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     if rhythm_is_contents(dom, el) {
         return false;
@@ -825,8 +824,7 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
             return true;
         }
     }
-    let image = dom.style(el, "backgroundImage");
-    if !image.is_empty() && image != "none" {
+    if rhythm_image_band(dom, el) {
         return true;
     }
     if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
@@ -834,6 +832,78 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     }
     let bs = dom.style(el, "boxShadow");
     !bs.is_empty() && bs != "none"
+}
+
+/// A box whose `background-image` paints a band across all of it, with an
+/// edge a reader sees as plainly as one painted with a colour: jyes.com.tw's
+/// grey news band is a `url()` texture tiled over the section. A layer bands
+/// the box when it tiles on both axes, is sized to `cover`, or is a gradient
+/// drawn at the box's own size. An icon placed once beside a heading's text,
+/// a short accent bar drawn with a gradient under it, and text filled with a
+/// gradient (`background-clip: text`) decorate the box without painting it,
+/// and a layer whose tiling the capture did not record (no `background`
+/// shorthand) is not counted, as before.
+fn rhythm_image_band(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    if image.is_empty() || image == "none" {
+        return false;
+    }
+    if [dom.style(el, "backgroundClip"), dom.style(el, "webkitBackgroundClip")]
+        .iter()
+        .any(|clip| clip.contains("text"))
+    {
+        return false;
+    }
+    let images = crate::color::split_top_level_commas(&image);
+    let sizes = crate::color::split_top_level_commas(&dom.style(el, "backgroundSize"));
+    let layers = crate::color::split_top_level_commas(&dom.style(el, "background"));
+    images.iter().enumerate().any(|(i, img)| {
+        if img == "none" {
+            return false;
+        }
+        let size = sizes.get(i).or(sizes.last()).map(|s| js::trim(s).to_string()).unwrap_or_default();
+        if size == "cover" {
+            return true;
+        }
+        let gradient = img.contains("gradient(");
+        if gradient && matches!(size.as_str(), "auto" | "auto auto" | "100% 100%") {
+            return true;
+        }
+        // The shorthand spells each layer's tiling; the image's own
+        // parentheses are dropped so a `url()` holding "repeat" cannot match.
+        let Some(layer) = layers.get(i) else { return false };
+        let mut words = Vec::new();
+        let mut depth = 0i32;
+        let mut word = String::new();
+        for c in layer.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = (depth - 1).max(0),
+                c if depth == 0 && c.is_whitespace() => {
+                    if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                c if depth == 0 => word.push(c),
+                _ => {}
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+        let tiling: Vec<&str> = words
+            .iter()
+            .map(String::as_str)
+            .filter(|w| matches!(*w, "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round"))
+            .collect();
+        match tiling.as_slice() {
+            [one] => matches!(*one, "repeat" | "space" | "round"),
+            [x, y] => {
+                matches!(*x, "repeat" | "space" | "round") && matches!(*y, "repeat" | "space" | "round")
+            }
+            _ => false,
+        }
+    })
 }
 
 /// The flow box `s` presents to a walk: `s` itself, or for a
@@ -1033,7 +1103,16 @@ fn rhythm_text_size(dom: &dyn Dom, el: ElId) -> f64 {
 /// smaller than the body text (`text_size`), in capitals, tracked out, or
 /// as a chip that paints its own small box. A line set like the body copy is
 /// content of its own (a date, a byline, a closing sentence), not a label.
-fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: f64) -> bool {
+/// `opens_group` says the line is the first box its parent lays out, which
+/// lets colour, italics or weight alone mark it as a label
+/// ([`rhythm_set_apart`]).
+fn rhythm_reads_as_eyebrow(
+    dom: &dyn Dom,
+    line: ElId,
+    heading: ElId,
+    text_size: f64,
+    opens_group: bool,
+) -> bool {
     let heading_size = rhythm_font_size(dom, heading);
     let span = math_max(dom.rect(heading).width, dom.rect(line).width);
     for e in rhythm_subtree(dom, line, 40) {
@@ -1067,7 +1146,7 @@ fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: 
         if cased.len() >= 3 && cased.iter().all(|c| c.is_uppercase()) {
             return true;
         }
-        if rhythm_set_apart(dom, line, heading, e) {
+        if opens_group && rhythm_set_apart(dom, line, heading, e) {
             return true;
         }
     }
@@ -1112,6 +1191,15 @@ fn rhythm_is_italic(dom: &dyn Dom, el: ElId) -> bool {
 /// and from the heading under it. A grey category link over a black
 /// headline, a purple italic eyebrow over a white title. A date or a closing
 /// sentence set like the copy around it stays content of its own.
+///
+/// Colour and italics also mark the line that closes the block above: a blue
+/// "View all essays" link under a grid, a grey date under an excerpt, with
+/// the next heading a few pixels below. What tells the two apart is the
+/// markup, so the caller asks this only of a line that opens its parent
+/// (cnnbrasil.com.br's category link starts the box that holds the headline;
+/// outreign.io's eyebrow starts the box that holds the title). A line with
+/// the block above laid out before it in the same parent stays a block of its
+/// own, and the gap is measured to it, as before.
 fn rhythm_set_apart(dom: &dyn Dom, line: ElId, heading: ElId, words: ElId) -> bool {
     let Some(container) = dom.parent(line) else { return false };
     if utf16_len(js::trim(&collapse_ws(&dom.text_content(line)))) > RHYTHM_SET_APART_MAX_CHARS {
@@ -1393,7 +1481,8 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(tag_lower(dom, sib).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
                 break;
             }
-            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size) {
+            let opens_group = previous_box(sib).is_none();
+            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size, opens_group) {
                 break;
             }
             top_el = sib;
@@ -2897,6 +2986,46 @@ mod tests {
             f[0].finding.detail,
             "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
         );
+    }
+
+    /// observations-28 row 4: a background image paints a band a heading walk
+    /// stops at only when it covers the box. jyes.com.tw tiles a texture over
+    /// its news band; an icon placed once beside a heading, a 3px accent bar
+    /// drawn with a gradient, and gradient-filled text decorate the box.
+    #[test]
+    fn heading_rhythm_image_band_needs_a_layer_that_covers_the_box() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let el = d.add(Some(body), "section");
+        let band = |d: &mut FakeDom, styles: &[(&str, &str)]| {
+            for p in ["backgroundImage", "backgroundSize", "background", "backgroundClip", "webkitBackgroundClip"] {
+                d.set_style(el, p, "");
+            }
+            d.set_styles(el, styles);
+            rhythm_image_band(d, el)
+        };
+        let tile = r#"url("https://www.jyes.com.tw/index-news-bg.jpg")"#;
+        let shorthand = |repeat: &str| {
+            format!(r#"rgba(0, 0, 0, 0) {tile} {repeat} scroll 0% 0% / auto padding-box border-box"#)
+        };
+        let tiled = shorthand("repeat");
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &tiled)]));
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "cover")]));
+        let grad = "linear-gradient(rgb(255, 255, 255), rgb(250, 250, 250))";
+        assert!(band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto")]));
+        // An icon placed once, one axis of tiling, a tiling not recorded.
+        let once = shorthand("no-repeat");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &once)]));
+        let strip = shorthand("repeat-x");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &strip)]));
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto")]));
+        // A 48px accent bar drawn 3px tall under a title.
+        let bar = "linear-gradient(90deg, rgb(17, 17, 17) 0px, rgb(17, 17, 17) 48px, rgba(0, 0, 0, 0) 48px)";
+        let bar_layer = format!("rgba(0, 0, 0, 0) {bar} no-repeat scroll 0% 100% / 100% 3px padding-box border-box");
+        assert!(!band(&mut d, &[("backgroundImage", bar), ("backgroundSize", "100% 3px"), ("background", &bar_layer)]));
+        // Gradient-filled text paints the glyphs, not the box.
+        assert!(!band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto"), ("webkitBackgroundClip", "text")]));
+        assert!(!band(&mut d, &[("backgroundImage", "none")]));
     }
 
     /// observations-25 issue 20: joongang.co.kr's tab slide parked past its

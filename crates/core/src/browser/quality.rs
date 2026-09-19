@@ -325,16 +325,25 @@ fn glyph_advance_bound_em(c: char) -> f64 {
     }
 }
 
-/// Whether `el` is a flex or grid container whose own text is split into
+/// Whether `el` is a wrapping flex container whose own text is split into
 /// several runs, each an anonymous item too short to wrap in the box. Each
-/// run then sets one line: the union of their rects is two or more rows of
-/// items (outreign.io's wrapped row of "100 free lead searches", "14-day
-/// trial", ...), not two line boxes of one run, and there is no leading
-/// between lines to crowd. A single run, or any run long enough that it could
-/// wrap by the widest advance a face sets, is measured as before.
+/// run then sets one line and moves to a row of its own when it does not
+/// fit: the union of their rects is two or more rows of items (outreign.io's
+/// wrapped row of "100 free lead searches", "14-day trial", ... on a phone),
+/// not two line boxes of one run, and there is no leading between lines to
+/// crowd. Only `flex-wrap: wrap` moves an item whole. Under the default
+/// `nowrap` the items shrink to share one row and each run wraps inside its
+/// item (outreign.io's same row at desktop width, where `sm:flex-nowrap`
+/// applies), and a grid cell is narrower than the container; neither is
+/// measured by the container's width. A container whose wrapping the capture
+/// did not record, a single run, or any run long enough that it could wrap by
+/// the widest advance a face sets, is measured as before.
 fn items_each_fit_one_line(dom: &dyn Dom, el: ElId, font_size: f64) -> bool {
     let display = dom.style(el, "display");
-    if !matches!(display.as_str(), "flex" | "inline-flex" | "grid" | "inline-grid") {
+    if !matches!(display.as_str(), "flex" | "inline-flex") {
+        return false;
+    }
+    if !dom.style(el, "flexWrap").starts_with("wrap") {
         return false;
     }
     let runs: Vec<String> = dom
@@ -3498,19 +3507,38 @@ mod tests {
         d.add_text(row, "Built with you on a call");
         d.set_styles(
             row,
-            &[("display", "flex"), ("fontSize", "12px"), ("lineHeight", "15px"), ("position", "static")],
+            &[
+                ("display", "flex"),
+                ("flexWrap", "wrap"),
+                ("fontSize", "12px"),
+                ("lineHeight", "15px"),
+                ("position", "static"),
+            ],
         );
         d.set_rect(row, 27.0, 673.0, 336.0, 34.0);
         d.set_text_rect(row, 43.3, 673.0, 292.4, 34.0);
         d.el_mut(row).client_width = 336.0;
         assert!(snippets(&d, row, "tight-leading").is_empty(), "short runs, whole items");
+        let flag = vec!["line-height 1.25x (need >=1.3)"];
+        // Under `nowrap` the items shrink into one row and each run wraps in
+        // its own item; a row whose wrapping was not recorded, and a grid
+        // whose cells are narrower than the box, are measured as before.
+        for wrap in ["nowrap", ""] {
+            d.set_style(row, "flexWrap", wrap);
+            assert_eq!(snippets(&d, row, "tight-leading"), flag, "flex-wrap {wrap:?}");
+        }
+        d.set_style(row, "flexWrap", "wrap-reverse");
+        assert!(snippets(&d, row, "tight-leading").is_empty(), "wrap-reverse moves items whole");
+        d.set_style(row, "display", "grid");
+        assert_eq!(snippets(&d, row, "tight-leading"), flag, "grid");
         // A block that sets the same text as one run wraps its lines.
         d.set_style(row, "display", "block");
-        assert_eq!(snippets(&d, row, "tight-leading"), vec!["line-height 1.25x (need >=1.3)"]);
+        assert_eq!(snippets(&d, row, "tight-leading"), flag);
         // A run wider than the box wraps inside its own item.
         d.set_style(row, "display", "flex");
+        d.set_style(row, "flexWrap", "wrap");
         d.el_mut(row).client_width = 150.0;
-        assert_eq!(snippets(&d, row, "tight-leading"), vec!["line-height 1.25x (need >=1.3)"]);
+        assert_eq!(snippets(&d, row, "tight-leading"), flag);
     }
 
     /// walkthroughs-20 note 13: tchibo.de sets its teaser headlines as

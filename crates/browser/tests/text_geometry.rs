@@ -173,8 +173,8 @@ fn the_text_geometry_rules_measure_the_text() {
     // exempt (taste call r3-03), a clamp that hides nothing included; bold
     // body text of four lines, a weight-500 title, regular copy in a clamp and
     // bold text a max-height clip shows three lines of keep the floor. A flex
-    // row is measured run by run: short runs wrapped as whole items pass, a
-    // run long enough to wrap in its item keeps the floor.
+    // row is measured run by run: short runs a wrapping row moves as whole
+    // items pass, a run long enough to wrap in its item keeps the floor.
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
     assert_cases(
         &leading,
@@ -199,6 +199,11 @@ fn the_text_geometry_rules_measure_the_text() {
         "tight-leading",
     );
     assert_eq!(leading.len(), 10, "the ten flag cases: {leading:?}");
+    // The same short runs in a row that does not wrap, and in grid cells,
+    // wrap inside their items and keep the floor.
+    let runs = findings(&engine, port, "tight-leading-runs.html", "tight-leading");
+    assert_cases(&runs, &["nowrap-runs-row", "grid-runs-row"], &[], "tight-leading");
+    assert_eq!(runs.len(), 2, "the two flag cases: {runs:?}");
 
     // A chip under 27.5px tall is measured by its glyphs (taste call r3-20):
     // the step chip's line box holds them 5px off its edges, the 20px chip's

@@ -251,6 +251,7 @@ fn page_level_misreads_stay_silent() {
     // The twins still report.
     for (fixture, rule) in [
         ("flat-type-hierarchy.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-dropped-flat.html", "flat-type-hierarchy"),
         ("oversized-h1-browser.html", "oversized-h1"),
         ("first-viewport-column-overflow.html", "first-viewport-column-overflow"),
         ("em-dash-prose-with-matrix.html", "em-dash-overuse"),

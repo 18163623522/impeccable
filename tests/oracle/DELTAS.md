@@ -4727,23 +4727,28 @@ cannot tell, the finding stays.
 
 - **heading-rhythm** (row 4). The eyebrow fold takes a short line at body
   size as the heading's label when its colour, italics or much lighter
-  weight sets it apart from both its container and the heading: one
-  rendered line of at most 40 UTF-16 units, a colour at least 32 apart on a
-  channel (or 0.25 in alpha), or a weight 300 or more under its container's.
+  weight sets it apart from both its container and the heading, and the
+  line is the first box its parent lays out: one rendered line of at most
+  40 UTF-16 units, a colour at least 32 apart on a channel (or 0.25 in
+  alpha), or a weight 300 or more under its container's.
   cnnbrasil.com.br's grey section links 1px over each headline and
   outreign.io's italic hairline eyebrows 12 to 20px over each title were
-  measured as the block above. A box painted with `background-image` now
-  draws an edge, as one painted with a colour does (jyes.com.tw's grey news
-  band). Not done: observations-28 also proposed treating space that
+  measured as the block above; each opens the box that holds its heading.
+  A box whose `background-image` covers it (a layer tiled on both axes,
+  sized to `cover`, or a gradient at the box's own size) now draws an edge,
+  as one painted with a colour does (jyes.com.tw's grey news band tiles a
+  texture). Not done: observations-28 also proposed treating space that
   `justify-content: space-between` makes as unmeasured, but the capture does
   not record `justifyContent` or `flexDirection`, so a replay cannot tell;
   the fold alone clears cnnbrasil.com.br.
-- **tight-leading** (row 25). A flex or grid container whose own text is
-  two or more runs, each an anonymous item too short to wrap in the box by
-  the widest advance a face sets (0.7em, 0.8em for a capital, 1.05em for a
-  full-width glyph), has no second line box: outreign.io's hero meta row
-  wraps three short runs as whole items onto two rows. A single run, or one
-  long enough to wrap, is measured as before. target.com 143630 was not an
+- **tight-leading** (row 25). A flex container with `flex-wrap: wrap`
+  whose own text is two or more runs, each an anonymous item too short to
+  wrap in the box by the widest advance a face sets (0.7em, 0.8em for a
+  capital, 1.05em for a full-width glyph), has no second line box:
+  outreign.io's hero meta row wraps three short runs as whole items onto two
+  rows on a phone. A single run, one long enough to wrap, a row that does
+  not wrap, a grid, and a row whose wrapping the capture did not record are
+  measured as before. The capture gains a `flexWrap` column for this. target.com 143630 was not an
   engine misfire: the engine flags a two-line run whose selector also
   matches a one-line span earlier on the page, so the crop shows the wrong
   element (observations-28 row 28a).
@@ -4769,8 +4774,10 @@ cannot tell, the finding stays.
   and nothing on record says they do not paint.
 - **flat-type-hierarchy** (row 23, both engines). The ladder declines when
   the heading levels with no dominant size hold more headings than the
-  settled ones (cnnbrasil.com.br sets thirty h3 headlines at 14, 16 and
-  20px, ten each, against twelve h1 and h2), and when the h1 is set smaller
+  settled ones and one of their sizes, placed in the ladder, would make a
+  step of 1.25 or more (cnnbrasil.com.br sets thirty h3 headlines at 14, 16
+  and 20px, ten each, against twelve h1 and h2; 20px over the 16px h2 is a
+  1.25 step), and when the h1 is set smaller
   than the body text (phillips66.com's 14px "FIND FBOS:" form label;
   avikmukherjee.com's 13px name over 14px copy). The first version declined
   whenever the most-used heading level dropped out; the ratchet showed it
@@ -4874,3 +4881,74 @@ headline). Each shows the fix is right.
 4. **The scale test reads the element's own width.** A box whose layout
    width was not recorded, or a transform that scales one axis only, is
    measured unscaled, as before.
+
+### Revised after review
+
+The independent review of the branch found four places where a fix removed
+findings the engine had measured right. Each now fails safe to the base
+behaviour; the reviewer's pages report exactly what base reports, in the
+URL engine and, for flat-type-hierarchy and tight-leading, the file engine.
+
+1. **A coloured line that closes the block above is not a label.** The
+   colour, italic and weight fold took a blue "View all essays" link under
+   a grid, 12 to 15px over the next h2, as that h2's label; three folded,
+   the gaps measured to the grid, and the page fell under the two-heading
+   minimum (4 findings to 0). A grey post date took the previous post's
+   date as the next title's label ("24px above" where base said "14px").
+   Markup is what tells the two apart: cnnbrasil.com.br's category link and
+   outreign.io's eyebrow each open the box that holds the heading, while a
+   closing link or date has the block above laid out before it in the same
+   box. The fold on colour, italics or weight alone now needs the line to
+   be the first box its parent lays out. Size, capitals, tracking and chips
+   fold as before.
+2. **A heading's own background image is not a top edge.** Any
+   `background-image` counted as a painted edge, so an icon bullet placed
+   once beside an h3 and a 48px accent bar drawn with a gradient under an h2
+   made each heading read as drawing its own top boundary, and every such
+   heading was skipped (4 to 0 on each page). Only a layer that covers the
+   box counts now: tiled on both axes, sized `cover`, or a gradient at the
+   box's own size, and never text filled through `background-clip: text`.
+   A layer whose tiling the capture did not record is not counted.
+3. **A dropped heading level declines only when it changes the verdict.**
+   The majority test declined whenever the dropped levels held more
+   headings than the settled ones. An 18px h1, h2s tied at 17 and 18px, a
+   16px h3 and 16px body is flat whichever size stands for the h2s, and
+   base reports it; the branch did not, in either engine. The ladder now
+   declines only when a dropped size placed in it makes a step of 1.25 or
+   more. cnnbrasil.com.br's 20px h3s still do.
+4. **Only a wrapping flex row moves its runs whole.** The skip compared each
+   run with the whole container and never read `flex-wrap`. Under the
+   default `nowrap` the items shrink into one row and each run wraps inside
+   its item; in a grid each run wraps in a cell narrower than the row. The
+   reviewer's 420px nowrap row and three-column grid row of 14px runs at 1.1
+   went from 2 findings to 0. The skip now needs `display: flex` or
+   `inline-flex` and a `flexWrap` that starts with `wrap`, and the capture
+   records `flexWrap` (`STYLE_PROPS` and `browser-bundle/15-snapshot.js`).
+   Run 28's snapshots predate the column and read it as empty, so on replay
+   outreign.io's hero row reports again; at 1280px that row is
+   `sm:flex-nowrap`, and its runs really do wrap in their items.
+
+Fixtures: `heading-rhythm.html` gains four flag cases (a link closing a tile
+block, a grey date closing a post, an h3 with a background icon, an h2 with a
+gradient accent bar) and a tiled-texture band (pass); its italic and hairline
+eyebrows now open their wrapper, as outreign.io's do. New:
+`tight-leading-runs.html` (a nowrap flex row and a grid row of short runs,
+flag in both engines; its own file because adding 12px runs to
+`tight-leading.html` tipped that page's static flat-type ladder) and
+`flat-type-hierarchy-dropped-flat.html` (flag in both engines). Unit tests:
+`heading_rhythm_image_band_needs_a_layer_that_covers_the_box`, the nowrap,
+unrecorded, wrap-reverse and grid cases in
+`tight_leading_reads_flex_text_runs_as_items`, and the tie cases in
+`flat_type_hierarchy_declines_a_ladder_without_the_page_headings`. Browser
+tests: `heading_rhythm.rs` (20 findings), `text_geometry.rs` and
+`card_heuristics.rs`.
+
+Goldens: new `detect-fixture-{json,text}-flat-type-hierarchy-dropped-flat-html`
+(1 finding) and `detect-fixture-{json,text}-tight-leading-runs-html` (2
+findings); the directory, scope and no-advisory goldens gain exactly those
+three findings (697 to 700). Nothing else changed.
+
+Ratchet, run 28, all three cohorts (801 captures): 126 removed, 0 added, 0
+severity moves, 0 violations. Every row matches the table above except
+tight-leading, which no longer removes anything (410 to 410): outreign.io's
+two findings report again, as item 4 says.

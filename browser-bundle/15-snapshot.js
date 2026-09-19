@@ -28,7 +28,7 @@ const __SNAP_STYLE_PROPS = [
   "borderRightColor", "borderRightWidth", "borderRightStyle",
   "borderTopColor", "borderTopWidth", "borderTopStyle", "bottom", "boxShadow",
   "clip", "clip-path", "clipPath", "color", "colorScheme", "contain", "content",
-  "contentVisibility", "cssFloat", "direction", "display", "filter", "float",
+  "contentVisibility", "cssFloat", "direction", "display", "filter", "flexWrap", "float",
   "fontFamily", "fontSize",
   "fontStyle", "fontVariant", "fontVariantCaps", "fontWeight", "height",
   "hyphens", "inlineSize", "inset", "insetBlock", "insetBlockEnd",

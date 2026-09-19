@@ -45,7 +45,8 @@ const __SNAP_STYLE_PROPS = [
   "transitionProperty", "transitionTimingFunction", "translate", "unicodeBidi",
   "verticalAlign",
   "visibility", "webkitBackgroundClip", "webkitClipPath", "webkitHyphens",
-  "webkitLineClamp", "webkitMaskImage", "webkitTextFillColor", "whiteSpace", "width", "willChange", "wordBreak",
+  "webkitLineClamp", "webkitMaskImage", "webkitTextFillColor",
+  "webkitTextStrokeColor", "webkitTextStrokeWidth", "whiteSpace", "width", "willChange", "wordBreak",
   "zIndex",
 ];
 // `::before` / `::after` properties, recorded where `content` is set.

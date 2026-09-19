@@ -174,6 +174,8 @@ pub const STYLE_PROPS: &[&str] = &[
     "webkitLineClamp",
     "webkitMaskImage",
     "webkitTextFillColor",
+    "webkitTextStrokeColor",
+    "webkitTextStrokeWidth",
     "whiteSpace",
     "width",
     "willChange",

@@ -4716,3 +4716,155 @@ From the review, checked against the merged code:
     (`a_right_to_left_page_records_where_its_screenshot_starts`, browser
     launch under load); the next full run and three runs of that file
     passed.
+
+## Recorded 2026-09-18: paint that never reaches the screen (corpus/round7-never-painted)
+
+Round 7, branch 2 of observations-28 section 6. The painted-at-capture
+predicate (`crates/core/src/browser/painted.rs`) learns what hides the paint
+inside a box, three rules that lacked it ask it, and text-occlusion stops
+counting answers its probe cannot rank.
+
+Ten goldens change, all from the new fixture
+`tests/fixtures/antipatterns/never-painted.html`: its two per-fixture cases
+are new (`detect-fixture-json-never-painted-html`,
+`detect-fixture-text-never-painted-html`), and the sweeps
+`detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+`detect-dir-quiet-all-fixtures`, `detect-scope-type`,
+`detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json` and
+`detect-no-advisory-text` gain its findings and nothing else (686 to 714
+counted, 124 to 125 advisory). Every change is URL-engine behavior, and the
+static engine reports what it can see in both columns of the fixture, as the
+painted-gate fixtures before it do. The URL behavior is pinned by
+`crates/browser/tests/never_painted.rs`: the base engine (156c3150) reports
+every should-pass case, the branch none.
+
+- **Transparent placeholder ink** (row 6). `check_placeholder_colors` skips a
+  `::placeholder` inked at or under the transparent-ink floor (Bootstrap's
+  `form-floating`, `placeholder:text-transparent`), which printed `#ffffff on
+  #ffffff`.
+- **Text under 1px** (rows 6, 15). The Text gate drops text whose element
+  computes `font-size` under 1px when no descendant with text of its own sets
+  a size of 1px or more (a row that collapses inline-block gaps keeps its
+  children). A size that does not parse keeps the finding. Slick's dot
+  labels, drom.ru's hidden link, ktb.gov.tr's `text-indent: 9999px` arrow.
+- **Fallback content** (row 6). Text inside `<video>`, `<audio>`,
+  `<canvas>` and `<iframe>` is not painted, and neither is a media element's
+  own text for the Text gate. `<object>` is left out: it shows its content
+  when the resource fails, which a capture does not record.
+- **Faces turned away** (row 12). `backfaceVisibility` joins the capture
+  (`STYLE_PROPS` in `snapshot.rs` and `15-snapshot.js`). A box whose own
+  computed `transform` is a `matrix3d` with a negative z scale under
+  `backface-visibility: hidden` is not painted, with its subtree, unless an
+  individual `rotate` / `scale` sits on it or a 3D transform or `rotate` sits
+  above it (a flip card turned on hover). Recorded captures lack the property,
+  so they keep their findings; the fixture measures it live.
+- **A viewport layer past the viewport's sides** (rows 11, 20). A fixed chain
+  (decided containment) whose element lies wholly left or right of the
+  viewport is outside the document, the case the outermost-fixed-box test
+  missed when a fixed header with `backdrop-filter` holds a parked drawer
+  (bt.cn at x 540 on a 390px phone). Only the x axis: a smooth-scroll layer
+  keeps its page below the fold.
+- **A panel held at its max-height is not a scroll frame** (row 13). The
+  script-scroll-frame exception (a box at least as tall as the fold that
+  hides overflow) no longer applies to a box standing at its computed
+  `max-height` in px: jyes.com.tw's spec table under a 1000px "read more"
+  panel on a 844px phone.
+- **Lazy images not shown yet** (row 9). A raster under the state-layer
+  opacity is a state layer when `data-loaded="false"`, `data-ll-status` is
+  not `loaded`, a library holds its source with no `src` of its own, or a
+  lazy class sits on it or its parent with no loaded class while it rests at
+  0 or a script tweens its inline `opacity`. The native `loading="lazy"`
+  attribute alone does not count, as before.
+- **A colour reveal caught part way** (row 12). low-contrast and
+  gray-on-color skip, and claim no colour pair for, a word whose `style`
+  attribute sets its colour (with nothing but its transition or opacity
+  beside it) while it transitions `color`, in a parent or grandparent with at
+  least three such words. A chip row styled inline with its fill is not a
+  word run.
+- **Gates that were missing** (rows 11, 16, 20). `gradient-text` joins
+  `PAINT_GATED_TEXT_RULES` and `PAINT_GATED_PAGE_FORMS` (its page form stands
+  only where its selector matches something painted, so gating the element
+  does not bring the page form back). side-tab's border path and the
+  clipped-overflow container ask the new `unpainted_text_box`: the Text gate's
+  walk, share floor and area test, without its test for text, so a card that
+  holds only an image still reports. layout-transition's element form and
+  cramped-padding's own-text form were already gated (Box and Text); the
+  corpus cases of both were something else (below).
+- **Carousel words and nearer windows** (row 14). `VIEWPORT_IDENT_WORDS`
+  gains `slick`, `tempwrap`, `rolling` and `reel`. An outer clip now defers to
+  a nearer clip that traps the same layer even when that nearer one is a
+  carousel window (it cut the layer on purpose); before, the Taboola ad slot
+  took over the reel's arrow once the reel was exempt.
+- **text-occlusion** (rows 7, 15). Over text that ignores pointer events the
+  probe answers with what is under it, so a box it names is not counted
+  (text it names still is: overlap is overlap either way). An answer counts
+  as text only where its own glyphs are: its direct-text rect must hold the
+  point (a rect the capture did not record keeps the answer) and its size
+  must be 1px or more. Marquee words and animations are asked of the
+  answer's ancestors up to the body, cached per element.
+
+### Measure: run 28 ratchet (801 captures, all three cohorts)
+
+`scripts/ratchet.sh <worktree> r7-never-painted ratchet --run 28 --label
+r7-never-painted-28`. Removed, by label (cohort):
+
+| Rule | Base | Removed | Added | Removed by label | By cohort |
+|---|---|---|---|---|---|
+| buried-raster | 198 | 188 | 0 | pattern-absent 176, unjudged 12 | c1 185, c3 3 |
+| text-occlusion | 77 | 54 | 1 | pattern-absent 44, unjudged 10 | c1 17, c2 3, c3 34 |
+| low-contrast | 6471 | 58 | 0 | pattern-absent 33, confirmed-harmful 20, unjudged 5 | c1 4, c2 2, c3 52 |
+| clipped-overflow-container | 108 | 32 | 0 | pattern-absent 28, unjudged 4 | c1 6, c3 26 |
+| cramped-padding | 194 | 9 | 0 | pattern-absent 9 | c3 9 |
+| side-tab | 149 | 7 | 0 | pattern-absent 6, real-harmless 1 | c1 6, c3 1 |
+| text-overflow | 41 | 6 | 0 | unjudged 6 | c1 6 |
+| gradient-text | 332 | 3 | 0 | real-harmless 3 | c1 3 |
+| layout-transition | 346 | 1 | 0 | unjudged 1 | c1 1 |
+
+No severity moved. The one addition is a snippet change, not a new finding:
+v0-dashboard-ui-redesign-nine.vercel.app's "Menu" label goes from "100%
+covered by overlapping text" to "63%", once the probe points outside the
+heading's glyphs stop counting.
+
+**The 20 confirmed-harmful removals are not the harmful copies.** They are
+jyes.com.tw's spec-table section labels (white on `#7cc4ea`, 1.9:1) in the
+rows the 1000px panel folds away. The cluster's label comes from its
+representatives (142485, 142753), which are the second legend, above the
+fold of the panel, and those copies still report on every capture. The crop
+of a removed one (142490) shows an empty row.
+
+Crops opened for removed findings: 142490 and 142635 (jyes rows past the
+panel's fold, review text or nothing where the rect is), 141986 (a Slick dot,
+no "1"), 132828 (stroq.dev's video poster, no fallback line), 143090
+(vitap.ac.in's video, no fallback line), 142829 and 131849 (floating labels,
+no placeholder), 127029 (nubank's CPF label readable), 143368 (hp.com, slide
+1 at the parked slide's rect), 126906 (ladepeche's "Faits divers" readable),
+127461 (drom.ru's "Belgee" readable), 142010 (jyes's lazy image shown), 139710
+(v0-evasion's "Experience" in its revealed black), 132017 (adant.ai, no
+striped card), 125511 (zigzag.kr, the capture's viewport), and ynet.co.il
+126214 (below).
+
+### Known limits at merge
+
+1. **ynet.co.il 126214 (unjudged)** goes: the accessibility button's glyphs
+   end at x 115 and the city label starts at 132, so the probes that answered
+   with the button met its icon, a `background-image` the occlusion rule
+   never counts as a box. The header collision the judges confirmed (126213,
+   the temperature under the search label) still reports.
+2. **Flip faces in recorded captures.** The corpus snapshots carry no
+   `backfaceVisibility`, so aisdr.com's backs (140791, 140828 and the
+   ai-color-palette findings on them) keep reporting until the next capture.
+3. **Not attempted from row 12:** inactive slides 45% on screen (apple.com),
+   text under a fixed widget below the fold, an ad skin, crossfade frames and
+   framer-motion's rising opacity. From row 15: stacked states (vestra.ai's
+   cycling pill went with the glyph test; inven.co.kr's rolling list keeps
+   one of its two).
+4. **cnnbrasil.com.br's mobile ticker (143126 to 143129) stays.** The
+   answers are not marquee spans: the ticker sits under the live-TV strip's
+   white `z-10` panel, whose text the probes return.
+5. **otto.de's feedback widget (126891, 127001) stays.** Its inline
+   `visibility: hidden` loses to the stylesheet's `visibility: unset
+   !important`; the widget computes visible and `checkVisibility()` is true.
+   The judges read the inline style.
+6. **slotListWrapper** (ynet.co.il) and a marquee two levels down (adant.ai)
+   are not on the word list; the brief named slick-list, tempWrap, rolling
+   and reel.

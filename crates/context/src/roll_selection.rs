@@ -103,10 +103,11 @@ fn tier_quotas(mode: Option<&str>) -> Option<HashMap<String, usize>> {
 /// JS: pickFromFamilies. Up to `count` concepts in ranked order, preferring one
 /// from a family not yet picked, then any concept not yet picked. At a count of
 /// two this is exactly the first-then-different-family pick of every roll
-/// before quotas.
-fn pick_from_families(order: &[Value], count: usize) -> Vec<Value> {
+/// before quotas. `prior` are picks already in the hand, whose families count
+/// as taken.
+fn pick_from_families(order: &[Value], count: usize, prior: &[Value]) -> Vec<Value> {
     let mut picks: Vec<Value> = Vec::new();
-    let mut families: Vec<Value> = Vec::new();
+    let mut families: Vec<Value> = prior.iter().map(|c| c.get("familyId").cloned().unwrap_or(Value::Null)).collect();
     let id_of = |c: &Value| s(c, "id").unwrap_or("").to_string();
     while picks.len() < count {
         let picked = |c: &Value| picks.iter().any(|p| id_of(p) == id_of(c));
@@ -125,6 +126,24 @@ fn pick_from_families(order: &[Value], count: usize) -> Vec<Value> {
         }
     }
     picks
+}
+
+/// JS: rankTier. A tier's pool in ticket order, one entry per concept.
+fn rank_tier(pool: &[Value], salt_input: &str) -> Vec<Value> {
+    let mut tickets = challenger_tickets(pool);
+    if tickets.is_empty() {
+        tickets = pool.iter().map(|c| Ticket { item: c.clone(), ticket: 0 }).collect();
+    }
+    let ranked = rank(&tickets, salt_input, |e| format!("{}#{}", s(&e.item, "id").unwrap_or(""), e.ticket));
+    let mut ordered: Vec<Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for e in ranked {
+        let id = s(&e.item, "id").unwrap_or("").to_string();
+        if seen.insert(id) {
+            ordered.push(e.item);
+        }
+    }
+    ordered
 }
 
 pub struct ChallengerSelection {
@@ -202,30 +221,25 @@ pub fn select_approved_challengers(
                 continue;
             }
             let full = by_tier.get(tier).cloned().unwrap_or_default();
-            let mut pool: Vec<Value> = full.iter().filter(|c| !excluded.contains(s(c, "id").unwrap_or(""))).cloned().collect();
-            // Reuse over starvation; under a quota, also when the tier can no
-            // longer fill its quota, so a re-roll still deals six.
-            if pool.is_empty() || (quotas.is_some() && pool.len() < quota) {
-                pool = full;
+            let fresh: Vec<Value> = full.iter().filter(|c| !excluded.contains(s(c, "id").unwrap_or(""))).cloned().collect();
+            let salt_input = format!("{}:{}:challenger-{}{}", scope, key, index, salt);
+            // Reuse over starvation.
+            let first_pool = if fresh.is_empty() { &full } else { &fresh };
+            let mut tier_picks = pick_from_families(&rank_tier(first_pool, &salt_input), quota, &[]);
+            // Under a quota, a tier whose unseen worlds cannot fill the quota
+            // deals every unseen one first and only then tops up from worlds
+            // already shown, so a late re-roll never repeats a world ahead of a
+            // new one.
+            if quotas.is_some() && tier_picks.len() < quota && !fresh.is_empty() && fresh.len() < full.len() {
+                let rest: Vec<Value> = full
+                    .iter()
+                    .filter(|c| !tier_picks.iter().any(|p| s(p, "id") == s(c, "id")))
+                    .cloned()
+                    .collect();
+                let more = pick_from_families(&rank_tier(&rest, &salt_input), quota - tier_picks.len(), &tier_picks);
+                tier_picks.extend(more);
             }
-            let mut tickets = challenger_tickets(&pool);
-            if tickets.is_empty() {
-                tickets = pool.iter().map(|c| Ticket { item: c.clone(), ticket: 0 }).collect();
-            }
-            let ranked = rank(&tickets, &format!("{}:{}:challenger-{}{}", scope, key, index, salt), |e| {
-                format!("{}#{}", s(&e.item, "id").unwrap_or(""), e.ticket)
-            });
-            let mut ordered: Vec<Value> = Vec::new();
-            let mut seen: HashSet<String> = HashSet::new();
-            for e in ranked {
-                let id = s(&e.item, "id").unwrap_or("").to_string();
-                if seen.contains(&id) {
-                    continue;
-                }
-                seen.insert(id);
-                ordered.push(e.item);
-            }
-            picks.extend(pick_from_families(&ordered, quota));
+            picks.extend(tier_picks);
         }
         picks
     };
@@ -459,6 +473,49 @@ mod tests {
         for p in &sel.picks {
             assert!(mode_allows(p, "operate"), "{} is closed to operate", s(p, "id").unwrap());
         }
+    }
+
+    // A late re-roll whose unseen graphic concepts cannot fill the quota deals
+    // every unseen one first, then tops up with families not yet in the hand.
+    #[test]
+    fn a_short_tier_deals_unseen_first_and_tops_up_across_families() {
+        let open: Vec<Value> = parity()["concepts"].as_array().unwrap().clone();
+        let graphic: Vec<Value> = open
+            .iter()
+            .filter(|c| {
+                s(c, "status") == Some("approved")
+                    && s(c, "wellTier") == Some("graphic")
+                    && mode_allows(c, "operate")
+                    && matches!(s(c, "strength"), Some("world") | Some("dual"))
+                    && review_field(c, "breadth").and_then(|b| b.as_str()) != Some("niche")
+            })
+            .cloned()
+            .collect();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut short_rounds = 0;
+        for round in 0..6 {
+            let sel = select_approved_challengers("direction", "chain", round, Some("operate"), &open).unwrap();
+            let dealt: Vec<Value> = sel.picks.iter().filter(|p| s(p, "wellTier") == Some("graphic")).cloned().collect();
+            let unseen: Vec<&Value> = graphic.iter().filter(|c| !seen.contains(s(c, "id").unwrap())).collect();
+            let dealt_ids: HashSet<String> = ids(&dealt).into_iter().collect();
+            if !unseen.is_empty() && unseen.len() < 5 && dealt.len() == 5 {
+                short_rounds += 1;
+                for c in &unseen {
+                    assert!(dealt_ids.contains(s(c, "id").unwrap()), "round {round} skipped unseen {}", s(c, "id").unwrap());
+                }
+                let taken: Vec<Value> = unseen.iter().map(|c| c["familyId"].clone()).collect();
+                let top_up: Vec<&Value> = dealt.iter().filter(|p| !unseen.iter().any(|c| s(c, "id") == s(p, "id"))).collect();
+                let families_left = graphic.iter().map(|c| c["familyId"].clone()).filter(|f| !taken.contains(f)).collect::<Vec<_>>();
+                if !families_left.is_empty() {
+                    assert!(!taken.contains(&top_up[0]["familyId"]), "round {round} top-up reused a taken family");
+                }
+            }
+            if unseen.is_empty() {
+                break;
+            }
+            seen.extend(dealt_ids);
+        }
+        assert!(short_rounds > 0, "the chain never reached a short round");
     }
 
     #[test]

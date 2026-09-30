@@ -1,5 +1,5 @@
 {
-  "stdout": "WAITING: no answer yet after 0s; run --wait --key k1 again\nCOMP SIDECAR MISSING: .impeccable/mocks/decision/a.png landed with no prompt sidecar. Every decision comp records the exact prompt that produced it in <comp>.json ({\"prompt\": \"...\"}; generate-image writes it itself, a harness image tool does not), and that prompt is written under the comp rules in <REPO>/skill/reference/visualize.md. Write each missing sidecar now, and read that file before the next comp prompt if you have not.\n",
+  "stdout": "WAITING: no answer yet after 0s; run --wait --key k1 again\nCOMP SIDECAR MISSING: .impeccable/mocks/decision/a.png landed with no prompt sidecar. Every decision comp records the exact prompt that produced it in its sidecar, the image's full file name plus .json (a.png gets a.png.json), as {\"prompt\": \"...\"} (generate-image writes it itself, a harness image tool does not), and that prompt is written under the comp rules in <REPO>/skill/reference/visualize.md. Write each missing sidecar now, and read that file before the next comp prompt if you have not.\n",
   "stderr": "",
   "exit": 3,
   "signal": null,

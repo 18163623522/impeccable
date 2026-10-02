@@ -311,17 +311,17 @@ describe('live-browser source contracts', () => {
     );
     assert.match(
       SOURCE,
-      /function sanitizedContextOuterHTML\(el, maxLength\)[\s\S]*?stripManualEditRuntimeState\(clone\);/,
+      /function sanitizedContextClone\(el\)[\s\S]*?stripManualEditRuntimeState\(clone\);/,
       'manual copy edit prompt context should strip browser-only edit markers before staging HTML',
     );
     assert.match(
       SOURCE,
-      /outerHTML: sanitizedContextOuterHTML\(el, 10000\),/,
+      /function extractContext\(el\)[\s\S]*?const clone = sanitizedContextClone\(el\);[\s\S]*?outerHTML: \(clone\.outerHTML \|\| ''\)\.slice\(0, 10000\),/,
       'staged element context should not include live edit runtime attributes',
     );
     assert.match(
       SOURCE,
-      /function copyEditLeafContext\(el, originalText, newText\)[\s\S]*?outerHTML: sanitizedContextOuterHTML\(el, 3000\) \|\| null,/,
+      /function copyEditLeafContext\(el, originalText, newText\)[\s\S]*?const clone = sanitizedContextClone\(el\);[\s\S]*?outerHTML: \(clone\.outerHTML \|\| ''\)\.slice\(0, 3000\) \|\| null,/,
       'staged leaf context should not include live edit runtime attributes',
     );
     assert.match(

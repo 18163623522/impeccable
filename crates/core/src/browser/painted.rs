@@ -1291,12 +1291,27 @@ fn is_one_letter(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// The declarations a colour reveal writes into a word's `style` attribute.
-const REVEAL_STYLE_PROPS: &[&str] = &["color", "opacity", "transition", "will-change"];
+/// `display` is among them: a reveal that splits a heading into words sets
+/// each one `inline-block` beside its colour (antropi.world's
+/// `span.word-element`), and the word is still held to an inline display
+/// below. A chip a script styles inline writes a fill or a border too.
+const REVEAL_STYLE_PROPS: &[&str] = &["color", "opacity", "transition", "will-change", "display"];
 
 /// An inline word whose `style` attribute sets its `color` and nothing but
-/// what a colour reveal writes beside it (its transition, an opacity).
+/// what a colour reveal writes beside it (its transition, an opacity, its
+/// display). Inline means laid out as a word: `inline` or `inline-block`, or
+/// the `block` either computes to as an item of a flex or grid run.
 fn is_reveal_word(dom: &dyn Dom, el: ElId) -> bool {
-    if !matches!(dom.style(el, "display").as_str(), "inline" | "inline-block") {
+    // A flex or grid container blockifies its items, so a word set
+    // `inline-block` inside a wrapping flex heading computes to `block`.
+    let inline = match dom.style(el, "display").as_str() {
+        "inline" | "inline-block" => true,
+        "block" => dom.parent(el).is_some_and(|p| {
+            matches!(dom.style(p, "display").as_str(), "flex" | "inline-flex" | "grid" | "inline-grid")
+        }),
+        _ => false,
+    };
+    if !inline {
         return false;
     }
     let Some(style) = dom.attr(el, "style") else {
@@ -1816,6 +1831,28 @@ mod tests {
             }
         }
         assert!(colour_mid_reveal(&d, letters[0]));
+
+        // antropi.world splits a wrapping flex heading into words: each sets
+        // its display beside its colour, and computes to `block` as a flex
+        // item. The spacers between them are not words.
+        let h = d.add(Some(body), "h1");
+        d.set_style(h, "display", "flex");
+        d.set_rect(h, 40.0, 1600.0, 600.0, 120.0);
+        let mut flex_words = Vec::new();
+        for w in ["we", "are", "creating", "the"] {
+            let span = d.add(Some(h), "span");
+            d.set_styles(span, &[("display", "block"), ("transitionProperty", "color"), ("transitionDuration", "0.3s")]);
+            d.set_attr(span, "style", "display: inline-block; color: rgb(172, 176, 207); will-change: color; transition: color 0.3s;");
+            d.add_text(span, w);
+            flex_words.push(span);
+            let gap = d.add(Some(h), "span");
+            d.set_style(gap, "display", "block");
+            d.set_attr(gap, "style", "display: inline-block; width: 0.3em;");
+        }
+        assert!(colour_mid_reveal(&d, flex_words[0]));
+        // Blocks stacked in a block parent are not a word run.
+        d.set_style(h, "display", "block");
+        assert!(!colour_mid_reveal(&d, flex_words[0]));
 
         // clipto.com's chips: the selected one styled inline with its fill.
         let row = d.add(Some(body), "div");

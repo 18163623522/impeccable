@@ -6462,3 +6462,92 @@ undersized-ui-text (-7) and heading-rhythm (+10), with no new violation.
 5. **Text an ancestor clips** is still measured against the viewport, as the
    review of observations-20 row 31 decided (simplybudget.framer.ai): only an
    element's own truncation ends its line.
+## Recorded 2026-10-02: own-box surfaces, repainted ink, and pixels that replace a verdict (corpus/round8-pixels-and-surfaces)
+
+Engine defects from the cohort 4 judge observations (corpus observations-35,
+section 5 branch 1: rows 2, 4, 11, 17, 18 and the contrast parts of row 15).
+No taste decision is involved. All of it is in the browser engines'
+`low-contrast` (and `gray-on-color`) path; the static HTML engine is
+unchanged.
+
+1. **A gradient over the same box's opaque fill is the surface.** `background:
+   #8b5cf6 linear-gradient(135deg, #6d28d9, #9061f9)` was scored against the
+   fill, a colour no pixel of the box shows. The gradient is now sampled
+   under the text and flattened over the fill. The fill stays the surface
+   where no layer paints under the text, where the geometry cannot be read,
+   and where the gradient moves it by less than 12 on every channel at every
+   point under the text (a sheen).
+2. **An upper gradient layer lies over the layers below it.** With several
+   gradient layers on one box, a translucent stop of an upper layer is
+   composited over each colour the lower layers can show, not over the page
+   behind the box.
+3. **SVG text is scored only where its fill is its colour.** SVG text paints
+   `fill`, which the capture does not record. It is scored as `color` only
+   where the nearest `fill` the markup states (attribute or inline style, on
+   the element or an SVG ancestor) is `currentColor`.
+4. **A filter that repaints the ink leaves no verdict.** A `filter` on the
+   element or an ancestor that moves the ink, or the surface of a box inside
+   the filtered one, by more than 2 on a channel (the Filter Effects matrices
+   over the flat colour), or that the engine cannot model (`url()`,
+   `opacity()` under 1), drops `low-contrast` and `gray-on-color`.
+5. **A colour reveal's word may set its own display.** The inline style of a
+   reveal word may declare `display`, and a word that computes to `block` as
+   an item of a flex or grid run is still a word.
+6. **Handed-over text inside an `aria-hidden` box reaches the pixels.** The
+   visual pass took no candidate under `aria-hidden="true"`, while the
+   element pass scores that text, so a verdict handed to the pixels was never
+   read. Painted text there now takes a slot of the second (routed) budget.
+   The first budget is unchanged.
+7. **The sampled pass stops where it cannot place an image.** A
+   `background-attachment: fixed` image, an image that did not load, and a
+   point the image does not reach end the walk unresolved (the pixel pass
+   takes the candidate) instead of scoring the text against the boxes
+   beneath.
+8. **Sample points that disagree go to the pixels.** Where the 10th
+   percentile fails, the median passes and the two differ by the divergence
+   factor, the sampled pass gives no verdict.
+9. **Paint the sampled pass cannot see goes to the pixels.** A first-budget
+   candidate the element pass hands over for unread paint, where that paint
+   is a pseudo-element over the text or a layer that ignores pointer events
+   (neither is in a hit-test stack), gets no sampled verdict.
+
+New fixture `own-box-surface-and-ink-contrast.html` (7 should-flag and 9
+should-pass rows), pinned on the URL engine by
+`crates/browser/tests/own_box_surface_and_ink.rs`. Every should-pass row
+reports on the base engine in a URL scan.
+
+- `detect-fixture-json-own-box-surface-and-ink-contrast-html`,
+  `detect-fixture-text-own-box-surface-and-ink-contrast-html`: new cases,
+  recorded from the binary (10 counted, 2 advisory, the static engine's
+  reading, see limit 1).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: the new fixture's findings only (1000 to 1012
+  findings, 835 to 845 counted, 165 to 167 advisory notes). No finding on an
+  existing fixture moved and no snippet changed.
+
+### Known limits
+
+1. **The static HTML engine is unchanged.** A file scan still scores a box
+   with a fill and a gradient against the fill, pools layered stops, reads
+   SVG text as `color` and models no filter or reveal: it misses the
+   fixture's first should-flag row and reports six of its should-pass rows.
+2. **The fill is kept where the gradient cannot be placed** (a
+   `conic-gradient`, a size in units the geometry does not read, a capture
+   with no `background` shorthand), as before.
+3. **A fill given to SVG text by a stylesheet is not seen.** Text styled
+   `fill: currentColor` from a class (Tailwind `fill-current`) is unscored,
+   and so is text whose `fill` is a colour of its own, whatever its contrast.
+4. **A filter is modelled on flat colours only.** A filter that moves either
+   colour silences the verdict rather than rescoring it, including where the
+   filtered result would still fail. A page filtered at its root
+   (`html { filter: invert(1) }`) reports no contrast finding.
+5. **The routed budget is unchanged.** `aria-hidden` text competes for the
+   same 12 routed slots in document order, so a handed-over verdict past the
+   twelfth still prints unread (nvidia.com's carousel credit line). What to
+   do with an unread handed-over verdict is taste call T5.
+6. **In-page scans have no pixel pass.** The live overlay and the extension
+   run the sampled pass alone, so the candidates items 7 and 8 leave
+   unresolved report nothing there.
+7. **`point outside image` on an `<img>`** still lets the walk go on; only
+   CSS `url()` layers end it.

@@ -6256,13 +6256,17 @@ thing, or a stylesheet form that never asked what its selector resolves to.
   left out. This is a fix to code that came from main (#840) and is its own
   commit, with `line-length-text-count.html` and
   `crates/browser/tests/line_length_text_count.rs` standing alone.
-- **`overused-font` took its share by element.** The URL engine now weighs
-  each element by the characters of its own text and leaves out text that
-  has no box (`hidden`, `display: none`, `visibility: hidden` or `collapse`,
-  `content-visibility: hidden`) from the share. The floor of 20 text
-  elements still counts hidden ones: it asks whether the page set enough type
-  to name a face. Opacity is not read: copy waiting for a scroll reveal is
-  still the page's copy.
+- **`overused-font` could name a face that sets next to no text.** The
+  element count still decides which face is primary, and the snippet is
+  unchanged. In the URL engine the finding now stands down when that face
+  sets under 5% of the characters in text that has a box (`hidden`,
+  `display: none`, `visibility: hidden` or `collapse` and
+  `content-visibility: hidden` are not weighed; opacity is not read).
+  walla.co.il's Arial at "40% of text" sets 2%. The bar sits under the
+  lowest share among findings both judges called harmful (mrtarget.de's
+  Montserrat, 6.6%): a full by-character share was tried first and lost five
+  of those (sellerassistant.io, v0-gigi, mrtarget.de), where a display or
+  label face that judges call the pattern sets a minority of the characters.
 - **`side-tab` reported one pseudo-element stripe twice,** once off the
   element and once off the stylesheet. The stylesheet form now defers to the
   element form on a host it resolves to. And the stylesheet scan no longer
@@ -6291,9 +6295,12 @@ finding by finding against its predecessor.
 ### Known limits
 
 1. **The static engine's `overused-font` is unchanged.** It reads declared
-   families with no layout and no character count, so it names Inter on
-   `overused-font-share-pass.html`, where Inter sits only in a closed drawer
-   and hidden slides.
+   families with no layout, so it names Inter on
+   `overused-font-share-pass.html`, where Inter sets thirty step numbers.
+   In the URL engine, a face that sets a minority of the characters but
+   more than 5% is still named by its element count: yedric.ai's Geist Mono
+   labels (11%) keep reporting, as judges split on them, and so does any
+   label face the 5% bar does not reach.
 2. **The static engine reports every marquee loop.** It cannot resolve a
    selector to an element, so the wave and the sweep on
    `marquee-ornament.html` report there. The same holds for the double

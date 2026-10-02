@@ -1,8 +1,8 @@
 //! Round 8 text and CSS-text forms against an installed browser. Skips
 //! cleanly when there is none.
 //!
-//! - `overused-font-share-{pass,flag}.html`: the primary face is the one
-//!   that sets the most rendered characters, not the most elements.
+//! - `overused-font-share-{pass,flag}.html`: a face that sets under one
+//!   character in twenty of the visible text is not reported as primary.
 //! - `side-tab-stylesheet-forms.html`: a pseudo-element stripe its host
 //!   already reports is not reported again from the stylesheet, and a stripe
 //!   drawn by an image alone is not reported.
@@ -85,19 +85,19 @@ fn findings(engine: &BrowserEngine, port: u16, fixture: &str, rule: &str) -> Vec
 }
 
 #[test]
-fn overused_font_share_is_of_rendered_characters() {
+fn overused_font_stands_down_for_a_face_that_sets_next_to_no_text() {
     let Some(engine) = engine() else { return };
     let port = serve();
 
-    // Thirty mono labels over six Georgia paragraphs, with twice the copy
-    // again in Inter inside a closed drawer and hidden slides.
+    // Thirty two-digit numbers in Inter over eight Georgia paragraphs, and a
+    // closed drawer of Inter copy: about 3% of the visible characters.
     let pass = findings(&engine, port, "overused-font-share-pass.html", "overused-font");
-    assert_eq!(pass, vec![], "Georgia sets the rendered text");
+    assert_eq!(pass, vec![], "Inter sets next to none of the visible text");
 
-    // Thirty Georgia labels over six Inter paragraphs.
+    // Thirty word labels in Inter: about 11%, and the element share stands.
     let flag = findings(&engine, port, "overused-font-share-flag.html", "overused-font");
     assert_eq!(flag.len(), 1, "{flag:?}");
-    assert!(flag[0].0.starts_with("Primary font: inter (8"), "{flag:?}");
+    assert_eq!(flag[0].0, "Primary font: inter (79% of text)", "{flag:?}");
 }
 
 fn snippets(engine: &BrowserEngine, port: u16, fixture: &str, rule: &str) -> Vec<String> {

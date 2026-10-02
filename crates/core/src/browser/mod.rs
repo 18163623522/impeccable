@@ -92,6 +92,7 @@ pub mod painted;
 pub mod quality;
 pub mod snapshot;
 pub mod text_collectors;
+pub mod text_context;
 pub mod text_geometry;
 pub mod text_layers;
 pub mod visual;

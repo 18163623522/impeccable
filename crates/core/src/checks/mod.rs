@@ -32,6 +32,9 @@
 //!   checkNumberedSectionLabels, checkEmDashOveruse, isRepeatedTextContainer.
 //!   Open (selector and tag lists, thresholds, the two text parsers):
 //!   `impeccable_foundation::rules::text`.
+//! - `text_context`: the contexts in which a typography finding reports as
+//!   advisory (framed HTML demos, legal fine print, micro-labels), decided
+//!   once over the `ContextNode` both engines implement.
 //! - `embedded_content`: how both engines read the controls and captions in
 //!   a box that frames embedded content for nested-cards (r4-p17).
 //!
@@ -51,6 +54,7 @@ pub mod gradient_geometry;
 pub mod html_patterns;
 pub mod measures;
 pub mod rules;
+pub mod text_context;
 pub mod text_rules;
 
 #[cfg(feature = "vectors")]

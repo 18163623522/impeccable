@@ -6133,3 +6133,109 @@ decision reads the message alone: it does not check that the page rendered
 complete, and development builds, which print the long message without a
 number, stay errors. The corpus replays `script-error` from recorded snippets,
 so an error the base run's cap dropped is not measured.
+## Recorded 2026-10-01: advisory contexts for micro-labels, fine print and framed demos (corpus/premise4-advisory-contexts)
+
+Three taste calls Paul decided on 2026-10-01, all "advisory". Each moves a
+finding's own severity to `advisory` inside the context the call describes
+(the registry severities are unchanged): the finding stays in the output with
+its snippet byte for byte, the JSON gains `"severity": "advisory",
+"advisory": true`, the text output moves it under "Advisory (not counted as
+failures)", and the failure count and the exit code drop it. The decisions
+are made once in `crates/core/src/checks/text_context.rs` over a
+`ContextNode` both engines implement.
+
+- **r5-p3, `undersized-ui-text` on a label with no reading job.** Decision:
+  "Report text under the floor as advisory when it is a label with no reading
+  job: a tick or axis label inside a chart, a unit or step marker beside a
+  number, a pill or eyebrow of a few words beside a heading. Prices, form
+  help, navigation and controls keep failing." Read as: the element's text is
+  all its own, and it is (a) at most 4 words and 32 characters with no figure
+  in it, and either opens its group right before a heading (an `h1` to `h6`,
+  `role="heading"`, a block that starts with one, or an untagged title of
+  words at 18px or more and 1.5 times the label's size) or follows one and is
+  drawn as a pill (rounded, with a fill or border); or (b) a unit from a
+  fixed list beside a sibling number set at 1.3 times its size or more; or
+  (c) a step marker (`01`, `1.`, `Step 2`) beside larger text; or (d) at most
+  3 words and 16 characters and inside a chart: a `chart`, `axis`, `tick`,
+  `graph`, `plot`, `sparkline`, `gauge` or `histogram` class or id part up to
+  4 levels up, a label whose centre sits over a sibling `canvas` or `svg` of
+  100 by 40px or more, or one of 3 or more absolutely placed siblings of the
+  same tag and class lined up on one axis. Never: text in or under a control,
+  `nav`, `form`, a table cell, `dt`/`dd`, `time`, a heading, text with a
+  currency sign, text that ends a sentence.
+- **r5-p27, legal fine print under `line-length`, `tiny-text` and
+  `tight-leading`.** Decision: "Report text marked as fine print (a legal,
+  disclaimer, terms or footnote class, or a block that opens with an asterisk
+  or a footnote mark) as advisory under the three rules. A consent or form
+  label is not fine print and keeps failing." Read as: text set under 15px
+  that is in a `small`, or carries one of the class markers
+  `undersized-ui-text` already reads for its smallprint floor (legal,
+  copyright, fineprint, smallprint, disclaimer, disclosure, footnote, without
+  the bare `footer`) or `terms`, as a class or id, on itself or up to 3
+  levels up (never on `html`, `body`, `main`, `article` or `form`), or that
+  opens with `*`, a dagger, a superscript digit or a leading `sup` and runs
+  to 60 characters or more. Never: text in a `label`, a block holding a form
+  control, a heading.
+- **r5-p26, framed HTML demos count as mock context.** Decision: "Read mock
+  context from structure as well as from a class: a window with three
+  title-bar dots, a caption with the word preview, a device frame that is
+  scaled or 3D-transformed. Text inside reports as advisory under all three
+  rules [...]. Sentence-length copy inside still counts as copy." Read as: an
+  ancestor (not `section`, `article`, `header`, `footer` or `nav`) whose
+  first child is a title bar (12 to 72px tall, 60% of the box's width, at its
+  top) that leads with exactly three empty round painted dots of 5 to 16px
+  at its leading half, or that holds a caption of at most three words with
+  the word `preview` while the box is drawn as a frame (rounded, with a
+  border or shadow); or an ancestor of 120 by 80px or more whose transform
+  tilts it in 3D by about a degree or more, or scales it uniformly to
+  between 0.3 and 0.85 while it is drawn as a frame, with no transform
+  animation running. It feeds the `Mockup` shape r3-04 already reads, so
+  `low-contrast` follows in every pass, and `undersized-ui-text` and
+  `tiny-text` now report text in mock context (by structure, by a mockup or
+  illustration class, or by `role="img"`) as advisory too. Never: the preview
+  caption itself, text in a control (`a[href]`, `button`, `label`, a control
+  role), text under a `figcaption`, anything in a carousel slide, pagination
+  bullets, sentence-length copy.
+
+New fixtures `undersized-ui-text-micro-labels.html`, `fine-print.html` and
+`mockup-structure.html`, each with a failing and an advisory column, pinned
+on the static engine by `crates/html/tests/advisory_contexts.rs` and on the
+URL engine by `crates/browser/tests/advisory_contexts.rs`. Every re-recorded
+golden was diffed finding by finding against its predecessor.
+
+- `detect-fixture-json-undersized-ui-text-micro-labels-html`, `detect-fixture-text-undersized-ui-text-micro-labels-html`, `detect-fixture-json-fine-print-html`, `detect-fixture-text-fine-print-html`, `detect-fixture-json-mockup-structure-html`, `detect-fixture-text-mockup-structure-html`: new cases.
+- `detect-fixture-json-tight-leading-html`, `detect-fixture-text-tight-leading-html`: the `div.footer-legal` block at 1.17x is advisory (15 to 14 counted, 1 advisory note). Its `legal` class marks fine print; the row stays in the should-flag column with a note, since it still reports.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the one move above plus the three new fixtures (772 to 815 counted, 133 to 160 advisory notes: 44 failing and 26 advisory rows in the new fixtures, and the moved one). No other finding moved and no snippet changed.
+
+Known limits, stated so the ratchet does not read them as misses:
+
+1. **The static engine has no layout.** A label over a plot and labels
+   lined up along an axis keep failing there, and so does a title bar judged
+   by its place in the window (the dots alone decide). Its cascade carries no
+   `transform`, so a scaled or tilted frame is seen only when the transform
+   is an inline style. `line-length` never reports there at all.
+2. **Device frames that are neither scaled nor tilted** carry none of the
+   three structural cues and keep failing: coldtea.ai's `DevicePhone-module`
+   frame (its text is shrunk by font size, 4 of the 22 r5-p26 evidence
+   findings), kraflio.com's bordered phone (4 more) and adant.ai's
+   `dc-demo-frame` (its "CANVAS · GENERATED" and "Swan rescue").
+3. **Controls keep failing in every context**, which leaves out r5-p3
+   evidence that sits in a link or a button: context.dev's SOC 2 badge,
+   outreign.io's "Listed on" and "Getting Started", redoubt.agency's
+   "Secure", inven.co.kr's "LIVE" and its countdown units, vestra.ai's `01`.
+4. **An eyebrow needs a heading right after it.** A kicker above a paragraph,
+   a list or a ticker (outreign.io's "Also included" and "Explore OutReign",
+   thursdai.news's "Guests From", vestra.ai's "Noticed on its own") keeps
+   failing, and so does a stat's label under its figure.
+5. **Fine print needs a marker.** Unmarked terms keep failing:
+   cuisineactuelle.fr's `custom_newsletter_mentions`, onco.cc's footer
+   paragraph. Fine print at 15px or more keeps failing too
+   (thecignagroup.com's 16px footnote).
+6. **`undersized-ui-text` and `tiny-text` now honour the class-marked mock
+   context as well**, not only the structural one: text under a `mockup` or
+   `illustration` class or `role="img"` is advisory under them. A `mock`
+   class was already exempt from both rules.
+7. **An advisory copy never speaks for a failing copy of the same colour
+   pair** (r3-04), so demoting a mock's text can surface one new
+   `low-contrast` finding on the same page (bitroad.ai, 2 in run 31).
+

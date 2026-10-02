@@ -120,6 +120,7 @@ pub fn decorative_text_facts_dom(dom: &dyn Dom, el: ElId) -> DecorativeTextFacts
         signature_marked: marked_signature(dom, el),
         mockup_ancestor,
         picture_ancestor,
+        framed_demo: super::text_context::in_framed_demo_dom(dom, el),
         text,
     }
 }

@@ -896,6 +896,134 @@ fn drop_brand_hue_headings(dom: &dyn Dom, groups: &mut [FindingGroup]) {
     }
 }
 
+// ─── Category colours (corpus decision r5-p28-ai-color-palette-category-colours) ──
+
+/// How many distinct hues the elements in one role carry before the colour
+/// is read as coding a category.
+const CATEGORY_MIN_HUES: usize = 6;
+/// Two hues closer than this are one hue: a `blue-600` beside a `blue-400`
+/// is one colour in two shades.
+const CATEGORY_HUE_SEPARATION_DEG: f64 = 5.0;
+
+/// The two ways an element wears a palette colour: as its ink (the heading
+/// and neon-text forms) or as its fill (the gradient forms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteRole {
+    Ink,
+    Fill,
+}
+
+/// Which colour an element-level ai-color-palette finding is about.
+fn palette_finding_role(f: &BrowserFinding) -> Option<PaletteRole> {
+    if f.type_ != "ai-color-palette" {
+        return None;
+    }
+    if f.detail.ends_with(" on heading") || f.detail.ends_with(" neon text on dark background") {
+        Some(PaletteRole::Ink)
+    } else if f.detail.ends_with(" gradient background") || f.detail == "Purple/violet gradient (Tailwind)" {
+        Some(PaletteRole::Fill)
+    } else {
+        None
+    }
+}
+
+/// The role an element plays and the hue it plays it in. Elements in one
+/// role are the same kind of thing drawn the same way: for ink, one tag set
+/// at one font size and weight (every section heading of a news front page);
+/// for a fill, one tag at one box size (the icon tile of every feature
+/// card). `None` when the element paints no chromatic colour in that role.
+fn category_role_key(dom: &dyn Dom, el: ElId, role: PaletteRole) -> Option<(String, f64)> {
+    use super::element_checks::{ai_palette_is_visible, element_rect};
+    use crate::color::{get_hue, has_chroma, parse_any_color, parse_gradient_colors};
+    let rect = element_rect(dom, el)?;
+    if !ai_palette_is_visible(dom, el) {
+        return None;
+    }
+    let tag = tag_lower(dom, el);
+    match role {
+        PaletteRole::Ink => {
+            let ink = parse_any_color(Some(&dom.style(el, "color")))?;
+            if ink.alpha_or_one() < 0.5 || !has_chroma(Some(&ink), Some(50.0)) {
+                return None;
+            }
+            let key = format!(
+                "{tag}|{}|{}",
+                dom.style(el, "fontSize"),
+                dom.style(el, "fontWeight")
+            );
+            Some((key, get_hue(Some(&ink))))
+        }
+        PaletteRole::Fill => {
+            let stops = parse_gradient_colors(Some(&dom.style(el, "backgroundImage")));
+            let first = stops
+                .iter()
+                .find(|c| c.alpha_or_one() > 0.1 && has_chroma(Some(c), Some(50.0)))?;
+            let key = format!("{tag}|{}x{}", rect.width.round(), rect.height.round());
+            Some((key, get_hue(Some(first))))
+        }
+    }
+}
+
+/// True when the hues are a category system: six or more distinct ones, at
+/// least half of them outside the violet and cyan bands. A set of tiles that
+/// runs violet, purple, fuchsia, cyan, teal and sky is the palette in six
+/// shades, not a colour per category.
+fn hues_are_a_category_system(hues: &[f64]) -> bool {
+    let mut sorted: Vec<f64> = hues.iter().copied().filter(|h| h.is_finite()).collect();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let mut distinct: Vec<f64> = Vec::new();
+    for h in sorted {
+        if distinct.last().is_none_or(|last| h - last >= CATEGORY_HUE_SEPARATION_DEG) {
+            distinct.push(h);
+        }
+    }
+    // The wheel closes: 358 and 2 are one red.
+    if distinct.len() > 1 && distinct[0] + 360.0 - distinct[distinct.len() - 1] < CATEGORY_HUE_SEPARATION_DEG {
+        distinct.pop();
+    }
+    let outside = distinct
+        .iter()
+        .filter(|h| super::element_checks::TellHue::of(**h).is_none())
+        .count();
+    distinct.len() >= CATEGORY_MIN_HUES && outside * 2 >= distinct.len()
+}
+
+/// The page's elements grouped by role, with the hues each role carries.
+/// Built on the first palette finding that asks, once per role, so a page
+/// with no violet or cyan never pays for the walk.
+#[derive(Default)]
+struct CategoryHues {
+    ink: std::cell::OnceCell<std::collections::HashMap<String, Vec<f64>>>,
+    fill: std::cell::OnceCell<std::collections::HashMap<String, Vec<f64>>>,
+}
+
+impl CategoryHues {
+    /// True when `el` wears its colour as one of a category system's hues:
+    /// the elements in its role carry six or more distinct hues between them.
+    fn is_category_colour(&self, dom: &dyn Dom, el: ElId, role: PaletteRole) -> bool {
+        let Some((key, _)) = category_role_key(dom, el, role) else {
+            return false;
+        };
+        let cell = match role {
+            PaletteRole::Ink => &self.ink,
+            PaletteRole::Fill => &self.fill,
+        };
+        let groups = cell.get_or_init(|| {
+            let mut groups: std::collections::HashMap<String, Vec<f64>> = std::collections::HashMap::new();
+            for other in dom.query_all(None, "*").unwrap_or_default() {
+                if !element_is_scanned(dom, other) {
+                    continue;
+                }
+                if let Some((key, hue)) = category_role_key(dom, other, role) {
+                    groups.entry(key).or_default().push(hue);
+                }
+            }
+            groups
+        });
+        groups.get(&key).is_some_and(|hues| hues_are_a_category_system(hues))
+    }
+}
+
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
 /// (a selector matching nothing drops the finding; a match under a
@@ -2059,6 +2187,9 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     // ground waits here until a second tell hue turns up somewhere, so one
     // deliberate accent stays an accent (REN-405).
     let mut palette_tells: Vec<ec::TellHue> = Vec::new();
+    // Category colour systems: a violet or cyan that is one of six or more
+    // hues its role carries codes a category and is not the palette (r5-p28).
+    let category_hues = CategoryHues::default();
     let mut palette_ink: Vec<(ElId, BrowserFinding)> = Vec::new();
     let body = dom.body();
     // JS `document.body` may be null on a bare document; every
@@ -2079,7 +2210,26 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         findings.extend(hits(ec::check_element_colors_dom(dom, el, &mut color_seen)));
         findings.extend(hits(ec::check_element_motion_dom(dom, el)));
         findings.extend(hits(ec::check_element_glow_dom(dom, el)));
-        let palette = ec::check_element_ai_palette_dom(dom, el, design_system.as_ref());
+        let mut palette = ec::check_element_ai_palette_dom(dom, el, design_system.as_ref());
+        // A category colour neither reports nor votes. Its gradient hit is
+        // withdrawn with the class forms below; the tell and the held ink
+        // are withdrawn here. The reading lists the gradient's tell first.
+        if !palette.tells.is_empty() {
+            let has_fill = !palette.hits.is_empty();
+            let fill_is_category =
+                has_fill && category_hues.is_category_colour(dom, el, PaletteRole::Fill);
+            let ink_is_category = palette.ink.is_some()
+                && category_hues.is_category_colour(dom, el, PaletteRole::Ink);
+            let mut index = 0;
+            palette.tells.retain(|_| {
+                let is_fill_tell = has_fill && index == 0;
+                index += 1;
+                if is_fill_tell { !fill_is_category } else { !ink_is_category }
+            });
+            if ink_is_category {
+                palette.ink = None;
+            }
+        }
         // The palette is a rule about what is painted: an element that is not
         // painted at capture neither reports nor votes. Its gradient hits go
         // through `retain_painted` below with the rest; the held ink and the
@@ -2125,6 +2275,10 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         // them to score.
         super::painted::retain_painted(dom, el, &mut findings);
         drop_covered_class_forms(&mut findings);
+        findings.retain(|f| {
+            palette_finding_role(f)
+                .is_none_or(|role| !category_hues.is_category_colour(dom, el, role))
+        });
         // Rule-pack element rules run last, so the built-in findings for this
         // element keep their order and their position in the group.
         if let Some(pack) = config.rule_pack {
@@ -2386,6 +2540,88 @@ mod tests {
         assert_eq!(run("rgb(0, 128, 128)", 1280.0).len(), 2);
         // A short nav pill is not the nav bar.
         assert_eq!(run("rgb(92, 45, 145)", 200.0).len(), 2);
+    }
+
+    /// r5-p28: a violet that is one of six or more hues its role carries is
+    /// a category colour; a lone violet, a short set, and a set that stays
+    /// inside the violet and cyan bands are not.
+    #[test]
+    fn category_hue_sets() {
+        // cnnbrasil.com.br's section headings.
+        assert!(hues_are_a_category_system(&[0.0, 200.0, 25.0, 173.0, 45.0, 258.0, 142.0, 189.0, 271.0, 330.0]));
+        // arbiproseller's icon tiles: two blues 8 degrees apart are two hues.
+        assert!(hues_are_a_category_system(&[255.0, 221.2, 213.1, 158.0, 43.0, 188.0]));
+        // Five hues, and one hue repeated.
+        assert!(!hues_are_a_category_system(&[0.0, 25.0, 142.0, 217.0, 271.0]));
+        assert!(!hues_are_a_category_system(&[271.0, 271.0, 271.0, 271.0, 272.0, 273.0, 189.0]));
+        // Six hues, all of them the palette's own.
+        assert!(!hues_are_a_category_system(&[262.0, 271.0, 293.0, 192.0, 175.0, 199.0]));
+        // 358 and 2 are one red.
+        assert!(!hues_are_a_category_system(&[358.0, 2.0, 25.0, 142.0, 217.0, 271.0]));
+    }
+
+    #[test]
+    fn category_colours_are_read_per_role() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 1280.0, 3000.0);
+        d.set_rect(body, 0.0, 0.0, 1280.0, 3000.0);
+        let heading = |d: &mut FakeDom, color: &str, size: &str| {
+            let h = d.add(Some(body), "h2");
+            d.set_rect(h, 0.0, 100.0, 300.0, 36.0);
+            d.set_styles(h, &[("color", color), ("fontSize", size), ("fontWeight", "700")]);
+            h
+        };
+        let section_inks = [
+            "rgb(220, 38, 38)",
+            "rgb(234, 88, 12)",
+            "rgb(22, 163, 74)",
+            "rgb(37, 99, 235)",
+            "rgb(219, 39, 119)",
+        ];
+        for ink in section_inks {
+            heading(&mut d, ink, "22px");
+        }
+        let violet = heading(&mut d, "rgb(124, 58, 237)", "22px");
+        // The same violet at another size is not one of the section headings.
+        let lone = heading(&mut d, "rgb(124, 58, 237)", "40px");
+        let tile = |d: &mut FakeDom, stops: &str, side: f64| {
+            let t = d.add(Some(body), "div");
+            d.set_rect(t, 0.0, 400.0, side, side);
+            d.set_style(t, "backgroundImage", &format!("linear-gradient(135deg, {stops})"));
+            t
+        };
+        let purple_tile = tile(&mut d, "rgb(147, 51, 234), rgb(168, 85, 247)", 56.0);
+        for stops in [
+            "rgb(37, 99, 235), rgb(59, 130, 246)",
+            "rgb(22, 163, 74), rgb(34, 197, 94)",
+            "rgb(234, 88, 12), rgb(249, 115, 22)",
+            "rgb(225, 29, 72), rgb(244, 63, 94)",
+        ] {
+            tile(&mut d, stops, 56.0);
+        }
+        let hues = CategoryHues::default();
+        assert!(hues.is_category_colour(&d, violet, PaletteRole::Ink));
+        assert!(!hues.is_category_colour(&d, lone, PaletteRole::Ink));
+        // Five tiles are not six.
+        assert!(!hues.is_category_colour(&d, purple_tile, PaletteRole::Fill));
+        tile(&mut d, "rgb(8, 145, 178), rgb(6, 182, 212)", 56.0);
+        let hues = CategoryHues::default();
+        assert!(hues.is_category_colour(&d, purple_tile, PaletteRole::Fill));
+        // A heading has no gradient to be a fill in.
+        assert!(!hues.is_category_colour(&d, violet, PaletteRole::Fill));
+    }
+
+    #[test]
+    fn palette_findings_name_their_role() {
+        let role = |detail: &str| palette_finding_role(&BrowserFinding::new("ai-color-palette", detail));
+        assert_eq!(role("text-violet-500 on heading"), Some(PaletteRole::Ink));
+        assert_eq!(role("Purple/violet text (#7c3aed) on heading"), Some(PaletteRole::Ink));
+        assert_eq!(role("Cyan neon text on dark background"), Some(PaletteRole::Ink));
+        assert_eq!(role("Cyan gradient background"), Some(PaletteRole::Fill));
+        assert_eq!(role("Purple/violet gradient (Tailwind)"), Some(PaletteRole::Fill));
+        assert_eq!(role("Purple/violet accent colors detected"), None);
+        assert_eq!(palette_finding_role(&BrowserFinding::new("low-contrast", "x on heading")), None);
     }
 
     #[test]

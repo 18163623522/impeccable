@@ -762,15 +762,26 @@ pub fn check_element_quality(
 }
 
 /// JS: checks.mjs#checkPageQualityFromDoc(doc)
+///
+/// A skip into the footer is not reported; see the browser twin
+/// (`impeccable_core::browser::quality::check_page_quality_from_doc`) for
+/// the rule (corpus decision r5-p29-skipped-heading-footer-titles).
 pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<RuleHit> {
     let mut findings = Vec::new();
     let mut prev_level: i64 = 0;
     let mut prev_text = String::new();
+    let mut prev_footer = None;
+    let mut prev_opens_footer = false;
     for h in doc.query_selector_all("h1, h2, h3, h4, h5, h6") {
         let tag = h.tag_upper();
         let level = tag[1..2].parse::<i64>().unwrap_or(0);
         let text = slice_utf16_prefix(&collapse_ws(js::trim(&h.text_content())), 60);
-        if prev_level > 0 && level > prev_level + 1 {
+        let footer = h
+            .closest(impeccable_core::browser::quality::FOOTER_SELECTOR)
+            .map(|f| f.id());
+        let opens_footer = footer.is_some() && footer != prev_footer;
+        let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
+        if prev_level > 0 && level > prev_level + 1 && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
                 format!(
@@ -785,6 +796,8 @@ pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<Rule
         }
         prev_level = level;
         prev_text = text;
+        prev_footer = footer;
+        prev_opens_footer = opens_footer;
     }
     findings
 }

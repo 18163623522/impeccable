@@ -6050,3 +6050,42 @@ on an existing fixture moved.
    face still takes the large-text bar, and a single-weight display face with
    no weight word (Lilita One) keeps the normal-text bar. Size still gates
    it: exxonmobil.com's EMprint-Semibold buttons are 16px and keep 4.5:1.
+## Recorded 2026-10-01: category colours and footer column titles (premise round 4)
+
+Two of Paul's taste calls, both "narrow":
+
+1. **`ai-color-palette` skips category colours**
+   (r5-p28-ai-color-palette-category-colours). In the URL engine an
+   element-level finding does not report when the elements in its role carry
+   six or more distinct hues, at least half of them outside the violet and
+   cyan bands. The role is the tag plus computed font size and weight for the
+   ink forms, the tag plus box size for the gradient forms. Such an element
+   does not vote in the two-hue ink gate either.
+2. **`skipped-heading` skips a skip into the footer**
+   (r5-p29-skipped-heading-footer-titles), in both engines. The skipped
+   heading sits in `footer`, `[role="contentinfo"]` or `#footer`, and the
+   heading it follows is the last one before that footer or the footer's own
+   first heading.
+
+No existing finding moved. Two fixtures are new, which adds four cases and
+changes the seven directory cases by exactly the new files' findings:
+
+- New, `detect-fixture-{json,text}-skipped-heading-footer-html`: 2 findings,
+  the content skip (`<h2> "Should flag" followed by <h4> "Jet fuel grades"`)
+  and the skip between two footer headings (`<h4> "Company" followed by <h6>
+  "Legal small print"`). The four footer column titles do not report.
+- New, `detect-fixture-{json,text}-ai-color-palette-category-colours-html`: 4
+  findings from the static engine, which reads no rendered roles and so
+  reports the two category headings (`#7c3aed`, `#9333ea`) beside the lone one
+  and the page-level accent form. The URL engine's reading of this fixture is
+  pinned in `crates/browser/tests/brand_and_vendors.rs`.
+- Directory cases: `detect-dir-json-all-fixtures` 905 to 911, `detect-no-advisory-json` and
+  `detect-no-advisory-text` 772 to 778, `detect-dir-text-all-fixtures` and
+  `detect-dir-quiet-all-fixtures` the same six, `detect-scope-both` and
+  `detect-scope-type` plus the two `skipped-heading` findings.
+
+Known limits: a footer built from unmarked `div`s (Framer output, a
+`div#contact` closing section) is not recognised and its column titles keep
+reporting; the static engine does not apply the category-colour skip; the
+role key is exact, so category headings set at two font sizes are two roles;
+the page-level `Purple/violet accent colors detected` is not affected.

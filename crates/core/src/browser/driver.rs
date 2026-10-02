@@ -1255,7 +1255,7 @@ fn dark_claim_stands(root_dark: Option<bool>, surfaces: &[Option<crate::color::R
 }
 
 /// The page-level forms of gradient-text, bounce-easing, dark-glow,
-/// radial-halo, layout-transition and marquee, reconciled with the element
+/// radial-halo, layout-transition, marquee and side-tab, reconciled with the element
 /// findings already on the page. Other rules pass through unchanged.
 fn reconcile_page_level_forms(
     dom: &dyn Dom,
@@ -1296,6 +1296,7 @@ fn reconcile_page_level_forms(
                     && layout_transition_page_form_stands(dom, style_text)
             }
             "marquee" => marquee_page_form_stands(dom, &item, &mut marquees),
+            "side-tab" => side_tab_page_form_stands(groups, &item),
             _ => true,
         };
         if stands {
@@ -1619,6 +1620,12 @@ fn marquee_page_form_stands(
     let Some(elements) = item.matches.as_ref().filter(|m| !m.is_empty()) else {
         return true;
     };
+    // A marquee is content crawling past: words, logos, pictures. A loop that
+    // moves nothing a visitor reads or looks at (a wave drawn as one SVG
+    // path, a highlight sweeping across a pill) is an ornament in motion.
+    if !elements.iter().any(|&el| marquee_carries_content(dom, el)) {
+        return false;
+    }
     let root_like = |el: ElId| Some(el) == dom.body() || Some(el) == dom.document_element();
     let parents: Vec<ElId> = elements
         .iter()
@@ -1634,6 +1641,69 @@ fn marquee_page_form_stands(
     }
     seen.push((elements.clone(), parents));
     true
+}
+
+/// Whether an element a marquee animation moves carries anything to read or
+/// look at: text, an image, video, canvas or frame, an SVG inside it (a logo
+/// in a strip; the element being one bare SVG drawing is not content), a
+/// `url()` background on it or under it, or generated content.
+fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
+    const MEDIA: &str = "img, picture, video, canvas, iframe, object, embed, svg, image, use";
+    const MEDIA_TAGS: [&str; 8] = ["img", "picture", "video", "canvas", "iframe", "object", "embed", "marquee"];
+    if !crate::js::trim(&dom.text_content(el)).is_empty() {
+        return true;
+    }
+    if MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
+        return true;
+    }
+    if dom.query_all(Some(el), MEDIA).map_or(true, |m| !m.is_empty()) {
+        return true;
+    }
+    let paints_image = |e: ElId| dom.style(e, "backgroundImage").contains("url(");
+    if paints_image(el) || dom.query_all(Some(el), "*").unwrap_or_default().into_iter().any(paints_image) {
+        return true;
+    }
+    ["::before", "::after"].iter().any(|which| {
+        dom.pseudo_style(el, which, "content").map_or(false, |c| {
+            let c = crate::js::trim(&c).to_string();
+            !(c.is_empty() || c == "none" || c == "normal" || c == "\"\"" || c == "''")
+                || dom.pseudo_style(el, which, "backgroundImage").map_or(false, |b| b.contains("url("))
+        })
+    })
+}
+
+/// The pseudo-element a stripe snippet names, `::before` or `::after`.
+fn stripe_pseudo(detail: &str) -> Option<&'static str> {
+    let head = detail.split(" — ").next().unwrap_or("");
+    if head.ends_with(":before") {
+        Some("::before")
+    } else if head.ends_with(":after") {
+        Some("::after")
+    } else {
+        None
+    }
+}
+
+/// The stylesheet form of a pseudo-element stripe stands unless a host it
+/// resolves to already carries the element form for the same pseudo-element:
+/// that finding read the stripe off the rendered box and names the element,
+/// and the two describe one stripe.
+fn side_tab_page_form_stands(groups: &[FindingGroup], item: &PatternItem) -> bool {
+    const STRIPE: &str = "pseudo-element stripe";
+    if !item.finding.detail.contains(STRIPE) {
+        return true;
+    }
+    let Some(hosts) = item.matches.as_ref().filter(|m| !m.is_empty()) else {
+        return true;
+    };
+    let Some(pseudo) = stripe_pseudo(&item.finding.detail) else {
+        return true;
+    };
+    !groups.iter().filter(|g| hosts.contains(&g.el)).any(|g| {
+        g.findings.iter().any(|f| {
+            f.type_ == "side-tab" && f.detail.contains(STRIPE) && stripe_pseudo(&f.detail) == Some(pseudo)
+        })
+    })
 }
 
 /// JS: index.mjs#serializeFindings(allFindings)
@@ -3940,11 +4010,14 @@ mod page_level_form_tests {
         let original = d.add(Some(strip), "div");
         d.add_selector(original, ".t--original");
         d.add_selector(original, ".page .t--original");
+        d.add_text(original, "Breaking: the strip carries words");
         let clone = d.add(Some(strip), "div");
         d.add_selector(clone, ".t--clone");
+        d.add_text(clone, "Breaking: the strip carries words");
         let band = d.add(Some(body), "div");
         let logos = d.add(Some(band), "div");
         d.add_selector(logos, ".logos");
+        d.add_text(logos, "Acme Globex Initech");
         let snippets: Vec<String> = details(&scan(&d), "marquee").into_iter().map(|(_, s)| s).collect();
         assert_eq!(
             snippets,
@@ -3952,6 +4025,102 @@ mod page_level_form_tests {
                 ".t--original — infinite horizontal loop animation \"m\"".to_string(),
                 ".logos — infinite horizontal loop animation \"scroll\"".to_string(),
             ]
+        );
+    }
+    /// asakana.co's wave divider (one SVG path sliding sideways) and
+    /// quickrefs.com's highlight sweep (a gradient crossing a pill) loop
+    /// forever and carry nothing to read or look at. A strip of logos does.
+    #[test]
+    fn a_marquee_needs_something_to_read_or_look_at() {
+        let style = "@keyframes wave{0%{transform:translate(0)}100%{transform:translate(-50%)}}\
+@keyframes sweep{0%{transform:translate(-120%)}100%{transform:translate(220%)}}\
+.wave{animation:wave 12s linear infinite}\
+.sweep{animation:sweep 3.6s ease-in-out infinite}";
+        let (mut d, body) = page(style);
+        let cta = d.add(Some(body), "section");
+        d.add_text(cta, "Let us talk about your operation.");
+        let wave = d.add(Some(cta), "svg");
+        d.add_selector(wave, ".wave");
+        let _path = d.add(Some(wave), "path");
+        let pill = d.add(Some(body), "span");
+        d.add_text(pill, "Human curation");
+        let sweep = d.add(Some(pill), "span");
+        d.add_selector(sweep, ".sweep");
+        d.set_style(sweep, "backgroundImage", "linear-gradient(100deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 50%, rgba(255, 255, 255, 0) 100%)");
+        assert!(details(&scan(&d), "marquee").is_empty());
+
+        // What makes each one content: words in the track, an inline SVG
+        // logo inside it, a picture painted as a background under it.
+        for content in ["text", "svg", "background"] {
+            let (mut d, body) = page(style);
+            let band = d.add(Some(body), "div");
+            let track = d.add(Some(band), "div");
+            d.add_selector(track, ".wave");
+            match content {
+                "text" => {
+                    d.add_text(track, "Trusted by teams at Acme and Globex");
+                }
+                "svg" => {
+                    let logo = d.add(Some(track), "svg");
+                    d.add_selector(logo, "img, picture, video, canvas, iframe, object, embed, svg, image, use");
+                }
+                _ => {
+                    let tile = d.add(Some(track), "div");
+                    d.add_selector(tile, "*");
+                    d.set_style(tile, "backgroundImage", "url(\"logo.png\")");
+                }
+            }
+            let snippets: Vec<String> = details(&scan(&d), "marquee").into_iter().map(|(_, s)| s).collect();
+            assert_eq!(
+                snippets,
+                vec![".wave — infinite horizontal loop animation \"wave\"".to_string()],
+                "{content}"
+            );
+        }
+    }
+
+    /// freenet.de: `.md-header::after` drew one 3px stripe and it reported
+    /// twice, once read off the element and once off the stylesheet.
+    #[test]
+    fn a_pseudo_stripe_its_host_already_reports_is_not_reported_from_the_stylesheet() {
+        let style = ".md-header::after{content:\"\";position:absolute;left:0;bottom:0;width:100%;height:3px;background-color:#84bc34}";
+        let build = |host_reports: bool| {
+            let (mut d, body) = page(style);
+            let header = d.add(Some(body), "div");
+            d.add_selector(header, ".md-header");
+            d.set_attr(header, "class", "md-header");
+            d.set_rect(header, 0.0, 0.0, 1280.0, 90.0);
+            if host_reports {
+                for (p, v) in [
+                    ("content", "\"\""),
+                    ("position", "absolute"),
+                    ("opacity", "1"),
+                    ("display", "block"),
+                    ("width", "1280px"),
+                    ("height", "3px"),
+                    ("top", "87px"),
+                    ("right", "0px"),
+                    ("bottom", "0px"),
+                    ("left", "0px"),
+                    ("backgroundColor", "rgb(132, 188, 52)"),
+                ] {
+                    d.set_pseudo_style(header, "::after", p, v);
+                }
+            }
+            let out = scan(&d);
+            let mut all: Vec<String> = details(&out, "side-tab").into_iter().map(|(_, s)| s).collect();
+            all.sort();
+            all
+        };
+        assert_eq!(
+            build(true),
+            vec!["div.md-header::after — absolute 3px pseudo-element stripe (bottom)".to_string()]
+        );
+        // With no element form on the host (the pseudo-element was not
+        // readable there), the stylesheet form is the only report and stays.
+        assert_eq!(
+            build(false),
+            vec![".md-header::after — absolute 3px pseudo-element stripe (bottom: 0)".to_string()]
         );
     }
 }

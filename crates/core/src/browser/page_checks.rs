@@ -100,6 +100,62 @@ fn has_visible_direct_text(dom: &dyn Dom, el: ElId) -> bool {
     has_direct_text_longer_than(dom, el, 0)
 }
 
+/// Below this share of the characters in text that has a box, a face named
+/// primary by its element count sets next to none of what a visitor reads,
+/// and `overused-font` stands down.
+///
+/// Counted per element, a page of short labels in one face over long copy
+/// in another names the label face: walla.co.il's Arial at "40% of text"
+/// sets 2% of the characters. But the element count is also how a display
+/// face that sets every heading gets named, and judges call that the
+/// pattern too: of the findings both judges called harmful, the lowest
+/// character share is mrtarget.de's Montserrat at 6.6%, then vestris.ai's
+/// Instrument Serif at 7.9%. One character in twenty sits clear of both.
+/// A finding above it is never moved or renamed.
+pub const OVERUSED_FONT_MIN_CHAR_SHARE: f64 = 0.05;
+
+/// Whether `font` sets under [`OVERUSED_FONT_MIN_CHAR_SHARE`] of the
+/// characters in text that has a box. With no such text there is nothing to
+/// weigh, and the element count stands.
+fn sets_next_to_none_of_the_text(font: &str, chars: &[(String, f64)], total: f64) -> bool {
+    if !(total > 0.0) {
+        return false;
+    }
+    let own = chars.iter().find(|(k, _)| k == font).map_or(0.0, |(_, c)| *c);
+    own / total < OVERUSED_FONT_MIN_CHAR_SHARE
+}
+
+/// The characters of `el`'s own text nodes as they render: white space
+/// collapsed, and the indentation around each node dropped.
+fn direct_text_chars(dom: &dyn Dom, el: ElId) -> f64 {
+    dom.direct_text_nodes(el)
+        .iter()
+        .map(|t| collapse_ws(js::trim(t)).chars().count() as f64)
+        .sum()
+}
+
+/// Whether an element's text is laid out for a visitor: neither it nor an
+/// ancestor is `hidden`, `display: none`, `visibility: hidden` or
+/// `content-visibility: hidden`. Opacity is deliberately not read: copy
+/// waiting at `opacity: 0` for a scroll reveal is the page's copy and a
+/// visitor reads all of it.
+fn font_text_has_a_box(dom: &dyn Dom, el: ElId) -> bool {
+    for current in ancestors_inclusive(dom, el) {
+        if dom.hidden_prop(current) || dom.attr(current, "hidden").is_some() {
+            return false;
+        }
+        let visibility = js::to_lower_case(&dom.style(current, "visibility"));
+        if js::to_lower_case(&dom.style(current, "display")) == "none"
+            || visibility == "hidden"
+            || visibility == "collapse"
+            || js::to_lower_case(&dom.style(current, "contentVisibility")) == "hidden"
+        {
+            return false;
+        }
+    }
+    true
+}
+
 const IMPECCABLE_OWN: &str =
     ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip";
 
@@ -109,6 +165,8 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
 
     let mut font_usage: Vec<(String, f64)> = Vec::new();
     let mut total_text_elements = 0.0f64;
+    let mut font_chars: Vec<(String, f64)> = Vec::new();
+    let mut total_text_chars = 0.0f64;
     for el in dom
         .query_all(
             None,
@@ -122,6 +180,10 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
         if !has_visible_direct_text(dom, el) {
             continue;
         }
+        // The characters each face sets in text that has a box: what
+        // stands a finding down when the face it names sets next to none of
+        // what a visitor reads (below).
+        let weight = if font_text_has_a_box(dom, el) { direct_text_chars(dom, el) } else { 0.0 };
         let ff = dom.style(el, "fontFamily");
         if ff.is_empty() {
             continue;
@@ -145,6 +207,14 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
             font_usage.push((primary.clone(), 1.0));
         }
         total_text_elements += 1.0;
+        if weight > 0.0 {
+            if let Some(slot) = font_chars.iter_mut().find(|(k, _)| k == primary) {
+                slot.1 += weight;
+            } else {
+                font_chars.push((primary.clone(), weight));
+            }
+            total_text_chars += weight;
+        }
     }
 
     if total_text_elements >= 20.0 {
@@ -161,6 +231,7 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
                 let share = count / total_text_elements;
                 if OVERUSED_FONTS.contains(&font.as_str())
                     && !is_brand_font_on_own_domain(font, Some(&hostname))
+                    && !sets_next_to_none_of_the_text(font, &font_chars, total_text_chars)
                 {
                     findings.push(BrowserFinding::new(
                         "overused-font",
@@ -3306,6 +3377,80 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].type_, "overused-font");
         assert_eq!(f[0].detail, "Primary font: inter (95% of text)");
+    }
+
+    fn typeset(d: &mut FakeDom, parent: ElId, tag: &str, text: &str, family: &str) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.add_text(el, text);
+        d.set_style(el, "fontFamily", family);
+        d.set_style(el, "fontSize", "16px");
+        el
+    }
+
+    fn font_finding(d: &FakeDom) -> Option<String> {
+        check_typography(d).into_iter().find(|f| f.type_ == "overused-font").map(|f| f.detail)
+    }
+
+    /// walla.co.il: Arial is "40% of text" by element and sets 2% of the
+    /// characters. Under one in twenty the finding stands down; above it the
+    /// element count names the face and the snippet is unchanged.
+    #[test]
+    fn a_face_that_sets_next_to_none_of_the_text_stands_down() {
+        let build = |label: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            for _ in 0..20 {
+                typeset(&mut d, body, "span", label, "Inter, sans-serif");
+            }
+            for _ in 0..5 {
+                typeset(&mut d, body, "p", &"w".repeat(200), "Georgia, serif");
+            }
+            d
+        };
+        // 40 of 1,040 characters: 3.8%.
+        assert_eq!(font_finding(&build("Go")), None);
+        // 100 of 1,100: 9.1%, and the snippet is the element share.
+        assert_eq!(font_finding(&build("Label")).as_deref(), Some("Primary font: inter (80% of text)"));
+    }
+
+    /// Only text with a box is weighed: the long copy in a closed drawer does
+    /// not lift the face it is set in, and copy waiting for a scroll reveal
+    /// at `opacity: 0` is weighed like any other.
+    #[test]
+    fn the_character_share_weighs_only_text_with_a_box() {
+        let build = |hide: (&str, &str)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            for _ in 0..20 {
+                typeset(&mut d, body, "span", "Go", "Inter, sans-serif");
+            }
+            let drawer = d.add(Some(body), "div");
+            d.set_style(drawer, hide.0, hide.1);
+            for _ in 0..30 {
+                typeset(&mut d, drawer, "p", &"w".repeat(200), "Inter, sans-serif");
+            }
+            for _ in 0..5 {
+                typeset(&mut d, body, "p", &"w".repeat(200), "Georgia, serif");
+            }
+            d
+        };
+        assert_eq!(font_finding(&build(("display", "none"))), None);
+        assert_eq!(font_finding(&build(("visibility", "hidden"))), None);
+        assert_eq!(
+            font_finding(&build(("opacity", "0"))).as_deref(),
+            Some("Primary font: inter (91% of text)")
+        );
+
+        // With no text that has a box there is nothing to weigh, and the
+        // element count stands as before.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let hidden = d.add(Some(body), "div");
+        d.set_style(hidden, "display", "none");
+        for _ in 0..25 {
+            typeset(&mut d, hidden, "p", "hidden", "Inter, sans-serif");
+        }
+        assert_eq!(font_finding(&d).as_deref(), Some("Primary font: inter (100% of text)"));
     }
 
     #[test]

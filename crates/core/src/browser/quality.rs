@@ -1671,18 +1671,36 @@ fn quality_input(dom: &dyn Dom, el: ElId, line_max: f64) -> QualityInput {
     }
 }
 
+/// What counts as the page's footer for `skipped-heading`: the element, the
+/// landmark role, or the conventional id.
+pub const FOOTER_SELECTOR: &str = "footer, [role=\"contentinfo\"], #footer";
+
 /// JS: checks.mjs#checkPageQualityFromDoc(doc)
+///
+/// A skip into the footer is not reported (corpus decision
+/// r5-p29-skipped-heading-footer-titles): footers title their link columns
+/// with h4 straight after the page's closing h2, and those titles are chrome,
+/// not part of the content outline. The skipped heading has to sit in a
+/// footer, and the heading it follows has to be the last one before that
+/// footer or the footer's own first heading (the closing call to action is
+/// often inside the footer). A skip between two later footer headings, and
+/// every skip in the content, reports.
 pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
     let mut findings = Vec::new();
     let mut prev_level: i64 = 0;
     let mut prev_text = String::new();
+    let mut prev_footer: Option<ElId> = None;
+    let mut prev_opens_footer = false;
     for h in dom.query_all(None, "h1, h2, h3, h4, h5, h6").unwrap_or_default() {
         let tag = dom.tag_name(h);
         // JS `parseInt(h.tagName[1])`
         let level = js::parse_int(&tag.chars().nth(1).map(|c| c.to_string()).unwrap_or_default(), 10);
         let level = if level.is_nan() { 0 } else { level as i64 };
         let text = slice_utf16_prefix(&collapse_ws(js::trim(&dom.text_content(h))), 60);
-        if prev_level > 0 && level > prev_level + 1 {
+        let footer = dom.closest(h, FOOTER_SELECTOR).ok().flatten();
+        let opens_footer = footer.is_some() && footer != prev_footer;
+        let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
+        if prev_level > 0 && level > prev_level + 1 && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
                 format!(
@@ -1697,6 +1715,8 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         }
         prev_level = level;
         prev_text = text;
+        prev_footer = footer;
+        prev_opens_footer = opens_footer;
     }
     findings
 }
@@ -4157,6 +4177,57 @@ mod tests {
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].type_, "skipped-heading");
         assert_eq!(f[0].detail, "<h1> \"Title here\" followed by <h3> \"Sub\" (missing h2)");
+    }
+
+    /// r5-p29: a skip into the footer is chrome; a skip in the content, and
+    /// one between two later footer headings, reports.
+    #[test]
+    fn skipped_heading_into_a_footer() {
+        let heading = |d: &mut FakeDom, parent: ElId, tag: &str, text: &str| {
+            let h = d.add(Some(parent), tag);
+            d.add_text(h, text);
+            h
+        };
+        let details = |d: &FakeDom| -> Vec<String> {
+            check_page_quality_dom(d).into_iter().map(|f| f.detail).collect()
+        };
+
+        // The footer's column titles follow the page's closing h2.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        heading(&mut d, body, "h1", "Products");
+        heading(&mut d, body, "h3", "Jet Fuel");
+        heading(&mut d, body, "h2", "Ready to start?");
+        let footer = d.add(Some(body), "footer");
+        d.add_selector(footer, FOOTER_SELECTOR);
+        heading(&mut d, footer, "h4", "Solutions");
+        heading(&mut d, footer, "h4", "Company");
+        heading(&mut d, footer, "h6", "Legal");
+        assert_eq!(
+            details(&d),
+            vec![
+                "<h1> \"Products\" followed by <h3> \"Jet Fuel\" (missing h2)",
+                "<h4> \"Company\" followed by <h6> \"Legal\" (missing h5)",
+            ]
+        );
+
+        // The closing call to action sits inside the footer itself.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        heading(&mut d, body, "h1", "Energy");
+        let footer = d.add(Some(body), "div");
+        d.add_selector(footer, FOOTER_SELECTOR);
+        heading(&mut d, footer, "h2", "Ready to level up?");
+        heading(&mut d, footer, "h4", "Products");
+        heading(&mut d, footer, "h4", "Company");
+        assert_eq!(details(&d), Vec::<String>::new());
+
+        // The same headings with no footer around them.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        heading(&mut d, body, "h2", "Ready to start?");
+        heading(&mut d, body, "h4", "Solutions");
+        assert_eq!(details(&d), vec!["<h2> \"Ready to start?\" followed by <h4> \"Solutions\" (missing h3)"]);
     }
 
     #[test]

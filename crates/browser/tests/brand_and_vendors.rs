@@ -18,6 +18,13 @@
 //!   whose headings are set two weight steps heavier than the body reports as
 //!   advisory; one step heavier stays a warning
 //!   (r4-p23-flat-type-hierarchy-commerce).
+//! - `ai-color-palette-category-colours.html`: a violet, purple or cyan that
+//!   is one of six or more hues its role carries is a category colour and
+//!   does not report; a lone one does, and so do six tiles that stay inside
+//!   the violet and cyan bands (r5-p28-ai-color-palette-category-colours).
+//! - `skipped-heading-footer.html`: a skip into the footer does not report; a
+//!   skip in the content and one between two later footer headings do
+//!   (r5-p29-skipped-heading-footer-titles).
 //! - A `file://` page in a project whose DESIGN.md declares a purple reports
 //!   none of ai-color-palette's purple forms.
 
@@ -114,6 +121,56 @@ fn purple_headings_in_the_brand_hue_do_not_report() {
             "Purple/violet gradient background",
             "Purple/violet text (#5c2d91) on heading",
             "Purple/violet text (#6a35a6) on heading",
+        ]
+    );
+}
+
+#[test]
+fn category_colours_do_not_report() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let findings = scan(&engine, port, "ai-color-palette-category-colours.html");
+    let mut palette: Vec<(&str, &str)> = of(&findings, "ai-color-palette")
+        .iter()
+        .map(|f| (f.snippet.as_str(), selector(f)))
+        .collect();
+    palette.sort();
+    let snippets: Vec<&str> = palette.iter().map(|(s, _)| *s).collect();
+    assert_eq!(
+        snippets,
+        vec![
+            "Cyan gradient background",
+            "Cyan gradient background",
+            "Cyan gradient background",
+            // The page-level stylesheet form is not about one element and
+            // keeps reporting.
+            "Purple/violet accent colors detected",
+            "Purple/violet gradient background",
+            "Purple/violet gradient background",
+            "Purple/violet gradient background",
+            "Purple/violet gradient background",
+            "Purple/violet text (#7c3aed) on heading",
+        ],
+        "{palette:#?}"
+    );
+    // Nothing in the category headings or the category tiles reports.
+    assert!(
+        !palette.iter().any(|(_, sel)| sel.contains("section-title") || sel.contains("div.tile")),
+        "{palette:#?}"
+    );
+}
+
+#[test]
+fn a_skip_into_the_footer_does_not_report() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let findings = scan(&engine, port, "skipped-heading-footer.html");
+    let skips: Vec<&str> = of(&findings, "skipped-heading").iter().map(|f| f.snippet.as_str()).collect();
+    assert_eq!(
+        skips,
+        vec![
+            "<h2> \"Should flag\" followed by <h4> \"Jet fuel grades\" (missing h3)",
+            "<h4> \"Company\" followed by <h6> \"Legal small print\" (missing h5)",
         ]
     );
 }

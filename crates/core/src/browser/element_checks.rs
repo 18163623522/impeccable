@@ -2025,7 +2025,7 @@ pub enum TellHue {
 
 impl TellHue {
     /// The band a colour falls in, `None` outside both.
-    fn of(hue: f64) -> Option<TellHue> {
+    pub(crate) fn of(hue: f64) -> Option<TellHue> {
         if (160.0..=200.0).contains(&hue) {
             Some(TellHue::Cyan)
         } else if (260.0..=310.0).contains(&hue) {

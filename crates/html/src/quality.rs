@@ -365,6 +365,14 @@ fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: f64, depth: usize
     }
 }
 
+/// The hit, at advisory severity when `advisory` holds.
+fn advisory_if(mut hit: RuleHit, advisory: bool) -> RuleHit {
+    if advisory {
+        hit.severity = Some(impeccable_core::checks::rules::ADVISORY_SEVERITY.to_string());
+    }
+    hit
+}
+
 /// JS: checks.mjs#checkQuality(opts), static (`rect: null`) branches.
 pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     let el = q.el;
@@ -568,9 +576,12 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     is_line_clamp(sv(style, "display"), sv(style, "webkitLineClamp")),
                 )
             {
-                findings.push(RuleHit::new(
-                    "tight-leading",
-                    format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                findings.push(advisory_if(
+                    RuleHit::new(
+                        "tight-leading",
+                        format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                    ),
+                    crate::text_context::is_fine_print(el),
                 ));
             }
         }
@@ -617,9 +628,11 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             && !is_uppercase
             && !is_non_rendered_text(el, tag, Some(style))
         {
-            findings.push(RuleHit::new(
-                "tiny-text",
-                format!("{}px body text", number_to_string(font_size)),
+            // Fine print (taste call r5-p27) and text in a mockup (r5-p26)
+            // report as advisory.
+            findings.push(advisory_if(
+                RuleHit::new("tiny-text", format!("{}px body text", number_to_string(font_size))),
+                crate::text_context::is_fine_print(el) || crate::text_context::in_mock_context(el),
             ));
         }
     }
@@ -653,14 +666,22 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     && (is_interactive || is_furniture || dt_len <= 20)
                 {
                     let excerpt = slice_utf16_prefix(&direct_text, 40);
-                    findings.push(RuleHit::new(
-                        "undersized-ui-text",
-                        format!(
-                            "{}px functional text \"{}\" (below {}px floor)",
-                            number_to_string(font_size),
-                            excerpt,
-                            number_to_string(floor)
+                    // A label with no reading job (taste call r5-p3) and
+                    // text in a mockup (r5-p26) report as advisory. A
+                    // control's text is never a micro-label.
+                    let advisory = (!is_interactive && crate::text_context::is_micro_label(el))
+                        || crate::text_context::in_mock_context(el);
+                    findings.push(advisory_if(
+                        RuleHit::new(
+                            "undersized-ui-text",
+                            format!(
+                                "{}px functional text \"{}\" (below {}px floor)",
+                                number_to_string(font_size),
+                                excerpt,
+                                number_to_string(floor)
+                            ),
                         ),
+                        advisory,
                     ));
                 }
             }

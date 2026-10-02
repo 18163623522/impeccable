@@ -951,6 +951,14 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     }
 }
 
+/// The hit, at advisory severity when `advisory` holds.
+fn advisory_if(mut hit: RuleHit, advisory: bool) -> RuleHit {
+    if advisory {
+        hit.severity = Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+    }
+    hit
+}
+
 /// JS: checks.mjs#checkQuality(opts), browser adapter inputs (`rect` set,
 /// `win` = window).
 pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
@@ -971,6 +979,19 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
 
     let st = |k: &str| dom.style(el, k);
     let spx = |k: &str| style_px(dom, el, k);
+
+    // The contexts in which a typography finding reports as advisory
+    // (`crate::checks::text_context`), each asked once and only of an
+    // element that failed: legal fine print under line-length, tiny-text and
+    // tight-leading (taste call r5-p27), and mock context under tiny-text
+    // and undersized-ui-text (r5-p26).
+    let fine_print = std::cell::OnceCell::new();
+    let fine_print_hit = |hit: RuleHit| {
+        let yes = *fine_print.get_or_init(|| super::text_context::is_fine_print_dom(dom, el));
+        advisory_if(hit, yes)
+    };
+    let mock = std::cell::OnceCell::new();
+    let in_mock = || *mock.get_or_init(|| super::text_context::in_mock_context_dom(dom, el));
 
     // A raster (<img>, or an element with a background url) at near-zero
     // opacity never reaches the screen: the produced material ships as a
@@ -1053,7 +1074,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 let long = widths.iter().filter(|w| chars(**w) > over).count();
                 if long >= 2 {
                     let longest = widths.iter().copied().fold(0.0, js::math_max);
-                    findings.push(RuleHit::new(
+                    findings.push(fine_print_hit(RuleHit::new(
                         "line-length",
                         format!(
                             "~{} chars on {} of {} rendered lines (aim for <{})",
@@ -1062,7 +1083,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                             number_to_string(widths.len() as f64),
                             number_to_string(line_max)
                         ),
-                    ));
+                    )));
                 }
             }
         }
@@ -1452,10 +1473,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     && !is_heading_text(dom, el, tag)
                     && !bold_title()
                 {
-                    findings.push(RuleHit::new(
+                    findings.push(fine_print_hit(RuleHit::new(
                         "tight-leading",
                         format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
-                    ));
+                    )));
                 }
             }
         }
@@ -1503,10 +1524,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             && !is_code_run
             && !is_non_rendered_text(dom, el, tag)
         {
-            findings.push(RuleHit::new(
+            // Fine print and text in a mockup report as advisory.
+            let hit = fine_print_hit(RuleHit::new(
                 "tiny-text",
                 format!("{}px body text", number_to_string(font_size)),
             ));
+            findings.push(if hit.is_advisory() { hit } else { advisory_if(hit, in_mock()) });
         }
     }
 
@@ -1541,14 +1564,23 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     && (is_interactive || is_furniture || dt_len <= 20)
                 {
                     let excerpt = slice_utf16_prefix(&dt, 40);
-                    findings.push(RuleHit::new(
-                        "undersized-ui-text",
-                        format!(
-                            "{}px functional text \"{}\" (below {}px floor)",
-                            number_to_string(font_size),
-                            excerpt,
-                            number_to_string(floor)
+                    // A label with no reading job (taste call r5-p3) and
+                    // text in a mockup (r5-p26) report as advisory. A
+                    // control's text is never a micro-label.
+                    let advisory = (!is_interactive
+                        && super::text_context::is_micro_label_dom(dom, el))
+                        || in_mock();
+                    findings.push(advisory_if(
+                        RuleHit::new(
+                            "undersized-ui-text",
+                            format!(
+                                "{}px functional text \"{}\" (below {}px floor)",
+                                number_to_string(font_size),
+                                excerpt,
+                                number_to_string(floor)
+                            ),
                         ),
+                        advisory,
                     ));
                 }
             }

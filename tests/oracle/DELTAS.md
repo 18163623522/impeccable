@@ -6326,3 +6326,139 @@ checks are compiled into the in-page bundle.
 8. **A panel parked under a clip collapsed to no height or width still
    counts** (epcco.com.sa's 0px slider), as does a parked panel that is in
    flow or `position: fixed`.
+## Recorded 2026-10-02: measuring the right box (corpus/round8-right-box)
+
+Round 8, branch 3 of observations-35 section 5, plus the `side-tab` recall
+bug of walkthroughs-35. Every change reads a box the engine already
+measured and stops reading the wrong one; none adds a rule or changes a
+severity. Fail-safe throughout: where the fact a change needs was not
+recorded (a text rect, a hit-test stack, a scroll width), the base reading
+stands.
+
+- **`side-tab`, a thin stripe on a card rounded away from it**
+  (walkthroughs-35, submitmap.com 7678, 7682). The computed
+  `border-radius` of `0px 12px 12px 0px` leads with 0, so a 2px left stripe
+  on that card took the square stripe's 3px floor. When the leading value is
+  0, the stripe is under 3px and the far corners are known, the radius is the
+  smaller far corner, and the stripe reports as
+  `border-left: 2px + border-radius: 12px`. A stripe of 3px or more keeps its
+  old wording. Top and bottom bands are untouched (taste call T2).
+- **`clipped-overflow-container`, row 7's implementation half.** (a) A
+  positioned child that paints nothing of its own (no fill, background
+  image, border, shadow, outline, own text or generated content) is cut only
+  where its descendants paint: text by its text rect, replaced elements and
+  painted boxes by their border boxes, a descendant that clips both axes by
+  its box. More than 200 descendants, text with no rect, or generated
+  content leave the wrapper's own box standing, and a popover layer keeps
+  reporting whatever it measures. mk.co.kr's `div.more_btn` and
+  bankofamerica.com's `div.spa-icon-wrapper`. (b) An absolutely positioned
+  child whose containing block sits inside a scroll container between it and
+  the clipping box belongs to that scroller (gamer.com.tw's captions in a row
+  at `overflow: auto hidden`). A fixed child is not read this way.
+- **`heading-rhythm`, row 12.** (a) A spacer is now any empty box whose
+  rendered children are all spacers, four levels deep: no text, no picture,
+  no painted bottom edge (kinghost.com.br's `div` around a
+  `wp-block-spacer`). (b) The walk below a heading stops at the end of
+  `main` (or `role="main"`), and once it has left the heading's own box it
+  does not measure to a `footer`, `nav`, `aside` or `header` (or their
+  roles): improved-rotary-phone-two.vercel.app measured 86px to the page
+  footer.
+- **`body-text-viewport-edge`, row 15.** (a) A line its own box truncates
+  by design (an ellipsis or a line clamp on a box that generates one, the
+  test `text-overflow` already uses) is measured to that box's padding edge
+  (keydris.com, leilonozap.vercel.app). (b) Text on a track a running,
+  infinitely repeating CSS animation transforms inside a box that hides x
+  overflow is not measured (paseo.sh). A track a script parks with a
+  transform is measured as before.
+- **`text-occlusion`, row 15.** (a) Where the answer to a probe is text, and
+  the hit-test stack places a picture (`img`, `picture`, `video`, `canvas`)
+  between that answer and the victim, or an ancestor of the victim painting
+  an opaque fill over it, the point is not counted: the answer lies on what
+  buries the victim (bankofamerica.com's sign-in form at `z-index: -1`). (b)
+  Both texts are read as the band their glyphs ink instead of their content
+  area, for text of ASCII, spaces and the four common currency signs with a
+  known font size and one line (or recorded line rects): the band drops
+  `max(0, 0.75 * H - 0.8em)` above the first line and
+  `max(0, 0.18 * H - 0.25em)` below the last, `H` being that line's rect
+  height. freenet.de's 40px price on a 40px line has a 57px rect that laps
+  the 12px label above it; its digits do not.
+- **`edge-flush-cards`, row 15.** A table cell, row, row group, caption or
+  column (by tag or computed `display`) is not a card (paseo.sh's `th`).
+- **`repeated-container-text`, row 15.** In the URL engine an element must
+  also pass the Text paint gate (a container, its box gate), so slides parked
+  past their window repeat nothing. In both engines, a class token with a
+  `-` or `_` part of four or more hex digits that holds a decimal digit is
+  dropped from the spot signature: it names an instance
+  (`jet-listing-dynamic-post-43268`), not a spot (kinghost.com.br).
+- **`first-viewport-column-overflow`, row 15.** The tall column and the
+  short one must have disjoint x ranges (submitmap.com's
+  `flex-col lg:flex-row` stack).
+- **`nested-cards`, row 8's control.** `role="tablist"`, `"radiogroup"` and
+  `"toolbar"` join `"menu"` and `"listbox"` as boxes that are not cards
+  (easyveo.com's Video / Image switch).
+- **`undersized-ui-text`, row 6.** (a) `[tabindex]` no longer makes a box a
+  control by itself: a box with a `tabindex` counts as one only when the value
+  is not negative and its text is 80 UTF-16 units or fewer. Every other
+  control selector is unchanged. (b) In the URL engine, a run in a monospace
+  face with `white-space: pre*` whose text holds one of
+  `{ } [ ] < > = ; " \` \ _` is code and is exempt (directus.io's JSON
+  sample). The character test is what keeps monospace pricing labels on the
+  same site reporting. (a) is mirrored in the static engine; (b) is not,
+  since its cascade carries no `white-space`.
+
+**Not built: `flat-type-hierarchy`** (row 15, kinghost.com.br 218888, 218909).
+"Decline when a rendered heading stands 1.25 times above the ladder top"
+removed the should-flag column of `flat-type-hierarchy.html` (one 48px h1
+on the page) and contradicts round 7's otto.de note. The narrower "a heading
+size a full step above the top, used twice" removed, on run 28, four
+findings both judges called the pattern present (inven.co.kr 141932, 142191,
+joongang.co.kr 138137, walla.co.il 142983). How much a role's secondary
+size counts against its modal one is a taste call.
+
+New fixtures, each with a should-flag and a should-pass column, pinned on
+the URL engine by `crates/browser/tests/right_box.rs` (every test there
+fails on the base engine):
+`side-tab-far-corners.html`, `clipped-overflow-painted-box.html`,
+`heading-rhythm-spacers.html`, `body-text-viewport-edge-truncated.html`,
+`text-occlusion-buried.html`, `edge-flush-cards-table.html`,
+`repeated-container-text-carousel.html`,
+`first-viewport-column-overflow-stacked.html`, `nested-cards-controls.html`,
+`undersized-ui-text-focus-and-code.html`.
+
+- `detect-fixture-json-side-tab-far-corners-html`, `detect-fixture-text-side-tab-far-corners-html`, `detect-fixture-json-clipped-overflow-painted-box-html`, `detect-fixture-text-clipped-overflow-painted-box-html`, `detect-fixture-json-heading-rhythm-spacers-html`, `detect-fixture-text-heading-rhythm-spacers-html`, `detect-fixture-json-body-text-viewport-edge-truncated-html`, `detect-fixture-text-body-text-viewport-edge-truncated-html`, `detect-fixture-json-text-occlusion-buried-html`, `detect-fixture-text-text-occlusion-buried-html`, `detect-fixture-json-edge-flush-cards-table-html`, `detect-fixture-text-edge-flush-cards-table-html`, `detect-fixture-json-repeated-container-text-carousel-html`, `detect-fixture-text-repeated-container-text-carousel-html`, `detect-fixture-json-first-viewport-column-overflow-stacked-html`, `detect-fixture-text-first-viewport-column-overflow-stacked-html`, `detect-fixture-json-nested-cards-controls-html`, `detect-fixture-text-nested-cards-controls-html`, `detect-fixture-json-undersized-ui-text-focus-and-code-html`, `detect-fixture-text-undersized-ui-text-focus-and-code-html`: new cases. On the static engine only three report: the four side-tab rows; the flag panel and the parked-slides panel of the carousel fixture; and on the code fixture the three flag rows plus the JSON lines (one of them also as `tiny-text`), which the static engine cannot exempt.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the new fixtures' findings only (835 to 848 counted). No existing finding moved; every pre-existing fixture golden replays byte for byte.
+
+Corpus ratchet (same replay, `reports/ratchet/round8-right-box-ratchet-*.json`):
+run 35 removes 52 and adds 6 (4 of the adds are the `heading-rhythm` page
+count changing from 3 to 2 headings on improved-rotary-phone-two), with one
+violation, 216097 (vexoai.com, "© 2026 VexoAI, Inc." at 10px in a
+`footer tabindex="-1"`: with the footer no longer a control it takes the
+decided 10px small-print floor). Run 34 removes 20 unjudged findings and
+adds 10. Run 28 matches the base engine except clipped-overflow (-8),
+undersized-ui-text (-7) and heading-rhythm (+10), with no new violation.
+
+### Known limits
+
+1. **The static engine reads none of the layout changes**: wrappers, scrollers,
+   spacers, landmarks, truncation, tracks, the hit-test stack, table cells
+   in scrollers, column positions. It shares the side-tab, id-like class and
+   `tabindex` changes, and the nested-cards role list does not apply to its
+   own nested-cards code, which flags neither column of that fixture.
+2. **The ink band is a font-agnostic estimate.** It assumes an ascent of 75
+   to 82% of the content area and ascenders and descenders of at most 0.8
+   and 0.25em; a face with a smaller ascent share and a large size could
+   have a few pixels of ink above the band. Accented capitals, emoji and
+   non-Latin text keep the content area.
+3. **The `heading-rhythm` spacer change also adds findings**: an empty
+   subtitle slot under a heading (tchibo.de's `span.ds-text-75` holding an
+   empty `p`) is now space, and five card titles 8px under a banner and
+   32px over their link report on each tchibo.de capture (10 on run 34, 10
+   on run 28, unjudged). That is what the page shows.
+4. **`tabindex` regions**: a focusable box over 80 characters is read as a
+   region, so a long label inside a custom control written as a big
+   focusable `div` with no role loses the control floor. `undersized-ui-text`
+   then reports it only up to 20 characters, and `tiny-text` takes longer
+   runs.
+5. **Text an ancestor clips** is still measured against the viewport, as the
+   review of observations-20 row 31 decided (simplybudget.framer.ai): only an
+   element's own truncation ends its line.

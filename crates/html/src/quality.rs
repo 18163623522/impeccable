@@ -322,7 +322,35 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
 
 const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
-const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"], [tabindex]";
+const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
+
+/// The browser engine's `FOCUSABLE_CONTROL_MAX_CHARS`.
+const FOCUSABLE_CONTROL_MAX_CHARS: usize = 80;
+
+/// Whether `el` is, or sits in, a control, as the browser engine reads it:
+/// one of the [`INTERACTIVE`] elements and roles, or a box with a `tabindex`
+/// that is not negative and that holds at most
+/// [`FOCUSABLE_CONTROL_MAX_CHARS`] of text. A focusable region (a card, an
+/// accordion item, a skip-link target) is not a control.
+fn is_in_control(el: &StaticElement<'_>) -> bool {
+    if el.closest(INTERACTIVE).is_some() {
+        return true;
+    }
+    let mut cur = Some(*el);
+    while let Some(c) = cur {
+        if let Some(value) = c.get_attribute("tabindex") {
+            let index = parse_float(js::trim(value));
+            let focusable = !(index.is_finite() && index < 0.0);
+            if focusable
+                && utf16_len(js::trim(&collapse_ws(&c.text_content()))) <= FOCUSABLE_CONTROL_MAX_CHARS
+            {
+                return true;
+            }
+        }
+        cur = c.parent_element();
+    }
+    false
+}
 const FURNITURE: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer, [class*=\"meta\" i], [class*=\"label\" i], [class*=\"badge\" i], [class*=\"chip\" i], [class*=\"pill\" i], [class*=\"tag\" i], [class*=\"kicker\" i], [class*=\"eyebrow\" i], [class*=\"breadcrumb\" i], [class*=\"timestamp\" i], [class*=\"category\" i], [class*=\"caption\" i], [class*=\"nav\" i]";
 const SMALLPRINT: &str = "small, footer, [class*=\"legal\" i], [class*=\"copyright\" i], [class*=\"fineprint\" i], [class*=\"fine-print\" i], [class*=\"smallprint\" i], [class*=\"small-print\" i], [class*=\"disclaimer\" i], [class*=\"disclosure\" i], [class*=\"footnote\" i]";
 
@@ -651,9 +679,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             && el.closest("sub, sup").is_none()
             && !is_non_rendered_text(el, tag, Some(style))
         {
+            // The browser engine also exempts a monospace run with its
+            // whitespace kept that reads as code; this cascade carries no
+            // `white-space`, so a code line outside a `pre` or `code` still
+            // reports here.
             let is_exempt_context = el.closest(EXEMPT_CONTEXT).is_some();
             if !is_exempt_context && !is_visually_hidden(el, style) {
-                let is_interactive = el.closest(INTERACTIVE).is_some();
+                let is_interactive = is_in_control(el);
                 let is_furniture = el.closest(FURNITURE).is_some();
                 let is_smallprint = el.closest(SMALLPRINT).is_some();
                 let floor = if !is_interactive && is_smallprint {

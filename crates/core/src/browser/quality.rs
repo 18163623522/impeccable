@@ -18,7 +18,7 @@ use crate::checks::measures::{
 use crate::checks::rules::RuleHit;
 use super::text_geometry::{
     holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent, phrasing_text_font,
-    scrolling_ancestor_cuts, text_line_count,
+    clamp_to_own_clip, rides_a_running_track, scrolling_ancestor_cuts, text_line_count,
 };
 use crate::checks::text_rules::{
     average_glyph_advance_em_at, font_weight_number, is_bold_title_leading, is_cjk_text,
@@ -71,7 +71,42 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
 
 const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
-const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"], [tabindex]";
+const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
+
+/// The most text, in UTF-16 units, a focusable box holds while it still reads
+/// as one control with a label: a tab, a chip, a custom button. Past this the
+/// box is a region a visitor can focus (a card, an accordion item, a scroll
+/// area), and the text inside it is content.
+const FOCUSABLE_CONTROL_MAX_CHARS: usize = 80;
+
+/// Whether `el` is, or sits in, a control: one of the [`INTERACTIVE`]
+/// elements and roles, or a box made focusable with `tabindex`.
+///
+/// `tabindex` alone names no control. A negative value takes the box out of
+/// the tab order (a skip-link target, a dialog focused from script), and
+/// builders put `tabindex="0"` on whole components: directus.io's Framer
+/// accordion item is a 358 by 531px focusable box around a code sample, a
+/// heading and a paragraph. So a `tabindex` box counts when its value is not
+/// negative and it holds at most [`FOCUSABLE_CONTROL_MAX_CHARS`] of text.
+fn is_in_control(dom: &dyn Dom, el: ElId) -> bool {
+    if matches_or_closest(dom, el, INTERACTIVE) {
+        return true;
+    }
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if let Some(value) = dom.attr(c, "tabindex") {
+            let index = parse_float(js::trim(&value));
+            let focusable = !(index.is_finite() && index < 0.0);
+            if focusable
+                && utf16_len(js::trim(&collapse_ws(&dom.text_content(c)))) <= FOCUSABLE_CONTROL_MAX_CHARS
+            {
+                return true;
+            }
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
 const FURNITURE: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer, [class*=\"meta\" i], [class*=\"label\" i], [class*=\"badge\" i], [class*=\"chip\" i], [class*=\"pill\" i], [class*=\"tag\" i], [class*=\"kicker\" i], [class*=\"eyebrow\" i], [class*=\"breadcrumb\" i], [class*=\"timestamp\" i], [class*=\"category\" i], [class*=\"caption\" i], [class*=\"nav\" i]";
 const SMALLPRINT: &str = "small, footer, [class*=\"legal\" i], [class*=\"copyright\" i], [class*=\"fineprint\" i], [class*=\"fine-print\" i], [class*=\"smallprint\" i], [class*=\"small-print\" i], [class*=\"disclaimer\" i], [class*=\"disclosure\" i], [class*=\"footnote\" i]";
 const TEXT_EDGE_QUERY: &str =
@@ -961,7 +996,22 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     }
     let (left, right) = match phrasing_text_extent(dom, el) {
         Some(t) if scrolling_ancestor_cuts(dom, el, &t) => return None,
+        // Text on a track a running animation moves stands wherever the
+        // capture caught it.
+        Some(_) if rides_a_running_track(dom, el) => return None,
         Some(t) => {
+            // A line its own box truncates with an ellipsis or a clamp ends
+            // at that box, wherever the Range rect of its text runs on to.
+            let t = if super::element_checks::truncates_its_own_line(dom, el) {
+                let (t_left, t_right) = clamp_to_own_clip(dom, el, t.left, t.right);
+                if t_right > t_left {
+                    Rect::from_xywh(t_left, t.top, t_right - t_left, t.height)
+                } else {
+                    t
+                }
+            } else {
+                t
+            };
             let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
             let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
             let pitch = q
@@ -1596,9 +1646,18 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             && closest_or_none(dom, el, "sub, sup").is_none()
             && !is_non_rendered_text(dom, el, tag)
         {
-            let is_exempt_context = matches_or_closest(dom, el, EXEMPT_CONTEXT);
+            // A run set in a monospace face with its whitespace kept is
+            // code, whatever its class names: the test `tiny-text` applies
+            // to a long run. directus.io's JSON sample is Framer text with
+            // hashed classes, 8px IBM Plex Mono at `white-space: pre-wrap`.
+            // The same site sets its pricing labels that way, so a short run
+            // also has to read as code.
+            let is_code_run = crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
+                && st("whiteSpace").starts_with("pre")
+                && crate::checks::text_rules::reads_as_code(&dt);
+            let is_exempt_context = is_code_run || matches_or_closest(dom, el, EXEMPT_CONTEXT);
             if !is_exempt_context && !is_visually_hidden(dom, el) {
-                let is_interactive = matches_or_closest(dom, el, INTERACTIVE);
+                let is_interactive = is_in_control(dom, el);
                 let is_furniture = matches_or_closest(dom, el, FURNITURE);
                 let is_smallprint = matches_or_closest(dom, el, SMALLPRINT);
                 let floor = if !is_interactive && is_smallprint {
@@ -4315,6 +4374,156 @@ mod tests {
             undersized(&d, credit),
             vec!["10.5px functional text \"Photo: Reuters\" (below 11px floor)"]
         );
+    }
+
+    /// observations-35 row 6 (directus.io 216043 to 216058): `tabindex`
+    /// alone names no control, and a monospace run that reads as code is
+    /// code whatever its class names.
+    #[test]
+    fn undersized_ui_text_reads_focusable_regions_and_code_runs() {
+        fn undersized(d: &FakeDom, el: ElId) -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "undersized-ui-text")
+                .map(|h| h.snippet)
+                .collect()
+        }
+        let long = "A caption that runs well past twenty characters";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        // A custom control: a short label in a focusable box.
+        let chip = d.add(Some(body), "div");
+        d.set_attr(chip, "tabindex", "0");
+        let label = text_el(&mut d, chip, "span", "Show the full comparison table", "9px");
+        d.set_rect(label, 20.0, 100.0, 140.0, 12.0);
+        assert_eq!(undersized(&d, label).len(), 1, "a control's label, however long");
+        // The same text in a box taken out of the tab order is content: over
+        // twenty characters, it is body text and not this rule's.
+        d.set_attr(chip, "tabindex", "-1");
+        assert!(undersized(&d, label).is_empty(), "tabindex -1");
+        // So is a focusable region holding more than a label.
+        d.set_attr(chip, "tabindex", "0");
+        let more = text_el(&mut d, chip, "p", "The region also holds a paragraph of copy, a heading and a code sample.", "16px");
+        d.set_rect(more, 20.0, 120.0, 400.0, 20.0);
+        assert!(undersized(&d, label).is_empty(), "a focusable region");
+        // A short label in it still reports, as any short label does.
+        let short = text_el(&mut d, chip, "span", "Beta", "9px");
+        d.set_rect(short, 20.0, 150.0, 30.0, 12.0);
+        assert_eq!(undersized(&d, short), vec!["9px functional text \"Beta\" (below 11px floor)"]);
+        // A real control inside the region keeps the interactive reading.
+        let button = d.add(Some(chip), "button");
+        d.add_selector(button, INTERACTIVE);
+        let in_button = text_el(&mut d, button, "span", long, "9px");
+        d.set_rect(in_button, 20.0, 170.0, 200.0, 12.0);
+        d.add_selector(in_button, INTERACTIVE);
+        assert_eq!(undersized(&d, in_button).len(), 1);
+
+        // Code: monospace, whitespace kept, and it reads as code.
+        let line = text_el(&mut d, body, "p", "\"id\": 7,", "8px");
+        d.set_rect(line, 20.0, 300.0, 80.0, 11.0);
+        d.set_styles(line, &[("fontFamily", "\"IBM Plex Mono\", monospace"), ("whiteSpace", "pre-wrap")]);
+        assert!(undersized(&d, line).is_empty(), "a JSON line");
+        // The same face on a pricing label is a label (directus.io 216153).
+        let price = text_el(&mut d, body, "p", "$50/seat", "9px");
+        d.set_rect(price, 20.0, 320.0, 60.0, 11.0);
+        d.set_styles(price, &[("fontFamily", "\"IBM Plex Mono\", monospace"), ("whiteSpace", "pre-wrap")]);
+        assert_eq!(undersized(&d, price), vec!["9px functional text \"$50/seat\" (below 11px floor)"]);
+        // Code in a proportional face, or with its whitespace collapsed, is
+        // not told from a label.
+        d.set_style(line, "whiteSpace", "normal");
+        assert_eq!(undersized(&d, line).len(), 1);
+        d.set_styles(line, &[("whiteSpace", "pre"), ("fontFamily", "Inter, sans-serif")]);
+        assert_eq!(undersized(&d, line).len(), 1);
+    }
+
+    /// observations-35 row 15 (keydris.com 217085, leilonozap.vercel.app
+    /// 215445, paseo.sh 217250): a line its own box truncates ends at that
+    /// box, and text on a running marquee track stands where the capture
+    /// caught it.
+    #[test]
+    fn viewport_edge_reads_a_truncated_line_at_its_box_and_skips_running_tracks() {
+        let copy = "A long single line that the box truncates with an ellipsis well before the edge";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 390.0;
+        let card = d.add(Some(body), "div");
+        d.set_rect(card, 37.0, 600.0, 316.0, 200.0);
+        let line = text_el(&mut d, card, "p", copy, "14px");
+        d.set_styles(
+            line,
+            &[("overflowX", "hidden"), ("overflow", "hidden"), ("textOverflow", "ellipsis"), ("display", "block"), ("lineHeight", "20px")],
+        );
+        d.set_rect(line, 50.0, 834.0, 290.0, 20.0);
+        d.el_mut(line).client_width = 290.0;
+        d.el_mut(line).scroll_width = 437.0;
+        // The Range rect runs to x 487, 97px past a 390px viewport.
+        d.set_text_rect(line, 50.0, 835.0, 437.0, 17.0);
+        assert!(snippets(&d, line, "body-text-viewport-edge").is_empty(), "the line ends at 340");
+        assert!(check_page_overflow_dom(&d).is_empty(), "and nothing runs past the page");
+        // A line clamp truncates the same way.
+        d.set_styles(line, &[("textOverflow", "clip"), ("webkitLineClamp", "2")]);
+        assert!(check_page_overflow_dom(&d).is_empty());
+        // A box that hides its overflow with no marker cuts text mid-word:
+        // that is not truncation by design, and it reports as before.
+        d.set_style(line, "webkitLineClamp", "none");
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "no marker");
+        // So does an inline box, which clips nothing.
+        d.set_styles(line, &[("textOverflow", "ellipsis"), ("display", "inline")]);
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "an inline box");
+        d.set_style(line, "display", "block");
+        // Text an ancestor cuts is not the line's own truncation
+        // (simplybudget.framer.ai's card, kept by the review of
+        // observations-20 row 31).
+        d.set_styles(line, &[("overflowX", "visible"), ("overflow", "visible")]);
+        d.set_styles(card, &[("overflowX", "hidden"), ("overflow", "hidden"), ("display", "block")]);
+        d.el_mut(card).client_width = 316.0;
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "cut by the card");
+        // A truncated line whose box reaches the viewport edge has no gutter.
+        d.set_styles(card, &[("overflowX", "visible"), ("overflow", "visible")]);
+        d.set_styles(line, &[("overflowX", "hidden"), ("overflow", "hidden")]);
+        d.set_rect(line, 50.0, 834.0, 336.0, 20.0);
+        d.el_mut(line).client_width = 336.0;
+        assert_eq!(
+            snippets(&d, line, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (right 4px)")]
+        );
+
+        // paseo.sh: a card in a track a running animation moves.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 390.0;
+        let window = d.add(Some(body), "div");
+        d.set_styles(window, &[("overflowX", "hidden"), ("overflow", "hidden"), ("display", "block")]);
+        d.set_rect(window, 0.0, 1794.0, 390.0, 324.0);
+        d.el_mut(window).client_width = 390.0;
+        d.el_mut(window).scroll_width = 3247.0;
+        let track = d.add(Some(window), "div");
+        d.set_styles(
+            track,
+            &[("display", "flex"), ("transform", "matrix(1, 0, 0, 1, -1264.31, 0)"), ("animationName", "social-proof-scroll"), ("animationIterationCount", "infinite")],
+        );
+        d.set_rect(track, -1264.0, 1964.0, 2688.0, 154.0);
+        d.el_mut(track).client_width = 2688.0;
+        d.el_mut(track).scroll_width = 2688.0;
+        let first = d.add(Some(track), "a");
+        d.set_rect(first, -256.0, 1964.0, 320.0, 154.0);
+        let second = d.add(Some(track), "a");
+        d.set_rect(second, 80.0, 1964.0, 320.0, 154.0);
+        let quote = text_el(&mut d, second, "p", copy, "14px");
+        d.set_style(quote, "lineHeight", "22px");
+        d.set_rect(quote, 97.0, 2025.0, 286.0, 68.0);
+        d.set_text_rect(quote, 97.0, 2027.0, 281.0, 64.0);
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "a running track");
+        // The same track held still by a script reports the gutter it shows.
+        d.set_style(track, "animationName", "none");
+        assert_eq!(
+            snippets(&d, quote, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (right 7px)")]
+        );
+        // An animation that runs once is not a marquee.
+        d.set_styles(track, &[("animationName", "slide-in"), ("animationIterationCount", "1")]);
+        assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
     }
 
     #[test]

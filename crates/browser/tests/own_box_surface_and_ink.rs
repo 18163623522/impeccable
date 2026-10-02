@@ -128,6 +128,7 @@ fn own_box_surfaces_repainted_ink_and_pixel_reads() {
         "#pass-date-on-dark-photo-in-aria-hidden",
         "#pass-copy-on-fixed-dark-photo",
         "#pass-copy-on-photo-with-bright-streak",
+        "#pass-copy-on-pseudo-scrim-over-pale-photo",
     ] {
         assert!(
             snippet(&flagged, "low-contrast", selector).is_none(),

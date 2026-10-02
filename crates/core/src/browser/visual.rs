@@ -3032,6 +3032,22 @@ pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
     if let Some(b) = blocking {
         return Prepared::Early { early: unresolved(candidate, &format!("{b} needs screenshot pixels")) };
     }
+    // A first-budget candidate the element pass hands over because the
+    // structural climb found paint the contrast walk never read is not the
+    // sampled pass's to score where that paint is one its stack walk cannot
+    // see: a pseudo-element over the text, or a layer that ignores pointer
+    // events, neither of which a hit-test stack lists. epcco.com.sa's footer
+    // lays a `::before` teal scrim at 0.9 over its photo, and white copy on
+    // it printed 2.6:1 against the bare photo.
+    if candidate.get("routed").and_then(Value::as_str) == Some("unread layer") {
+        let text = dom.direct_text_rect(el).unwrap_or_else(|| dom.rect(el));
+        let unseen = layer_under_text_found(dom, el).1.is_some_and(|n| {
+            js::trim(&dom.style(n, "pointerEvents")) == "none" || pseudo_paint(dom, n, &text).is_some()
+        });
+        if unseen {
+            return Prepared::Early { early: unresolved(candidate, "unread layer needs screenshot pixels") };
+        }
+    }
     let text_color = parse_rgb_or_any(&dom.style(el, "color"))
         .or_else(|| rgba_from_value(candidate.get("textColor")));
     let Some(text_color) = text_color else {
@@ -4251,6 +4267,27 @@ mod tests {
                 Prepared::Early { early } => assert_eq!(early["status"], json!("unresolved"), "{reason}"),
                 Prepared::Ready { .. } => panic!("{reason} was sampled"),
             }
+        }
+        // A first-budget candidate is sampled as before where nothing the
+        // stack walk cannot see lies under it.
+        let routed = json!({ "selector": "p", "reasons": ["image background"], "routed": "unread layer", "threshold": 4.5 });
+        assert!(matches!(prepare_analysis(&d, &routed), Prepared::Ready { .. }));
+
+        // epcco.com.sa's footer: a `::before` scrim stretched over the
+        // card, which no hit-test stack lists, goes to the pixels.
+        let (mut d, card, p) = card_with_pseudo(BADGE);
+        for (prop, value) in [("top", "0px"), ("left", "0px"), ("width", "420px"), ("height", "200px")] {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        d.add_selector(p, "p");
+        match prepare_analysis(&d, &routed) {
+            Prepared::Early { early } => assert_eq!(early["reason"], "unread layer needs screenshot pixels"),
+            Prepared::Ready { .. } => panic!("the scrim's text was sampled"),
+        }
+        // Without the `routed` mark it is not refused for the scrim.
+        let unmarked = json!({ "selector": "p", "reasons": ["image background"], "threshold": 4.5 });
+        if let Prepared::Early { early } = prepare_analysis(&d, &unmarked) {
+            assert_ne!(early["reason"], "unread layer needs screenshot pixels");
         }
     }
 

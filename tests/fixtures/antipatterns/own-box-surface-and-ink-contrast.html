@@ -34,14 +34,16 @@
        - an image the sampled pass cannot place under a point ends its walk,
          so the text is not scored against the boxes beneath it;
        - where the sample points read two surfaces and the line passes on
-         the one most of them read, the pixel pass reads the glyphs.
+         the one most of them read, the pixel pass reads the glyphs;
+       - text over a pseudo-element scrim, which the sampled pass's stack
+         never lists, is read from pixels.
 
        The static HTML engine measures no boxes and reads no pixels. It
        scores a box with a fill and a gradient against the fill, pools the
        stops of layered gradients, reads SVG text as `color`, models no
        filter and no reveal, and scores a caption over a photo against the
        fill behind the photo. So it misses the first should-flag row and
-       reports six should-pass rows: the dark-gradient button, the dark
+       reports six of the nine should-pass rows: the dark-gradient button, the dark
        initials, the filtered label, the reveal word, the SVG label with no
        fill and the date on the dark photo (and it reports neither fixed
        image nor the streak, which only pixels read). The URL behavior is
@@ -112,6 +114,14 @@
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='560' height='60' preserveAspectRatio='none'%3E%3Crect width='560' height='60' fill='%2314532d'/%3E%3Crect width='37' height='60' fill='%23f7fee7'/%3E%3C/svg%3E");
       background-repeat: no-repeat; background-size: 560px 60px; background-position: 0 0; }
     .streak-band p { margin: 0; font: 700 16px/20px system-ui, sans-serif; color: #fbfbfb; }
+
+    /* A pale photo under a teal scrim drawn as the band's own ::before,
+       which no hit-test stack lists. */
+    .scrim-band { position: relative; z-index: 1; width: 560px; height: 64px; padding: 20px 24px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Crect width='8' height='8' fill='%23e7efe9'/%3E%3C/svg%3E");
+      background-size: cover; background-repeat: no-repeat; }
+    .scrim-band::before { content: ""; position: absolute; left: 0; top: 0; width: 560px; height: 64px; background-color: rgb(0, 83, 94); opacity: 0.9; }
+    .scrim-band p { position: relative; margin: 0; font-size: 16px; line-height: 24px; color: #fafafa; }
   </style>
 </head>
 <body>
@@ -206,6 +216,11 @@
       <!-- Bold white copy on a dark photo with one bright streak. -->
       <div class="case">
         <div class="streak-band"><p id="pass-copy-on-photo-with-bright-streak">We know fresh matters to our customers</p></div>
+      </div>
+
+      <!-- White copy on a pseudo-element scrim over a pale photo. -->
+      <div class="case">
+        <div class="scrim-band"><p id="pass-copy-on-pseudo-scrim-over-pale-photo">The company was founded by royal decree</p></div>
       </div>
 
       <div class="fold-spacer"></div>

@@ -6284,8 +6284,12 @@ unchanged.
 8. **Sample points that disagree go to the pixels.** Where the 10th
    percentile fails, the median passes and the two differ by the divergence
    factor, the sampled pass gives no verdict.
+9. **Paint the sampled pass cannot see goes to the pixels.** A first-budget
+   candidate the element pass hands over for unread paint, where that paint
+   is a pseudo-element over the text or a layer that ignores pointer events
+   (neither is in a hit-test stack), gets no sampled verdict.
 
-New fixture `own-box-surface-and-ink-contrast.html` (7 should-flag and 8
+New fixture `own-box-surface-and-ink-contrast.html` (7 should-flag and 9
 should-pass rows), pinned on the URL engine by
 `crates/browser/tests/own_box_surface_and_ink.rs`. Every should-pass row
 reports on the base engine in a URL scan.

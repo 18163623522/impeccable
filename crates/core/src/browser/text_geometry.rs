@@ -248,6 +248,80 @@ pub(crate) fn moves_a_track(dom: &dyn Dom, el: ElId, clip: ElId) -> bool {
     false
 }
 
+/// Whether `el` rides a track that is moving at capture: a box between it and
+/// a clip that hides x overflow which a running, endlessly repeating CSS
+/// animation transforms ([`moves_a_track`] with the animation on the track).
+/// paseo.sh's testimonial cards sit in a `social-proof-track` animated by
+/// `social-proof-scroll`; where a card's text stands against the viewport
+/// edge is where the capture caught it, not a gutter the page sets. A track a
+/// script parks with a transform (a carousel at its first slide) holds still,
+/// and its text is measured as before.
+pub fn rides_a_running_track(dom: &dyn Dom, el: ElId) -> bool {
+    let root = dom.document_element();
+    let body = dom.body();
+    let mut cur = dom.parent(el);
+    while let Some(clip) = cur {
+        if Some(clip) == root || Some(clip) == body {
+            break;
+        }
+        if matches!(overflow_x(dom, clip).as_str(), "hidden" | "clip") {
+            let client = dom.client_width(clip);
+            let mut inner = dom.parent(el);
+            while let Some(t) = inner {
+                if t == clip {
+                    break;
+                }
+                let content = dom.scroll_width(t);
+                if client.is_finite()
+                    && client > 0.0
+                    && content.is_finite()
+                    && content > client + 1.0
+                    && is_transformed(dom, t)
+                    && runs_endless_animation(dom, t)
+                    && holds_row(dom, t)
+                {
+                    return true;
+                }
+                inner = dom.parent(t);
+            }
+        }
+        cur = dom.parent(clip);
+    }
+    false
+}
+
+/// A CSS animation that never ends: a name other than `none` with an
+/// `infinite` iteration count.
+fn runs_endless_animation(dom: &dyn Dom, el: ElId) -> bool {
+    let name = dom.style(el, "animationName");
+    let named = !name.is_empty() && name.split(',').any(|n| js::trim(n) != "none");
+    named && dom.style(el, "animationIterationCount").split(',').any(|n| js::trim(n) == "infinite")
+}
+
+/// The x range of a truncated line: text measured at `(left, right)` cut to
+/// the padding box of `el`, which hides its own inline overflow. The caller
+/// asks this only of a box that truncates by design (an ellipsis or a line
+/// clamp on a box that generates one): the Range rect of such a line runs on
+/// past the box (keydris.com's `div.truncate` 97px past a 390px viewport,
+/// leilonozap.vercel.app's `p.truncate` 809px) while the line a visitor sees
+/// ends in an ellipsis inside its card. An unmeasured box leaves the range
+/// as it was.
+///
+/// Only the element's own clip is read. Text an ancestor cuts (a card or a
+/// section at `overflow: hidden`) is cut mid-word with no marker, and the
+/// rule keeps reporting it against the viewport, as before.
+pub fn clamp_to_own_clip(dom: &dyn Dom, el: ElId, left: f64, right: f64) -> (f64, f64) {
+    let r = dom.rect(el);
+    if !(r.all_finite() && r.width > 0.0) {
+        return (left, right);
+    }
+    let border = dom.client_left(el);
+    let clip_left = r.left + if border.is_finite() && border > 0.0 { border } else { 0.0 };
+    let client = dom.client_width(el);
+    let clip_right = if client.is_finite() && client > 0.0 { clip_left + client } else { r.right };
+    (js::math_max(left, clip_left), js::math_min(right, clip_right))
+}
+
 /// A `transform` or `translate` other than `none`, the identity matrix
 /// included: a track parked at its first slide.
 fn is_transformed(dom: &dyn Dom, el: ElId) -> bool {

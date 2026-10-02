@@ -428,6 +428,31 @@ const MONOSPACE_FACES: &[&str] = &[
     "source code pro",
 ];
 
+/// A class token that carries a generated id: one of its `-` or `_`
+/// separated parts is four or more hex digits with at least one decimal digit
+/// among them (`43268`, `a565c83`, `67254963955209192`). `grid-col-desk-2`,
+/// `elementor-col-50` and `text-gray-500` carry none.
+pub fn is_id_like_class(token: &str) -> bool {
+    token.split(['-', '_']).any(|part| {
+        part.len() >= 4
+            && part.bytes().all(|b| b.is_ascii_hexdigit())
+            && part.bytes().any(|b| b.is_ascii_digit())
+    })
+}
+
+/// Whether a short run reads as source code rather than as a label: it holds
+/// a character that structured text is written with and a label is not, one
+/// of `{ } [ ] < > = ; " \` \ _`. A JSON line (`"id": 7,`, `},`), a tag, an
+/// assignment and a snake_case name all do; a price (`$50/seat`), a count
+/// (`200+`), a rating (`4.9`) and a copyright line do not. Builders set
+/// monospace labels with their whitespace kept (Framer keeps it on every text
+/// box), so the face and `white-space` alone cannot tell a code sample from a
+/// pricing label.
+pub fn reads_as_code(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '{' | '}' | '[' | ']' | '<' | '>' | '=' | ';' | '"' | '`' | '\\' | '_'))
+}
+
 /// Whether a computed `font-family` leads with a monospace face: a generic
 /// `monospace` or `ui-monospace`, a name with a `mono` word in it
 /// (`JetBrains Mono`, `SFMono-Regular`, `Roboto Mono`), or a known code face.
@@ -523,6 +548,17 @@ pub fn is_repeated_text_container(style: Option<&dyn StyleMap>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_as_code_wants_a_character_code_is_written_with() {
+        for code in ["\"data\":", "\"id\": 7,", "},", "{", "<div>", "const x = 1", "published_date", "`npm i`", "a\\b", "items[0]", "run();"] {
+            assert!(reads_as_code(code), "{code}");
+        }
+        for label in ["$50/seat", "per Month", "200+", "4.9", "© 2026 VexoAI, Inc.", "Type II", "G2", "v2.0-beta", "don't", "(optional)", "50% off: today", "A / B"] {
+            assert!(!reads_as_code(label), "{label}");
+        }
+    }
+
     use std::collections::HashMap;
 
     #[test]

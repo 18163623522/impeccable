@@ -2875,6 +2875,163 @@ fn clipped_axes(dom: &dyn Dom, el: ElId) -> Option<(bool, bool)> {
     Some((clip_x, clip_y))
 }
 
+/// Whether `el` paints anything of its own: a box ([`paints_own_box`]), a
+/// shadow or an outline.
+fn paints_own_surface(dom: &dyn Dom, el: ElId) -> bool {
+    if paints_own_box(dom, el) {
+        return true;
+    }
+    let shadow = dom.style(el, "boxShadow");
+    if !shadow.is_empty() && shadow != "none" {
+        return true;
+    }
+    let outline = dom.style(el, "outlineStyle");
+    !outline.is_empty() && outline != "none" && style_px(dom, el, "outlineWidth") > 0.0
+}
+
+/// How many descendants [`painted_bounds_of_wrapper`] reads before it gives
+/// up and leaves the wrapper's own box standing.
+const WRAPPER_PAINT_SCAN_LIMIT: usize = 200;
+
+/// The rects of what the subtree under `el` paints, in both axes: text by its
+/// text rect, replaced elements and painted boxes by their border boxes. A
+/// descendant that clips or scrolls keeps its content inside its own box, so
+/// its box stands for everything under it. `false` when the paint cannot be
+/// measured: generated content no rect covers, text with no text rect, or
+/// more descendants than the budget.
+fn wrapper_painted_rects(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, budget: &mut usize) -> bool {
+    for child in dom.children(el) {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        if dom.style(child, "display") == "none" {
+            continue;
+        }
+        if generated_content_unmeasured(dom, child) {
+            return false;
+        }
+        let r = dom.rect(child);
+        let has_area = r.all_finite() && r.width > 0.0 && r.height > 0.0;
+        if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str()) {
+            if has_area {
+                out.push(r);
+            }
+            continue;
+        }
+        let clips = |v: String| matches!(v.as_str(), "hidden" | "clip" | "auto" | "scroll");
+        if generates_box(dom, child)
+            && has_area
+            && clips(crate::browser::text_geometry::overflow_x(dom, child))
+            && clips(dom.style(child, "overflowY"))
+        {
+            out.push(r);
+            continue;
+        }
+        if has_area && paints_own_surface(dom, child) {
+            out.push(r);
+        }
+        if has_direct_text_longer_than(dom, child, 0) {
+            match dom.direct_text_rect(child) {
+                Some(t) if t.all_finite() => {
+                    if t.width > 0.0 && t.height > 0.0 {
+                        out.push(t);
+                    }
+                }
+                _ => return false,
+            }
+        }
+        if !wrapper_painted_rects(dom, child, out, budget) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The box a positioned child shows a visitor when it paints nothing of its
+/// own: the union of what its descendants paint. mk.co.kr's `div.more_btn` is
+/// a transparent 40px wrapper around a 30px button, and bankofamerica.com's
+/// `div.spa-icon-wrapper` a transparent 38px one around a 30px button; each
+/// reaches 3 to 4px past its clipping container while everything it paints
+/// sits inside. `None` leaves the wrapper's own border box standing: it
+/// paints a box, a shadow, an outline or text of its own, it is a replaced
+/// element, it carries generated content, its descendants cannot all be
+/// measured, or nothing under it paints.
+fn painted_bounds_of_wrapper(dom: &dyn Dom, child: ElId) -> Option<Rect> {
+    if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str())
+        || paints_own_surface(dom, child)
+        || has_direct_text_longer_than(dom, child, 0)
+        || generated_content_unmeasured(dom, child)
+    {
+        return None;
+    }
+    let mut rects = Vec::new();
+    let mut budget = WRAPPER_PAINT_SCAN_LIMIT;
+    if !wrapper_painted_rects(dom, child, &mut rects, &mut budget) || rects.is_empty() {
+        return None;
+    }
+    let left = rects.iter().map(|r| r.left).fold(f64::INFINITY, js::math_min);
+    let top = rects.iter().map(|r| r.top).fold(f64::INFINITY, js::math_min);
+    let right = rects.iter().map(|r| r.right).fold(f64::NEG_INFINITY, js::math_max);
+    let bottom = rects.iter().map(|r| r.bottom).fold(f64::NEG_INFINITY, js::math_max);
+    Some(Rect::from_xywh(left, top, right - left, bottom - top))
+}
+
+/// Whether what a transparent wrapper paints stays inside `el`'s clip on the
+/// clipped axes, by the same 2px threshold as
+/// [`positioned_child_escapes_clip`]. `false` when the wrapper's paint cannot
+/// be told from its box.
+fn wrapper_paints_inside_clip(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: bool) -> bool {
+    let (Some(parent_rect), Some(painted)) = (element_rect(dom, el), painted_bounds_of_wrapper(dom, child)) else {
+        return false;
+    };
+    let threshold = 2.0;
+    let out_x = painted.left < parent_rect.left - threshold || painted.right > parent_rect.right + threshold;
+    let out_y = painted.top < parent_rect.top - threshold || painted.bottom > parent_rect.bottom + threshold;
+    !(clip_x && out_x) && !(clip_y && out_y)
+}
+
+/// Whether a scroll container between `child` and `el` holds `child` as its
+/// own content: a box that scrolls on either axis (so clips on both) and that
+/// the child's containing block sits inside. gamer.com.tw's captions are
+/// absolutely positioned inside cards in a row at `overflow: auto hidden`
+/// that overhangs its column by 8px (`margin: 0 -8px`); the row cuts and
+/// scrolls its cards, and the column's clip cuts the row, not a layer. A
+/// scroller never owns a finding, as before.
+///
+/// Only an absolutely positioned child is read: a fixed one is placed against
+/// the viewport. The scroller holds the child when it, or a box between it
+/// and the child, is positioned or transformed, which makes that box the
+/// child's containing block. Where neither is, the child is laid out against
+/// a box outside the scroller, which does not clip it.
+fn scroller_between_owns_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
+    if dom.style(child, "position") != "absolute" {
+        return false;
+    }
+    let scrolls = |v: String| v == "auto" || v == "scroll";
+    let contains_block = |e: ElId| {
+        let position = dom.style(e, "position");
+        let transform = dom.style(e, "transform");
+        (!position.is_empty() && position != "static") || (!transform.is_empty() && transform != "none")
+    };
+    let mut contained = false;
+    let mut current = dom.parent(child);
+    while let Some(inner) = current {
+        if inner == el {
+            return false;
+        }
+        contained = contained || contains_block(inner);
+        if contained
+            && generates_box(dom, inner)
+            && (scrolls(crate::browser::text_geometry::overflow_x(dom, inner)) || scrolls(dom.style(inner, "overflowY")))
+        {
+            return true;
+        }
+        current = dom.parent(inner);
+    }
+    false
+}
+
 /// Whether `child` is cut by `el`'s clip in a way worth reporting. The
 /// container-level exemptions are the caller's; this is the per-child half,
 /// so an ancestor can ask the same question about the same child.
@@ -2886,6 +3043,15 @@ fn clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: 
     }
     let escapes = positioned_child_escapes_clip(dom, el, child, clip_x, clip_y);
     if escapes == Some(false) {
+        return false;
+    }
+    // The border box leaves the clip. A wrapper that paints nothing of its
+    // own is cut only where its contents are, and a layer that really opens
+    // keeps reporting whatever it measures.
+    if escapes == Some(true)
+        && !positioned_child_is_popover_layer(dom, child)
+        && wrapper_paints_inside_clip(dom, el, child, clip_x, clip_y)
+    {
         return false;
     }
     if escapes.is_none()
@@ -2967,6 +3133,9 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             continue;
         }
         if nearer_clip_traps_child(dom, el, child) {
+            continue;
+        }
+        if scroller_between_owns_child(dom, el, child) {
             continue;
         }
         // A layer that never renders (a player's menu under a control bar at
@@ -3406,6 +3575,13 @@ fn truncates_by_design(dom: &dyn Dom, el: ElId) -> bool {
     }
     let clamp = dom.style(el, "webkitLineClamp");
     !clamp.is_empty() && clamp != "none"
+}
+
+/// Whether `el` truncates its own line by design: a box of its own that
+/// marks or clamps what it cuts ([`truncates_by_design`]). An inline span
+/// with the same styles clips nothing.
+pub(crate) fn truncates_its_own_line(dom: &dyn Dom, el: ElId) -> bool {
+    generates_box(dom, el) && truncates_by_design(dom, el)
 }
 
 /// Whether the element generates a box of its own, the only kind `overflow`
@@ -3916,6 +4092,26 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "side-tab");
         assert_eq!(hits[0].snippet, "border-left: 4px");
+
+        // walkthroughs-35 (submitmap.com 7678, 7682): a 2px stripe on a card
+        // rounded only away from it. The leading radius value is 0, and the
+        // far corners are what the stripe is read against.
+        d.set_style(card, "borderLeftWidth", "2px");
+        with_radius(&mut d, "0px 12px 12px 0px");
+        d.set_style(card, "borderLeftWidth", "2px");
+        let hits = check_element_borders_dom(&d, card);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "border-left: 2px + border-radius: 12px");
+        // The smaller far corner is the radius, and one under the rounded
+        // card floor is square.
+        d.set_style(card, "borderRadius", "0px 12px 6px 0px");
+        assert_eq!(check_element_borders_dom(&d, card)[0].snippet, "border-left: 2px + border-radius: 6px");
+        d.set_style(card, "borderRadius", "0px 12px 2px 0px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+        // A 2px stripe on a square box stays out, as before.
+        d.set_style(card, "borderRadius", "0px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+        d.set_style(card, "borderLeftWidth", "4px");
 
         // A radius the engine cannot read is unknown, not square: a snapshot
         // missing the column, or a value no parser resolves, keeps the find.
@@ -6864,6 +7060,87 @@ mod tests {
         // Text in the same layer is a layer that needed to escape.
         d.add_text(glow, "Posted on the web");
         assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+    }
+
+    /// observations-35 row 7 (mk.co.kr 217919, bankofamerica.com 219440): a
+    /// transparent wrapper a few pixels larger than what it holds leaves the
+    /// clip with its border box only. What it paints is measured instead.
+    #[test]
+    fn clipped_overflow_measures_a_transparent_wrapper_by_what_it_paints() {
+        let (mut d, body) = page();
+        // mk.co.kr: a 358px card, a 40px wrapper at x 322 around a 30px button.
+        let card = clipping_box(&mut d, body, 16.0, 0.0, 358.0, 165.0);
+        let wrap = positioned_child(&mut d, card, 338.0, 60.0, 40.0, 40.0);
+        let button = d.add(Some(wrap), "button");
+        d.set_styles(button, &[("display", "block"), ("backgroundColor", "rgb(240, 240, 240)")]);
+        d.set_rect(button, 343.0, 65.0, 30.0, 30.0);
+        d.add_selector(button, POSITIONED_CHILD_INTERACTIVE_SELECTOR);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "the button sits inside");
+        // The button itself past the edge is cut, and reports.
+        d.set_rect(button, 349.0, 65.0, 30.0, 30.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_rect(button, 343.0, 65.0, 30.0, 30.0);
+        // A wrapper that paints its own box is cut where its box is.
+        d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_style(wrap, "backgroundColor", "rgba(0, 0, 0, 0)");
+        // So is one with a shadow, or with generated content no rect covers.
+        d.set_style(wrap, "boxShadow", "rgba(0, 0, 0, 0.4) 0px 2px 8px 0px");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_style(wrap, "boxShadow", "none");
+        d.set_pseudo_style(wrap, "::after", "content", "\"new\"");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_pseudo_style(wrap, "::after", "content", "none");
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty());
+        // Text under it that the capture could not measure leaves the box.
+        let label = d.add(Some(wrap), "span");
+        d.add_text(label, "More");
+        d.set_rect(label, 343.0, 65.0, 30.0, 30.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "unmeasured text");
+        d.set_text_rect(label, 345.0, 70.0, 26.0, 14.0);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "measured text inside");
+        d.set_text_rect(label, 345.0, 70.0, 46.0, 14.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "text past the edge");
+        d.set_text_rect(label, 345.0, 70.0, 26.0, 14.0);
+        // A menu keeps reporting whatever it measures.
+        d.set_attr(wrap, "role", "menu");
+        d.add_selector(wrap, "[role=\"menu\"]");
+        d.add_selector(wrap, POPOVER_LAYER_SELECTOR);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "a popover layer");
+    }
+
+    /// observations-35 row 7 (gamer.com.tw 217951, 218190): a caption inside
+    /// a card in a row that scrolls sideways and overhangs its column by 8px.
+    /// The scroller holds the caption; the column's clip cuts the row.
+    #[test]
+    fn clipped_overflow_leaves_a_layer_to_the_scroller_that_holds_it() {
+        let (mut d, body) = page();
+        let column = clipping_box(&mut d, body, 8.0, 0.0, 374.0, 600.0);
+        let row = d.add(Some(column), "ul");
+        d.set_styles(
+            row,
+            &[("display", "flex"), ("position", "relative"), ("overflow", "auto hidden"), ("overflowX", "auto"), ("overflowY", "hidden")],
+        );
+        d.set_rect(row, 0.0, 100.0, 390.0, 250.0);
+        let card = d.add(Some(row), "a");
+        d.set_styles(card, &[("display", "flex"), ("position", "relative")]);
+        d.set_rect(card, 203.0, 100.0, 187.0, 122.0);
+        let caption = positioned_child(&mut d, card, 203.0, 194.0, 187.0, 28.0);
+        d.add_text(caption, "A caption on the card");
+        assert!(check_element_clipped_overflow_dom(&d, column).is_empty());
+        // A row that only shows its overflow holds nothing: the column cuts
+        // the caption itself.
+        d.set_styles(row, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible")]);
+        assert_eq!(check_element_clipped_overflow_dom(&d, column).len(), 1);
+        // A scroller the caption is not laid out against (nothing positioned
+        // from it down to the caption) does not hold it either.
+        d.set_styles(row, &[("overflow", "auto hidden"), ("overflowX", "auto"), ("overflowY", "hidden"), ("position", "static")]);
+        d.set_style(card, "position", "static");
+        assert_eq!(check_element_clipped_overflow_dom(&d, column).len(), 1);
+        // Positioned again, the card is the caption's containing block
+        // inside the scroller.
+        d.set_style(card, "position", "relative");
+        assert!(check_element_clipped_overflow_dom(&d, column).is_empty());
     }
 
     #[test]

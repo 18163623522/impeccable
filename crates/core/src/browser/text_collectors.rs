@@ -619,10 +619,16 @@ pub fn collect_repeated_container_text_findings(
                 }
                 let raw = dom.attr(c, "class").unwrap_or_default();
                 let raw_cls = js::trim(&raw);
+                // A class that carries an id (`jet-listing-dynamic-post-43268`,
+                // `elementor-element-a565c83`) names one instance, not a
+                // spot: the slides of one carousel differ by nothing else.
                 let mut cls: Vec<&str> = if raw_cls.is_empty() {
                     Vec::new()
                 } else {
-                    WS_RE.split(raw_cls).filter(|s| !s.is_empty()).collect()
+                    WS_RE
+                        .split(raw_cls)
+                        .filter(|s| !s.is_empty() && !crate::checks::text_rules::is_id_like_class(s))
+                        .collect()
                 };
                 cls.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
                 let cls = cls.join(".");
@@ -668,7 +674,24 @@ pub fn collect_repeated_container_text_findings(
 
 /// JS: checks.mjs#checkRepeatedContainerTextDOM()
 pub fn check_repeated_container_text_dom(dom: &dyn Dom) -> Vec<RuleHit> {
-    collect_repeated_container_text_findings(dom, &|el| is_rendered_for_browser_rule(dom, el))
+    // Text a visitor cannot see at capture repeats nothing on screen: the
+    // slides a carousel parks past its window carry the same label as the one
+    // it shows. The Text paint gate is asked of an element only once it has
+    // passed the cheaper rendered test.
+    collect_repeated_container_text_findings(dom, &|el| {
+        if !is_rendered_for_browser_rule(dom, el) {
+            return false;
+        }
+        // The collector asks this of the container and of each element
+        // under it. The Text gate needs text, so it is asked only of an
+        // element that holds some; a container's box is asked the gate's
+        // walk without that test.
+        if super::dom::has_direct_text_longer_than(dom, el, 0) {
+            super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_none()
+        } else {
+            super::painted::unpainted_text_box(dom, el).is_none()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1031,9 +1054,14 @@ mod tests {
                 ("backgroundColor", "rgb(255, 255, 255)"),
             ],
         );
-        for tag in ["p", "span", "em"] {
+        d.set_rect(card, 0.0, 0.0, 400.0, 200.0);
+        let mut spots = Vec::new();
+        for (i, tag) in ["p", "span", "em"].into_iter().enumerate() {
             let e = d.add(Some(card), tag);
             d.add_text(e, "Active");
+            d.set_style(e, "fontSize", "14px");
+            d.set_rect(e, 20.0, 20.0 + 30.0 * i as f64, 60.0, 20.0);
+            spots.push(e);
         }
         let hits = check_repeated_container_text_dom(&d);
         assert_eq!(hits.len(), 1);
@@ -1042,6 +1070,32 @@ mod tests {
         assert!(hits[0]
             .snippet
             .starts_with("\"Active\" rendered 3× in distinct spots inside div"));
+        // observations-35 row 15 (kinghost.com.br 218763): a spot a visitor
+        // cannot see repeats nothing. With one of the three unpainted, two
+        // are left.
+        d.set_style(spots[2], "visibility", "hidden");
+        assert!(check_repeated_container_text_dom(&d).is_empty(), "a hidden spot");
+        d.set_style(spots[2], "visibility", "visible");
+        assert_eq!(check_repeated_container_text_dom(&d).len(), 1);
+        // Classes that carry an id name an instance, not a spot: three
+        // slides that differ by nothing else are one spot three times.
+        for (e, id) in spots.iter().zip(["post-43268", "post-22775", "post-42287"]) {
+            d.el_mut(*e).tag = "P".to_string();
+            d.set_attr(*e, "class", &format!("term jet-listing-dynamic-{id}"));
+        }
+        assert!(check_repeated_container_text_dom(&d).is_empty(), "id-like classes");
+        for (e, class) in spots.iter().zip(["term title", "term badge", "term footer"]) {
+            d.set_attr(*e, "class", class);
+        }
+        assert_eq!(check_repeated_container_text_dom(&d).len(), 1, "three named spots");
+        use crate::checks::text_rules::is_id_like_class;
+        assert!(is_id_like_class("elementor-element-a565c83"));
+        assert!(is_id_like_class("elementor-dcss-67254963955209192"));
+        assert!(is_id_like_class("jet_listing_43268"));
+        for plain in ["grid-col-desk-2", "elementor-col-50", "text-gray-500", "card", "face-cafe", "w-1/2"] {
+            assert!(!is_id_like_class(plain), "{plain}");
+        }
+
         // Parallel positions (same signature) do not count.
         let mut d2 = FakeDom::new();
         let (_h, b2) = d2.with_page();

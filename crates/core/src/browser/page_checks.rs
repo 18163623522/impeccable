@@ -1891,12 +1891,23 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let mut cache: std::collections::HashMap<ElId, HiddenState> = std::collections::HashMap::new();
     // Read once, and only when the page has an invisible box to classify.
     let closed_ids: std::cell::OnceCell<std::collections::HashSet<String>> = std::cell::OnceCell::new();
+    // The page's CSS, read once and only for a box an animation holds at 0.
+    let style_text: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+
+    fn page_style_text(dom: &dyn Dom) -> String {
+        let html = dom.document_html_for_patterns();
+        let mut text = crate::checks::html_patterns::build_html_pattern_corpora(&html).style_text;
+        text.push('\n');
+        text.push_str(&dom.linked_stylesheet_text());
+        text
+    }
 
     fn state_of(
         dom: &dyn Dom,
         root: Option<ElId>,
         cache: &mut std::collections::HashMap<ElId, HiddenState>,
         closed_ids: &std::cell::OnceCell<std::collections::HashSet<String>>,
+        style_text: &std::cell::OnceCell<String>,
         el: Option<ElId>,
     ) -> HiddenState {
         let Some(el) = el else { return HiddenState::Visible };
@@ -1910,7 +1921,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         let state = if HIDDEN_TEXT_EXCLUDE_TAGS.contains(&tag.as_str()) {
             HiddenState::Excluded
         } else {
-            let parent_state = state_of(dom, root, cache, closed_ids, dom.parent(el));
+            let parent_state = state_of(dom, root, cache, closed_ids, style_text, dom.parent(el));
             if parent_state == HiddenState::Excluded {
                 HiddenState::Excluded
             } else {
@@ -1929,8 +1940,27 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                 {
                     // The box where the invisible subtree starts decides for
                     // everything under it.
+                    let by_visibility = HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility"));
                     if closed_container(dom, el, closed_ids.get_or_init(|| closed_controlled_ids(dom))) {
                         HiddenState::Excluded
+                    } else if super::painted::parked_outside_clip(dom, el) {
+                        // A box parked outside the ancestor that clips it
+                        // shows nothing at any opacity: collapsed interface,
+                        // not content a reveal failed to show.
+                        HiddenState::Excluded
+                    } else if !by_visibility
+                        && dom.running_animation_properties(el).is_some_and(|p| !p.is_empty())
+                        && super::painted::opacity_held_by_scroll_timeline(
+                            dom,
+                            el,
+                            style_text.get_or_init(|| page_style_text(dom)),
+                        )
+                    {
+                        // A scroll or view timeline holds the box at 0 while
+                        // the page sits at the top, where this is measured,
+                        // and shows it to a visitor who scrolls: its text is
+                        // content they read.
+                        HiddenState::Visible
                     } else {
                         HiddenState::Invisible
                     }
@@ -1954,7 +1984,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         if len == 0 {
             continue;
         }
-        let state = state_of(dom, root, &mut cache, &closed_ids, Some(el));
+        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, Some(el));
         if state == HiddenState::Excluded {
             continue;
         }
@@ -3447,6 +3477,56 @@ mod tests {
         let m = measure_hidden_text_dom(&d);
         let hidden = 19.0 + 28.0 + 2.0 * 19.0 + 5.0 * 13.0 + 15.0 + 15.0;
         assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 4.0 + 4.0 + 5.0 + hidden, hidden));
+    }
+
+    /// sona8.com (217624 and five more) and directus.io (216125, 216180):
+    /// text a view timeline holds at 0 counts as shown, and an answer parked
+    /// outside its closed row leaves both counts.
+    #[test]
+    fn hidden_text_measure_leaves_out_scroll_timelines_and_parked_panels() {
+        let fade = || vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0".to_string())] }];
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.html_for_patterns = "<html><head><style>.reveal > * { animation-name: rise; animation-timeline: view(); }\
+.stagger > * { animation-name: rise; animation-timeline: auto; }</style></head><body></body></html>"
+            .to_string();
+        d.keyframes.insert("rise".to_string(), fade());
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        // Held by a view timeline: content a visitor scrolls to.
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "");
+        d.add_selector(scrubbed, ".reveal > *");
+        d.set_running_animations(scrubbed, &["opacity", "transform"]);
+        hidden_box(&mut d, scrubbed, "p", &[], "scrubbed in on scroll");
+        // The same animation on the document timeline, and a scrubbed box
+        // from a probe that read no animations: reveals that have not run.
+        let timed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "waits on a class");
+        d.add_selector(timed, ".stagger > *");
+        d.set_running_animations(timed, &["opacity"]);
+        let unread = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "no animations read");
+        d.add_selector(unread, ".reveal > *");
+        // A `visibility: hidden` box is not held by its opacity.
+        let vis = hidden_box(&mut d, body, "div", &[("visibility", "hidden"), ("animationName", "rise")], "hidden by visibility");
+        d.add_selector(vis, ".reveal > *");
+        d.set_running_animations(vis, &["opacity"]);
+        // An answer parked below its closed, clipped row.
+        let row = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(row, 108.0, 3617.0, 1064.0, 76.0);
+        let answer = hidden_box(&mut d, row, "div", &[("opacity", "0"), ("position", "absolute")], "parked answer text");
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 45.0);
+        // The same answer inside its row's box, and one under a slider that
+        // never got its height: both still count.
+        let open_row = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(open_row, 108.0, 4000.0, 1064.0, 200.0);
+        let shown = hidden_box(&mut d, open_row, "div", &[("opacity", "0"), ("position", "absolute")], "answer in an open row");
+        d.set_rect(shown, 132.0, 4060.0, 1016.0, 45.0);
+        let slider = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(slider, 0.0, 5000.0, 1280.0, 0.0);
+        let slide = hidden_box(&mut d, slider, "div", &[("opacity", "0"), ("position", "absolute")], "slide never shown");
+        d.set_rect(slide, 0.0, 5000.0, 1280.0, 400.0);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        let hidden = 16.0 + 18.0 + 20.0 + 21.0 + 17.0;
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 21.0 + hidden, hidden), "{:?}", m.hidden_samples);
     }
 
     #[test]

@@ -511,17 +511,25 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         let Some((left, right, cut_left, cut_right)) = visible_x_extent(dom, el, node, &nr, edge_threshold) else {
             continue;
         };
+        // Text lands on a side when it stops within the threshold of it, on
+        // either side of the edge. Text further past the edge than that is
+        // not held against it: it runs out of the box (a block parked 64px
+        // to the left of its column until its scroll reveal brings it in).
+        let lands = |gap: f64| gap <= edge_threshold && gap >= -edge_threshold;
         let sides = [
-            nr.top - rect.top <= edge_threshold,
-            !cut_right && rect.right - right <= edge_threshold,
-            rect.bottom - nr.bottom <= edge_threshold,
-            !cut_left && left - rect.left <= edge_threshold,
+            lands(nr.top - rect.top),
+            !cut_right && lands(rect.right - right),
+            lands(rect.bottom - nr.bottom),
+            !cut_left && lands(left - rect.left),
         ];
-        // The two remaining tests run only for text that reached an edge.
+        // The remaining tests run only for text that reached an edge.
         if !sides.iter().any(|s| *s) {
             continue;
         }
         if is_visually_hidden(dom, node) || !text_rect_survives_clipping(dom, el, node, &nr) {
+            continue;
+        }
+        if !text_is_the_wrappers(dom, el, node) {
             continue;
         }
         for s in 0..4 {
@@ -529,6 +537,47 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         }
     }
     flush
+}
+
+/// The opacity at or under which a box on the way from a text to its wrapper
+/// shows nothing of that text.
+const WRAPPER_TEXT_UNSEEN_OPACITY: f64 = 0.02;
+
+/// Whether the text of `node` is text the padding of `el` is there to hold
+/// off its edge, asked of every box from `node` up to `el`, `el` excluded.
+/// It is not when one of them:
+///
+/// - is at an opacity of [`WRAPPER_TEXT_UNSEEN_OPACITY`] or less: nothing of
+///   the text shows, and a block waiting at 0 for its scroll reveal is
+///   measured where the reveal starts it, not where it rests;
+/// - is out of flow (`position: absolute` or `fixed`): the wrapper's padding
+///   does not place it, its own offsets do (a promo badge pinned to a card's
+///   corner);
+/// - is a box that paints a surface of its own, a fill that differs from
+///   what is behind it: the text sits on that surface, and its inset is that
+///   box's to give. Inline boxes do not count: a highlighted word at the
+///   start of a line is still a line of the wrapper's text.
+fn text_is_the_wrappers(dom: &dyn Dom, el: ElId, node: ElId) -> bool {
+    const MAX_DEPTH: usize = 256;
+    let mut cur = Some(node);
+    for _ in 0..MAX_DEPTH {
+        let Some(c) = cur else { return true };
+        if c == el {
+            return true;
+        }
+        let opacity = parse_float(&dom.style(c, "opacity"));
+        if opacity.is_finite() && opacity <= WRAPPER_TEXT_UNSEEN_OPACITY {
+            return false;
+        }
+        if matches!(dom.style(c, "position").as_str(), "absolute" | "fixed") {
+            return false;
+        }
+        if dom.style(c, "display") != "inline" && has_visible_background_boundary(dom, c) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
 }
 
 /// JS: checks.mjs#isVisuallyHidden(el, style)
@@ -2719,6 +2768,72 @@ mod tests {
         );
     }
 
+    /// freenet.de (218500, 218548) and sona8.com (217614, 217742, 217750,
+    /// 217758): text the wrapper's padding does not place, or that a scroll
+    /// reveal has not brought in yet.
+    #[test]
+    fn flush_ignores_text_that_is_not_the_wrappers() {
+        let flush = vec!["<div> \"border\": children flush against border on top/bottom (no inset)".to_string()];
+        let hits = |d: &FakeDom, row: ElId| -> Vec<String> {
+            check_element_quality_dom(d, row, &BrowserConfig::default())
+                .into_iter()
+                .map(|h| h.snippet)
+                .collect()
+        };
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        let h3 = d.parent(button).unwrap();
+        d.set_text_rect(button, 24.0, 1.0, 300.0, 56.0);
+        d.set_styles(button, &[("display", "block"), ("opacity", "1"), ("position", "static")]);
+        d.set_styles(h3, &[("display", "block"), ("opacity", "1"), ("position", "static")]);
+        assert_eq!(hits(&d, row), flush);
+
+        // A box on the way to the wrapper waits at opacity 0 for its reveal.
+        d.set_style(h3, "opacity", "0");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "opacity", "0.02");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "opacity", "0.6");
+        assert_eq!(hits(&d, row), flush);
+        d.set_style(h3, "opacity", "1");
+
+        // A badge pinned to the corner: the padding does not place it.
+        d.set_style(button, "position", "absolute");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(button, "position", "fixed");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(button, "position", "relative");
+        assert_eq!(hits(&d, row), flush);
+        d.set_style(button, "position", "static");
+
+        // A box that paints its own surface holds its own text; an inline
+        // highlight is still the wrapper's line.
+        d.set_style(h3, "backgroundColor", "rgb(20, 20, 20)");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "display", "inline");
+        assert_eq!(hits(&d, row), flush);
+        d.set_styles(h3, &[("display", "block"), ("backgroundColor", "rgba(0, 0, 0, 0)")]);
+        assert_eq!(hits(&d, row), flush);
+
+        // Text further past an edge than the threshold has left the box (a
+        // block a reveal starts 56px low); a pixel or two over it still lands
+        // on the edge. The text is read inside its own box, so the box moves.
+        let place = |d: &mut FakeDom, y: f64, h: f64| {
+            d.set_rect(button, 24.0, y, 552.0, h);
+            d.set_text_rect(button, 24.0, y, 300.0, h);
+        };
+        place(&mut d, -30.0, 50.0);
+        assert!(hits(&d, row).is_empty(), "30px above the top rule, 38px off the bottom one");
+        place(&mut d, -3.0, 64.0);
+        assert_eq!(hits(&d, row), flush, "3px over each rule");
+        place(&mut d, 1.0, 80.0);
+        assert_eq!(
+            hits(&d, row),
+            vec!["<div> \"border\": children flush against border on top (no inset)".to_string()],
+            "23px past the bottom rule"
+        );
+    }
+
     #[test]
     fn flush_ignores_hidden_and_clipped_text() {
         let mut d = FakeDom::new();
@@ -2967,8 +3082,13 @@ mod tests {
         d.set_rect(run, 32.0, 112.0, 380.0, 20.0);
         d.set_text_rect(run, 32.0, 112.0, 380.0, 20.0);
         assert!(cramped(&d, band).is_empty(), "cut by the ellipsis box: {:?}", cramped(&d, band));
-        // Unclipped, the run reaches past the band's right side.
+        // Unclipped, the run ends 38px past the band's right side: it runs
+        // out of the band, which is not text held against its edge.
         d.set_style(name, "overflowX", "visible");
+        assert!(cramped(&d, band).is_empty(), "past the edge: {:?}", cramped(&d, band));
+        // Ending on the edge, it is.
+        d.set_rect(run, 32.0, 112.0, 342.0, 20.0);
+        d.set_text_rect(run, 32.0, 112.0, 342.0, 20.0);
         assert_eq!(cramped(&d, band), vec!["<div> \"band\": children flush against bg on right (no inset)"]);
     }
 

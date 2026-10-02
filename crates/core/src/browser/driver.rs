@@ -1288,7 +1288,7 @@ fn reconcile_page_level_forms(
                 })
             }
             "dark-glow" => {
-                dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, root_dark)
+                dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, style_text, root_dark)
             }
             "radial-halo" => radial_halo_page_form_stands(dom, &item, root_dark),
             "layout-transition" => {
@@ -1400,11 +1400,14 @@ fn glow_declaration(detail: &str) -> Option<(String, String)> {
 /// so that form stands, and where it claims a dark page the hosts' surfaces
 /// and the painted root decide ([`dark_claim_stands`]). A form with no
 /// selector (a keyframe step, an inline `style` attribute) stands as before,
-/// unless it claims a dark page and the painted root is light.
+/// unless it claims a dark page and the painted root is light, or it is a
+/// step of `@keyframes` that no painted element runs
+/// ([`glow_keyframes_run_nowhere`]).
 fn dark_glow_page_form_stands(
     dom: &dyn Dom,
     element_findings: &[&BrowserFinding],
     item: &PatternItem,
+    style_text: &str,
     root_dark: Option<bool>,
 ) -> bool {
     if let Some(page) = glow_declaration(&item.finding.detail) {
@@ -1429,6 +1432,11 @@ fn dark_glow_page_form_stands(
             .unwrap_or_default();
         if !casters.is_empty() {
             return false;
+        }
+        if let Some((prop, hex)) = glow_declaration(&item.finding.detail) {
+            if glow_keyframes_run_nowhere(dom, style_text, &prop, &hex) {
+                return false;
+            }
         }
         if !claims_dark {
             return true;
@@ -1518,6 +1526,51 @@ fn elements_casting_glow(dom: &dyn Dom, prop: &str, hex: &str) -> Vec<ElId> {
                 })
         })
         .collect()
+}
+
+static KEYFRAMES_NAME_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r#"@(?:-webkit-|-moz-)?keyframes\s+["']?([^\s{"']+)"#).expect("KEYFRAMES_NAME_RE")
+});
+
+/// Whether a glow no element computes is a step of `@keyframes` that nothing
+/// on the page runs: the style text declares at least one `@keyframes` whose
+/// frames set `prop` to a shadow of colour `hex`, and no element painted at
+/// capture carries one of those names in its `animation-name`. A stylesheet
+/// that ships an animation for a class the page does not use (a cart button
+/// that is not rendered) puts no glow in front of a visitor.
+///
+/// Keyframes the probe cannot read, and a declaration no readable keyframes
+/// carry (an inline `style` attribute), answer no: the form stands as before.
+fn glow_keyframes_run_nowhere(dom: &dyn Dom, style_text: &str, prop: &str, hex: &str) -> bool {
+    let mut names: Vec<String> = Vec::new();
+    for m in KEYFRAMES_NAME_RE.captures_iter(style_text) {
+        let name = m[1].to_string();
+        if names.contains(&name) {
+            continue;
+        }
+        let casts = dom.keyframes(&name).is_some_and(|frames| {
+            frames.iter().flat_map(|f| f.decls.iter()).any(|(p, value)| {
+                p == prop
+                    && crate::js_ext_a::split_commas_outside_parens(value).into_iter().any(|layer| {
+                        crate::checks::rules::find_shadow_color(layer)
+                            .and_then(|info| info.color)
+                            .is_some_and(|c| crate::color::color_to_hex(Some(&c)) == hex)
+                    })
+            })
+        });
+        if casts {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return false;
+    }
+    !dom.query_all(None, "*").unwrap_or_default().into_iter().any(|el| {
+        let running = dom.style(el, "animationName");
+        running != "none"
+            && running.split(',').map(crate::js::trim).any(|n| names.iter().any(|k| k == n))
+            && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none()
+    })
 }
 
 /// The layout-transition page form carries no selector of its own, and the
@@ -3659,6 +3712,57 @@ mod page_level_form_tests {
         // A custom property named after a shadow declares a token.
         let (d, _body) = page(":root{--bprogress-box-shadow:0 0 10px #29d,0 0 5px #29d}");
         assert!(details(&scan(&d), "dark-glow").is_empty());
+    }
+
+    /// leilonozap.vercel.app (findings 213409, 213477): the stylesheet ships
+    /// `cart-breathe` for a cart button the page does not render.
+    #[test]
+    fn a_glow_in_keyframes_nothing_runs_is_not_on_the_page() {
+        let style = ".cart-glass{animation:cart-breathe 3s infinite}\
+@keyframes cart-breathe{0%,100%{box-shadow:0 0 0 rgba(153,193,152,0)}50%{box-shadow:0 0 14px rgba(153,193,152,.35)}}";
+        let reported = "Zero-offset box-shadow glow (#99c198)".to_string();
+        let frames = || {
+            vec![
+                crate::browser::dom::KeyframeFrame {
+                    decls: vec![("box-shadow".to_string(), "rgba(153, 193, 152, 0) 0px 0px 0px".to_string())],
+                },
+                crate::browser::dom::KeyframeFrame {
+                    decls: vec![("box-shadow".to_string(), "rgba(153, 193, 152, 0.35) 0px 0px 14px".to_string())],
+                },
+            ]
+        };
+
+        // Keyframes the probe cannot read: the text decides, as before.
+        let (d, body) = page(style);
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported.clone())]);
+
+        // Readable keyframes that no element runs.
+        let (mut d, _body) = page(style);
+        d.keyframes.insert("cart-breathe".to_string(), frames());
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // An element that runs them but is not painted.
+        let button = d.add(d.body, "a");
+        d.set_style(button, "animationName", "cart-breathe");
+        d.set_style(button, "display", "none");
+        d.set_rect(button, 0.0, 0.0, 0.0, 0.0);
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // A painted element running them, caught between glow frames.
+        let (mut d, body) = page(style);
+        d.keyframes.insert("cart-breathe".to_string(), frames());
+        let button = d.add(Some(body), "a");
+        d.set_style(button, "animationName", "spin, cart-breathe");
+        d.set_rect(button, 0.0, 0.0, 40.0, 40.0);
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported.clone())]);
+
+        // Another animation's keyframes do not carry the glow.
+        let (mut d, body) = page(style);
+        d.keyframes.insert(
+            "cart-breathe".to_string(),
+            vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0.5".to_string())] }],
+        );
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported)]);
     }
 
     #[test]

@@ -6239,3 +6239,90 @@ Known limits, stated so the ratchet does not read them as misses:
    pair** (r3-04), so demoting a mock's text can surface one new
    `low-contrast` finding on the same page (bitroad.ai, 2 in run 31).
 
+
+## Recorded 2026-10-02: images and text that are not at rest (corpus/round8-not-at-rest)
+
+Four changes from `reports/observations-35.md` (rows 1, 5, the `dark-glow`
+part of row 15, and the mechanical part of `content-hidden-at-rest`), all in
+the URL engine's checks under `crates/core/src/browser`, so no existing
+finding moved in any golden. Two goldens are new, for the fixture added here,
+and eight directory goldens gained that fixture's static findings.
+
+- `buried-raster` skips two more state layers. An animation or transition the
+  capture saw running on the raster that moves its `opacity` is a fade in
+  progress. An `<img>` at rest at 0 is waiting for a class swap when at least
+  two other images on the page are shown (own opacity 0.5 or more, painted
+  through their ancestors), declare an opacity transition or an opacity
+  animation, share a class token with it, and carry its class list with one
+  token swapped or one token added (tagDiv Newspaper's
+  `td-animation-stack-type0-1` to `-type0-2`).
+- `cramped-padding`, wrapper form: text lands on a side only within 4px of it
+  on either side of the edge (it used to count at any distance past it), and
+  text is the wrapper's only when no box from it up to the wrapper is at
+  opacity 0.02 or less, is `position: absolute` or `fixed`, or is a
+  non-inline box painting a fill that differs from what is behind it.
+- `dark-glow`, page form with no selector: when the style text declares
+  `@keyframes` whose readable frames set the shadow property to that colour,
+  the form stands only if an element painted at capture carries one of those
+  names in its `animation-name`.
+- `content-hidden-at-rest`: a box that starts an invisible subtree leaves
+  both counts when it is `position: absolute`, has area and lies wholly
+  outside an ancestor that clips it, every clipping ancestor having area on
+  the axis it clips. It counts as shown when its opacity is held by a scroll
+  or view timeline: a running animation moves its `opacity`, a named
+  animation's keyframes set `opacity`, and a rule matching it declares
+  `animation-timeline: scroll()`, `view()` or a named timeline.
+
+New fixture `not-at-rest.html`, a failing and a passing column, pinned on the
+URL engine by `crates/browser/tests/not_at_rest.rs`: the base engine
+(3b1dced5) reports every should-pass case there, and in a browser the hidden
+share reads `687 of 1654 chars`, which leaves out the 267 characters a view
+timeline holds and the 177 parked under closed rows. Every re-recorded golden
+was diffed finding by finding against its predecessor.
+
+- `detect-fixture-json-not-at-rest-html`, `detect-fixture-text-not-at-rest-html`: new cases. The static engine measures no boxes and reads no running animations, so it reports both columns: 5 `buried-raster`, 2 `cramped-padding`, 1 `dark-glow` and 1 advisory `flat-type-hierarchy`.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`: the new fixture's findings and nothing else (835 to 843 counted, 165 to 166 advisory notes). No other finding moved and no snippet changed.
+
+`crates/live/assets/detect-antipatterns-browser.js` was rebuilt, since the
+checks are compiled into the in-page bundle.
+
+**Known limits.**
+
+1. **The class-swap test needs two revealed peers and a shared class.** An
+   image with no class, a page where no image of that kind has been revealed
+   yet, and a reveal that swaps a class on a wrapper instead of on the image
+   keep reporting. In the other direction, an image deliberately held at 0
+   whose class list is one token away from two shown, fading images is
+   skipped.
+2. **A fade in progress is read from the capture's running animations.** A
+   snapshot recorded before animations were read keeps base behaviour, and an
+   image a script tweens through inline opacity with no class marker is
+   covered only by the round 7 lazy tests.
+3. **Text more than 4px past a wrapper's edge is no longer `cramped-padding`.**
+   It overflows the box, which is another defect, and no rule here names it.
+   An existing unit test that pinned the old reading
+   (`cramped_padding_reads_the_edges_a_reader_sees`, the unclipped run 38px
+   past its band) was changed with it.
+4. **Out-of-flow and self-painted text is left to its own box.** A caption
+   positioned absolutely at a card's corner with no inset, and text in a
+   filled child that touches the wrapper's edge, are not reported on the
+   wrapper; the filled child is still measured as an element of its own.
+5. **The wrapper form's insulation loop still reads direct children only**,
+   and its paint gate is still asked of the wrapper, not of each text. Only
+   the opacity of the boxes between a text and the wrapper is read.
+6. **The keyframe test reads the names the style text declares** and the
+   frames the probe can read. Keyframes in an unreadable (cross-origin)
+   sheet, and a glow in an inline `style` attribute no element computes, keep
+   base behaviour. An element that runs the animation at capture hands the
+   decision back to the existing logic.
+7. **Scroll timelines are recognised from CSS only.** A timeline attached by
+   script (`new ScrollTimeline()`), a reveal a script scrubs by writing
+   styles (antropi.world), a slider that never initialised (letour.fr,
+   epcco.com.sa) and a reveal that never ran (asakana.co) all keep reporting:
+   those wait on taste call T6. `animation-timeline` is not in the snapshot's
+   style properties, so the rule is found in the style text and matched to
+   the box by its selector; a rule the selector engine cannot match keeps
+   base behaviour.
+8. **A panel parked under a clip collapsed to no height or width still
+   counts** (epcco.com.sa's 0px slider), as does a parked panel that is in
+   flow or `position: fixed`.

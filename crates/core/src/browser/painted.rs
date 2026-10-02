@@ -1017,14 +1017,195 @@ fn page_width(dom: &dyn Dom, viewport_w: f64) -> f64 {
 /// only in script state, is still reported; an image genuinely held buried
 /// at 0 that also carries `loading="lazy"` or sits over a sibling image is
 /// skipped.
+///
+/// Two more readings need no declared marker. An animation or transition the
+/// capture saw running on the raster and moving its `opacity` is a fade in
+/// progress ([`opacity_in_motion`]). And an `<img>` at rest at 0 whose class
+/// list the page is seen swapping on other images is waiting for the same
+/// swap ([`awaits_class_reveal`]).
 fn is_state_layer(dom: &dyn Dom, el: ElId) -> bool {
-    if declares_opacity_animation(dom, el) || lazy_raster_pending(dom, el) {
+    if declares_opacity_animation(dom, el)
+        || lazy_raster_pending(dom, el)
+        || opacity_in_motion(dom, el)
+        || awaits_class_reveal(dom, el)
+    {
         return true;
     }
     if !declares_opacity_transition(dom, el) || effective_opacity_dom(dom, el) > TRANSPARENT_FLOOR {
         return false;
     }
     declares_animation(dom, el) || marks_lazy_loading(dom, el) || in_crossfade_stack(dom, el)
+}
+
+/// Whether an animation or transition running on the element at capture
+/// moves its `opacity`: the frame the capture read is one of a fade, not a
+/// value the raster is held at. A probe that could not read running
+/// animations answers no.
+fn opacity_in_motion(dom: &dyn Dom, el: ElId) -> bool {
+    dom.running_animation_properties(el)
+        .is_some_and(|props| props.iter().any(|p| p == "opacity"))
+}
+
+/// Whether `el`, a box at an opacity of 0, is held there by a scroll-driven
+/// animation rather than by a reveal that never ran: `animation-timeline:
+/// view()` fades a block in as it enters the viewport and holds it at its
+/// first keyframe while it is below the fold, so a measure taken at the top
+/// of the page reads every block further down at 0, and a visitor who
+/// scrolls sees all of them. All three of:
+///
+/// - an animation the capture saw running on the box moves its `opacity`;
+/// - an `animation-name` on the box has keyframes that set `opacity`;
+/// - a rule in `style_text` whose selector matches the box declares an
+///   `animation-timeline` that is a scroll progress timeline (`scroll()`), a
+///   view progress timeline (`view()`) or a named timeline (`--name`).
+///
+/// A probe that could not read running animations, a timeline attached by
+/// script (`new ScrollTimeline()`), and a scroll-linked reveal a script
+/// drives by writing styles are none of these and keep base behaviour.
+pub fn opacity_held_by_scroll_timeline(dom: &dyn Dom, el: ElId, style_text: &str) -> bool {
+    if !opacity_in_motion(dom, el) {
+        return false;
+    }
+    let sets_opacity = animation_names(dom, el).iter().any(|name| {
+        dom.keyframes(name)
+            .is_some_and(|frames| frames.iter().any(|f| f.decls.iter().any(|(p, _)| p == "opacity")))
+    });
+    if !sets_opacity {
+        return false;
+    }
+    const DECL: &str = "animation-timeline";
+    let lower = style_text.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(DECL) {
+        let at = from + found;
+        from = at + DECL.len();
+        let rest = lower[from..].trim_start();
+        let Some(value) = rest.strip_prefix(':') else { continue };
+        let value = value.split([';', '}']).next().unwrap_or("");
+        let scroll_driven = value.split(',').map(js::trim).any(|timeline| {
+            timeline.starts_with("scroll(") || timeline.starts_with("view(") || timeline.starts_with("--")
+        });
+        if !scroll_driven {
+            continue;
+        }
+        let Some(selector) = crate::checks::css_scan::enclosing_css_selector(style_text, at) else {
+            continue;
+        };
+        if dom.matches(el, &selector) == Ok(true) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `el`, an absolutely positioned box with area, lies wholly outside
+/// an ancestor that clips it, where every ancestor that clips it has area on
+/// the axis it clips: the answer of a closed accordion that parks its panel
+/// below a row which hides its overflow. Such a box shows nothing at any
+/// opacity, so its opacity is not what hides its text. A box under a clip
+/// collapsed to no width or no height (a slider that never got its height) is
+/// not this: there the clip itself may be what failed.
+pub fn parked_outside_clip(dom: &dyn Dom, el: ElId) -> bool {
+    if Placement::of(dom, el) != Placement::Absolute {
+        return false;
+    }
+    let rect = dom.rect(el);
+    if !rect.all_finite() || rect.width < 1.0 || rect.height < 1.0 {
+        return false;
+    }
+    if unpainted_at_capture(dom, el, OwnOpacity::Toggled) != Some(Unpainted::ClippedOut) {
+        return false;
+    }
+    const MAX_ANCESTORS: usize = 512;
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(p) = cur else { break };
+        if Some(p) == dom.body() || Some(p) == dom.document_element() {
+            break;
+        }
+        if clips_contents(&dom.style(p, "display")) {
+            let (ox, oy) = overflow_axes(dom, p);
+            let cr = dom.rect(p);
+            if !cr.all_finite() || (clips(&ox) && cr.width < 1.0) || (clips(&oy) && cr.height < 1.0) {
+                return false;
+            }
+        }
+        cur = dom.parent(p);
+    }
+    true
+}
+
+/// How many revealed peers show that a page swaps a class to reveal its
+/// images.
+const CLASS_REVEAL_MIN_PEERS: usize = 2;
+
+/// The own opacity from which a peer image counts as revealed.
+const CLASS_REVEAL_PEER_OPACITY: f64 = 0.5;
+
+/// Whether an `<img>` at rest at 0 is waiting for a class swap the page is
+/// seen making on other images. A theme that fades its thumbnails in as they
+/// scroll into view holds each one at `opacity: 0` under one class and swaps
+/// it for another that sets `opacity: 1` with an opacity transition (tagDiv
+/// Newspaper's `td-animation-stack-type0-1` to `-type0-2`, a React image
+/// going from `opacity-0` to `opacity-100` once it loads); a capture that
+/// reads the page before the swap reaches an image finds it at 0 with no
+/// lazy marker, since its `src` is already set and the fade is declared on
+/// the class that replaces this one.
+///
+/// The evidence is on the page: at least [`CLASS_REVEAL_MIN_PEERS`] other
+/// images that are shown (own opacity [`CLASS_REVEAL_PEER_OPACITY`] or more,
+/// painted through their ancestors), declare an opacity transition or an
+/// opacity animation, share a class token with this image and carry its
+/// class list with exactly one token swapped for another or one token added.
+/// An image with no class, or with no such peers, keeps base behaviour: one
+/// held at 0 on a page that reveals nothing else of its kind is reported.
+fn awaits_class_reveal(dom: &dyn Dom, el: ElId) -> bool {
+    if tag_lower(dom, el) != "img" || effective_opacity_dom(dom, el) > TRANSPARENT_FLOOR {
+        return false;
+    }
+    let own = class_tokens(dom, el);
+    if own.is_empty() {
+        return false;
+    }
+    let mut peers = 0;
+    for other in dom.query_all(None, "img").unwrap_or_default() {
+        if other == el {
+            continue;
+        }
+        let theirs = class_tokens(dom, other);
+        let shared = own.iter().filter(|t| theirs.contains(*t)).count();
+        let gone = own.len() - shared;
+        let new = theirs.iter().filter(|t| !own.contains(*t)).count();
+        if shared == 0 || gone > 1 || new != 1 {
+            continue;
+        }
+        let opacity = js::parse_float(&dom.style(other, "opacity"));
+        if !(opacity.is_finite() && opacity >= CLASS_REVEAL_PEER_OPACITY) {
+            continue;
+        }
+        if effective_opacity_dom(dom, other) <= TRANSPARENT_FLOOR {
+            continue;
+        }
+        if !(declares_opacity_transition(dom, other) || declares_opacity_animation(dom, other)) {
+            continue;
+        }
+        peers += 1;
+        if peers >= CLASS_REVEAL_MIN_PEERS {
+            return true;
+        }
+    }
+    false
+}
+
+/// The distinct class tokens of an element, as written.
+fn class_tokens(dom: &dyn Dom, el: ElId) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for token in class_attr(dom, el).split_ascii_whitespace() {
+        if !tokens.iter().any(|t| t == token) {
+            tokens.push(token.to_string());
+        }
+    }
+    tokens
 }
 
 /// `transition-property` / `transition-duration` pair `opacity` or `all` with
@@ -2161,6 +2342,181 @@ mod tests {
         ("transitionProperty", "color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter"),
         ("transitionDuration", "0.15s"),
     ];
+
+    /// fischundfang.de (findings 218782, 218787, 219211, 219393, 220983,
+    /// 221026): tagDiv Newspaper holds each thumbnail at opacity 0 under
+    /// `td-animation-stack-type0-1` and swaps the class for `-type0-2`, which
+    /// fades it in, as its reveal queue reaches the image.
+    #[test]
+    fn an_image_waiting_for_a_class_swap_is_a_state_layer() {
+        let (mut d, body) = page();
+        let thumb = |d: &mut FakeDom, y: f64, class: &str, opacity: &str| {
+            let img = d.add(Some(body), "img");
+            d.set_rect(img, 106.0, y, 324.0, 235.0);
+            if !class.is_empty() {
+                d.set_attr(img, "class", class);
+            }
+            d.set_attr(img, "src", "/thumb.jpg");
+            d.set_styles(img, &[("opacity", opacity), ("transitionProperty", "all"), ("transitionDuration", "0s")]);
+            img
+        };
+        let fades = |d: &mut FakeDom, img: ElId| {
+            d.set_styles(img, &[("transitionProperty", "opacity"), ("transitionDuration", "0.3s")]);
+        };
+        let waiting = thumb(&mut d, 2793.0, "entry-thumb td-animation-stack-type0-1", "0");
+        assert_eq!(raster(&d, waiting), None, "no image on the page has been revealed");
+
+        // One revealed peer is not enough; two are.
+        let first = thumb(&mut d, 400.0, "entry-thumb td-animation-stack-type0-2", "1");
+        fades(&mut d, first);
+        assert_eq!(raster(&d, waiting), None);
+        let second = thumb(&mut d, 800.0, "entry-thumb td-animation-stack-type0-2", "0.82");
+        fades(&mut d, second);
+        assert_eq!(raster(&d, waiting), Some(Unpainted::StateLayer));
+
+        // A class added on reveal, rather than swapped.
+        let (mut d, body) = page();
+        let _ = body;
+        let waiting = thumb(&mut d, 2793.0, "photo fade", "0");
+        for y in [400.0, 800.0] {
+            let shown = thumb(&mut d, y, "photo fade in", "1");
+            fades(&mut d, shown);
+        }
+        assert_eq!(raster(&d, waiting), Some(Unpainted::StateLayer));
+
+        // An image held at a faint value is not at the start of a fade.
+        d.set_style(waiting, "opacity", "0.08");
+        assert_eq!(raster(&d, waiting), None);
+        d.set_style(waiting, "opacity", "0");
+
+        // Peers that do not fade, are not shown, share no class, or differ by
+        // more than the one token are not evidence.
+        let (mut d, _body) = page();
+        let waiting = thumb(&mut d, 2793.0, "entry-thumb stack-1", "0");
+        thumb(&mut d, 300.0, "entry-thumb stack-2", "1");
+        thumb(&mut d, 400.0, "entry-thumb stack-2", "1");
+        for y in [500.0, 600.0] {
+            let hidden = thumb(&mut d, y, "entry-thumb stack-2", "0.2");
+            fades(&mut d, hidden);
+        }
+        for y in [700.0, 800.0] {
+            let other = thumb(&mut d, y, "logo shown", "1");
+            fades(&mut d, other);
+        }
+        for y in [900.0, 1000.0] {
+            let far = thumb(&mut d, y, "entry-thumb wide stack-2", "1");
+            fades(&mut d, far);
+        }
+        assert_eq!(raster(&d, waiting), None);
+
+        // An image with no class has no swap to wait for.
+        let (mut d, _body) = page();
+        let bare = thumb(&mut d, 2793.0, "", "0");
+        for y in [400.0, 800.0] {
+            let shown = thumb(&mut d, y, "loaded", "1");
+            fades(&mut d, shown);
+        }
+        assert_eq!(raster(&d, bare), None);
+    }
+
+    /// fischundfang.de 219211: an image at 0.105 with the fade running on it.
+    #[test]
+    fn a_fade_running_on_an_image_is_a_state_layer() {
+        let (mut d, body) = page();
+        let img = d.add(Some(body), "img");
+        d.set_rect(img, 478.0, 600.0, 324.0, 235.0);
+        d.set_styles(img, &[("opacity", "0.105372"), ("transitionProperty", "opacity"), ("transitionDuration", "0.3s")]);
+        assert_eq!(raster(&d, img), None, "a probe that read no animations");
+        d.set_running_animations(img, &[]);
+        assert_eq!(raster(&d, img), None, "nothing running: held at a faint value");
+        d.set_running_animations(img, &["transform"]);
+        assert_eq!(raster(&d, img), None);
+        d.set_running_animations(img, &["opacity"]);
+        assert_eq!(raster(&d, img), Some(Unpainted::StateLayer));
+    }
+
+    /// sona8.com: `animation-timeline: view()` holds every block below the
+    /// fold at its first keyframe while the page sits at the top.
+    #[test]
+    fn a_scroll_timeline_holding_opacity_is_recognised() {
+        let css = ".has-reveal [data-cascade] > * { animation-name: lab-scrub-rise; animation-timeline: view(); }\n\
+.has-reveal .timed > * { animation-name: lab-rise; animation-timeline: auto; }\n\
+.has-reveal .rail { animation-name: lab-rail; animation-timeline: --lab-rail; }";
+        let (mut d, body) = page();
+        let fade = || vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0".to_string())] }];
+        d.keyframes.insert("lab-scrub-rise".to_string(), fade());
+        d.keyframes.insert("lab-rise".to_string(), fade());
+        d.keyframes.insert("lab-rail".to_string(), fade());
+        d.keyframes.insert(
+            "lab-grow".to_string(),
+            vec![crate::browser::dom::KeyframeFrame { decls: vec![("transform".to_string(), "none".to_string())] }],
+        );
+        let block = d.add(Some(body), "div");
+        d.set_styles(block, &[("opacity", "0"), ("animationName", "lab-scrub-rise")]);
+        d.add_selector(block, ".has-reveal [data-cascade] > *");
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "a probe that read no animations");
+        d.set_running_animations(block, &["opacity", "transform"]);
+        assert!(opacity_held_by_scroll_timeline(&d, block, css));
+        d.set_running_animations(block, &["transform"]);
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "the running animation moves no opacity");
+        d.set_running_animations(block, &["opacity"]);
+        d.set_style(block, "animationName", "lab-grow");
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "its keyframes set no opacity");
+        d.set_style(block, "animationName", "none");
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "a transition, not an animation");
+
+        // A named timeline counts; the document timeline does not.
+        let rail = d.add(Some(body), "div");
+        d.set_styles(rail, &[("opacity", "0"), ("animationName", "lab-rail")]);
+        d.set_running_animations(rail, &["opacity"]);
+        d.add_selector(rail, ".has-reveal .rail");
+        assert!(opacity_held_by_scroll_timeline(&d, rail, css));
+        let timed = d.add(Some(body), "div");
+        d.set_styles(timed, &[("opacity", "0"), ("animationName", "lab-rise")]);
+        d.set_running_animations(timed, &["opacity"]);
+        d.add_selector(timed, ".has-reveal .timed > *");
+        assert!(!opacity_held_by_scroll_timeline(&d, timed, css));
+        assert!(!opacity_held_by_scroll_timeline(&d, timed, ""), "no rule to read");
+    }
+
+    /// directus.io: a closed FAQ row hides its overflow at 76px and parks the
+    /// answer, absolutely positioned at opacity 0, below it.
+    #[test]
+    fn a_box_parked_outside_its_clip_is_recognised() {
+        let (mut d, body) = page();
+        let row = d.add(Some(body), "div");
+        resolved(&mut d, row);
+        d.set_styles(row, &[("display", "flex"), ("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(row, 108.0, 3617.0, 1064.0, 76.0);
+        let answer = d.add(Some(row), "div");
+        resolved(&mut d, answer);
+        d.set_styles(answer, &[("display", "flex"), ("position", "absolute"), ("opacity", "0")]);
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 45.0);
+        assert!(parked_outside_clip(&d, answer));
+
+        // Inside the row, in flow, or with no area: not parked.
+        d.set_rect(answer, 132.0, 3640.0, 1016.0, 45.0);
+        assert!(!parked_outside_clip(&d, answer));
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 45.0);
+        d.set_style(answer, "position", "static");
+        assert!(!parked_outside_clip(&d, answer));
+        d.set_style(answer, "position", "absolute");
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 0.0);
+        assert!(!parked_outside_clip(&d, answer));
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 45.0);
+
+        // A row that does not clip, or is not the containing block.
+        d.set_styles(row, &[("overflowX", "visible"), ("overflowY", "visible")]);
+        assert!(!parked_outside_clip(&d, answer));
+        d.set_styles(row, &[("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "static")]);
+        assert!(!parked_outside_clip(&d, answer));
+        d.set_style(row, "position", "relative");
+        assert!(parked_outside_clip(&d, answer));
+
+        // epcco.com.sa: a slider collapsed to no height is not a closed row.
+        d.set_rect(row, 108.0, 3617.0, 1064.0, 0.0);
+        assert!(!parked_outside_clip(&d, answer));
+    }
 
     /// Tailwind's `transition` utility lists `opacity` for every element that
     /// animates anything, so a declared transition alone does not make a

@@ -9,6 +9,8 @@
   on a navy so dark it reads as black is gray on black, while a mid navy, a
   dark navy and a deep teal still read as colour. A state variant utility
   (`hover:bg-*`) paints only in that state and is not the resting background.
+  Gray is low chroma at the lightness the ink sits at: an off-white (`#e5e7eb`,
+  lightness 0.91) is one of the two neutral inks a coloured surface carries.
 -->
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #ffffff; color: #111111; }
@@ -17,14 +19,16 @@
 </head>
 <body>
   <section aria-label="Should flag">
-    <div class="swatch" id="flag-gray-on-navy" style="background: #1e3a8a; color: #e5e7eb">Gray copy on a mid navy panel reads washed out.</div>
-    <div class="swatch" id="flag-gray-on-teal" style="background: #115e59; color: #e5e7eb">Gray copy on a deep teal panel reads washed out.</div>
+    <div class="swatch" id="flag-gray-on-navy" style="background: #1e3a8a; color: #d1d5db">Gray copy on a mid navy panel reads washed out.</div>
+    <div class="swatch" id="flag-gray-on-teal" style="background: #115e59; color: #d1d5db">Gray copy on a deep teal panel reads washed out.</div>
     <div class="swatch" id="flag-gray-on-dark-navy" style="background: #001c47; color: #d4d4d8">Gray copy on a dark navy that still reads as navy.</div>
     <div class="swatch text-gray-400 bg-blue-600" id="flag-tailwind-classes">Utility classes name gray text on a blue fill.</div>
   </section>
 
   <section aria-label="Should pass">
     <div class="swatch" id="pass-gray-on-near-black-navy" style="background: #04002d; color: #d1d1d1">Light gray copy on a navy so dark it reads as black.</div>
+    <div class="swatch" id="pass-off-white-on-navy" style="background: #1e3a8a; color: #e5e7eb">Off-white copy on a mid navy panel is the light neutral ink.</div>
+    <div class="swatch" id="pass-off-white-on-teal" style="background: #115e59; color: #e5e7eb">Off-white copy on a deep teal panel is the light neutral ink.</div>
     <div class="swatch text-gray-500 bg-white hover:bg-emerald-400" id="pass-hover-variant">A hover fill is not the resting background.</div>
   </section>
 </body>

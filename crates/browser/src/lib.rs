@@ -30,6 +30,8 @@
 
 pub mod cdp;
 pub mod consent;
+pub mod response_capture;
+pub mod html_snapshot;
 pub mod discovery;
 pub mod fullpage;
 pub mod screenshot_contrast;
@@ -74,7 +76,7 @@ impl BrowserEngine {
 
     /// An engine reading the real process environment.
     pub fn from_process_env() -> Self {
-        BrowserEngine::new(std::env::vars().collect())
+        BrowserEngine::new(impeccable_common::process_env())
     }
 
     /// JS `launchArgs = process.env.CI ? ['--no-sandbox','--disable-setuid-sandbox'] : []`.
@@ -253,6 +255,7 @@ pub fn serialize_design_system_for_browser(ds: Option<&DesignSystem>) -> Value {
         "hasRadii": ds.has_radii,
         "allowedRadii": radii,
         "hasPillRadius": ds.has_pill_radius,
+        "declaredSelectors": ds.declared_selectors,
     })
 }
 

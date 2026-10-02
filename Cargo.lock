@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "base64",
  "impeccable-browser",
@@ -540,26 +540,29 @@ dependencies = [
  "impeccable-live",
  "impeccable-skills",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
 name = "impeccable-browser"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "base64",
  "image",
+ "impeccable-common",
  "impeccable-core",
  "impeccable-detect",
  "percent-encoding",
  "png",
  "serde_json",
+ "sha2",
  "tungstenite",
  "url",
 ]
 
 [[package]]
 name = "impeccable-bundle"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "base64",
  "impeccable-core",
@@ -568,14 +571,14 @@ dependencies = [
 
 [[package]]
 name = "impeccable-common"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "impeccable-comp"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "image",
  "once_cell",
@@ -587,23 +590,26 @@ dependencies = [
 
 [[package]]
 name = "impeccable-comp-verbs"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-common",
  "impeccable-comp",
+ "impeccable-context",
  "once_cell",
  "regex",
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
 ]
 
 [[package]]
 name = "impeccable-context"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "flate2",
  "impeccable-common",
+ "impeccable-comp",
  "impeccable-core",
  "once_cell",
  "regex",
@@ -619,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-core"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-core",
  "impeccable-foundation",
@@ -631,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-detect"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-common",
  "impeccable-core",
@@ -643,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-foundation"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "cssparser",
  "once_cell",
@@ -656,9 +662,10 @@ dependencies = [
 
 [[package]]
 name = "impeccable-hook"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-common",
+ "impeccable-comp-verbs",
  "impeccable-context",
  "impeccable-core",
  "impeccable-detect",
@@ -670,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-html"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "cssparser",
  "ego-tree",
@@ -691,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-live"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "getrandom 0.2.17",
  "impeccable-common",
@@ -709,7 +716,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-skills"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-common",
  "impeccable-context",
@@ -728,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "impeccable-wasm"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-core",
  "impeccable-detect",
@@ -1759,7 +1766,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.1.5"
+version = "0.1.9"
 dependencies = [
  "impeccable-bundle",
 ]

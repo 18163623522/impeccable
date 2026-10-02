@@ -6239,3 +6239,84 @@ Known limits, stated so the ratchet does not read them as misses:
    pair** (r3-04), so demoting a mock's text can surface one new
    `low-contrast` finding on the same page (bitroad.ai, 2 in run 31).
 
+## Recorded 2026-10-02: text and CSS-text forms (corpus/round8-text-forms)
+
+Five engine defects from the judged findings of corpus run 35
+(`reports/observations-35.md` rows 13, 14, 3 and 15 in the corpus repo). No
+decision of taste is in here: each is a measurement that counted the wrong
+thing, or a stylesheet form that never asked what its selector resolves to.
+
+- **`line-length` counted characters that are on no line.** The rule divides
+  an element's characters among its rendered line rects, and took the count
+  from the UTF-16 length of trimmed `textContent`. It now counts the
+  characters that rendered: the text of a `style`, `script`, `noscript` or
+  `template` descendant and of a `display: none` one is cut out, collapsible
+  white space counts once unless the element computes `white-space: pre`,
+  `pre-wrap` or `break-spaces`, and combining marks and format characters are
+  left out. This is a fix to code that came from main (#840) and is its own
+  commit, with `line-length-text-count.html` and
+  `crates/browser/tests/line_length_text_count.rs` standing alone.
+- **`overused-font` took its share by element.** The URL engine now weighs
+  each element by the characters of its own text and leaves out text that
+  has no box (`hidden`, `display: none`, `visibility: hidden` or `collapse`,
+  `content-visibility: hidden`) from the share. The floor of 20 text
+  elements still counts hidden ones: it asks whether the page set enough type
+  to name a face. Opacity is not read: copy waiting for a scroll reveal is
+  still the page's copy.
+- **`side-tab` reported one pseudo-element stripe twice,** once off the
+  element and once off the stylesheet. The stylesheet form now defers to the
+  element form on a host it resolves to. And the stylesheet scan no longer
+  reports a stripe whose background is a `url()` with no colour beside it.
+- **`marquee` never asked what the loop moves.** In the URL engine the
+  stylesheet form stands only when an element it resolves to carries text,
+  media, an SVG inside it, a `url()` background or generated content.
+- **`bounce-easing` read a name as the motion.** A bounce-named animation
+  whose keyframes are readable and only scale between 0 and 1 or fade does
+  not report, in either engine.
+
+New fixtures `line-length-text-count.html`, `overused-font-share-pass.html`,
+`overused-font-share-flag.html`, `side-tab-stylesheet-forms.html`,
+`marquee-ornament.html` and `bounce-easing-pulse.html`, pinned on the URL
+engine by `crates/browser/tests/line_length_text_count.rs` and
+`crates/browser/tests/text_forms.rs`. Every re-recorded golden was diffed
+finding by finding against its predecessor.
+
+- `detect-fixture-json-line-length-text-count-html`, `detect-fixture-text-line-length-text-count-html`: new cases, no findings (`line-length` needs layout).
+- `detect-fixture-json-overused-font-share-pass-html`, `detect-fixture-text-overused-font-share-pass-html`, `detect-fixture-json-overused-font-share-flag-html`, `detect-fixture-text-overused-font-share-flag-html`: new cases. Both report `Primary font: inter` on the static engine, see limit 1.
+- `detect-fixture-json-side-tab-stylesheet-forms-html`, `detect-fixture-text-side-tab-stylesheet-forms-html`: new cases, three stripes; the image-only stripe is absent.
+- `detect-fixture-json-marquee-ornament-html`, `detect-fixture-text-marquee-ornament-html`: new cases, four loops on the static engine, see limit 2.
+- `detect-fixture-json-bounce-easing-pulse-html`, `detect-fixture-text-bounce-easing-pulse-html`: new cases, the two bounces as advisory notes; the loader dots are absent.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the findings of the new fixtures and nothing else (835 to 844 counted, 165 to 167 advisory notes: two `overused-font`, three `side-tab`, four `marquee`, two advisory `bounce-easing`). No existing finding moved and no snippet changed.
+
+### Known limits
+
+1. **The static engine's `overused-font` is unchanged.** It reads declared
+   families with no layout and no character count, so it names Inter on
+   `overused-font-share-pass.html`, where Inter sits only in a closed drawer
+   and hidden slides.
+2. **The static engine reports every marquee loop.** It cannot resolve a
+   selector to an element, so the wave and the sweep on
+   `marquee-ornament.html` report there. The same holds for the double
+   report of a pseudo-element stripe: the static engine has one form and
+   never doubled.
+3. **`line-length` on text ended by `<br>`** still divides the count by
+   width, so short lines ended by breaks share characters in proportion to
+   their ink. odishatreasury.gov.in's footer keeps its finding at the right
+   number (`~125 chars on 2 of 3`, was `~171 chars on 3 of 3`).
+4. **Combining marks are dropped by general category,** not by grapheme
+   cluster, so a conjunct of two consonants counts as two and a spacing
+   vowel sign as none.
+5. **Characters hidden other than by `display: none`** (a `visibility:
+   hidden` child, a 1px visually hidden label) are still counted by
+   `line-length`: their rects are in the lines too, or negligible.
+6. **A bounce name whose keyframes move the element still reports,**
+   including a plain up-and-down loop with no overshoot (Tailwind's `bounce`),
+   which judges call the pattern. Only a pulse in place is dropped, and only
+   when its keyframes can be read: keyframes in a stylesheet the engine could
+   not read keep the finding.
+7. **A square top or bottom band still reports as `side-tab`.** Whether the
+   rounded-card requirement extends to them is an open decision (T2); this
+   change only stops the same band from reporting twice.
+8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
+   `url()` background still reports from the stylesheet scan, as before.
+

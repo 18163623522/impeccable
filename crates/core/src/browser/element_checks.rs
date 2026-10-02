@@ -1558,12 +1558,35 @@ pub fn check_element_motion_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
-    check_motion(&MotionOpts {
+    let animation_name = dom.style(el, "animationName");
+    let mut hits = check_motion(&MotionOpts {
         tag,
         transition_property: Some(dom.style(el, "transitionProperty")),
-        animation_name: Some(dom.style(el, "animationName")),
+        animation_name: Some(animation_name.clone()),
         timing_functions: Some(timing.join(" ")),
         class_list: Some(class_attr(dom, el)),
+    });
+    // A bounce by name is a bounce unless the page's keyframes for every
+    // name in the list are readable and only pulse (a loader dot scaling
+    // from nothing to its size and back): nothing moves and nothing passes
+    // its end value. Keyframes the DOM cannot hand over keep the finding.
+    if hits.iter().any(|h| h.id == "bounce-easing" && h.snippet.starts_with("animation: "))
+        && animation_names_only_pulse(dom, &animation_name)
+    {
+        hits.retain(|h| !(h.id == "bounce-easing" && h.snippet.starts_with("animation: ")));
+    }
+    hits
+}
+
+/// Whether every bounce-named animation in a computed `animation-name` list
+/// has keyframes the DOM can read and that only pulse
+/// ([`crate::checks::css_scan::keyframes_only_pulse`]).
+fn animation_names_only_pulse(dom: &dyn Dom, animation_name: &str) -> bool {
+    crate::checks::css_scan::bounce_names_only_pulse(animation_name, |name| {
+        let frames = dom.keyframes(name)?;
+        Some(crate::checks::css_scan::keyframes_only_pulse(
+            frames.iter().flat_map(|f| f.decls.iter().map(|(p, v)| (p.as_str(), v.as_str()))),
+        ))
     })
 }
 
@@ -8158,5 +8181,35 @@ mod tests {
         assert!(check_element_colors_dom(&d, covered, &mut seen).is_empty());
         let hits = check_element_colors_dom(&d, visible_link, &mut seen);
         assert!(reports_contrast(&hits), "{hits:?}");
+    }
+    /// The element form reads the same keyframes off the page.
+    #[test]
+    fn a_bounce_name_is_dropped_only_when_its_keyframes_only_pulse() {
+        use crate::browser::dom::KeyframeFrame;
+        let frames = |steps: &[&[(&str, &str)]]| -> Vec<KeyframeFrame> {
+            steps
+                .iter()
+                .map(|s| KeyframeFrame { decls: s.iter().map(|(p, v)| (p.to_string(), v.to_string())).collect() })
+                .collect()
+        };
+        let (mut d, body) = page();
+        let dot = d.add(Some(body), "div");
+        d.set_style(dot, "animationName", "sk-bounceDelay");
+        let bounce = |d: &FakeDom| -> Vec<String> {
+            check_element_motion_dom(d, dot).into_iter().filter(|h| h.id == "bounce-easing").map(|h| h.snippet).collect()
+        };
+        // No keyframes to read: the name decides, as before.
+        assert_eq!(bounce(&d), vec!["animation: sk-bounceDelay".to_string()]);
+        d.keyframes.insert(
+            "sk-bounceDelay".to_string(),
+            frames(&[&[("transform", "scale(0)")], &[("transform", "scale(1)")]]),
+        );
+        assert!(bounce(&d).is_empty());
+        // Keyframes that move the element are a bounce.
+        d.keyframes.insert(
+            "sk-bounceDelay".to_string(),
+            frames(&[&[("transform", "translateY(-25%)")], &[("transform", "none")]]),
+        );
+        assert_eq!(bounce(&d), vec!["animation: sk-bounceDelay".to_string()]);
     }
 }

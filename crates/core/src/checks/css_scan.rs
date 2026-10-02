@@ -663,6 +663,23 @@ fn get_or<'a>(decls: &'a DeclMap, a: &str, b: &str) -> &'a str {
     }
 }
 
+re!(STRIPE_URL_FN_RE, format!(r#"{}\((?:"[^"]*"|'[^']*'|[^)]*)\)"#, ci("url")));
+
+/// Whether a stripe's background value paints an image and names no colour
+/// beside it: a `url()` layer, and no other token that parses as a colour.
+/// A value with no `url()` (an unresolved `var()`, a keyword) is left to the
+/// caller, which reports it as before.
+fn stripe_is_an_image_with_no_colour(bg: &str) -> bool {
+    if !STRIPE_URL_FN_RE.is_match(bg) {
+        return false;
+    }
+    let rest = STRIPE_URL_FN_RE.replace_all(bg, " ");
+    !rest
+        .split(|c: char| is_js_ws(c) || c == ',' || c == '/')
+        .filter(|t| !t.is_empty())
+        .any(|t| parse_any_color(Some(t)).is_some() || t.contains("var("))
+}
+
 /// JS: checks.mjs#scanCssTextForPseudoStripe
 pub fn scan_css_text_for_pseudo_stripe(raw_content: &str) -> Vec<PatternFinding> {
     let content = blank_comments(raw_content);
@@ -805,6 +822,10 @@ pub fn scan_css_text_for_pseudo_stripe(raw_content: &str) -> Vec<PatternFinding>
                 continue;
             }
         } else if NEUTRAL_NAME_RE.is_match(bg) {
+            continue;
+        } else if stripe_is_an_image_with_no_colour(bg) {
+            // `background: url(rule.jpg) repeat-x`: the stripe is a picture,
+            // and nothing here says it is an accent colour.
             continue;
         }
 
@@ -2171,6 +2192,152 @@ pub fn scan_css_text_for_buried_raster(style_text: &str) -> Vec<PatternFinding> 
     findings
 }
 
+// ─── bounce names whose keyframes only pulse ────────────────────────────────
+re!(
+    NAMED_KEYFRAMES_RE,
+    format!(r"@(?:-webkit-)?keyframes{WS}+([A-Za-z0-9_-]+){WS}*\{{")
+);
+re!(KEYFRAME_STEP_RE, r"\{([^{}]*)\}".to_string());
+re!(
+    SCALE_FN_RE,
+    format!(r"^{}(?:[xXyYzZ]|3[dD])?\(([^()]*)\)", ci("scale"))
+);
+
+/// Whether every number in `list` (split on commas or white space) is a
+/// scale factor between nothing and full size.
+fn scale_factors_within_unit(list: &str) -> bool {
+    let mut any = false;
+    for part in list.split(|c: char| c == ',' || is_js_ws(c)).filter(|p| !p.is_empty()) {
+        let Ok(v) = part.parse::<f64>() else { return false };
+        if !(0.0..=1.0).contains(&v) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Whether one keyframe declaration is part of a pulse: it scales the
+/// element between nothing and its full size, fades it, or sets an easing
+/// that stays inside its range. Anything that moves the element (a
+/// translate, an offset, a margin), turns it, grows it past full size or
+/// eases past its end value is not, and neither is a value this cannot read
+/// (a `var()`, a `calc()`).
+pub fn keyframe_decl_only_pulses(prop: &str, value: &str) -> bool {
+    let prop = js::to_lower_case(js::trim(prop));
+    let prop = prop.strip_prefix("-webkit-").unwrap_or(&prop);
+    let value = js::trim(value);
+    let value = js::trim(value.strip_suffix("!important").unwrap_or(value));
+    match prop {
+        "opacity" => true,
+        "scale" => value.eq_ignore_ascii_case("none") || scale_factors_within_unit(value),
+        "transform" => {
+            if value.eq_ignore_ascii_case("none") {
+                return true;
+            }
+            let mut rest = value;
+            let mut any = false;
+            while !rest.is_empty() {
+                let Some(m) = SCALE_FN_RE.captures(rest) else { return false };
+                if !scale_factors_within_unit(&m[1]) {
+                    return false;
+                }
+                any = true;
+                rest = js::trim_start(&rest[m.get(0).unwrap().end()..]);
+            }
+            any
+        }
+        "animation-timing-function" => {
+            let lower = js::to_lower_case(value);
+            if lower.contains("linear(") || lower.contains("var(") {
+                return false;
+            }
+            !crate::checks::rules::BEZIER_RE.captures_iter(&lower).any(|m| {
+                let (y1, y2) = (parse_float(&m[2]), parse_float(&m[4]));
+                !(0.0..=1.0).contains(&y1) || !(0.0..=1.0).contains(&y2)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Whether a set of keyframes only pulses: it has declarations, and each one
+/// passes [`keyframe_decl_only_pulses`]. A loader dot that swells from
+/// nothing to its size and back (SpinKit's `sk-bounceDelay`) is this: nothing
+/// moves and nothing passes its end value, whatever the keyframes are called.
+pub fn keyframes_only_pulse<'a>(decls: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool {
+    let mut any = false;
+    for (prop, value) in decls {
+        if !keyframe_decl_only_pulses(prop, value) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// [`keyframes_only_pulse`] for the `@keyframes` named `name` in a
+/// stylesheet text: `None` when the text defines no such keyframes, and
+/// `Some(true)` only when every definition of the name pulses and nothing
+/// else.
+pub fn css_keyframes_only_pulse(style_text: &str, name: &str) -> Option<bool> {
+    let mut verdict: Option<bool> = None;
+    let mut pos = 0usize;
+    while let Some(m) = NAMED_KEYFRAMES_RE.captures_at(style_text, pos) {
+        let after = m.get(0).unwrap().end();
+        let bytes = style_text.as_bytes();
+        let (mut i, mut depth) = (after, 1i64);
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        pos = i.max(after);
+        if &m[1] != name {
+            continue;
+        }
+        if depth != 0 {
+            return Some(false);
+        }
+        let body = &style_text[after..i - 1];
+        let pulses = keyframes_only_pulse(KEYFRAME_STEP_RE.captures_iter(body).flat_map(|step| {
+            let block = step.get(1).unwrap().as_str();
+            block
+                .split(';')
+                .filter(|d| !js::trim(d).is_empty())
+                .map(|d| d.split_once(':').unwrap_or((d, "")))
+                .collect::<Vec<_>>()
+        }));
+        if !pulses {
+            return Some(false);
+        }
+        verdict = Some(true);
+    }
+    verdict
+}
+
+/// Whether a `bounce-easing` name finding (`animation: <name list>`) is a
+/// pulse called a bounce: every bounce-named animation in the list has
+/// keyframes `only_pulses` can find, and they only pulse. `only_pulses`
+/// answers `None` for keyframes it cannot read, which keeps the finding.
+pub fn bounce_names_only_pulse(names: &str, only_pulses: impl Fn(&str) -> Option<bool>) -> bool {
+    const BOUNCE_WORDS: [&str; 5] = ["bounce", "elastic", "wobble", "jiggle", "spring"];
+    let mut any = false;
+    for name in names.split(',').map(js::trim).filter(|n| {
+        let lower = js::to_lower_case(n);
+        BOUNCE_WORDS.iter().any(|w| lower.contains(w))
+    }) {
+        if only_pulses(name) != Some(true) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 re!(MARQUEE_TAG_RE, format!(r"<{}{B}", ci("marquee")));
 
 /// JS: checks.mjs#scanCssTextForMarquee. `markup` defaults to `content`.
@@ -3026,5 +3193,54 @@ mod tests {
             let _ = crate::checks::html_patterns::check_html_patterns(s, None);
             let _ = crate::checks::html_patterns::scan_html_for_shape_assembled_illustration(s);
         }
+    }
+    /// lpga.or.jp: `.news::after` is a 10px strip of a repeated photograph.
+    /// A stripe that names no colour is not an accent colour.
+    #[test]
+    fn a_pseudo_stripe_drawn_by_an_image_alone_is_not_reported() {
+        let rule = |bg: &str| {
+            format!(".news::after{{content:\"\";position:absolute;bottom:0;height:10px;left:0;right:0;background:{bg}}}")
+        };
+        let snippets = |bg: &str| -> Vec<String> {
+            scan_css_text_for_pseudo_stripe(&rule(bg)).into_iter().map(|f| f.snippet).collect()
+        };
+        assert!(snippets("url(\"../images/before-sns.jpg\") left center / auto 10px repeat-x").is_empty());
+        assert!(snippets("url(rule.png)").is_empty());
+        let reported = vec![".news::after — absolute 10px pseudo-element stripe (bottom: 0)".to_string()];
+        // A colour beside the image, in any spelling, reports as before.
+        assert_eq!(snippets("url(rule.png) #e11d48"), reported);
+        assert_eq!(snippets("crimson url(rule.png) repeat-x"), reported);
+        assert_eq!(snippets("url(rule.png) var(--accent)"), reported);
+        // And so does a value with no image that the scan cannot parse.
+        assert_eq!(snippets("var(--accent)"), reported);
+    }
+
+    #[test]
+    fn keyframes_that_only_pulse() {
+        // SpinKit: a dot swelling from nothing to its size and back.
+        let spinkit = "@keyframes sk-bounceDelay{0%,80%,100%{transform:scale(0)}40%{transform:scale(1)}}";
+        assert_eq!(css_keyframes_only_pulse(spinkit, "sk-bounceDelay"), Some(true));
+        assert_eq!(css_keyframes_only_pulse(spinkit, "other"), None);
+        for (pulses, body) in [
+            (true, "0%{opacity:0;-webkit-transform:scale3d(.3,.3,.3)}100%{opacity:1;transform:none}"),
+            (true, "50%{scale:0.5 0.5;animation-timing-function:cubic-bezier(0.4,0,0.2,1)}"),
+            // Tailwind's bounce moves the element.
+            (false, "0%,100%{transform:translateY(-25%);animation-timing-function:cubic-bezier(0.8,0,1,1)}50%{transform:none}"),
+            // A pop past full size, an easing past its end value, a turn.
+            (false, "0%{transform:scale(0)}60%{transform:scale(1.2)}100%{transform:scale(1)}"),
+            (false, "0%{transform:scale(0);animation-timing-function:cubic-bezier(0.34,1.56,0.64,1)}100%{transform:scale(1)}"),
+            (false, "0%{transform:scale(0) rotate(10deg)}100%{transform:scale(1)}"),
+            // Values this cannot read, another property, no declaration.
+            (false, "0%{transform:scale(var(--s))}100%{transform:scale(1)}"),
+            (false, "0%{top:0}100%{top:10px}"),
+            (false, "0%{}100%{}"),
+        ] {
+            let css = format!("@keyframes k{{{body}}}");
+            assert_eq!(css_keyframes_only_pulse(&css, "k"), Some(pulses), "{body}");
+        }
+        // Two definitions of one name: both have to pulse.
+        let twice = "@keyframes k{0%{transform:scale(0)}100%{transform:scale(1)}} @-webkit-keyframes k{0%{transform:translateY(-10px)}}";
+        assert_eq!(css_keyframes_only_pulse(twice, "k"), Some(false));
+        assert_eq!(css_keyframes_only_pulse("@keyframes k{0%{opacity:0}", "k"), Some(false));
     }
 }

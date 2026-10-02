@@ -1841,7 +1841,12 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
         if Some(el) == body || Some(el) == root {
             continue;
         }
-        if !super::element_checks::is_rendered_for_browser_rule(dom, el) {
+        // The element pass has no `aria-hidden` gate, so a verdict it hands
+        // over on painted text inside an `aria-hidden` box would never be
+        // read here and never replaced. Such text takes a slot of the second
+        // budget only; the first is what it always was.
+        let rendered = super::element_checks::is_rendered_for_browser_rule(dom, el);
+        if !rendered && !(routed_open && super::element_checks::is_painted_for_browser_rule(dom, el)) {
             continue;
         }
         let tag = tag_lower(dom, el);
@@ -1859,7 +1864,7 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
         {
             continue;
         }
-        if base_open {
+        if base_open && rendered {
             if let Some(c) = base_candidate(dom, el, &tag, &direct, image_only) {
                 candidates.push(c);
                 continue;
@@ -2690,6 +2695,16 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
             }
         }
         if URL_RE.is_match(&bg_image) {
+            // A `fixed` image is placed against the viewport, not against
+            // the box, so the pixel under a point depends on the scroll
+            // position this walk never models. Mapped onto the box it read
+            // white text on a dark photo band at 2.1:1 (epcco.com.sa). The
+            // walk ends there and the pixel pass reads the text.
+            if url_layer_is_fixed(&bg_image, &dom.style(node, "background")) {
+                return CssPlan::Sample {
+                    sample: json!({ "status": "unresolved", "reason": "fixed background image", "stop": true }),
+                };
+            }
             let size = {
                 let v = get_layer_value(&dom.style(node, "backgroundSize"), 0);
                 if v.is_empty() { "auto".to_string() } else { v }
@@ -2718,6 +2733,23 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
     }
 }
 
+/// Whether the first `url()` layer of a box's `background-image` is drawn
+/// with `background-attachment: fixed`, read from the computed `background`
+/// shorthand (the capture records no attachment longhand). Where the
+/// shorthand was not recorded, or its layers do not line up with the
+/// image's, a box with one layer is read from it and any other is not fixed.
+fn url_layer_is_fixed(bg_image: &str, shorthand: &str) -> bool {
+    let images = crate::color::split_top_level_commas(bg_image);
+    let layers = crate::color::split_top_level_commas(shorthand);
+    let Some(index) = images.iter().position(|layer| URL_RE.is_match(layer)) else {
+        return false;
+    };
+    if layers.len() != images.len() {
+        return false;
+    }
+    crate::checks::gradient_geometry::parse_shorthand_layer(&layers[index]).fixed
+}
+
 /// JS: sampleCssBackground url path — `if (!img) return { status:
 /// 'unresolved', reason: 'image unavailable' }`.
 ///
@@ -2726,14 +2758,20 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
 /// its pixels (a size stated in pixels or percentages, or `cover`) and it
 /// covers neither the candidate's text nor its own box, it is not the surface
 /// either, and the walk ends there as it does once the image loads
-/// ([`css_url_source_point`]). Otherwise the walk goes on, as before.
+/// ([`css_url_source_point`]).
+///
+/// Otherwise the walk ends there too. It used to go on to the boxes beneath,
+/// and scored the text against a surface the image covers: white text on
+/// bankofamerica.com's photo band printed 1.0:1 against the white page
+/// behind it. What the image shows there is not known, so the candidate is
+/// left to the pixel pass.
 pub fn css_url_no_image(dom: &dyn Dom, node: ElId, el: ElId, size: &str, position: &str) -> Value {
     let rect: Box4 = dom.rect(node).into();
     let painted = resolve_painted_image_rect(&rect, 0.0, 0.0, size, position);
     if image_leaves_text_uncovered(dom, node, el, &painted, 0.0, 0.0, size) {
         return uncovered_image_sample();
     }
-    json!({ "status": "unresolved", "reason": "image unavailable" })
+    json!({ "status": "unresolved", "reason": "image unavailable", "stop": true })
 }
 
 /// The sample that ends the walk at an image that is not under the text.
@@ -2780,8 +2818,13 @@ pub fn css_url_source_point(
     if image_leaves_text_uncovered(dom, node, el, &painted, intrinsic_w, intrinsic_h, size) {
         return Err(uncovered_image_sample());
     }
-    point_to_image_source(x, y, &painted)
-        .ok_or_else(|| json!({ "status": "unresolved", "reason": "point outside background image" }))
+    // A point the image does not reach shows the box's own fill, or what is
+    // behind the box, and this walk reads neither once a box carries an
+    // image. It ends here rather than score the text against the boxes
+    // beneath.
+    point_to_image_source(x, y, &painted).ok_or_else(|| {
+        json!({ "status": "unresolved", "reason": "point outside background image", "stop": true })
+    })
 }
 
 /// How far a no-repeat image may fall short of a box and still cover it:
@@ -3015,9 +3058,10 @@ pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
 /// sample off the image's edge, as the verdict for the whole line (vorelios.com
 /// printed 4.0:1 against a median of 8.3:1, climatempo.com.br 4.4:1 against
 /// 10.0:1). Where the points read two surfaces, the median more than
-/// [`VERDICT_MEDIAN_DIVERGENCE`] times the 10th percentile, the words over the
-/// light part are really there and the line is scored at that percentile as
-/// before.
+/// [`VERDICT_MEDIAN_DIVERGENCE`] times the 10th percentile, this is that
+/// percentile: [`finish_analysis`] prints it where the median fails as well,
+/// and gives no verdict where the median passes, since which of the two
+/// surfaces the glyphs sit on is the pixel pass's to read.
 pub fn sampled_verdict(sorted: &[f64]) -> f64 {
     let low = percentile(sorted, 10.0);
     let median = percentile(sorted, 50.0);
@@ -3085,6 +3129,23 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
     let median = percentile(&ratios, 50.0);
     let measured = sampled_verdict(&ratios);
     let threshold = candidate.get("threshold").and_then(Value::as_f64).unwrap_or(f64::NAN);
+    // The points read two surfaces and the line passes on the one most of
+    // them read: a few samples landed on a bright patch of a photo, or past
+    // its edge (thekrogerco.com printed 1.9:1 against a median of 7.0:1 for
+    // bold white text on a green photo). Which surface the glyphs sit on is
+    // the pixel pass's to say, so this pass gives no verdict. The same guard
+    // as the pixel pass's "verdict disagrees with its own median".
+    if measured < threshold && median >= threshold && measured < median {
+        return spread(
+            candidate,
+            vec![
+                ("status", json!("unresolved")),
+                ("confidence", json!("none")),
+                ("samples", json!(n)),
+                ("reason", json!("sample points disagree")),
+            ],
+        );
+    }
     let status = if measured < threshold { "fail" } else { "pass" };
     let mut sorted_methods = methods.clone();
     sorted_methods.sort();
@@ -3421,17 +3482,25 @@ mod tests {
         let out = finish_analysis(&candidate, &tc, &mixed, 7);
         assert_eq!(out["status"], "pass", "{out}");
         assert!(out["finding"].is_null(), "{out}");
-        // White over a grey band and over black reads two surfaces; the words
-        // over the grey keep the low reading, and a median above the bar
-        // prints one decimal.
+        // White over a grey band and over black reads two surfaces, and the
+        // line passes over the one most points read: no verdict, and the
+        // pixel pass reads which one the glyphs sit on.
         let white = rgba(255.0, 255.0, 255.0, 1.0);
         let grey = json!({ "status": "sampled", "color": { "r": 119, "g": 119, "b": 119, "a": 1 }, "method": "canvas-img-underlay" });
         let black = json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 1 }, "method": "canvas-img-underlay" });
-        let banded: Vec<Value> = vec![grey.clone(), grey.clone(), grey, black.clone(), black.clone(), black.clone(), black];
+        let banded: Vec<Value> = vec![grey.clone(), grey.clone(), grey.clone(), black.clone(), black.clone(), black.clone(), black];
         let out = finish_analysis(&candidate, &white, &banded, 7);
+        assert_eq!(out["status"], "unresolved", "{out}");
+        assert_eq!(out["reason"], "sample points disagree", "{out}");
+        assert!(out.get("finding").is_none(), "{out}");
+        // Two surfaces that both fail keep the low reading, and the median
+        // it prints: white over the grey band and over a paler one.
+        let pale = json!({ "status": "sampled", "color": { "r": 236, "g": 236, "b": 236, "a": 1 }, "method": "canvas-img-underlay" });
+        let failing: Vec<Value> = vec![pale.clone(), pale.clone(), pale, grey.clone(), grey.clone(), grey.clone(), grey];
+        let out = finish_analysis(&candidate, &white, &failing, 7);
         assert_eq!(out["status"], "fail", "{out}");
         let snippet = out["finding"]["snippet"].as_str().unwrap();
-        assert!(snippet.starts_with("browser contrast 4.48:1 median 21.0:1 (need 4.5:1)"), "{snippet}");
+        assert!(snippet.starts_with("browser contrast 1.2:1 median 4.48:1 (need 4.5:1)"), "{snippet}");
     }
 
     #[test]
@@ -4080,6 +4149,96 @@ mod tests {
         assert_eq!(none, first);
     }
 
+    /// fischundfang.de marks its whole page wrapper `aria-hidden="true"`.
+    /// The element pass scores the text in it, so the verdicts it hands over
+    /// have to reach the pixels.
+    #[test]
+    fn handed_over_text_in_an_aria_hidden_box_takes_a_routed_slot() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 1280.0, 4000.0);
+        d.set_rect(body, 0.0, 0.0, 1280.0, 4000.0);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let wrap = d.add(Some(body), "div");
+        d.set_rect(wrap, 0.0, 0.0, 1280.0, 4000.0);
+        d.set_styles(wrap, &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+        d.set_attr(wrap, "aria-hidden", "true");
+        // A first-budget candidate inside it stays out, as it always did.
+        let band = d.add(Some(wrap), "section");
+        d.set_rect(band, 0.0, 0.0, 1280.0, 200.0);
+        d.set_styles(
+            band,
+            &[
+                ("backgroundImage", "linear-gradient(rgb(230, 226, 216), rgb(217, 212, 200))"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("opacity", "1"),
+            ],
+        );
+        text_run(&mut d, band, "p", "Band copy", (10.0, 10.0, 200.0, 20.0));
+        // A caption over a photo, which the element pass hands over.
+        let hero = d.add(Some(wrap), "section");
+        d.set_rect(hero, 0.0, 1200.0, 1280.0, 600.0);
+        d.set_styles(hero, &[("position", "relative"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+        let photo = d.add(Some(hero), "img");
+        d.set_rect(photo, 0.0, 1200.0, 1280.0, 600.0);
+        d.set_styles(photo, &[("position", "absolute"), ("opacity", "1")]);
+        let content = d.add(Some(hero), "div");
+        d.set_rect(content, 0.0, 1400.0, 1280.0, 100.0);
+        d.set_styles(content, &[("position", "relative"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("opacity", "1")]);
+        let caption = text_run(&mut d, content, "a", "19. Juni 2024", (20.0, 1420.0, 140.0, 20.0));
+
+        let first = collect_visual_contrast_candidates(&d, &json!({ "maxCandidates": 12 }));
+        assert!(first.is_empty(), "{first:#?}");
+        let both = collect_visual_contrast_candidates(&d, &json!({ "maxCandidates": 12, "maxRoutedCandidates": 12 }));
+        assert_eq!(both.len(), 1, "{both:#?}");
+        assert_eq!(both[0]["text"], json!("19. Juni 2024"));
+        assert_eq!(both[0]["routed"], json!("unread layer"));
+        // What is not painted stays out of both budgets.
+        d.set_style(wrap, "visibility", "hidden");
+        d.set_style(caption, "visibility", "hidden");
+        let hidden = collect_visual_contrast_candidates(&d, &json!({ "maxCandidates": 12, "maxRoutedCandidates": 12 }));
+        assert!(hidden.is_empty(), "{hidden:#?}");
+    }
+
+    /// epcco.com.sa: `background: url(bg-2.jpg) center 0 / cover no-repeat
+    /// fixed` on the band.
+    #[test]
+    fn a_fixed_image_ends_the_walk_unread() {
+        let mut d = FakeDom::new();
+        let (_, body) = d.with_page();
+        let band = d.add(Some(body), "section");
+        d.set_rect(band, 0.0, 1800.0, 1280.0, 155.0);
+        let image = "url(\"https://example.com/bg-2.jpg\")";
+        let paint = |d: &mut FakeDom, attachment: &str| {
+            d.set_styles(
+                band,
+                &[
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("backgroundImage", image),
+                    ("backgroundSize", "cover"),
+                    ("backgroundPosition", "50% 0px"),
+                    ("background", &format!("rgba(0, 0, 0, 0) {image} no-repeat {attachment} 50% 0px / cover padding-box border-box")),
+                ],
+            );
+        };
+        let white = rgba(255.0, 255.0, 255.0, 1.0);
+        paint(&mut d, "fixed");
+        match css_plan(&d, band, Some(&white)) {
+            CssPlan::Sample { sample } => {
+                assert_eq!(sample["reason"], "fixed background image");
+                assert!(sample_ends_walk(&sample));
+            }
+            other => panic!("a fixed image was mapped onto its box: {other:?}"),
+        }
+        paint(&mut d, "scroll");
+        assert!(matches!(css_plan(&d, band, Some(&white)), CssPlan::Url { .. }));
+        // No shorthand recorded: read as before.
+        d.set_style(band, "background", "");
+        assert!(matches!(css_plan(&d, band, Some(&white)), CssPlan::Url { .. }));
+        // An image that did not load ends the walk as well.
+        assert!(sample_ends_walk(&css_url_no_image(&d, band, band, "cover", "50% 0px")));
+    }
+
     #[test]
     fn the_sampled_pass_refuses_what_it_hands_to_the_pixels() {
         let mut d = FakeDom::new();
@@ -4299,7 +4458,8 @@ mod tests {
         assert_eq!(css_url_no_image(&d, card, caption, "cover", "50% 50%")["reason"], "image unavailable");
 
         // A repeating tile covers what it paints; outside its first tile the
-        // point is unresolved and the walk goes on, as before.
+        // point is unresolved, and the walk ends on the box rather than score
+        // the text against what lies beneath it.
         let tiled = d.add(Some(body), "div");
         d.set_rect(tiled, 0.0, 600.0, 400.0, 200.0);
         d.set_style(
@@ -4314,14 +4474,16 @@ mod tests {
         let outside =
             css_url_source_point(&d, tiled, words, 64.0, 64.0, "64px 64px", "0% 0%", 200.0, 630.0)
                 .unwrap_err();
-        assert!(!sample_ends_walk(&outside));
+        assert!(sample_ends_walk(&outside));
+        assert_eq!(outside["reason"], "point outside background image");
 
-        // What the capture cannot place is read as before: no shorthand
-        // recorded, or a `contain` size with no intrinsic size loaded.
+        // What the capture cannot place is read where the image reaches: no
+        // shorthand recorded, or a `contain` size with no intrinsic size
+        // loaded.
         let bare = d.add(Some(body), "span");
         d.set_rect(bare, 200.0, 100.0, 32.0, 32.0);
         let unplaced = css_url_source_point(&d, bare, count, 30.0, 22.0, "22px 16px", "50% 50%", 216.0, 114.0);
-        assert!(unplaced.map_or_else(|s| !sample_ends_walk(&s), |_| true));
+        assert!(unplaced.is_ok());
         d.set_style(bare, "background", "rgba(0, 0, 0, 0) url(\"x.svg\") no-repeat scroll 50% 50% / contain padding-box border-box");
         let no_size = css_url_source_point(&d, bare, count, 0.0, 0.0, "contain", "50% 50%", 216.0, 114.0);
         assert!(no_size.map_or_else(|s| !sample_ends_walk(&s), |_| true));

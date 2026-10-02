@@ -200,6 +200,14 @@ fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
         match bg {
             Some(b) if alpha_gt(&b, q.min_fill_alpha) => {
                 if b.a.map_or(false, |a| a >= 0.99) {
+                    // A gradient on the same box paints over its fill, so
+                    // the fill is the surface only where the gradient lets
+                    // it show.
+                    if has_gradient_or_url {
+                        if let Some(painted) = own_gradient_over_fill(dom, cur, &bg_image, &b, q) {
+                            return gradient_over_fill_surface(out, cur, painted);
+                        }
+                    }
                     out.info = BackgroundInfo {
                         color: Some(flatten(&out.overlays, b)),
                         unresolved: false,
@@ -291,6 +299,48 @@ fn walk_surface(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> TextSurface {
         unresolved: false,
     };
     out.base = Some(canvas);
+    out
+}
+
+/// How far, on any channel, a gradient has to move an opaque fill under the
+/// text before the surface is the gradient and not the fill. Under it a
+/// reader sees the fill (a sheen, a vignette that has faded out there), and
+/// the fill stays the surface, named and deduped as it always was.
+const OWN_GRADIENT_MIN_CHANNEL_DELTA: f64 = 12.0;
+
+/// What the gradient layers of a box with an opaque fill paint under the
+/// queried text, flattened over that fill: `background: #8b5cf6
+/// linear-gradient(135deg, #6d28d9, #9061f9)` shows the gradient, and the
+/// fill nowhere (sona8.com's buttons were scored against the fill, a colour
+/// no pixel of them has). `None` keeps the fill as the surface: on the walk
+/// every other rule shares, where the layers hold a picture, where no layer
+/// paints under the text, where the geometry cannot be read, and where the
+/// gradient leaves the fill within [`OWN_GRADIENT_MIN_CHANNEL_DELTA`] at
+/// every point under the text.
+fn own_gradient_over_fill(dom: &dyn Dom, node: ElId, bg_image: &str, fill: &Rgba, q: &Query<'_>) -> Option<Vec<Rgba>> {
+    q.text?;
+    let UnderText::Paint(samples) = gradient_under_text(dom, node, bg_image, q)? else {
+        return None;
+    };
+    let painted: Vec<Rgba> = samples.iter().map(|s| composite_color_over(s, fill)).collect();
+    let moved = |c: &Rgba| {
+        (c.r - fill.r).abs() >= OWN_GRADIENT_MIN_CHANNEL_DELTA
+            || (c.g - fill.g).abs() >= OWN_GRADIENT_MIN_CHANNEL_DELTA
+            || (c.b - fill.b).abs() >= OWN_GRADIENT_MIN_CHANNEL_DELTA
+    };
+    painted.iter().any(moved).then_some(painted)
+}
+
+/// The surface of a box whose gradient was read over its own opaque fill
+/// ([`own_gradient_over_fill`]): the samples, under the fills above them.
+fn gradient_over_fill_surface(mut out: TextSurface, host: ElId, painted: Vec<Rgba>) -> TextSurface {
+    out.samples = Some(painted.into_iter().map(|c| flatten(&out.overlays, c)).collect());
+    out.gradient_host = Some(host);
+    out.host = Some(host);
+    out.info = BackgroundInfo {
+        color: None,
+        unresolved: false,
+    };
     out
 }
 
@@ -394,9 +444,16 @@ pub fn resolve_background(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
 }
 
 /// JS: checks.mjs#compositeGradientStops(stops, gradientEl, win, customPropMap)
+///
+/// `stops` are the stops of every layer in `bg_image`, pooled. Where the box
+/// holds one gradient its translucent stops are composited over the ground
+/// behind the box, as they always were. Where it holds several, an upper
+/// layer's translucent stops lie over the layers below it in the same box,
+/// not over that ground ([`layered_gradient_stops`]).
 fn composite_gradient_stops(
     dom: &dyn Dom,
     stops: Vec<Rgba>,
+    bg_image: &str,
     gradient_el: ElId,
     q: &Query<'_>,
 ) -> Option<Vec<Rgba>> {
@@ -406,6 +463,9 @@ fn composite_gradient_stops(
     }
     let base_el = dom.flat_parent(gradient_el).unwrap_or(gradient_el);
     let base = walk_surface(dom, base_el, q).info.color;
+    if let Some(layered) = layered_gradient_stops(bg_image, base) {
+        return Some(layered);
+    }
     let mut out = Vec::new();
     for s in stops {
         let a = s.alpha_or_one();
@@ -422,6 +482,65 @@ fn composite_gradient_stops(
     } else {
         Some(out)
     }
+}
+
+/// The most colours [`layered_gradient_stops`] carries from one layer to the
+/// next; a box past it keeps the pooled reading.
+const LAYERED_STOPS_MAX: usize = 48;
+
+/// Every colour the gradient layers of one box can show, read bottom layer
+/// up: an opaque stop is itself, and a translucent one is composited over
+/// each colour the layers below it can show (over `ground`, behind the box,
+/// for the bottom layer). wotsthat.com's avatar is a translucent radial
+/// highlight (`rgba(255, 255, 255, 0.3)` to clear) over an opaque pastel
+/// conic gradient; pooled, the highlight's clear stop was composited over
+/// the dark page behind the avatar and dark initials read 1.1:1 against a
+/// colour the avatar never shows.
+///
+/// A layer whose stops are all opaque may be a tile that leaves the layers
+/// below showing around it, so their colours stay in the set. `None` (the
+/// pooled reading) for a single layer, for a set past
+/// [`LAYERED_STOPS_MAX`], and where nothing can be said.
+fn layered_gradient_stops(bg_image: &str, ground: Option<Rgba>) -> Option<Vec<Rgba>> {
+    let layers: Vec<Vec<Rgba>> = split_top_level_commas(bg_image)
+        .iter()
+        .map(|layer| parse_gradient_colors(Some(layer)))
+        .filter(|stops| !stops.is_empty())
+        .collect();
+    if layers.len() < 2 {
+        return None;
+    }
+    let push = |set: &mut Vec<Rgba>, c: Rgba| {
+        if !set.iter().any(|k| k.r == c.r && k.g == c.g && k.b == c.b) {
+            set.push(c);
+        }
+    };
+    let mut visible: Vec<Rgba> = Vec::new();
+    for (i, stops) in layers.iter().enumerate().rev() {
+        let bottom = i == layers.len() - 1;
+        let below: Vec<Rgba> = if bottom { ground.into_iter().collect() } else { visible.clone() };
+        let opaque_layer = stops.iter().all(|s| s.alpha_or_one() >= 0.99);
+        let mut next: Vec<Rgba> = if opaque_layer { visible.clone() } else { Vec::new() };
+        for s in stops {
+            if s.alpha_or_one() >= 0.99 {
+                push(&mut next, *s);
+            } else {
+                for b in &below {
+                    push(&mut next, composite_color_over(s, b));
+                }
+            }
+        }
+        if next.len() > LAYERED_STOPS_MAX {
+            return None;
+        }
+        // A translucent layer over ground that could not be read shows
+        // nothing this can name; the layers above it are read over what the
+        // box is known to show.
+        if !next.is_empty() {
+            visible = next;
+        }
+    }
+    (!visible.is_empty()).then_some(visible)
 }
 
 /// JS: checks.mjs#resolveGradientStops(el, win, customPropMap) in browser mode.
@@ -473,7 +592,7 @@ fn gradient_stops_walk(dom: &dyn Dom, el: ElId, q: &Query<'_>) -> Option<Vec<Rgb
             }
         }
         if let Some(stops) = stops {
-            let composited = composite_gradient_stops(dom, stops, cur, q);
+            let composited = composite_gradient_stops(dom, stops, &bg_image, cur, q);
             let Some(composited) = composited else { return None };
             if overlays.is_empty() {
                 return Some(composited);
@@ -659,6 +778,94 @@ mod tests {
         // Without a text box the size alone says the same.
         let s = resolve_text_surface(&d, link, &|_| false, Box2::new(0.0, 0.0, 0.0, 0.0), 14.0);
         assert_eq!(s.skipped_images, vec![link]);
+    }
+
+    /// sona8.com: `background: #8b5cf6 linear-gradient(135deg, #6d28d9,
+    /// #9061f9)`. The gradient paints over the fill.
+    #[test]
+    fn a_gradient_over_the_same_boxs_opaque_fill_is_the_surface() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(body, "backgroundImage", "none");
+        let button = d.add(Some(body), "a");
+        let paint = |d: &mut FakeDom, fill: &str, image: &str| {
+            d.set_styles(
+                button,
+                &[
+                    ("backgroundColor", fill),
+                    ("backgroundImage", image),
+                    ("backgroundSize", "auto"),
+                    ("backgroundPosition", "0% 0%"),
+                    ("background", &format!("{fill} {image} repeat scroll 0% 0% / auto padding-box border-box")),
+                ],
+            );
+        };
+        d.set_rect(button, 0.0, 0.0, 110.0, 40.0);
+        let text = Box2::new(16.0, 10.0, 78.0, 20.0);
+        paint(&mut d, "rgb(196, 181, 253)", "linear-gradient(135deg, rgb(91, 33, 182) 0%, rgb(109, 40, 217) 100%)");
+        let s = resolve_text_surface(&d, button, &|_| false, text, 14.0);
+        let samples = s.samples.expect("the gradient is sampled");
+        assert!(samples.iter().all(|c| c.r < 115.0 && c.alpha_or_one() == 1.0), "{samples:?}");
+        assert_eq!((s.gradient_host, s.host, s.info.color), (Some(button), Some(button), None));
+        // The walk every other rule shares still reads the fill.
+        assert_eq!(resolve_background(&d, button), Some(Rgba::new(196.0, 181.0, 253.0, 1.0)));
+
+        // A translucent sheen is read over the fill, not over the page.
+        paint(&mut d, "rgb(30, 58, 138)", "linear-gradient(rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.5))");
+        let s = resolve_text_surface(&d, button, &|_| false, text, 14.0);
+        assert_eq!(s.samples.as_deref().and_then(|v| v.first()).copied(), Some(Rgba::new(143.0, 157.0, 197.0, 1.0)));
+
+        // One that leaves the fill within a reader's tolerance keeps the
+        // fill, named as it always was.
+        paint(&mut d, "rgb(30, 58, 138)", "linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0))");
+        let s = resolve_text_surface(&d, button, &|_| false, text, 14.0);
+        assert_eq!(s.info.color, Some(Rgba::new(30.0, 58.0, 138.0, 1.0)));
+        assert!(s.samples.is_none() && s.gradient_host.is_none() && s.base.is_some());
+
+        // So does one whose geometry cannot be read.
+        paint(&mut d, "rgb(196, 181, 253)", "conic-gradient(rgb(91, 33, 182), rgb(109, 40, 217))");
+        let s = resolve_text_surface(&d, button, &|_| false, text, 14.0);
+        assert_eq!(s.info.color, Some(Rgba::new(196.0, 181.0, 253.0, 1.0)));
+    }
+
+    /// wotsthat.com: a translucent highlight over an opaque pastel wheel, on
+    /// a dark page.
+    #[test]
+    fn an_upper_gradient_layer_is_composited_over_the_layers_below_it() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        clear(&mut d, html);
+        d.set_style(body, "backgroundColor", "rgb(19, 22, 42)");
+        d.set_style(body, "backgroundImage", "none");
+        let avatar = d.add(Some(body), "span");
+        d.set_style(avatar, "backgroundColor", "rgba(0, 0, 0, 0)");
+        d.set_style(
+            avatar,
+            "backgroundImage",
+            "radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.3) 0%, rgba(0, 0, 0, 0) 45%), conic-gradient(rgb(163, 230, 53) 0deg, rgb(45, 212, 191) 85deg, rgb(167, 139, 250) 180deg, rgb(163, 230, 53) 360deg)",
+        );
+        let stops = resolve_gradient_stops(&d, avatar).expect("stops");
+        // The wheel's three colours, and each under the highlight. The clear
+        // stop shows the wheel, never the page behind the avatar.
+        assert_eq!(stops.len(), 6, "{stops:?}");
+        assert!(stops.contains(&Rgba::new(163.0, 230.0, 53.0, 1.0)));
+        assert!(stops.contains(&Rgba::new(191.0, 238.0, 114.0, 1.0)));
+        assert!(stops.iter().all(|c| c.g > 130.0), "{stops:?}");
+
+        // One layer is composited over the ground behind the box, as before.
+        d.set_style(avatar, "backgroundImage", "linear-gradient(rgba(255, 255, 255, 0.5), rgba(0, 0, 0, 0))");
+        let stops = resolve_gradient_stops(&d, avatar).expect("stops");
+        assert_eq!(stops, vec![Rgba::new(137.0, 139.0, 149.0, 1.0), Rgba::new(19.0, 22.0, 42.0, 1.0)]);
+
+        // Opaque layers alone are pooled, as before.
+        d.set_style(
+            avatar,
+            "backgroundImage",
+            "linear-gradient(rgb(1, 2, 3), rgb(4, 5, 6)), linear-gradient(rgb(7, 8, 9), rgb(10, 11, 12))",
+        );
+        assert_eq!(resolve_gradient_stops(&d, avatar).map(|v| v.len()), Some(4));
     }
 
     #[test]

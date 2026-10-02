@@ -10,6 +10,7 @@ pub mod cascade;
 pub mod decorative_text;
 pub mod dom;
 pub mod engine;
+pub mod field_label;
 pub mod layer;
 pub mod page;
 pub mod profile;

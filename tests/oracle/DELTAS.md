@@ -6010,3 +6010,43 @@ rendered lines, `cramped-padding` on the measured inset, the two-hue gate of
 `ai-color-palette`, `kicker-above-heading` naming its eyebrow) print nothing
 in these file-scan goldens; `crates/browser/tests/text_geometry.rs` pins the
 new `line-length` snippets against a real browser.
+
+## Recorded 2026-10-01: labelled placeholders advisory, bold-named faces take the large-text bar
+
+Two taste calls on `low-contrast` (premise round 4):
+
+1. **r5-p30, advisory.** A low-contrast placeholder reports as advisory when
+   a visible label names its field, and keeps its severity when the
+   placeholder is the field's only label. A label is a `<label for>` or a
+   `<label>` around the field, the text `aria-labelledby` points at, or a
+   short text label right above the field, and it counts only where a reader
+   sees it: a label that is `display: none` (HubSpot's forms), screen-reader
+   text and `aria-label` are no label.
+2. **r5-p31, narrow.** A first font family named as a bold cut (`bold`,
+   `semibold`, `demibold`, `extrabold`, `ultrabold`, `heavy` or `black` as a
+   word of the name, split at punctuation and at a lower-to-upper case step)
+   reads as weight 700 for the large-text bar when its computed weight is
+   under 700. 18.66px of it is large text and needs 3:1.
+
+New fixtures `low-contrast-labelled-placeholders.html` and
+`low-contrast-heavy-faces.html` add four per-fixture cases, recorded from the
+binary. The five directory cases were re-recorded and differ only by those
+two files' findings: the all-fixtures JSON goes from 905 to 924 findings (14
+failing, 5 advisory) and the `--no-advisory` JSON from 772 to 786. No finding
+on an existing fixture moved.
+
+### Known limits
+
+1. **A file scan cannot see "right above".** Without layout the static
+   engine counts label elements and `aria-labelledby` text only, so plain
+   text above a field (`Where do you work today` in the fixture) is advisory
+   in the browser engines and keeps its severity in a file scan.
+2. **A label element is taken at its word.** A `<label>` whose visible text
+   does not name the field still counts: a `https://` prefix inside a
+   wrapping label (context.dev), a promotional line written as the field's
+   `<label for>` (sapo.vn).
+3. **Only the family name is read.** The engine cannot see which face was
+   loaded, so a bold-named first family that fell back to a regular system
+   face still takes the large-text bar, and a single-weight display face with
+   no weight word (Lilita One) keeps the normal-text bar. Size still gates
+   it: exxonmobil.com's EMprint-Semibold buttons are 16px and keep 4.5:1.

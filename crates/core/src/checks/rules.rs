@@ -640,6 +640,56 @@ pub fn contrast_severity(ratio: f64, threshold: f64) -> Option<String> {
     contrast_near_bar(ratio, threshold).then(|| ADVISORY_SEVERITY.to_string())
 }
 
+/// The words in a font family's name that say the face is drawn bold.
+const HEAVY_FACE_WORDS: &[&str] = &[
+    "bold", "semibold", "demibold", "extrabold", "ultrabold", "heavy", "black",
+];
+
+/// Whether the first family in a computed `font-family` list is named as a
+/// bold cut: `ploni-demi-bold`, `EMprint Semibold`, `Gotham-Black`,
+/// `ProximaNovaBold` (taste call r5-p31). The name is split at anything that
+/// is not a letter or digit and at a lower-to-upper case step, so `demi-bold`
+/// reads as `demi` + `bold` and `Blackletter` or `Kobold` as neither. Only
+/// the first family is read: it is the one the page asked for, and the
+/// engine cannot see which face was actually loaded.
+pub fn family_names_heavy_face(font_family: &str) -> bool {
+    let first = font_family.split(',').next().unwrap_or("");
+    let first = first.trim().trim_matches(|c| c == '"' || c == '\'');
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in first.chars() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && prev_lower && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        prev_lower = c.is_lowercase();
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words.iter().any(|w| HEAVY_FACE_WORDS.contains(&w.as_str()))
+}
+
+/// The weight the large-text contrast bar reads: the computed weight, or 700
+/// where the family is named as a bold cut and the computed weight is under
+/// it ([`family_names_heavy_face`]). A face drawn bold and served as its
+/// family's regular weight computes to 400, and 19px of it is large text.
+pub fn contrast_font_weight(font_weight: f64, font_family: &str) -> f64 {
+    if font_weight < 700.0 && family_names_heavy_face(font_family) {
+        700.0
+    } else {
+        font_weight
+    }
+}
+
 /// Marks every `low-contrast` hit advisory. The engines call it on an
 /// element whose text has no reading job ([`crate::checks::decorative_text`]).
 pub fn demote_low_contrast(hits: &mut [RuleHit]) {
@@ -2980,6 +3030,42 @@ mod tests {
             has_direct_text: true,
             ..Default::default()
         }
+    }
+
+    /// r5-p31: walla.co.il's `ploni-demi-bold` and exxonmobil.com's
+    /// `EMprint Semibold` compute to weight 400.
+    #[test]
+    fn a_family_named_as_a_bold_cut_reads_as_bold() {
+        for heavy in [
+            "ploni-demi-bold, arial",
+            "\"EMprint Semibold\", Arial, sans-serif",
+            "EMprint-Semibold",
+            "ProximaNovaBold",
+            "Gotham-Black",
+            "\"Avenir Heavy\"",
+            "Inter ExtraBold",
+            "Arial Black, sans-serif",
+            "DEMIBOLD",
+        ] {
+            assert!(family_names_heavy_face(heavy), "{heavy}");
+            assert_eq!(contrast_font_weight(400.0, heavy), 700.0, "{heavy}");
+        }
+        for plain in [
+            "\"Lilita One\", cursive",
+            "Inter, \"Arial Black\"",
+            "Blackletter",
+            "Kobold",
+            "Boldonse",
+            "ploni-regular",
+            "Heavyweight",
+            "",
+        ] {
+            assert!(!family_names_heavy_face(plain), "{plain}");
+            assert_eq!(contrast_font_weight(400.0, plain), 400.0, "{plain}");
+        }
+        // A computed weight at or over 700 is kept as it is.
+        assert_eq!(contrast_font_weight(900.0, "Gotham-Black"), 900.0);
+        assert_eq!(contrast_font_weight(600.0, "Inter"), 600.0);
     }
 
     #[test]

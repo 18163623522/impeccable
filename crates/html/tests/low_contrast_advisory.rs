@@ -170,3 +170,53 @@ fn a_failing_copy_first_hides_later_advisory_copies() {
     assert_eq!(findings.len(), 1, "{findings:#?}");
     assert_failing(&findings[0]);
 }
+
+/// r5-p30: a placeholder under a visible label is a hint. The file scan
+/// reads label elements and `aria-labelledby`; plain text above a field
+/// needs layout, so that row keeps its severity here.
+#[test]
+fn a_placeholder_under_a_visible_label_is_advisory() {
+    let findings = scan_fixture("low-contrast-labelled-placeholders.html");
+    for only_label in [
+        "Work email address",
+        "Company website link",
+        "Search trials and targets",
+        "Plate number or VIN",
+        "Look up a compound",
+        "Newsletter email address",
+        "Family name goes here",
+        "Where do you work today",
+    ] {
+        assert_failing(one(&findings, only_label));
+    }
+    for hint in [
+        "Optional for individuals",
+        "What are you working on this quarter",
+        "Include the country code",
+        "What should we call you",
+        "Where the parcel goes",
+    ] {
+        assert_advisory(one(&findings, hint));
+    }
+    assert_eq!(findings.len(), 13, "{findings:#?}");
+}
+
+/// r5-p31: a family named as a bold cut takes the large-text bar at computed
+/// weight 400.
+#[test]
+fn a_family_named_as_a_bold_cut_takes_the_large_text_bar() {
+    let findings = scan_fixture("low-contrast-heavy-faces.html");
+    for (surface, bar) in [
+        ("#ff572a", "(need 4.5:1)"),
+        ("#ff5757", "(need 4.5:1)"),
+        ("#f93258", "(need 4.5:1)"),
+        ("#f41987", "(need 4.5:1)"),
+        ("#fa6400", "(need 4.5:1)"),
+        ("#ff9494", "(need 3:1)"),
+    ] {
+        let f = one(&findings, surface);
+        assert!(f.snippet.contains(bar), "{f:#?}");
+        assert_failing(f);
+    }
+    assert_eq!(findings.len(), 6, "{findings:#?}");
+}

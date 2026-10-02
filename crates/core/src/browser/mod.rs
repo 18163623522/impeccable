@@ -86,6 +86,7 @@ pub mod background;
 pub mod decorative_text;
 pub mod driver;
 pub mod element_checks;
+pub mod field_label;
 pub mod page_checks;
 pub mod painted;
 pub mod quality;

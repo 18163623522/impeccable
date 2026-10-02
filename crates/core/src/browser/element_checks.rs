@@ -1011,6 +1011,9 @@ pub fn check_element_colors_dom(
             400.0
         }
     };
+    // A family named as a bold cut is bold for the large-text bar (r5-p31).
+    let font_weight =
+        crate::checks::rules::contrast_font_weight(font_weight, &dom.style(ink_el, "fontFamily"));
     let bg_clip = {
         let a = dom.style(el, "webkitBackgroundClip");
         if !a.is_empty() {
@@ -1267,7 +1270,11 @@ pub fn check_element_colors_dom(
                                 .into_iter()
                                 .filter(|h| verdict_stands(h))
                                 .collect();
-                        if hits.iter().any(|h| h.id == "low-contrast") && is_decorative() {
+                        // A placeholder under a visible label is a hint, not
+                        // the field's name (r5-p30).
+                        if hits.iter().any(|h| h.id == "low-contrast")
+                            && (is_decorative() || super::field_label::field_has_visible_label(dom, el))
+                        {
                             crate::checks::rules::demote_low_contrast(&mut hits);
                         }
                         findings.extend(hits);

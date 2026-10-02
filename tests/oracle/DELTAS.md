@@ -6089,3 +6089,47 @@ Known limits: a footer built from unmarked `div`s (Framer output, a
 reporting; the static engine does not apply the category-colour skip; the
 role key is exact, so category headings set at two font sizes are two roles;
 the page-level `Purple/violet accent colors detected` is not affected.
+## Recorded 2026-10-01: closed interface and recoverable hydration errors (premise round 4)
+
+Two corpus decisions, both in the URL engine, so no existing golden moved: the
+1,011 recorded cases replay byte-equal. Six goldens are new, the
+`detect-fixture-{json,text}-*` pairs for the three fixtures added here, and all
+six are empty, because the static engine reports neither rule.
+
+- `detect-fixture-json-content-hidden-at-rest-html`, `detect-fixture-text-content-hidden-at-rest-html`,
+  `detect-fixture-json-content-hidden-closed-interface-html`, `detect-fixture-text-content-hidden-closed-interface-html`
+  (r5-p5-content-hidden-closed-navigation): `content-hidden-at-rest` leaves
+  text in closed interface out of the hidden count and the page total. A
+  subtree is closed interface when the box that starts it (itself at opacity
+  0.02 or less, or `visibility: hidden`) is in a `nav` or under a `navigation`,
+  `menu` or `menubar` role, is or sits under `inert`, is or sits under an id
+  whose `aria-controls` triggers say `aria-expanded="false"` or
+  `aria-selected="false"`, carries a `dialog`, `alertdialog` or `tabpanel`
+  role, carries a drawer, flyout, modal, tab-panel or accordion-panel class
+  word, follows an element that says `aria-expanded="false"`, or is
+  `position: fixed` and wholly beside the viewport. In a browser the first
+  fixture reports `50% of page text (580 of 1162 chars)`, the three stalled
+  reveals alone (the base engine printed 80%, 2269 of 2851), and the second
+  reports nothing (base: 74%). `crates/browser/tests/hidden_and_hydration.rs`
+  pins both.
+- `detect-fixture-json-script-error-hydration-html`, `detect-fixture-text-script-error-hydration-html`
+  (r5-p13-script-error-hydration): a `script-error` whose message is
+  `Minified React error #418`, `#419`, `#422`, `#423` or `#425` reports as
+  advisory, snippet unchanged, under its own cap of three. Other React
+  invariants and first-party errors stay errors. Pinned by the same test file.
+
+`crates/live/assets/detect-antipatterns-browser.js` was rebuilt, since the
+measure is compiled into the in-page bundle.
+
+**Known limits.** Closed interface is recognized only by the marks above. An
+unmarked closed panel still counts (ktb.gov.tr's `#accessibility_panel`, a
+Framer accordion with no ARIA on landio.framer.website), which is base
+behaviour. In the other direction, a reveal that never ran is left out when it
+carries one of the marks: a whole `nav` staged at opacity 0, a `tab-content`
+or `modal` wrapper faded in on scroll, a section that directly follows a
+collapsed disclosure button. A carousel whose dots are `aria-selected="false"`
+tabs with `aria-controls` reads as unselected tab panels. The hydration
+decision reads the message alone: it does not check that the page rendered
+complete, and development builds, which print the long message without a
+number, stay errors. The corpus replays `script-error` from recorded snippets,
+so an error the base run's cap dropped is not measured.

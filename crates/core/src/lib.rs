@@ -14,6 +14,7 @@
 
 pub mod browser;
 pub mod checks;
+pub mod script_errors;
 pub mod third_party;
 
 pub use impeccable_foundation::{

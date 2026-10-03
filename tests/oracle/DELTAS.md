@@ -6639,3 +6639,25 @@ finding by finding against its predecessor.
 8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
    `url()` background still reports from the stylesheet scan, as before.
 
+
+## Recorded 2026-10-03: near-black ink is not gray (corpus/premise5-hues, r6-t8)
+
+Corpus decision `r6-t8-gray-on-color-near-black` (narrow). `is_gray_ink`
+counted any low-saturation ink over lightness 0.2 as gray, so `#393939` on a
+yellow card and `#413c38` on a green button (6 to 8:1, harmless to both judges)
+reported as gray on colour. The floor is now `GRAY_INK_MIN_LIGHTNESS` = 0.3:
+every Tailwind neutral at `-700` and darker sits under it, every `-600` and
+lighter over it. The Tailwind class path skips `text-{gray,slate,zinc,neutral,stone}-{700..}`
+the same way.
+
+- `detect-fixture-json-gray-on-color-html`, `detect-fixture-text-gray-on-color-html`: the fixture's two new should-flag rows (`#4b5563` on `#fcd34d`, `text-gray-600 on bg-amber-400`) report; its three new should-pass rows (`#393939` on `#ffc224`, `#413c38` on `#38e07b`, `text-gray-800` on `bg-yellow-400`) do not.
+- `detect-fixture-json-own-box-surface-and-ink-contrast-html`, `detect-fixture-text-own-box-surface-and-ink-contrast-html`: `gray-on-color` on `#363637` (lightness 0.21) on `#066bed` is gone; the `low-contrast` 2.5:1 finding on the same pair stays.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`: the same three moves (875 to 876 counted). Nothing else moved.
+
+### Known limits
+
+1. **Near-black ink that is genuinely too dark for its fill** (`#363637` on
+   a mid blue) now reports only as `low-contrast`, which is the rule that owns
+   that failure.
+2. **The class path reads the shade number, not the colour,** so a project
+   that redefines `gray-700` lighter than 0.3 is still skipped.

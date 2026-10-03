@@ -270,7 +270,8 @@ pub mod origin {
     /// The visual-contrast pass (image and pixel reads), and the rule pass's
     /// `low-contrast` verdicts on text it hands to that pass
     /// (`visual::routed_reason`), which the pixels replace where they give a
-    /// verdict and which stand where they do not. Recorded, not replayable.
+    /// verdict and which stand, as advisory, where they do not. Recorded,
+    /// not replayable.
     pub const VISUAL_CONTRAST: &str = "visual-contrast";
 }
 
@@ -319,8 +320,14 @@ pub struct Evidence {
     pub validity: Option<PageValidity>,
     /// The post-reveal capture's JSON, which every deterministic pass ran over.
     pub scan_snapshot: Option<String>,
-    /// Every hit test answered for that capture, by all of its passes.
+    /// Every hit test answered for that capture, by all of its passes, and
+    /// the scroll probe's answers ([`Facts::shown_on_scroll`]).
     pub scan_facts: Facts,
+    /// Notes about the capture rather than the page, which report no
+    /// finding and block nothing: a slider that never started, whose text
+    /// `content-hidden-at-rest` left out. The CLI prints the same lines
+    /// after its findings in text mode.
+    pub capture_notes: Vec<String>,
     /// Unset: the passes share one capture, so there is no second one to
     /// record. A recording made before they shared it carries its separate
     /// post-reveal capture here, and [`replay_url_scan`] still reads it.
@@ -517,8 +524,9 @@ fn detect_url_impl(
     };
 
     let mut consent = ConsentReport::default();
+    let mut capture_notes = Vec::new();
     let scanned = scan_on_browser(
-        browser, url, credentials, options, wait_until, settle_ms, profile, None, &mut consent,
+        browser, url, credentials, options, wait_until, settle_ms, profile, None, &mut consent, &mut capture_notes,
     );
     // finally: close page (inside scan_page) and the browser when owned.
     if owns_browser {
@@ -535,6 +543,7 @@ fn detect_url_impl(
         }
         notes.push(consent_note(url, &consent.hidden));
     }
+    notes.extend(capture_notes);
     Ok(UrlScan { findings, notes })
 }
 
@@ -564,6 +573,7 @@ pub fn detect_url_evidence(
     let (url, credentials) = split_scan_url(url);
     let mut evidence = Evidence::default();
     let mut consent = ConsentReport::default();
+    let mut capture_notes = Vec::new();
     let results = scan_on_browser(
         browser,
         &url,
@@ -574,7 +584,9 @@ pub fn detect_url_evidence(
         options.profile.as_deref(),
         Some((&mut evidence, request)),
         &mut consent,
+        &mut capture_notes,
     );
+    evidence.capture_notes = capture_notes;
     let blocked = evidence.validity.as_ref().is_some_and(PageValidity::is_blocked);
     if !options.keep_consent_banners && !blocked {
         evidence.consent = Some(consent);
@@ -595,6 +607,9 @@ pub struct ReplayOutcome {
     /// for an unchanged engine; a rule change that probes new points reports
     /// them here, and its findings for those points are an undercount.
     pub unanswered_hit_tests: usize,
+    /// The capture notes the live scan of this capture printed
+    /// ([`Evidence::capture_notes`]).
+    pub capture_notes: Vec<String>,
 }
 
 /// Re-run the deterministic passes over a recorded capture, with no browser.
@@ -631,6 +646,13 @@ pub fn replay_url_scan(
     results.retain(|r| r.origin == origin::SCAN);
     let measured = measure_hidden_text_dom(&dom);
     unanswered += dom.take_needs().hit_tests.len();
+    // A recording made before the scroll probe answers none of its
+    // questions, and those boxes count as hidden, as they did when recorded.
+    let _ = dom.take_scroll_probes();
+    let capture_notes: Vec<String> =
+        unstarted_slider_note(url, measured.unstarted_slider_chars, &measured.unstarted_slider_samples)
+            .into_iter()
+            .collect();
     results.extend(content_hidden_results(
         measured.total_chars,
         measured.hidden_chars,
@@ -640,6 +662,7 @@ pub fn replay_url_scan(
     Ok(ReplayOutcome {
         findings,
         unanswered_hit_tests: unanswered,
+        capture_notes,
     })
 }
 
@@ -750,6 +773,50 @@ fn hand_over(results: &mut [RawResult], handed: &[bool]) {
     }
 }
 
+/// Settle the element pass's `low-contrast` verdicts on text it handed to
+/// the pixels ([`hand_over`]), once the visual-contrast pass has run.
+///
+/// Where the pixels gave a verdict, pass or fail, theirs replaces the element
+/// pass's (`superseded`). Where they gave none (the routed budget was spent,
+/// the read was refused for a blocked reason, the candidate never reached a
+/// slot, the two shots differed), the element pass's verdict stands, but as
+/// advisory: it was computed from styles over paint the walk could not read,
+/// and the check meant to confirm it never ran (corpus decision
+/// r6-t5-unread-pixel-verdicts). Its text is unchanged. Only the verdicts
+/// `hand_over` moved to the visual-contrast origin are touched: the scan
+/// origin is what a replay reproduces, and a replay has no pixels.
+fn settle_handed_over(results: &mut Vec<RawResult>, superseded: &[String]) {
+    let handed = |r: &RawResult| r.origin == origin::VISUAL_CONTRAST && r.id == "low-contrast";
+    if !superseded.is_empty() {
+        results.retain(|r| {
+            !(handed(r) && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
+        });
+    }
+    for r in results.iter_mut().filter(|r| handed(r)) {
+        r.severity = impeccable_core::checks::rules::ADVISORY_SEVERITY.to_string();
+    }
+}
+
+/// The least text an unstarted slider holds before the scan says so: the
+/// hidden-character floor `content-hidden-at-rest` reports from.
+const UNSTARTED_SLIDER_NOTE_CHARS: f64 = 150.0;
+
+/// The capture note for text `content-hidden-at-rest` left out because the
+/// slider holding it never started (corpus decision
+/// r6-t6-hidden-scroll-linked). Not a finding: the page may not have
+/// finished loading when it was captured, which is a fact about the scan.
+/// `None` below [`UNSTARTED_SLIDER_NOTE_CHARS`].
+fn unstarted_slider_note(url: &str, chars: f64, samples: &[String]) -> Option<String> {
+    if chars < UNSTARTED_SLIDER_NOTE_CHARS {
+        return None;
+    }
+    let sample = samples.first().map(|s| format!(", e.g. \"{s}\"")).unwrap_or_default();
+    Some(format!(
+        "Capture note: {} chars of text on {url} sit in sliders that never started (every slide hidden{sample}), so content-hidden-at-rest left them out. The page may not have finished loading; scan it again to check that text.",
+        impeccable_core::js::number_to_string(chars)
+    ))
+}
+
 fn content_hidden_results(
     total_chars: f64,
     hidden_chars: f64,
@@ -778,6 +845,7 @@ fn scan_on_browser(
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    notes: &mut Vec<String>,
 ) -> Result<Vec<RawResult>, EngineError> {
     let (vw, vh) = options.viewport.unwrap_or((1280, 800));
     let viewport = Viewport {
@@ -787,7 +855,7 @@ fn scan_on_browser(
     let page = step(profile, "load", "new-page", url, || browser.new_page()).map_err(cdp_err);
     match page {
         Ok(page) => scan_page(
-            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence, consent,
+            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence, consent, notes,
         ),
         Err(e) => Err(e),
     }
@@ -806,6 +874,7 @@ fn scan_page(
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    notes: &mut Vec<String>,
 ) -> Result<Vec<RawResult>, EngineError> {
     let outcome = scan_page_inner(
         &mut page,
@@ -818,6 +887,7 @@ fn scan_page(
         profile,
         evidence,
         consent,
+        notes,
     );
     step(profile, "load", "close-page", url, || page.close());
     outcome
@@ -858,6 +928,7 @@ fn scan_page_inner(
     profile: Option<&DetectorProfile>,
     mut evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    notes: &mut Vec<String>,
 ) -> Result<Vec<RawResult>, EngineError> {
     step(profile, "load", "set-viewport", url, || {
         page.set_viewport(viewport)
@@ -999,15 +1070,43 @@ fn scan_page_inner(
 
     // content-hidden-at-rest: what is still hidden once the reveal handlers
     // have run, measured over the same post-reveal capture.
+    let mut unstarted: Option<(f64, Vec<String>)> = None;
     let hidden = step_findings(profile, "scan", "content-hidden-at-rest", url, || {
-        let facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
-        let measured = snapshot_engine::resolve_needs_recording(
+        let mut facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
+        let _ = base.take_scroll_probes();
+        let mut measured = snapshot_engine::resolve_needs_recording(
             &base,
             page,
             |d| measure_hidden_text_dom(d),
-            facts,
+            facts.as_deref_mut(),
         )
         .map_err(cdp_err)?;
+        // The boxes a share that would report asked about: scroll to each
+        // and look, then measure again with the answers (recorded, so a
+        // replay of this capture reads them).
+        let probes = base.take_scroll_probes();
+        if !probes.is_empty() {
+            let answers = step(profile, "scan", "scroll-probe", url, || {
+                snapshot_engine::probe_shown_on_scroll(page, &probes)
+            })
+            .map_err(cdp_err)?;
+            let answered = Facts { shown_on_scroll: answers, ..Facts::default() };
+            base.add_facts(&answered);
+            if let Some(record) = facts.as_deref_mut() {
+                record.shown_on_scroll.extend(answered.shown_on_scroll.iter().copied());
+            }
+            measured = snapshot_engine::resolve_needs_recording(
+                &base,
+                page,
+                |d| measure_hidden_text_dom(d),
+                facts,
+            )
+            .map_err(cdp_err)?;
+            let _ = base.take_scroll_probes();
+        }
+        if measured.unstarted_slider_chars > 0.0 {
+            unstarted = Some((measured.unstarted_slider_chars, measured.unstarted_slider_samples.clone()));
+        }
         Ok::<_, EngineError>(content_hidden_results(
             measured.total_chars,
             measured.hidden_chars,
@@ -1015,6 +1114,9 @@ fn scan_page_inner(
         ))
     })?;
     results.extend(hidden);
+    if let Some(note) = unstarted.and_then(|(chars, samples)| unstarted_slider_note(url, chars, &samples)) {
+        notes.push(note);
+    }
 
     results.extend(capped_script_errors(
         page.page_errors().iter().map(|e| (e.message.as_str(), e.source.as_deref())),
@@ -1032,17 +1134,7 @@ fn scan_page_inner(
     .map_err(cdp_err)?;
     let (mut visual, superseded) =
         run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
-    // The element pass's verdict on text it hands over (paint the walk never
-    // read under it, an outline) is replaced where the pixels gave one. Only
-    // the verdicts `hand_over` moved to the visual-contrast origin can go: the
-    // scan origin is what a replay reproduces, and a replay has no pixels.
-    if !superseded.is_empty() {
-        results.retain(|r| {
-            !(r.origin == origin::VISUAL_CONTRAST
-                && r.id == "low-contrast"
-                && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
-        });
-    }
+    settle_handed_over(&mut results, &superseded);
     for r in visual.iter_mut() {
         tag_widget_vendor(&base, r);
     }
@@ -1090,7 +1182,7 @@ const VISUAL_CONTRAST_MAX_ROUTED: f64 = 12.0;
 /// they have spent this long, or once this many in a row gave no verdict (a
 /// page whose carousels repaint every box between the two shots, at about a
 /// second a read on lpga.or.jp). What they leave unread keeps the element
-/// pass's verdict, as it did before. A page whose reads are quick (about
+/// pass's verdict, as advisory ([`settle_handed_over`]). A page whose reads are quick (about
 /// 150ms each) spends under two seconds on all twelve.
 const ROUTED_PIXEL_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
 const ROUTED_PIXEL_MISSES: usize = 4;
@@ -1542,6 +1634,38 @@ mod tests {
         assert_eq!(summary[3], (false, "Uncaught TypeError: cart is undefined (at https://example.com/js/app.js:1:1)"));
         assert_eq!(summary[4], (false, "Uncaught Error: first-party 1"));
         assert_eq!(summary[5], (false, "Uncaught Error: first-party 2"));
+    }
+
+    /// r6-t5-unread-pixel-verdicts: a handed-over verdict the pixels read is
+    /// replaced; one they did not read stands as advisory, text unchanged;
+    /// nothing else moves.
+    #[test]
+    fn unread_handed_over_verdicts_are_advisory() {
+        let result = |origin: &'static str, id: &str, sel: &str, severity: &str| RawResult {
+            selector: Some(sel.to_string()),
+            severity: severity.to_string(),
+            ..RawResult::new(origin, id.to_string(), format!("{id} on {sel}"))
+        };
+        let mut results = vec![
+            result(origin::VISUAL_CONTRAST, "low-contrast", "#read", ""),
+            result(origin::VISUAL_CONTRAST, "low-contrast", "#unread", ""),
+            result(origin::SCAN, "low-contrast", "#scored", ""),
+            result(origin::SCAN, "tiny-text", "#unread", ""),
+        ];
+        settle_handed_over(&mut results, &["#read".to_string()]);
+        let summary: Vec<(&str, &str, &str)> =
+            results.iter().map(|r| (r.origin, r.snippet.as_str(), r.severity.as_str())).collect();
+        assert_eq!(
+            summary,
+            vec![
+                (origin::VISUAL_CONTRAST, "low-contrast on #unread", "advisory"),
+                (origin::SCAN, "low-contrast on #scored", ""),
+                (origin::SCAN, "tiny-text on #unread", ""),
+            ]
+        );
+        let (findings, _) = results_to_findings("https://example.com/", results, None).unwrap();
+        assert_eq!((findings[0].severity.as_str(), findings[0].advisory), ("advisory", Some(true)));
+        assert_ne!(findings[1].severity, "advisory");
     }
 
     #[test]

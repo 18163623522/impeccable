@@ -6639,3 +6639,54 @@ finding by finding against its predecessor.
 8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
    `url()` background still reports from the stylesheet scan, as before.
 
+
+## Recorded 2026-10-03: verdicts the pixels could not read, scroll-linked reveals and sliders that never started
+
+Corpus decisions r6-t5-unread-pixel-verdicts (advisory) and
+r6-t6-hidden-scroll-linked (narrow). Both change the URL engine only: a
+`low-contrast` verdict the element pass hands to the pixel pass that the
+pixels do not read now reports as advisory, and `content-hidden-at-rest`
+leaves out reveals that show once the page is scrolled to them (a live
+scroll probe, recorded in the capture's facts) and sliders whose every slide
+is hidden (a capture note instead of a finding). The static engine, which
+every oracle case runs, has no pixel pass and no hidden-share measure, so no
+existing case moved. Three fixtures were added for the browser tests
+(`content-hidden-scroll-linked.html`, `content-hidden-unstarted-slider.html`,
+`low-contrast-unread-pixels.html`); their own cases are new goldens and the
+directory cases changed only by their findings.
+
+- `detect-fixture-json-content-hidden-scroll-linked-html`,
+  `detect-fixture-text-content-hidden-scroll-linked-html`,
+  `detect-fixture-json-content-hidden-unstarted-slider-html`,
+  `detect-fixture-text-content-hidden-unstarted-slider-html`: new, no
+  findings, exit 0 (both rules they exercise are browser-only).
+- `detect-fixture-json-low-contrast-unread-pixels-html`,
+  `detect-fixture-text-low-contrast-unread-pixels-html`: new, two
+  `low-contrast` findings at full severity (`2.9:1 (need 4.5:1) — text
+  #ffffff on #979797`, once per column). The static engine has no pixel pass
+  to hand either verdict to, so it reports both as before; the URL engine
+  drops the one the pixels read and makes the other advisory.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: those two findings only (875 to 877 counted).
+  No existing finding moved and no snippet changed.
+
+Known limits:
+1. **A recording made before the scroll probe answers none of its
+   questions,** so a replay counts every scroll-linked box as hidden: every
+   capture up to run 38 reports antropi.world as before. Only a capture made
+   with this engine records `shownOnScroll`.
+2. **The probe reads the box's own computed opacity and visibility.** A box
+   that a script reveals by moving a child out from under a mask, or that
+   needs a hover or a click, is not shown to it and counts as hidden.
+3. **A reveal that runs once and failed during the sweep but runs on the
+   probe's longer dwell** counts as shown: a visitor who scrolls there sees
+   it. A reveal that only fires on the probe's viewport position but not a
+   visitor's is not distinguished.
+4. **A slider is known by its class words only.** An unclassed slider whose
+   slides are all hidden still counts, as before (the base fixture's
+   0px-high slider case), and a box classed `slider` that is not one (a
+   range input's track) is read as one.
+5. **The static engine and the extension are unchanged:** they have no page
+   to scroll and no pixels, so both decisions fail safe to base behaviour
+   there.

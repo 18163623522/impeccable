@@ -157,7 +157,12 @@
       // Parked in the page's dialog, chrome clicks would bubble into its own
       // handlers, such as a click-outside-the-box close. Live listens in capture.
       topLayerHost.addEventListener('click', (e) => e.stopPropagation());
-      openModals.push(...doc.querySelectorAll('dialog:modal'));
+      // Modals already open have no readable top-layer order, but the topmost
+      // one's backdrop covers the viewport, so a hit test lands in it. It goes
+      // last; the rest keep document order.
+      const top = doc.elementFromPoint(0, 0)?.closest('dialog:modal');
+      const open = [...doc.querySelectorAll('dialog:modal')];
+      openModals.push(...open.filter((m) => m !== top), ...open.filter((m) => m === top));
       const observer = new MutationObserver(syncTopLayerHost);
       observer.observe(doc, { subtree: true, childList: true, attributes: true, attributeOldValue: true, attributeFilter: ['open'] });
       syncTopLayerHost();
@@ -166,6 +171,14 @@
         openModals.length = 0;
         syncTopLayerHost();
       };
+    }
+
+    // A copy of a page element without the chrome parked inside it, which a
+    // picked modal dialog contains.
+    function cloneWithoutChrome(el) {
+      const clone = el.cloneNode(true);
+      if (el.contains(topLayerHost)) clone.querySelector('#' + cssId(topLayerHost.id)).remove();
+      return clone;
     }
 
     // Mount a chrome node on the page itself: <body>, or the top-layer host
@@ -236,6 +249,7 @@
       uiAppendToPage,
       topLayerHost,
       watchModalDialogs,
+      cloneWithoutChrome,
       uiAppendStyle,
       uiGetById,
       activeElementDeep,

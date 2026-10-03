@@ -311,8 +311,13 @@ describe('live-browser source contracts', () => {
     );
     assert.match(
       SOURCE,
-      /function sanitizedContextClone\(el\)[\s\S]*?stripManualEditRuntimeState\(clone\);/,
-      'manual copy edit prompt context should strip browser-only edit markers before staging HTML',
+      /function sanitizedContextClone\(el\) \{\s*const clone = cloneWithoutChrome\(el\);\s*stripManualEditRuntimeState\(clone\);/,
+      'staged context should drop chrome parked in a picked modal dialog and strip browser-only edit markers',
+    );
+    assert.match(
+      SOURCE,
+      /filter: \(node\) => node !== topLayerHost,/,
+      'element captures should leave out chrome parked in a picked modal dialog',
     );
     assert.match(
       SOURCE,

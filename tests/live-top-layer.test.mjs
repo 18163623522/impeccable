@@ -26,6 +26,8 @@ const PAGE = `
     <button id="close" onclick="d.close()">Close</button>
     <dialog id="d2"><p>Nested</p></dialog>
   </dialog>
+  <dialog id="e1"><p>First</p></dialog>
+  <dialog id="e2"><p>Second</p></dialog>
   <div style="height: 2000px"></div>`;
 
 let browser;
@@ -54,10 +56,11 @@ beforeEach(async () => {
     const bar = document.createElement('div');
     bar.id = 'impeccable-live-bar';
     bar.style.cssText = 'position: fixed; left: 20px; bottom: 20px; width: 160px; height: 40px; z-index: 100005';
+    bar.textContent = 'Live bar';
     bar.onclick = () => { window.clicks = (window.clicks || 0) + 1; };
     h.uiAppend(bar);
     window.live = h;
-    h.watchModalDialogs();
+    window.stopWatch = h.watchModalDialogs();
   });
 });
 
@@ -138,6 +141,26 @@ describe('live chrome under a modal dialog', () => {
     await click('#impeccable-live-bar');
     assert.equal(await clicks(), 1);
     assert.equal(await page.evaluate(() => d.open), true);
+  });
+
+  it('parks in the topmost of modals already open when watching starts', async () => {
+    // Opened against document order, so document order would pick e2.
+    await page.evaluate(() => { window.stopWatch(); e2.showModal(); e1.showModal(); window.live.watchModalDialogs(); });
+    assert.equal(await parentOf(HOST), 'e1');
+    await click('#impeccable-live-bar');
+    assert.equal(await clicks(), 1);
+  });
+
+  it('leaves parked chrome out of a copy of the picked dialog', async () => {
+    await page.evaluate(() => d.showModal());
+    const copy = await page.evaluate(() => {
+      const clone = window.live.cloneWithoutChrome(d);
+      return { host: d.contains(window.live.topLayerHost), parked: !!clone.querySelector('[id^="impeccable-live"]'), text: clone.textContent };
+    });
+    assert.equal(copy.host, true);
+    assert.equal(copy.parked, false);
+    assert.doesNotMatch(copy.text, /Live bar/);
+    assert.match(copy.text, /Inside/);
   });
 
   it('puts the chrome back when an open modal is removed from the document', async () => {

@@ -295,6 +295,7 @@
     uiAppendToPage,
     topLayerHost,
     watchModalDialogs,
+    cloneWithoutChrome,
     uiAppendStyle,
     uiGetById,
     activeElementDeep,
@@ -971,12 +972,10 @@
     }
   }
 
-  // The element as the agent reads it, text and markup alike. The chrome
-  // parks inside an open modal <dialog> (live-browser-dom.js), so a picked
-  // dialog contains it; the clone must not.
+  // The element as the agent reads it, text and markup alike: no parked
+  // chrome (a picked modal dialog contains it) and no edit runtime state.
   function sanitizedContextClone(el) {
-    const clone = el.cloneNode(true);
-    if (el.contains(topLayerHost)) clone.querySelector('#' + topLayerHost.id).remove();
+    const clone = cloneWithoutChrome(el);
     stripManualEditRuntimeState(clone);
     return clone;
   }

@@ -121,6 +121,14 @@
     const pageRoots = new WeakSet(); // chrome nodes mounted on the page itself
     const openModals = [];           // in the order they opened; last is topmost
 
+    // Modals that were open before watching began have no readable top-layer
+    // order, but the topmost one's backdrop covers the viewport, so a hit
+    // test lands in it. Raise that one to the top of the stack.
+    function raiseHitModal() {
+      const i = openModals.indexOf(doc.elementFromPoint(0, 0)?.closest('dialog:modal'));
+      if (i !== -1) openModals.push(...openModals.splice(i, 1));
+    }
+
     function syncTopLayerHost(records = []) {
       for (const { type, target, oldValue } of records) {
         if (type !== 'attributes' || oldValue !== null || !target.matches('dialog:modal')) continue;
@@ -133,10 +141,13 @@
         openModals.push(target);
         if (topLayerHost.parentNode === target) topLayerHost.remove();
       }
-      // A closed dialog, or one removed from the document while open, stops matching :modal.
+      // A closed dialog, or one removed from the document while open, stops
+      // matching :modal. Whichever is now on top may predate the watch.
+      const before = openModals.length;
       for (let i = openModals.length - 1; i >= 0; i--) {
         if (!openModals[i].matches('dialog:modal')) openModals.splice(i, 1);
       }
+      if (openModals.length < before && openModals.length > 1) raiseHitModal();
       const modal = openModals[openModals.length - 1] || null;
       if (topLayerHost.parentNode === modal) return;
       if (modal) {
@@ -157,12 +168,8 @@
       // Parked in the page's dialog, chrome clicks would bubble into its own
       // handlers, such as a click-outside-the-box close. Live listens in capture.
       topLayerHost.addEventListener('click', (e) => e.stopPropagation());
-      // Modals already open have no readable top-layer order, but the topmost
-      // one's backdrop covers the viewport, so a hit test lands in it. It goes
-      // last; the rest keep document order.
-      const top = doc.elementFromPoint(0, 0)?.closest('dialog:modal');
-      const open = [...doc.querySelectorAll('dialog:modal')];
-      openModals.push(...open.filter((m) => m !== top), ...open.filter((m) => m === top));
+      openModals.push(...doc.querySelectorAll('dialog:modal'));
+      raiseHitModal();
       const observer = new MutationObserver(syncTopLayerHost);
       observer.observe(doc, { subtree: true, childList: true, attributes: true, attributeOldValue: true, attributeFilter: ['open'] });
       syncTopLayerHost();

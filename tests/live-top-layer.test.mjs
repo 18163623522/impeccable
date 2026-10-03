@@ -28,6 +28,7 @@ const PAGE = `
   </dialog>
   <dialog id="e1"><p>First</p></dialog>
   <dialog id="e2"><p>Second</p></dialog>
+  <dialog id="e3"><p>Third</p></dialog>
   <div style="height: 2000px"></div>`;
 
 let browser;
@@ -144,11 +145,16 @@ describe('live chrome under a modal dialog', () => {
   });
 
   it('parks in the topmost of modals already open when watching starts', async () => {
-    // Opened against document order, so document order would pick e2.
-    await page.evaluate(() => { window.stopWatch(); e2.showModal(); e1.showModal(); window.live.watchModalDialogs(); });
-    assert.equal(await parentOf(HOST), 'e1');
+    // Opened against document order, so document order would pick e3, then e2.
+    await page.evaluate(() => { window.stopWatch(); e3.showModal(); e1.showModal(); e2.showModal(); window.live.watchModalDialogs(); });
+    assert.equal(await parentOf(HOST), 'e2');
     await click('#impeccable-live-bar');
     assert.equal(await clicks(), 1);
+
+    await page.evaluate(() => e2.close());
+    assert.equal(await parentOf(HOST), 'e1');
+    await click('#impeccable-live-bar');
+    assert.equal(await clicks(), 2);
   });
 
   it('leaves parked chrome out of a copy of the picked dialog', async () => {

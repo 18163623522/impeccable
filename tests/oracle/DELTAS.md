@@ -6639,3 +6639,33 @@ finding by finding against its predecessor.
 8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
    `url()` background still reports from the stylesheet scan, as before.
 
+
+## Recorded 2026-10-03: URL scans hide tours, stuck preloaders and two more consent layers (corpus/overlays)
+
+From the corpus round 8 harness items (site-made consent boxes, preloaders,
+tours). One golden changes, `detect-help`: the usage text gains
+`--no-overlay-hiding` after `--no-consent-hiding`. No fixture case changes:
+the oracle scans files. The URL behavior is pinned by
+`crates/browser/tests/overlay_hiding.rs` over `tests/fixtures/overlays/` and
+two new cases in `consent_hiding.rs`.
+
+- **consentmanager** (letour.fr): `#cmpwrapper` (the open shadow root host
+  its `#cmpbox` renders in) and `#cmpbox`.
+- **Borlabs Cookie** (fischundfang.de) was already hidden by
+  `#BorlabsCookieBox`; it now also hides `#BorlabsCookieWidget`, counts
+  `#BorlabsDialogBackdrop` as a backdrop (so its inline body
+  `overflow: hidden` is undone), and removes the `aria-hidden="true"` Borlabs
+  marked with `data-borlabs-cookie-aria-hidden` (the page wrapper).
+- **Tours:** driver.js 1.x only, by its own classes; no other tour library
+  appears in the corpus. **Preloaders:** structural (see the contract); wait
+  up to 5s, then hide. Findings carry `overlaysHidden: [{ kind, name }]`;
+  `consentHidden` is unchanged.
+
+Measured live, runs 39 and 40 against run 38 (same pages):
+fischundfang.de 2,928 to 5,729 findings, all but 12 of the rise
+`undersized-ui-text` on the 10px category tags of every post card, which the
+Borlabs aria-hidden had kept out of the rule; letour.fr 104 to 102 with
+consentmanager hidden on every capture; gamer.com.tw 374 to 372 with the
+tour hidden on all four; epcco.com.sa's `div#preloader` hidden on two of six
+captures; bankofamerica.com unchanged (no state picker showed in either run,
+and nothing of the site's was hidden).

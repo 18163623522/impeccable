@@ -983,7 +983,7 @@ fn hues_are_a_category_system(hues: &[f64]) -> bool {
     }
     let outside = distinct
         .iter()
-        .filter(|h| super::element_checks::TellHue::of(**h).is_none())
+        .filter(|h| super::element_checks::TellHue::of_hue(**h).is_none())
         .count();
     distinct.len() >= CATEGORY_MIN_HUES && outside * 2 >= distinct.len()
 }

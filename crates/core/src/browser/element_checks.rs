@@ -40,7 +40,7 @@ use crate::checks::text_rules::{
     POSITIONED_CHILD_INTERACTIVE_SELECTOR, TEXT_OVERFLOW_SKIP_TAGS,
 };
 use crate::color::{
-    color_to_hex, composite_color_over, get_hue, has_chroma, parse_any_color,
+    color_to_hex, composite_color_over, get_hue, has_chroma, lightness_saturation, parse_any_color,
     parse_gradient_colors, parse_rgb,
     relative_luminance, Rgba,
 };
@@ -2223,7 +2223,7 @@ fn ai_palette_gradient_hit(
             continue;
         }
         painted += 1;
-        if let Some(band) = TellHue::of(get_hue(Some(c))) {
+        if let Some(band) = TellHue::of(c) {
             in_band += 1;
             if tell.is_none() {
                 tell = Some(band);
@@ -2271,7 +2271,7 @@ fn ai_palette_text_hit(
     if !has_chroma(Some(&tc), Some(80.0)) {
         return None;
     }
-    let tell = TellHue::of(get_hue(Some(&tc)))?;
+    let tell = TellHue::of(&tc)?;
     let parent = dom.parent(el);
     let parent_bg_info = match parent {
         Some(p) => resolve_background_info(dom, p),
@@ -2341,15 +2341,39 @@ pub enum TellHue {
     Purple,
 }
 
+/// The cyan band: teal through cyan, short of emerald and of sky blue
+/// (corpus decision r6-t7-cyan-band, "about 170 to 195"). Emerald (`#10b981`
+/// at 160, `#059669` at 161, `#065f46` at 163) is a green and was reported as
+/// cyan under the old 160 to 200 band; sky (`#0ea5e9` at 199, `#38bdf8` at
+/// 198) is a blue. The top edge is 197, not 195, so Tailwind's dark cyans
+/// (`cyan-900` `#164e63` at 196, `cyan-950` `#083344` at 197) stay in.
+const AI_PALETTE_CYAN_HUES: std::ops::RangeInclusive<f64> = 170.0..=197.0;
+/// HSL saturation a cyan needs to be the palette's neon. A grayed teal
+/// (`cadetblue` at 0.26, `#6a9c99` at 0.20) is a muted accent; every stock
+/// teal and cyan (`teal-500` at 0.80, `teal-700` at 0.77, `cyan-500` at 0.95)
+/// clears it.
+const AI_PALETTE_CYAN_MIN_SATURATION: f64 = 0.4;
+const AI_PALETTE_PURPLE_HUES: std::ops::RangeInclusive<f64> = 260.0..=310.0;
+
 impl TellHue {
-    /// The band a colour falls in, `None` outside both.
-    pub(crate) fn of(hue: f64) -> Option<TellHue> {
-        if (160.0..=200.0).contains(&hue) {
+    /// The band a hue falls in, `None` outside both. Hue alone: the
+    /// category-colour test (r5-p28) counts hues, not colours.
+    pub(crate) fn of_hue(hue: f64) -> Option<TellHue> {
+        if AI_PALETTE_CYAN_HUES.contains(&hue) {
             Some(TellHue::Cyan)
-        } else if (260.0..=310.0).contains(&hue) {
+        } else if AI_PALETTE_PURPLE_HUES.contains(&hue) {
             Some(TellHue::Purple)
         } else {
             None
+        }
+    }
+
+    /// The band a colour falls in, `None` outside both. A cyan also needs
+    /// the saturation floor.
+    pub(crate) fn of(c: &Rgba) -> Option<TellHue> {
+        match TellHue::of_hue(get_hue(Some(c)))? {
+            TellHue::Cyan if lightness_saturation(c).1 < AI_PALETTE_CYAN_MIN_SATURATION => None,
+            band => Some(band),
         }
     }
     fn label(self) -> &'static str {
@@ -6108,6 +6132,37 @@ mod tests {
         el
     }
 
+    /// r6-t7: the cyan band is 170 to 197 with a saturation floor.
+    #[test]
+    fn cyan_band_skips_emerald_sky_and_grayed_teal() {
+        let band = |r: f64, g: f64, b: f64| TellHue::of(&Rgba::new(r, g, b, 1.0));
+        // leilonozap.vercel.app's emerald buttons and tiles: 160 to 163.
+        assert_eq!(band(5.0, 150.0, 105.0), None);
+        assert_eq!(band(4.0, 120.0, 87.0), None);
+        assert_eq!(band(6.0, 95.0, 70.0), None);
+        assert_eq!(band(16.0, 185.0, 129.0), None);
+        // sky-500 at 199, sky-400 at 198.
+        assert_eq!(band(14.0, 165.0, 233.0), None);
+        assert_eq!(band(56.0, 189.0, 248.0), None);
+        // cyan-900 at 196 and cyan-950 at 197 are the palette's dark cyans.
+        assert_eq!(band(22.0, 78.0, 99.0), Some(TellHue::Cyan));
+        assert_eq!(band(8.0, 51.0, 68.0), Some(TellHue::Cyan));
+        // cadetblue: hue 182, saturation 0.26.
+        assert_eq!(band(95.0, 158.0, 160.0), None);
+        // The stock teals and cyans stay in.
+        assert_eq!(band(20.0, 184.0, 166.0), Some(TellHue::Cyan)); // teal-500
+        assert_eq!(band(15.0, 118.0, 110.0), Some(TellHue::Cyan)); // teal-700
+        assert_eq!(band(6.0, 182.0, 212.0), Some(TellHue::Cyan)); // cyan-500
+        assert_eq!(band(130.0, 255.0, 247.0), Some(TellHue::Cyan));
+        assert_eq!(band(133.0, 38.0, 254.0), Some(TellHue::Purple));
+
+        let (mut d, body) = page();
+        let emerald = gradient_surface(&mut d, body, "linear-gradient(135deg, rgb(5, 150, 105), rgb(6, 95, 70))");
+        assert!(palette_hits(&d, emerald).is_empty());
+        let teal = gradient_surface(&mut d, body, "linear-gradient(135deg, rgb(20, 184, 166), rgb(6, 182, 212))");
+        assert_eq!(palette_hits(&d, teal)[0].snippet, "Cyan gradient background");
+    }
+
     #[test]
     fn ai_palette_gradient_keeps_the_stock_ramps() {
         let (mut d, body) = page();
@@ -6290,10 +6345,12 @@ mod tests {
     #[test]
     fn ai_palette_gradient_skips_a_placeholder_under_its_image() {
         let (mut d, body) = page();
+        // A pale cyan stop (hue 186): the mint this test once used (hue 163)
+        // is out of the cyan band since r6-t7.
         let fill = gradient_surface(
             &mut d,
             body,
-            "linear-gradient(150deg, rgb(168, 200, 232), rgb(167, 229, 211))",
+            "linear-gradient(150deg, rgb(168, 200, 232), rgb(130, 220, 230))",
         );
         d.set_rect(fill, 0.0, 0.0, 120.0, 213.0);
         assert_eq!(palette_hits(&d, fill).len(), 1);

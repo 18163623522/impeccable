@@ -6661,3 +6661,32 @@ the same way.
    that failure.
 2. **The class path reads the shade number, not the colour,** so a project
    that redefines `gray-700` lighter than 0.3 is still skipped.
+
+## Recorded 2026-10-03: the cyan band is 170 to 197 with a saturation floor (corpus/premise5-hues, r6-t7)
+
+Corpus decision `r6-t7-cyan-band` (narrow). `TellHue::of` read any hue from
+160 to 200 as cyan, so emerald buttons and icon tiles (`#059669` at 161,
+`#047857` at 163, harmless to both judges on leilonozap.vercel.app) reported
+as "Cyan gradient background". The band is now 170 to 197, and a cyan also
+needs an HSL saturation of at least 0.4. The decision said "about 170 to
+195"; the top edge is 197 so Tailwind's `cyan-900` (196) and `cyan-950`
+(197) stay in, while sky (198 to 200) and hue-200 glows drop. The violet band is unchanged. The
+band is defined once (`AI_PALETTE_CYAN_HUES` in `element_checks.rs`); the
+category-colour test (r5-p28) reads it by hue alone through `TellHue::of_hue`.
+
+- No golden moved. The element-level gradient and neon-ink forms are URL
+  engine only, and the static engine's output for `ai-color-palette.html`
+  and `ai-color-palette-category-colours.html` is unchanged by their new rows.
+  The URL engine rows are pinned by `crates/browser/tests/brand_and_vendors.rs`.
+
+### Known limits
+
+1. **The category-colour test counts hues, not colours,** so a grayed teal
+   under the saturation floor still counts as inside the cyan band there.
+   That only makes the exemption harder to reach.
+2. **Sky blue at 198 to 200 is no longer cyan,** so the category fixture's
+   sky swatch stops reporting; the set it belongs to is still the palette.
+3. **A hue-200 glow drops with sky.** arbiproseller-app.vercel.app's
+   section-wide hsl(200) radial glow on dark navy (findings 138945, 139054,
+   harmful to both judges) no longer reports; the band's top edge is a hue,
+   and 200 is where sky sits.

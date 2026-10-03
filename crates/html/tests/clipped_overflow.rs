@@ -31,7 +31,6 @@ fn flag_column_containers_are_reported_with_the_child_they_cut() {
         ("flag-overflow-right", "div.flyout"),
         ("flag-shadow-utility", "div.pop.bg-white.shadow-lg"),
         ("flag-overlay-surface", "div.pop.modal-overlay"),
-        ("flag-ribbon-notch", "span.ribbon"),
         ("flag-rail-tooltip", "span.rail-tooltip"),
         // Nested clips: the row nearest each layer owns it, and the second
         // row is its own finding rather than one the shell absorbs.
@@ -73,6 +72,10 @@ fn pass_column_containers_are_not_reported() {
         "pass-x-clip",
         "pass-swiper-rail",
         "pass-swap-reveal",
+        // r6-t1: a layer that is not a popover is cut on purpose.
+        "pass-ribbon-notch",
+        "pass-masthead-curve",
+        "pass-unnamed-dropdown",
         // The shell around two nested clips: the nearer clip owns each layer.
         "nested-outer-clip",
     ] {

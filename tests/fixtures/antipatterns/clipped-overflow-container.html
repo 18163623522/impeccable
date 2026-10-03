@@ -56,46 +56,42 @@
     <section class="col flag">
       <div class="box flag-overflow-hidden" style="overflow: hidden">
         <button>Menu</button>
-        <ul class="pop">Dropdown that gets clipped by the hidden ancestor</ul>
+        <ul class="pop" role="menu">Dropdown that gets clipped by the hidden ancestor</ul>
       </div>
       <div class="box flag-overflow-clip" style="overflow: clip">
         <button>Tooltip host</button>
-        <span class="pop">Tooltip clipped by overflow clip</span>
+        <span class="pop" role="tooltip">Tooltip clipped by overflow clip</span>
       </div>
       <div class="box flag-overflow-negative" style="overflow: hidden">
         <button>Help</button>
-        <span class="tip-negative">Tooltip clipped above the host</span>
+        <span class="tip-negative" role="tooltip">Tooltip clipped above the host</span>
       </div>
       <div class="box flag-overflow-right" style="overflow: hidden">
         <button>Actions</button>
-        <div class="flyout">Flyout menu clipped to the right of the host</div>
+        <div class="flyout" role="menu">Flyout menu clipped to the right of the host</div>
       </div>
       <div class="box flag-shadow-utility" style="overflow: hidden">
         <button>More</button>
-        <div class="pop bg-white shadow-lg">Dropdown with utility classes still gets clipped.</div>
+        <div class="pop bg-white shadow-lg" role="listbox">Dropdown with utility classes still gets clipped.</div>
       </div>
       <div class="box flag-overlay-surface" style="overflow: clip">
         <button>Dialog</button>
-        <div class="pop modal-overlay">Overlay-style dialog content still needs to escape.</div>
-      </div>
-      <div class="box flag-ribbon-notch" style="overflow: hidden">
-        <p>Pricing card with a ribbon pinned above its top edge.</p>
-        <span class="ribbon">Most popular</span>
+        <div class="pop modal-overlay" role="dialog">Overlay-style dialog content still needs to escape.</div>
       </div>
       <div class="box flag-rail-tooltip" style="overflow: hidden">
         <div class="rail-card">Review card in a horizontal rail.</div>
-        <span class="rail-tooltip">Posted on the web</span>
+        <span class="rail-tooltip" role="tooltip">Posted on the web</span>
       </div>
       <!-- Two nested clips cut the same layer. The nearer one owns it, and a
            second row is its own finding rather than one the shell absorbs. -->
       <div class="box nested-outer-clip" style="overflow: hidden">
         <div class="inner-clip flag-nested-row">
           <button>Row actions</button>
-          <span class="tip-negative">Tooltip clipped by both nested containers</span>
+          <span class="tip-negative" role="tooltip">Tooltip clipped by both nested containers</span>
         </div>
         <div class="inner-clip flag-nested-note">
           <button>Row notes</button>
-          <span class="tip-second">Second row tooltip, cut by its own row</span>
+          <span class="tip-second" role="tooltip">Second row tooltip, cut by its own row</span>
         </div>
       </div>
       <div class="box flag-translated-menu" style="overflow: hidden">
@@ -109,7 +105,7 @@
       <!-- A BEM element name that names no track still reports. -->
       <div class="box hero__panel flag-bem-tooltip" style="overflow: hidden">
         <button>Details</button>
-        <span class="hero__badge-tooltip" style="position: absolute; top: -34px; left: 16px; width: 160px; background: #222; color: #fff; padding: 8px">A BEM tooltip clipped above the host</span>
+        <span class="hero__badge-tooltip" role="tooltip" style="position: absolute; top: -34px; left: 16px; width: 160px; background: #222; color: #fff; padding: 8px">A BEM tooltip clipped above the host</span>
       </div>
     </section>
 
@@ -201,6 +197,21 @@
         <div class="deck-track">
           <span class="promo__slider-next" style="position: absolute; top: 0; left: 100%; width: 200px; height: 120px">The next promotion waits past the edge.</span>
         </div>
+      </div>
+      <!-- Decision r6-t1-clipped-overflow-popovers: only a popover layer (a
+           menu, a listbox, a tooltip, a dialog) reports. A layer that is not
+           one is cut on purpose, whatever its words or its class. -->
+      <div class="box pass-ribbon-notch" style="overflow: hidden">
+        <p>Pricing card with a ribbon pinned above its top edge.</p>
+        <span class="ribbon">Most popular</span>
+      </div>
+      <div class="box pass-masthead-curve" style="overflow: hidden">
+        <h3>Curved masthead</h3>
+        <span class="pop" style="top: 60%; left: -20px; width: 260px; height: 120px; border-radius: 50%">Spring collection</span>
+      </div>
+      <div class="box pass-unnamed-dropdown" style="overflow: hidden">
+        <button>Sort</button>
+        <div class="pop dropdown-panel">A dropdown named only by its class keeps its silence.</div>
       </div>
     </section>
   </div>

@@ -143,6 +143,28 @@ fn marked_mockup(el: &StaticElement<'_>) -> (bool, bool) {
     (false, false)
 }
 
+/// Whether a box sits in a drawn product mockup: under an HTML `role="img"`
+/// outside any `svg`, or in or itself a framed demo by its structure. The static twin
+/// of [`impeccable_core::browser::decorative_text::box_in_mockup_dom`], for
+/// `nested-cards` (decision r6-t3-nested-cards-mockups); a mockup class or id
+/// is not read there either.
+pub fn box_in_mockup(el: &StaticElement<'_>) -> bool {
+    let mut in_svg = ancestors_inclusive(el).any(|c| c.tag_lower() == "svg");
+    for c in ancestors_inclusive(el) {
+        let tag = c.tag_lower();
+        if tag == "figcaption" {
+            break;
+        }
+        if !in_svg && role_is(&c, &["img"]) {
+            return true;
+        }
+        if tag == "svg" {
+            in_svg = false;
+        }
+    }
+    crate::text_context::in_framed_demo(el) || crate::text_context::is_demo_frame(el)
+}
+
 /// What the static document says about one element's text.
 pub fn decorative_text_facts(el: &StaticElement<'_>) -> DecorativeTextFacts {
     let text = collapsed_text(el);

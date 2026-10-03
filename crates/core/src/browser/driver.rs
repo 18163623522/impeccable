@@ -1101,7 +1101,7 @@ fn html_pattern_items(
             if !super::painted::page_form_painted(dom, &f.id, &matches) {
                 continue;
             }
-            // A left or right stripe from the style-text scans reports only
+            // A stripe on any edge from the style-text scans reports only
             // on a card rounded away from it, read off the elements it paints.
             if let Some(side) = crate::checks::css_scan::side_stripe_index(&f) {
                 let rounded = matches.iter().any(|&el| {
@@ -2460,12 +2460,10 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
                 continue;
             }
             let target = f.el.unwrap_or(body_key);
-            add_browser_findings(
-                dom,
-                groups,
-                target,
-                vec![BrowserFinding::new(f.finding.type_.clone(), f.finding.detail.clone())],
-            );
+            // A check's own severity (an inner card in a mockup) rides along.
+            let mut item = BrowserFinding::new(f.finding.type_.clone(), f.finding.detail.clone());
+            item.severity = f.finding.severity.clone();
+            add_browser_findings(dom, groups, target, vec![item]);
         }
     };
 

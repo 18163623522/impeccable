@@ -6769,3 +6769,69 @@ consentmanager hidden on every capture; gamer.com.tw 374 to 372 with the
 tour hidden on all four; epcco.com.sa's `div#preloader` hidden on two of six
 captures; bankofamerica.com unchanged (no state picker showed in either run,
 and nothing of the site's was hidden).
+## Recorded 2026-10-03: popover clips, rounded-card bands, mockup panels (corpus/premise5-clip-stripe-mockup)
+
+Three taste calls from premise round 6 (run 35), each built in the browser
+and static engines and, for the stripe gate, the text engine too.
+
+- **r6-t1-clipped-overflow-popovers, narrow.** `clipped-overflow-container`
+  reports only when the positioned child is a popover layer: the child or a
+  descendant matches `POPOVER_LAYER_SELECTOR` (`[popover]`, `role` `dialog`,
+  `listbox`, `menu`, `menubar` or `tooltip`). Every other clipped child is
+  the effect (a curved masthead, an icon in a field, a card's image crop).
+  The exemptions only a non-popover could reach are gone with it: the
+  ornament test, the masked-reveal transform test and the transparent
+  wrapper measure. A popover is cut by its border box, as before.
+- **r6-t2-side-tab-bands, narrow.** A top or bottom border, pseudo-element
+  stripe or inset box-shadow stripe reports `side-tab` only on a card
+  rounded away from it (`is_rounded_away_from_side` for sides 0 and 2), the
+  gate left and right accents already pass. A band on a card rounded all
+  round still reports as `border-accent-on-rounded`, unchanged.
+- **r6-t3-nested-cards-mockups, advisory.** An inner card reports
+  `nested-cards` as advisory when it is under an HTML `role="img"` outside
+  any `svg`, in a framed demo by r5-p26's structure (`in_framed_demo`), or
+  is itself such a frame (`is_demo_frame`: a three-dot title bar, a framed
+  box under a preview caption, a device frame scaled or tilted in 3D). A
+  mockup class or id is not read for this rule: `illustration` names a
+  feature tile's picture as often as a mockup (nested-cards.html's
+  `flag-illustration-inner` would have moved), and r4-p17 keeps those
+  failing. The URL engine now carries a page check's own severity through
+  `el_pass`, and the static engine through its page-level `push_hits`;
+  neither had a page check that set one before.
+
+Fixtures: `clipped-overflow-container.html` gives its flag rows popover
+roles and moves the ribbon to the pass column with a curved masthead and a
+dropdown named only by its class; `clipped-overflow-painted-box.html`,
+`never-painted.html` and `painted-at-capture.html` mark their clipped layers
+as menus, tooltips or dialogs; `side-tab-stylesheet-forms.html` rounds its
+flagged hosts and adds a square band that passes; `border-baseline.html` and
+`named-color-borders.html` move their square top and bottom bands to the
+pass column. New `nested-cards-mockups.html`, pinned on both engines by the
+`advisory_contexts` tests. Every re-recorded golden was diffed finding by
+finding against its predecessor.
+
+- `detect-fixture-json-clipped-overflow-container-html`, `detect-fixture-text-clipped-overflow-container-html`: the ribbon's clip is gone (13 to 12 advisory notes); every popover row still reports.
+- `detect-fixture-json-on-screen-html`, `detect-fixture-text-on-screen-html`: the two `div.word-clip` clips of a word track are gone.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: the plain `div clips positioned div` is gone.
+- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`: the square `border-top: 4px` and `border-bottom: 3px` are gone (10 to 8).
+- `detect-fixture-json-linked-stylesheet-html`, `detect-fixture-text-linked-stylesheet-html`: `.external-square-top`'s `border-top: 4px` is gone (3 to 2), which its stylesheet comment already said.
+- `detect-fixture-json-named-color-borders-html`, `detect-fixture-text-named-color-borders-html`: the square crimson `border-top: 4px` is gone (7 to 6).
+- `detect-fixture-json-nested-cards-mockups-html`, `detect-fixture-text-nested-cards-mockups-html`: new cases, five warnings and four advisory notes.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the moves above and the new fixture, nothing else (875 to 876 counted: four square bands out, five nested cards in; 170 advisory notes either way: four clips out, four mockup panels in).
+
+### Known limits
+
+1. **A dropdown named only by its class is silent.** The popover test reads
+   roles and the `popover` attribute, so a menu built from bare `div`s with
+   a `dropdown` class no longer reports. No judged finding showed one cut.
+2. **Mock context for `nested-cards` is read from structure and
+   `role="img"` only.** directus.com's app screenshot built in HTML
+   (215951), quickrefs.com's profile cards (217021, 217066) and
+   context.dev's preview window with a URL bar and no dots (203683, 203837)
+   carry none of those marks and keep failing at full severity.
+3. **The static engine reads a frame's transform from the inline `style`
+   only,** as r5-p26 does, so a device frame tilted by a stylesheet rule
+   is not seen there and its panels keep failing.
+4. **A band whose corners cannot be read keeps reporting,** as a left or
+   right accent does: an unresolved `var()` radius, a stylesheet the static
+   engine could not load.

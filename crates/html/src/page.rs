@@ -469,10 +469,16 @@ pub fn check_page_layout(doc: &StaticDocument) -> Vec<RuleHit> {
             .iter()
             .any(|other| other != el && el.contains(other));
         if !is_ancestor_of_flagged {
-            findings.push(RuleHit::new(
+            let mut hit = RuleHit::new(
                 "nested-cards",
                 format!("Card inside card ({})", el.tag_lower()),
-            ));
+            );
+            // A mockup's panels report as advisory
+            // (decision r6-t3-nested-cards-mockups).
+            if crate::decorative_text::box_in_mockup(el) {
+                hit.severity = Some(impeccable_core::checks::rules::ADVISORY_SEVERITY.to_string());
+            }
+            findings.push(hit);
         }
     }
     findings

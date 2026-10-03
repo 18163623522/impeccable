@@ -9,6 +9,9 @@
 //! - r5-p26 (`mockup-structure.html`): text in a framed HTML demo read from
 //!   structure reports `undersized-ui-text`, `tiny-text` and `low-contrast`
 //!   as advisory.
+//! - r6-t3 (`nested-cards-mockups.html`): an inner card in a framed demo or
+//!   under `role="img"` reports `nested-cards` as advisory; bordered cards in
+//!   a bordered panel (paseo.sh) and under a mockup class keep failing.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -185,4 +188,16 @@ fn text_in_a_framed_demo_is_advisory() {
     assert_eq!(on(&f, "tiny-text", "adv-dots-run"), ["advisory"], "{f:#?}");
     assert_eq!(on(&f, "tiny-text", "fail-sentence"), ["warning"], "{f:#?}");
     assert_eq!(on(&f, "low-contrast", "adv-dots-dim"), ["advisory"], "{f:#?}");
+}
+
+#[test]
+fn nested_cards_in_a_mockup_are_advisory() {
+    let Some(f) = scan("nested-cards-mockups.html") else { return };
+    let rule = "nested-cards";
+    for id in ["#adv-window-inner", "#adv-tilted-inner", "#adv-window-itself", "#adv-picture-inner"] {
+        assert_eq!(on(&f, rule, id), ["advisory"], "{id}: {f:#?}");
+    }
+    for id in ["#fail-panel-a", "#fail-panel-b", "#fail-panel-c", "#fail-two-dots-inner", "#fail-marked-inner"] {
+        assert_eq!(on(&f, rule, id), ["warning"], "{id}: {f:#?}");
+    }
 }

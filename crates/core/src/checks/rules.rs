@@ -367,11 +367,19 @@ pub fn check_borders(
                 "border-accent-on-rounded",
                 format!("border-{sn}: {w_s}px + border-radius: {r_s}px"),
             ));
-        } else if !opts.tab_context && w >= 3.0 && w <= 12.0 {
-            // A square top or bottom band still reports. The rounded-card
-            // gate above covers the left and right accent the corpus judged;
-            // the square horizontal band was never judged, and silencing it
-            // here would drop findings on no evidence.
+        } else if !opts.tab_context
+            && w >= 3.0
+            && w <= 12.0
+            && is_rounded_away_from_side(opts.corners.as_ref(), i)
+        {
+            // A top or bottom band is the card tell only on a rounded card,
+            // the gate left and right accents pass above (decision
+            // r6-t2-side-tab-bands, narrow): on a square box it is a rule
+            // across a section or a header. A band on a card rounded all
+            // round leads with a radius and reports as
+            // `border-accent-on-rounded` instead, so what reaches here is a
+            // card rounded only away from its band, or corners nobody could
+            // read.
             findings.push(RuleHit::new("side-tab", format!("border-{sn}: {w_s}px")));
         }
     }

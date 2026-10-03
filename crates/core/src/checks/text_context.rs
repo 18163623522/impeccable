@@ -487,6 +487,18 @@ pub fn in_framed_demo<N: ContextNode>(el: &N) -> bool {
     false
 }
 
+/// Whether the box itself is a framed HTML demo by the structure
+/// [`in_framed_demo`] reads off an ancestor: a window with three title-bar
+/// dots, a framed box under a preview caption, or a device frame scaled or
+/// tilted in 3D. `nested-cards` asks it of an inner card, which can be the
+/// window itself (stroq.dev's editor window inside a card), as well as
+/// asking [`in_framed_demo`] (decision r6-t3-nested-cards-mockups).
+pub fn is_demo_frame<N: ContextNode>(el: &N) -> bool {
+    !FRAME_SKIP_TAGS.contains(&el.tag().as_str())
+        && !has_part(&el.class_list(), SLIDE_PARTS)
+        && (is_transformed_frame(el) || is_demo_window(el))
+}
+
 // ─── r5-p27: legal fine print ───────────────────────────────────────────────
 
 /// Substrings of a class or id that mark fine print. The first nine are the

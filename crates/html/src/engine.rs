@@ -312,7 +312,13 @@ pub fn detect_html_source(
         }
         let mut push_hits = |hits: Vec<RuleHit>| {
             for h in hits {
-                if let Some(f) = mk(&h.id, &h.snippet) {
+                if let Some(mut f) = mk(&h.id, &h.snippet) {
+                    // A page check's own severity (an inner card in a
+                    // mockup) overrides the registry's.
+                    if let Some(sev) = h.severity.filter(|s| !s.is_empty()) {
+                        f.severity = sev;
+                        impeccable_core::findings::derive_advisory_flag(&mut f);
+                    }
                     findings.push(f);
                 }
             }
@@ -383,7 +389,7 @@ pub fn detect_html_source(
                     hosts = matches;
                 }
             }
-            // A left or right stripe from the style-text scans reports only
+            // A stripe on any edge from the style-text scans reports only
             // on a card rounded away from it: read off the cascade for the
             // elements the rule paints, else off the host rule's own
             // declarations when no element on the page matches.

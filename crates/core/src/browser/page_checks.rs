@@ -1853,7 +1853,88 @@ enum HiddenState {
     Visible,
     Invisible,
     Excluded,
+    /// Inside a slider that never started ([`unstarted_slider`]): out of
+    /// both counts, and reported as a capture note instead.
+    Unstarted,
 }
+
+/// Class words that name a slider or carousel: the box's own class, or a
+/// class of its library (`swiper`, `slick`, `splide`, `glide`, `flickity`,
+/// Slider Revolution's `rev_slider`).
+const SLIDER_CLASS_WORDS: &[&str] =
+    &["slider", "carousel", "swiper", "slick", "splide", "glide", "flickity", "slideshow", "revslider"];
+
+/// How far above a hidden box the slider that holds it is looked for.
+const SLIDER_MAX_DEPTH: usize = 6;
+
+/// Class words that name one slide of a slider (`swiper-slide`,
+/// `carousel-item`, `splide__slide`): such a box is a slide, not the slider.
+const SLIDE_CLASS_WORDS: &[&str] = &["slide", "item", "cell", "card", "pane"];
+
+/// Whether `el` is a slider box: a class token names a slider
+/// ([`SLIDER_CLASS_WORDS`]) and not one of its slides
+/// ([`SLIDE_CLASS_WORDS`]).
+fn slider_class(dom: &dyn Dom, el: ElId) -> bool {
+    dom.attr(el, "class").unwrap_or_default().split_whitespace().any(|token| {
+        let words = class_words(token);
+        words.iter().any(|w| SLIDER_CLASS_WORDS.contains(&w.as_str()))
+            && !words.iter().any(|w| SLIDE_CLASS_WORDS.contains(&w.as_str()))
+    })
+}
+
+/// Whether `el`'s own text paints within `upto`: it is not
+/// `visibility: hidden | collapse`, and no box from it up to `upto`
+/// (inclusive) is `display: none`, `aria-hidden="true"` or at opacity 0.02 or
+/// less.
+fn text_shows_within(dom: &dyn Dom, el: ElId, upto: ElId) -> bool {
+    if HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility")) {
+        return false;
+    }
+    let mut cur = Some(el);
+    while let Some(e) = cur {
+        if dom.style(e, "display") == "none"
+            || dom.attr(e, "aria-hidden").as_deref() == Some("true")
+            || pf0(&dom.style(e, "opacity")) <= 0.02
+        {
+            return false;
+        }
+        if e == upto {
+            return true;
+        }
+        cur = dom.parent(e);
+    }
+    true
+}
+
+/// Whether `el`, a box that is itself transparent or `visibility: hidden`,
+/// sits in a slider that never started (corpus decision
+/// r6-t6-hidden-scroll-linked): the box or one of its nearest
+/// [`SLIDER_MAX_DEPTH`] ancestors carries a slider class
+/// ([`SLIDER_CLASS_WORDS`]), and not one element in that slider shows text
+/// ([`text_shows_within`]). A slider that started shows its current slide,
+/// so its other slides are not this (they count as before). One that shows
+/// nothing at all is the capture's state (a script that had not run, a
+/// preloader still up), not something to measure the page by.
+fn unstarted_slider(dom: &dyn Dom, el: ElId, verdicts: &mut std::collections::HashMap<ElId, bool>) -> bool {
+    let Some(slider) = ancestors_inclusive(dom, el).into_iter().take(SLIDER_MAX_DEPTH + 1).find(|a| slider_class(dom, *a))
+    else {
+        return false;
+    };
+    if let Some(v) = verdicts.get(&slider) {
+        return *v;
+    }
+    let shows = |e: ElId| {
+        dom.direct_text_nodes(e).iter().any(|t| !js::trim(&collapse_ws(t)).is_empty()) && text_shows_within(dom, e, slider)
+    };
+    let started =
+        shows(slider) || dom.query_all(Some(slider), "*").unwrap_or_default().into_iter().any(shows);
+    verdicts.insert(slider, !started);
+    !started
+}
+
+/// At most this many hidden boxes are probed for a scroll-linked reveal
+/// ([`Dom::shown_when_scrolled_to`]), the ones holding the most text.
+pub const SCROLL_PROBE_MAX: usize = 8;
 
 /// Roles that make an invisible box, or an invisible box inside one, closed
 /// navigation: a menu that opens on demand.
@@ -2008,6 +2089,19 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
 /// `visibility: hidden` subtree and is a [`closed_container`] (a closed menu,
 /// drawer or dialog, an unselected tab or accordion panel). Nobody expects a
 /// closed menu to show, so it is not content a reveal failed to show.
+///
+/// Corpus decision r6-t6-hidden-scroll-linked adds two more:
+///
+/// - Text in a slider that never started ([`unstarted_slider`]) leaves both
+///   counts and is reported in [`HiddenTextMeasure::unstarted_slider_chars`],
+///   which the URL engine turns into a capture note rather than a finding.
+/// - When the share would report, the hidden boxes holding the most text (up
+///   to [`SCROLL_PROBE_MAX`]) are asked [`Dom::shown_when_scrolled_to`]. A box
+///   that shows once the page is scrolled to it is a scroll-linked reveal the
+///   measure caught at the top of the page: its text counts as shown, as a
+///   box a CSS scroll or view timeline holds at 0 does. A box the probe has
+///   not looked at (`None`: a replay of a recording made before the probe,
+///   any DOM with no page behind it) stays hidden.
 pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let root = dom.document_element();
     let mut cache: std::collections::HashMap<ElId, HiddenState> = std::collections::HashMap::new();
@@ -2015,6 +2109,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let closed_ids: std::cell::OnceCell<std::collections::HashSet<String>> = std::cell::OnceCell::new();
     // The page's CSS, read once and only for a box an animation holds at 0.
     let style_text: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+    // Per slider box: whether it never started.
+    let mut sliders: std::collections::HashMap<ElId, bool> = std::collections::HashMap::new();
 
     fn page_style_text(dom: &dyn Dom) -> String {
         let html = dom.document_html_for_patterns();
@@ -2024,12 +2120,14 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         text
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn state_of(
         dom: &dyn Dom,
         root: Option<ElId>,
         cache: &mut std::collections::HashMap<ElId, HiddenState>,
         closed_ids: &std::cell::OnceCell<std::collections::HashSet<String>>,
         style_text: &std::cell::OnceCell<String>,
+        sliders: &mut std::collections::HashMap<ElId, bool>,
         el: Option<ElId>,
     ) -> HiddenState {
         let Some(el) = el else { return HiddenState::Visible };
@@ -2043,7 +2141,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         let state = if HIDDEN_TEXT_EXCLUDE_TAGS.contains(&tag.as_str()) {
             HiddenState::Excluded
         } else {
-            let parent_state = state_of(dom, root, cache, closed_ids, style_text, dom.parent(el));
+            let parent_state = state_of(dom, root, cache, closed_ids, style_text, sliders, dom.parent(el));
             if parent_state == HiddenState::Excluded {
                 HiddenState::Excluded
             } else {
@@ -2055,6 +2153,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                     || cv == "hidden"
                 {
                     HiddenState::Excluded
+                } else if parent_state == HiddenState::Unstarted {
+                    HiddenState::Unstarted
                 } else if parent_state == HiddenState::Invisible {
                     HiddenState::Invisible
                 } else if pf0(&dom.style(el, "opacity")) <= 0.02
@@ -2083,6 +2183,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                         // and shows it to a visitor who scrolls: its text is
                         // content they read.
                         HiddenState::Visible
+                    } else if unstarted_slider(dom, el, sliders) {
+                        HiddenState::Unstarted
                     } else {
                         HiddenState::Invisible
                     }
@@ -2097,7 +2199,12 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
 
     let mut total_chars = 0.0f64;
     let mut hidden_chars = 0.0f64;
-    let mut hidden_samples: Vec<String> = Vec::new();
+    let mut unstarted_slider_chars = 0.0f64;
+    let mut unstarted_slider_samples: Vec<String> = Vec::new();
+    // Each hidden text element and the box its invisible subtree starts at,
+    // in document order, and the characters each such box holds.
+    let mut hidden_els: Vec<(ElId, ElId)> = Vec::new();
+    let mut hidden_roots: Vec<(ElId, f64)> = Vec::new();
     for el in dom.query_all(None, "body *").unwrap_or_default() {
         let mut len = 0usize;
         for t in dom.direct_text_nodes(el) {
@@ -2106,25 +2213,73 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         if len == 0 {
             continue;
         }
-        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, Some(el));
-        if state == HiddenState::Excluded {
-            continue;
+        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, &mut sliders, Some(el));
+        match state {
+            HiddenState::Excluded => continue,
+            HiddenState::Unstarted => {
+                unstarted_slider_chars += len as f64;
+                if unstarted_slider_samples.len() < 3 {
+                    let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
+                    if !text.is_empty() {
+                        unstarted_slider_samples.push(text);
+                    }
+                }
+                continue;
+            }
+            _ => {}
         }
         total_chars += len as f64;
         if state == HiddenState::Invisible {
             hidden_chars += len as f64;
-            if hidden_samples.len() < 3 {
-                let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
-                if !text.is_empty() {
-                    hidden_samples.push(text);
+            // The topmost invisible box above it, which every state above
+            // was cached on the way to this one.
+            let mut start = el;
+            while let Some(p) = dom.parent(start) {
+                if cache.get(&p) != Some(&HiddenState::Invisible) {
+                    break;
                 }
+                start = p;
             }
+            hidden_els.push((el, start));
+            match hidden_roots.iter_mut().find(|(r, _)| *r == start) {
+                Some((_, chars)) => *chars += len as f64,
+                None => hidden_roots.push((start, len as f64)),
+            }
+        }
+    }
+
+    // Scroll-linked reveals, asked only of a page the share would report.
+    let mut shown_roots: Vec<ElId> = Vec::new();
+    if crate::checks::measures::content_hidden_reports(total_chars, hidden_chars) {
+        let mut by_size = hidden_roots.clone();
+        by_size.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (start, chars) in by_size.into_iter().take(SCROLL_PROBE_MAX) {
+            if dom.shown_when_scrolled_to(start) == Some(true) {
+                hidden_chars -= chars;
+                shown_roots.push(start);
+            }
+        }
+    }
+
+    let mut hidden_samples: Vec<String> = Vec::new();
+    for (el, start) in hidden_els {
+        if hidden_samples.len() >= 3 {
+            break;
+        }
+        if shown_roots.contains(&start) {
+            continue;
+        }
+        let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
+        if !text.is_empty() {
+            hidden_samples.push(text);
         }
     }
     HiddenTextMeasure {
         total_chars,
         hidden_chars,
         hidden_samples,
+        unstarted_slider_chars,
+        unstarted_slider_samples,
     }
 }
 
@@ -3977,6 +4132,61 @@ mod tests {
         let m = measure_hidden_text_dom(&d);
         let hidden = 16.0 + 18.0 + 20.0 + 21.0 + 17.0;
         assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 21.0 + hidden, hidden), "{:?}", m.hidden_samples);
+    }
+
+    /// r6-t6-hidden-scroll-linked: a hidden box that shows once the page is
+    /// scrolled to it leaves the hidden share; one the probe saw stay hidden,
+    /// or never looked at, still counts. A slider with every slide hidden
+    /// leaves both counts and is reported apart; a slider showing its current
+    /// slide is a page, and its other slides count as before.
+    #[test]
+    fn hidden_text_measure_probes_scroll_linked_reveals_and_sets_aside_unstarted_sliders() {
+        let text = |c: &str, n: usize| c.repeat(n);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0")], "");
+        d.set_shown_on_scroll(scrubbed, true);
+        hidden_box(&mut d, scrubbed, "p", &[], &text("s", 150));
+        let failed = hidden_box(&mut d, body, "div", &[("opacity", "0")], &text("f", 60));
+        d.set_shown_on_scroll(failed, false);
+        hidden_box(&mut d, body, "div", &[("visibility", "hidden")], &text("u", 40));
+        // A slider that never started: its box is transparent, and so is
+        // every slide of one whose box is not.
+        let dead = hidden_box(&mut d, body, "div", &[("opacity", "0")], "");
+        d.set_attr(dead, "class", "slider slider--thumbnails js-slider");
+        hidden_box(&mut d, dead, "div", &[], &text("a", 50));
+        let rev = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(rev, "class", "rev_slider");
+        let list = hidden_box(&mut d, rev, "ul", &[], "");
+        hidden_box(&mut d, list, "li", &[("visibility", "hidden")], &text("b", 30));
+        hidden_box(&mut d, list, "li", &[("visibility", "hidden")], &text("c", 30));
+        // A slider showing its current slide: the waiting slides are not the
+        // slider, though their class names it.
+        let live = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(live, "class", "swiper-wrapper");
+        let current = hidden_box(&mut d, live, "div", &[], &text("d", 20));
+        d.set_attr(current, "class", "swiper-slide swiper-slide-active");
+        let waiting = hidden_box(&mut d, live, "div", &[("opacity", "0")], &text("e", 20));
+        d.set_attr(waiting, "class", "swiper-slide");
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(
+            (m.total_chars, m.hidden_chars, m.unstarted_slider_chars),
+            (100.0 + 150.0 + 60.0 + 40.0 + 40.0, 60.0 + 40.0 + 20.0, 110.0)
+        );
+        assert_eq!(m.hidden_samples, vec![text("f", 40), text("u", 40), text("e", 20)]);
+        assert_eq!(m.unstarted_slider_samples, vec![text("a", 40), text("b", 30), text("c", 30)]);
+
+        // Below the reporting share nothing is probed, and nothing moves.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 400));
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0")], &text("s", 150));
+        d.set_shown_on_scroll(scrubbed, true);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (550.0, 150.0));
     }
 
     #[test]

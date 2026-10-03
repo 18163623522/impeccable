@@ -214,6 +214,16 @@ pub trait Dom {
         None
     }
 
+    /// Whether a box that is hidden with the page scrolled to the top shows
+    /// once the page is scrolled to it: a reveal that follows the scroll
+    /// position (a scrubbed timeline, a reveal that hides again when its
+    /// section leaves the viewport). `None` is a probe that has not looked: a
+    /// recording made before the probe existed, a DOM with no page behind it.
+    /// A caller treats `None` as the base answer, hidden.
+    fn shown_when_scrolled_to(&self, _el: ElId) -> Option<bool> {
+        None
+    }
+
     // ── the flat tree ─────────────────────────────────────────────────
     /// The box an element paints inside once shadow trees are composed: the
     /// slot a light-DOM child is assigned to, else its parent, else the host

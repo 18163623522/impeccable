@@ -380,6 +380,19 @@ impl Needs {
 pub struct Facts {
     #[serde(default)]
     pub hits: Vec<HitTest>,
+    /// Answers to [`SnapshotDom::take_scroll_probes`]: whether a box hidden
+    /// with the page at the top showed once the page was scrolled to it.
+    /// Absent in recordings made before the probe existed, where nothing is
+    /// known and the box counts as hidden.
+    #[serde(rename = "shownOnScroll", default, skip_serializing_if = "Vec::is_empty")]
+    pub shown_on_scroll: Vec<ScrollShown>,
+}
+
+/// One answer of the scroll probe ([`Dom::shown_when_scrolled_to`]).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ScrollShown {
+    pub el: ElId,
+    pub shown: bool,
 }
 
 /// The serialized page.
@@ -604,6 +617,8 @@ pub struct SnapshotDom {
     closest_cache: RefCell<HashMap<(ElId, String), Result<Option<ElId>, SelectorError>>>,
     text_cache: RefCell<HashMap<ElId, String>>,
     unknown_props: RefCell<Vec<String>>,
+    shown_on_scroll: RefCell<HashMap<ElId, bool>>,
+    scroll_probes: RefCell<Vec<ElId>>,
 }
 
 impl SnapshotDom {
@@ -617,6 +632,8 @@ impl SnapshotDom {
             closest_cache: RefCell::new(HashMap::new()),
             text_cache: RefCell::new(HashMap::new()),
             unknown_props: RefCell::new(Vec::new()),
+            shown_on_scroll: RefCell::new(HashMap::new()),
+            scroll_probes: RefCell::new(Vec::new()),
         };
         let inline: Vec<HitTest> = dom.snap.hits.clone();
         dom.add_hits(&inline);
@@ -642,6 +659,13 @@ impl SnapshotDom {
     /// Supply facts for an earlier [`Self::take_needs`].
     pub fn add_facts(&self, facts: &Facts) {
         self.add_hits(&facts.hits);
+        {
+            let mut shown = self.shown_on_scroll.borrow_mut();
+            for s in &facts.shown_on_scroll {
+                shown.insert(s.el, s.shown);
+            }
+        }
+        self.scroll_probes.borrow_mut().clear();
         // Answers may change what a later run asks; forget the misses.
         self.misses.borrow_mut().clear();
         self.missed_keys.borrow_mut().clear();
@@ -652,6 +676,14 @@ impl SnapshotDom {
         let hit_tests = std::mem::take(&mut *self.misses.borrow_mut());
         self.missed_keys.borrow_mut().clear();
         Needs { hit_tests }
+    }
+
+    /// The boxes [`Dom::shown_when_scrolled_to`] asked about that the facts
+    /// do not answer (drained), in first-asked order. Kept apart from
+    /// [`Self::take_needs`]: only the URL engine's hidden-text step answers
+    /// them, and a consumer that answers hit tests alone never sees them.
+    pub fn take_scroll_probes(&self) -> Vec<ElId> {
+        std::mem::take(&mut *self.scroll_probes.borrow_mut())
     }
 
     /// Whether anything is pending.
@@ -750,6 +782,19 @@ impl Dom for SnapshotDom {
     }
     fn css_escape(&self, s: &str) -> String {
         css_escape(s)
+    }
+    fn shown_when_scrolled_to(&self, el: ElId) -> Option<bool> {
+        if !self.valid(el) {
+            return None;
+        }
+        if let Some(shown) = self.shown_on_scroll.borrow().get(&el) {
+            return Some(*shown);
+        }
+        let mut pending = self.scroll_probes.borrow_mut();
+        if !pending.contains(&el) {
+            pending.push(el);
+        }
+        None
     }
     fn running_animation_properties(&self, el: ElId) -> Option<Vec<String>> {
         if !self.snap.animations_recorded || !self.valid(el) {
@@ -1346,10 +1391,31 @@ mod tests {
                 top: 5,
                 stack: vec![5, 4, 3, 1],
             }],
+            ..Facts::default()
         });
         assert_eq!(d.element_from_point(20.0, 20.0), Some(5));
         assert_eq!(d.elements_from_point(20.0, 20.0), vec![5, 4, 3, 1]);
         assert!(!d.has_needs());
+    }
+
+    /// The scroll probe is asked on demand, kept apart from the hit tests a
+    /// consumer answers, and read from the facts once answered; the facts
+    /// leave the field out when there is nothing in it.
+    #[test]
+    fn scroll_probes_are_demand_driven_and_kept_apart() {
+        let d = snap(SMALL);
+        assert_eq!(d.shown_when_scrolled_to(5), None);
+        assert_eq!(d.shown_when_scrolled_to(5), None);
+        assert!(!d.has_needs());
+        assert_eq!(d.take_scroll_probes(), vec![5]);
+        assert!(d.take_scroll_probes().is_empty());
+        let facts: Facts = serde_json::from_str(r#"{"hits":[],"shownOnScroll":[{"el":5,"shown":true}]}"#).unwrap();
+        d.add_facts(&facts);
+        assert_eq!(d.shown_when_scrolled_to(5), Some(true));
+        assert!(d.take_scroll_probes().is_empty());
+        assert_eq!(serde_json::to_string(&Facts::default()).unwrap(), r#"{"hits":[]}"#);
+        let old: Facts = serde_json::from_str(r#"{"hits":[]}"#).unwrap();
+        assert!(old.shown_on_scroll.is_empty());
     }
 
     /// A capture that recorded the text rects hands over the lines; one that

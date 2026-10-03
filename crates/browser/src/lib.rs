@@ -18,8 +18,10 @@
 //! Before any rule runs, the loaded page is classified ([`validity`]): a bot
 //! challenge, an HTTP error page, or a page that is only a consent wall is
 //! refused with an error instead of being scanned and reported clean. Then
-//! the banners of known consent managers are hidden ([`consent`]), so every
-//! pass and the screenshot see the page a visitor sees once they dismiss it.
+//! the banners of known consent managers are hidden ([`consent`]), and so are
+//! known product tours and preloaders still covering the page
+//! ([`overlays`]), so every pass and the screenshot see the page a visitor
+//! sees once they dismiss them.
 //!
 //! Two entry points serve measurement work rather than the CLI.
 //! [`detect_url_evidence`] runs the same scan and also returns what a
@@ -30,6 +32,7 @@
 
 pub mod cdp;
 pub mod consent;
+pub mod overlays;
 pub mod response_capture;
 pub mod html_snapshot;
 pub mod discovery;
@@ -55,6 +58,7 @@ use serde_json::{json, Map, Value};
 
 use cdp::{Browser, CdpError, Page, Viewport};
 use consent::ConsentReport;
+use overlays::OverlayReport;
 pub use fullpage::ElementShot;
 use validity::{DocumentResponse, PageProbe, PageValidity};
 
@@ -346,6 +350,11 @@ pub struct Evidence {
     /// that matched and the scroll locks undone. `None` when hiding was off
     /// ([`ScanOptions::keep_consent_banners`]) or the page was blocked.
     pub consent: Option<ConsentReport>,
+    /// The product tours and preloaders the scan hid ([`overlays`]), the
+    /// selectors that matched, what was undone, and how long the scan waited
+    /// for a preloader. `None` when hiding was off
+    /// ([`ScanOptions::keep_overlays`]) or the page was blocked.
+    pub overlays: Option<OverlayReport>,
 }
 
 /// A full-page screenshot taken after the scan. Its pixels line up with
@@ -517,8 +526,18 @@ fn detect_url_impl(
     };
 
     let mut consent = ConsentReport::default();
+    let mut overlays = OverlayReport::default();
     let scanned = scan_on_browser(
-        browser, url, credentials, options, wait_until, settle_ms, profile, None, &mut consent,
+        browser,
+        url,
+        credentials,
+        options,
+        wait_until,
+        settle_ms,
+        profile,
+        None,
+        &mut consent,
+        &mut overlays,
     );
     // finally: close page (inside scan_page) and the browser when owned.
     if owns_browser {
@@ -535,6 +554,13 @@ fn detect_url_impl(
         }
         notes.push(consent_note(url, &consent.hidden));
     }
+    if !overlays.hidden.is_empty() {
+        let hidden = overlays.hidden_value();
+        for f in findings.iter_mut() {
+            f.extras.insert("overlaysHidden".into(), hidden.clone());
+        }
+        notes.push(overlay_note(url, &overlays));
+    }
     Ok(UrlScan { findings, notes })
 }
 
@@ -546,6 +572,25 @@ fn consent_note(url: &str, hidden: &[String]) -> String {
         [] => (String::new(), "banner"),
     };
     format!("Hid the {names} consent {noun} on {url} before scanning. Pass --no-consent-hiding to scan it.")
+}
+
+/// The text-mode note for a scan that hid tours or preloaders.
+fn overlay_note(url: &str, report: &OverlayReport) -> String {
+    let parts: Vec<String> = report
+        .hidden
+        .iter()
+        .map(|h| match h.kind.as_str() {
+            "tour" => format!("the {} tour", h.name),
+            "preloader" => format!("the preloader {}", h.name),
+            other => format!("the {other} {}", h.name),
+        })
+        .collect();
+    let list = match parts.as_slice() {
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => String::new(),
+    };
+    format!("Hid {list} on {url} before scanning. Pass --no-overlay-hiding to scan it.")
 }
 
 /// Run the URL engine's scan on a browser the caller owns and also return
@@ -564,6 +609,7 @@ pub fn detect_url_evidence(
     let (url, credentials) = split_scan_url(url);
     let mut evidence = Evidence::default();
     let mut consent = ConsentReport::default();
+    let mut overlays = OverlayReport::default();
     let results = scan_on_browser(
         browser,
         &url,
@@ -574,10 +620,14 @@ pub fn detect_url_evidence(
         options.profile.as_deref(),
         Some((&mut evidence, request)),
         &mut consent,
+        &mut overlays,
     );
     let blocked = evidence.validity.as_ref().is_some_and(PageValidity::is_blocked);
     if !options.keep_consent_banners && !blocked {
         evidence.consent = Some(consent);
+    }
+    if !options.keep_overlays && !blocked {
+        evidence.overlays = Some(overlays);
     }
     let results = results?;
     let (findings, origins) = results_to_findings(&url, results, options.design_system.as_deref())?;
@@ -778,6 +828,7 @@ fn scan_on_browser(
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    overlays: &mut OverlayReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     let (vw, vh) = options.viewport.unwrap_or((1280, 800));
     let viewport = Viewport {
@@ -787,7 +838,7 @@ fn scan_on_browser(
     let page = step(profile, "load", "new-page", url, || browser.new_page()).map_err(cdp_err);
     match page {
         Ok(page) => scan_page(
-            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence, consent,
+            page, url, credentials, options, wait_until, settle_ms, viewport, profile, evidence, consent, overlays,
         ),
         Err(e) => Err(e),
     }
@@ -806,6 +857,7 @@ fn scan_page(
     profile: Option<&DetectorProfile>,
     evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    overlays: &mut OverlayReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     let outcome = scan_page_inner(
         &mut page,
@@ -818,6 +870,7 @@ fn scan_page(
         profile,
         evidence,
         consent,
+        overlays,
     );
     step(profile, "load", "close-page", url, || page.close());
     outcome
@@ -858,6 +911,7 @@ fn scan_page_inner(
     profile: Option<&DetectorProfile>,
     mut evidence: Option<(&mut Evidence, &EvidenceRequest)>,
     consent: &mut ConsentReport,
+    overlays: &mut OverlayReport,
 ) -> Result<Vec<RawResult>, EngineError> {
     step(profile, "load", "set-viewport", url, || {
         page.set_viewport(viewport)
@@ -911,6 +965,13 @@ fn scan_page_inner(
     if hide_consent {
         step(profile, "load", "hide-consent", url, || hide_consent_banners(page, consent));
     }
+    // Then tours and preloaders ([`overlays`]), the same way. A preloader
+    // still covering the page gets a bounded wait to go on its own first.
+    let hide_overlays = !options.keep_overlays;
+    if hide_overlays {
+        overlays.waited_ms = step(profile, "load", "wait-preloader", url, || wait_for_preloaders(page));
+        step(profile, "load", "hide-overlays", url, || hide_page_overlays(page, overlays));
+    }
 
     // Inject the plain-JS snapshot producer (no WebAssembly runs in the page).
     step(profile, "scan", "inject-snapshot-script", url, || {
@@ -935,6 +996,9 @@ fn scan_page_inner(
     if hide_consent {
         step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
     }
+    if hide_overlays {
+        step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
+    }
 
     // The one capture every pass below reads: the rule pass, the hidden-text
     // measure, and the visual pass share this DOM, so a hit test any of them
@@ -945,7 +1009,11 @@ fn scan_page_inner(
     // A banner that arrived around the capture is hidden, and the page
     // captured again, so the capture, the live hit tests and the pixel reads
     // all see the page without it.
-    if hide_consent && step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent)) {
+    let consent_changed =
+        hide_consent && step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
+    let overlays_changed =
+        hide_overlays && step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
+    if consent_changed || overlays_changed {
         base_json = snapshot_engine::capture_snapshot_json(page).map_err(cdp_err)?;
     }
     let base = snapshot_engine::parse_snapshot(&base_json).map_err(cdp_err)?;
@@ -1057,6 +1125,9 @@ fn scan_page_inner(
         // And once more before the screenshot, so the crops match the capture.
         if hide_consent {
             let _ = hide_consent_banners(page, consent);
+        }
+        if hide_overlays {
+            let _ = hide_page_overlays(page, overlays);
         }
         let mut selectors: Vec<String> = Vec::new();
         for r in &results {
@@ -1334,6 +1405,38 @@ fn hide_consent_banners(page: &mut Page<'_>, report: &mut ConsentReport) -> bool
             v.get("changed").and_then(Value::as_bool).unwrap_or(false)
         }
         Err(_) => false,
+    }
+}
+
+/// Run the overlay hide step ([`overlays::hide_js`]) and fold what it hid
+/// into `report`. Idempotent and best-effort, like [`hide_consent_banners`].
+/// Returns whether this run changed the page.
+fn hide_page_overlays(page: &mut Page<'_>, report: &mut OverlayReport) -> bool {
+    match page.evaluate_value(&overlays::hide_js()) {
+        Ok(v) => {
+            report.merge(&v);
+            v.get("changed").and_then(Value::as_bool).unwrap_or(false)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Wait up to [`overlays::PRELOADER_WAIT_MS`] for every preloader covering
+/// the page to go on its own. Returns how long it waited: 0 when none was
+/// covering the page, the full budget when one is still there (the hide step
+/// then hides it). A failed probe ends the wait.
+fn wait_for_preloaders(page: &mut Page<'_>) -> u64 {
+    let js = overlays::preloader_probe_js();
+    let started = Instant::now();
+    let budget = Duration::from_millis(overlays::PRELOADER_WAIT_MS);
+    let mut waited = false;
+    loop {
+        let covering = matches!(page.evaluate_value(&js), Ok(Value::Array(a)) if !a.is_empty());
+        if !covering || started.elapsed() >= budget {
+            return if waited { started.elapsed().as_millis() as u64 } else { 0 };
+        }
+        std::thread::sleep(Duration::from_millis(overlays::PRELOADER_POLL_MS));
+        waited = true;
     }
 }
 

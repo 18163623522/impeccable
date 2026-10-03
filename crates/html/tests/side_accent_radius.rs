@@ -134,13 +134,18 @@ fn every_static_producer_answers_the_same_visual_the_same_way() {
     );
 }
 
-/// A top band is outside the gate in every producer.
+/// A top or bottom band passes the same rounded-card gate in every producer
+/// (decision r6-t2-side-tab-bands): silent on a square box, reported on a
+/// card rounded away from it.
 #[test]
-fn a_square_top_band_still_reports_in_every_producer() {
+fn a_top_band_needs_a_rounded_card_in_every_producer() {
     let css = ".bd{border-top:4px solid #6366f1}\
 .sq{position:relative}.sq::after{content:\"\";position:absolute;left:0;right:0;top:0;height:5px;background:#6366f1}\
 .sh{box-shadow:inset 0 6px 0 0 #6366f1}";
-    assert_eq!(side_tab_page(css, PRODUCER_BODY).len(), 3);
+    assert!(side_tab_page(css, PRODUCER_BODY).is_empty());
+    // Rounded only away from the band: the bottom corners.
+    let rounded = ".bd,.sq,.sh{border-radius:0 0 12px 12px}".to_string() + css;
+    assert_eq!(side_tab_page(&rounded, PRODUCER_BODY).len(), 3);
 }
 
 /// The radius can come from any rule that matches the element: the cascade

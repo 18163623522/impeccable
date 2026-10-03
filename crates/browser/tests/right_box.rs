@@ -115,17 +115,17 @@ fn a_thin_stripe_is_read_against_the_far_corners() {
 }
 
 #[test]
-fn a_clip_cuts_a_layer_only_where_the_layer_paints() {
+fn a_clip_cuts_only_a_popover_layer_by_its_box() {
     let Some(engine) = engine() else { return };
     let port = serve();
     let found = findings(&engine, port, "clipped-overflow-painted-box.html", "clipped-overflow-container");
     assert_cases(
         &found,
-        &["flag-cuts-button", "flag-cuts-painted-wrapper", "flag-cuts-caption"],
+        &["flag-cuts-menu", "flag-cuts-tooltip"],
         &["pass-holds-wrapper", "pass-holds-scrolling-row"],
         "clipped-overflow-container",
     );
-    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(found.len(), 2, "{found:?}");
 }
 
 #[test]

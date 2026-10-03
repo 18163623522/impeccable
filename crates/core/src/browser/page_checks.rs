@@ -849,10 +849,14 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
             .iter()
             .any(|&other| other != el && dom.contains(el, other));
         if !is_ancestor {
-            findings.push(ElFinding {
-                el: Some(el),
-                finding: BrowserFinding::new("nested-cards", "Card inside card"),
-            });
+            let mut finding = BrowserFinding::new("nested-cards", "Card inside card");
+            // The panels of a drawn product mockup are a picture of an
+            // interface, not cards nested on this page: advisory there
+            // (decision r6-t3-nested-cards-mockups).
+            if super::decorative_text::box_in_mockup_dom(dom, el) {
+                finding.severity = Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+            }
+            findings.push(ElFinding { el: Some(el), finding });
         }
     }
     findings
@@ -3562,6 +3566,53 @@ mod tests {
         assert_eq!(f[0].finding.detail, "Card inside card");
         d.set_style(inner, "position", "absolute");
         assert!(check_layout(&d).is_empty());
+    }
+
+    /// Decision r6-t3-nested-cards-mockups (advisory): the panels of a drawn
+    /// product mockup report as advisory, in a framed demo (r5-p26's
+    /// structure) or under an HTML `role="img"`.
+    /// Bordered cards in a bordered panel outside any mockup (paseo.sh)
+    /// keep the registry's severity.
+    #[test]
+    fn nested_cards_in_a_mockup_are_advisory() {
+        let build = |frame: &dyn Fn(&mut FakeDom, ElId, ElId)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let wrap = d.add(Some(body), "div");
+            d.set_rect(wrap, 0.0, 0.0, 400.0, 300.0);
+            let outer = d.add(Some(wrap), "div");
+            card_styles(&mut d, outer, "rgb(255, 255, 255)");
+            d.set_rect(outer, 0.0, 0.0, 400.0, 300.0);
+            let inner = d.add(Some(outer), "div");
+            card_styles(&mut d, inner, "rgb(250, 250, 250)");
+            d.set_rect(inner, 10.0, 10.0, 200.0, 100.0);
+            d.add_text(inner, "Some card body text");
+            d.add_text(outer, "Outer text longer than ten");
+            frame(&mut d, wrap, outer);
+            let f = check_layout(&d);
+            assert_eq!(f.len(), 1, "{f:?}");
+            f[0].finding.severity.clone()
+        };
+        let advisory = Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+        assert_eq!(build(&|_, _, _| {}), None, "outside any mockup");
+        assert_eq!(build(&|d, wrap, _| { d.set_attr(wrap, "role", "img"); }), advisory);
+        // A class is not read: an `illustration` names a feature tile's
+        // picture as often as a mockup (r4-p17 keeps those failing).
+        assert_eq!(build(&|d, wrap, _| { d.set_attr(wrap, "class", "mockup-window"); }), None);
+        assert_eq!(
+            build(&|d, _, outer| { d.set_style(outer, "transform", "perspective(900px) rotateX(8deg)"); }),
+            advisory,
+            "a device frame tilted in 3D"
+        );
+        // The inner card can be the frame itself.
+        assert_eq!(
+            build(&|d, _, outer| {
+                let inner = d.children(outer)[0];
+                d.set_style(inner, "transform", "perspective(900px) rotateX(8deg)");
+            }),
+            advisory,
+            "the inner card is the tilted frame"
+        );
     }
 
     #[test]

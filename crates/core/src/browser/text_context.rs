@@ -79,6 +79,11 @@ pub fn in_framed_demo_dom(dom: &dyn Dom, el: ElId) -> bool {
     text_context::in_framed_demo(&DomNode::new(dom, el))
 }
 
+/// Whether the element is itself a framed HTML demo, by structure.
+pub fn is_demo_frame_dom(dom: &dyn Dom, el: ElId) -> bool {
+    text_context::is_demo_frame(&DomNode::new(dom, el))
+}
+
 /// Whether the element's text sits in mock context: an illustration mockup
 /// by its marker, its `role="img"` or its structure.
 pub fn in_mock_context_dom(dom: &dyn Dom, el: ElId) -> bool {

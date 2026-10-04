@@ -534,8 +534,11 @@ impl RenderedTextCount {
 
 /// Feeds the text nodes under `el` in document order, each under its own
 /// parent's `white-space`, skipping every descendant that renders no text: a
-/// `<style>`, `<script>`, `<noscript>` or `<template>`, and a `display: none`
-/// box.
+/// `<style>`, `<script>`, `<noscript>` or `<template>`, a `display: none`
+/// box, and the contents of a `content-visibility: hidden` box (the box
+/// itself lays out, its text is on no line). A DOM that does not record
+/// `contentVisibility` answers `""` and the subtree is counted, which errs
+/// toward the count `textContent` would give.
 fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
     let mut preserved: Option<bool> = None;
     for child in dom.child_nodes(el) {
@@ -549,7 +552,10 @@ fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
             }
             DomChild::Element(child) => {
                 let tag = tag_lower(dom, child);
-                if UNRENDERED_TEXT_TAGS.contains(&tag.as_str()) || dom.style(child, "display") == "none" {
+                if UNRENDERED_TEXT_TAGS.contains(&tag.as_str())
+                    || dom.style(child, "display") == "none"
+                    || js::to_lower_case(&dom.style(child, "contentVisibility")) == "hidden"
+                {
                     continue;
                 }
                 feed_rendered_text(dom, child, out);
@@ -4915,5 +4921,30 @@ mod rendered_text_tests {
             d.add_text(q, "x");
         }
         assert_eq!(rendered_text_len(&d, q), "one two three fourxxx".len());
+    }
+
+    /// A `content-visibility: hidden` child lays out its box and renders none
+    /// of its contents, so its text is on no line. A DOM that cannot say
+    /// (no `contentVisibility` value) counts it.
+    #[test]
+    fn a_content_visibility_hidden_child_is_skipped() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, "Before ");
+        let skipped = d.add(Some(p), "span");
+        d.set_style(skipped, "display", "inline-block");
+        d.set_style(skipped, "contentVisibility", "hidden");
+        d.add_text(skipped, &"unrendered ".repeat(30));
+        d.add_text(p, "after");
+        assert_eq!(rendered_text_len(&d, p), "Before after".len());
+
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "Before ");
+        let unknown = d.add(Some(q), "span");
+        d.set_style(unknown, "display", "inline");
+        d.add_text(unknown, "kept ");
+        d.add_text(q, "after");
+        assert_eq!(rendered_text_len(&d, q), "Before kept after".len());
     }
 }

@@ -558,6 +558,11 @@ impl Dom for FakeDom {
     fn text_slot(&self, el: ElId) -> Option<ElId> {
         self.els[el as usize].text_slot
     }
+    fn shadow_children(&self, el: ElId) -> Vec<ElId> {
+        (1..self.els.len() as ElId)
+            .filter(|&i| self.els[i as usize].shadow_host == Some(el))
+            .collect()
+    }
     fn shadow_trees_recorded(&self) -> bool {
         !self.shadow_trees_unrecorded
     }

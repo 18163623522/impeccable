@@ -6835,3 +6835,37 @@ finding against its predecessor.
 4. **A band whose corners cannot be read keeps reporting,** as a left or
    right accent does: an unresolved `var()` radius, a stylesheet the static
    engine could not load.
+
+## Recorded 2026-10-04: heading-rhythm counts even gaps under running prose (corpus/premise6-heading-rhythm, r7-t1)
+
+Paul's call r7-t1-heading-rhythm-equal-gaps (narrow): a heading whose gap
+above is no larger than its gap below (0.5px slack) also counts when the
+block above ends in running prose: the text block at its bottom edge has at
+least 80 characters on at least two rendered lines, is set smaller than the
+heading and no larger than 1.25 times the body text, is not a heading, spans
+at least half the heading's width, and is not inside a box that shows its
+bottom edge. The crowded test (above < 0.75 x below and a 12px deficit) and
+the two-heading page minimum are unchanged. Three walk fixes ride along: a
+shadow host whose shadow tree lays out content is a block, not a spacer; an
+`hr` or an empty box with a top border is a rule, not a spacer; and the walk
+above passes a wrapper painted the colour of its backdrop unless the wrapper
+is one of a run of like boxes. `heading-rhythm.html` moves "Pass Near Equal"
+to the flag column, adds two even-under-prose rows, a white module row and a
+shadow-DOM carousel row (declarative shadow root), and gives three pass rows
+more room above so they keep testing what they were written for.
+
+No golden changed: the static engine does not run `heading-rhythm`, and the
+fixture edits move no static finding.
+
+### Known limits
+
+1. **Captures recorded before line rects stand down.** The prose test reads
+   the capture's line boxes; run 28 and older snapshots have none, so only the
+   crowded test applies there.
+2. **otto.de's carousel is still missed,** and not for the reason the probe
+   gave: its host has light children and is no spacer. The host box starts
+   4px above the heading's padding-box bottom, past the walk's 2px tolerance,
+   and the heading's own 16px bottom padding is not counted as gap below.
+3. **A heading beside a paragraph in a two-column row** can now meet the page
+   minimum through its even-gap neighbours (everhomes.ae "Featured
+   apartments", 80 / 136 under a dark banner) and report on the crowded test.

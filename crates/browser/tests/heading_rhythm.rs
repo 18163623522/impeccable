@@ -9,7 +9,9 @@
 //! at body size set apart by colour, italics or a hairline weight when they
 //! open the box that holds the heading, and a band painted with a background
 //! image that covers it; a link or date closing the block above and a
-//! heading's own icon or accent bar keep reporting.
+//! heading's own icon or accent bar keep reporting. Round 7's equal-gaps
+//! call (r7-t1) reports a heading spaced evenly under running prose, and an
+//! even gap under one line or with more room above still passes.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -80,6 +82,13 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         "\"Flag Crowded Two\"",
         "\"Flag Crowded Three\"",
         "\"Flag Wrapped Section Title\"",
+        // r7-t1: no more space above than below, under running prose.
+        "\"Flag Near Equal Under Prose\" has 20px above vs 24px below",
+        "\"Flag Even Under Prose\" has 24px above vs 24px below",
+        // A wrapper filled with the page's own white shows no top edge, and
+        // a carousel drawn in a shadow tree is content, not a spacer.
+        "\"Flag White Module Title\" has 10px above vs 40px below",
+        "\"Flag Title Over Shadow Carousel\" has 10px above vs 40px below",
         // The wrapper spacing column: the title's wrapper, a stretched row, a
         // grid column or a spacer holds the gap, and it is still measured.
         "\"Flag Header Padding\" has 16px above vs 48px below",
@@ -113,5 +122,5 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
     }
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
-    assert_eq!(snippets.len(), 20, "{snippets:?}");
+    assert_eq!(snippets.len(), 24, "{snippets:?}");
 }

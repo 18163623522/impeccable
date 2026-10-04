@@ -40,7 +40,7 @@
 //! [`SnapshotDom::unknown_style_props`], so a parity run can prove the
 //! property list complete.
 
-use super::dom::{Dom, ElId, KeyframeFrame, Rect, SelectorError};
+use super::dom::{Dom, DomChild, ElId, KeyframeFrame, Rect, SelectorError};
 
 use super::selector::Selector;
 
@@ -950,6 +950,20 @@ impl Dom for SnapshotDom {
             .filter_map(|n| match n {
                 ChildNode::Text(t) => Some(t.clone()),
                 _ => None,
+            })
+            .collect()
+    }
+    /// A `CData` entry is not a `nodeType === 3` node, so it is left out
+    /// here as it is from [`Dom::direct_text_nodes`].
+    fn child_nodes(&self, el: ElId) -> Vec<DomChild> {
+        self.snap
+            .node(el)
+            .child_nodes
+            .iter()
+            .filter_map(|n| match n {
+                ChildNode::Text(t) => Some(DomChild::Text(t.clone())),
+                ChildNode::El(c) => Some(DomChild::Element(*c)),
+                ChildNode::CData(_) => None,
             })
             .collect()
     }

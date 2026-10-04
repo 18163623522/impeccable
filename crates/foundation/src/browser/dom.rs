@@ -71,6 +71,14 @@ pub struct KeyframeFrame {
     pub decls: Vec<(String, String)>,
 }
 
+/// One child of an element as [`Dom::child_nodes`] lists it: an element, or
+/// a text node's data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomChild {
+    Element(ElId),
+    Text(String),
+}
+
 /// The DOM measurement surface. Element handles are opaque `u32`s.
 pub trait Dom {
     // ── document / window ─────────────────────────────────────────────
@@ -144,6 +152,20 @@ pub trait Dom {
     /// The `textContent` of every direct child text node (`nodeType === 3`),
     /// in order. Empty text nodes are included (they matter for `join(' ')`).
     fn direct_text_nodes(&self, el: ElId) -> Vec<String>;
+    /// `el.childNodes` reduced to its element children and its text nodes
+    /// (`nodeType === 3`), in document order. Comments and other node types
+    /// are left out.
+    ///
+    /// This is the one view that says where an element's own text sits among
+    /// its children, which a caller needs to rebuild the rendered text node
+    /// by node. The default lists the direct text nodes and then the element
+    /// children, which is the right order only when the element has one kind
+    /// or the other; every DOM in this workspace overrides it.
+    fn child_nodes(&self, el: ElId) -> Vec<DomChild> {
+        let mut out: Vec<DomChild> = self.direct_text_nodes(el).into_iter().map(DomChild::Text).collect();
+        out.extend(self.children(el).into_iter().map(DomChild::Element));
+        out
+    }
     /// `el.isContentEditable`.
     fn is_content_editable(&self, el: ElId) -> bool;
     /// `el.hidden` (the boolean IDL attribute).

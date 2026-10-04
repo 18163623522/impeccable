@@ -11,6 +11,11 @@
     and one code unit for every combining mark. Each pass case here read as a
     long column on textContent and is a comfortable one on the page. Explicit
     pixel widths throughout.
+
+    Every case has a plain twin on this page that renders the same characters
+    on the same lines (plain-wide, plain-measure, flag-preserved), so a test
+    can ask that each case reads the same as its twin whatever font the host
+    browser resolves system-ui to.
   -->
   <style>
     body { font-family: system-ui, sans-serif; margin: 0; padding: 24px 40px; color: #1a1a1a; background: #fff; }
@@ -24,6 +29,9 @@
 </head>
 <body>
   <!-- FLAG: the count still charges real long columns -->
+  <h2>Flag: a plain wide column, the twin of the next two</h2>
+  <p class="copy wide plain-wide">Reading copy set across a column this wide asks the eye to travel a long way back to the start of every line, and after a few lines of it a reader starts to lose their place. The measure is what a designer sets with a max-width on the text block, and this block sets none at all, so every line runs the full width of the column it sits in from one edge to the other.</p>
+
   <h2>Flag: a wide column that also carries an inline style child</h2>
   <p class="copy wide flag-style-child"><style>.flag-style-child { min-height: 48px; }</style>Reading copy set across a column this wide asks the eye to travel a long way back to the start of every line, and after a few lines of it a reader starts to lose their place. The measure is what a designer sets with a max-width on the text block, and this block sets none at all, so every line runs the full width of the column it sits in from one edge to the other.</p>
 
@@ -36,6 +44,9 @@
   </p>
 
   <!-- PASS: a comfortable measure that textContent overcounts -->
+  <h2>Pass: a plain 560px measure, the twin of the next three</h2>
+  <p class="copy measure plain-measure">A paragraph held to a comfortable measure wraps long before the eye has far to travel back, and this one keeps to about seventy characters a line.</p>
+
   <h2>Pass: a 560px measure with an inline style child</h2>
   <!-- directus.io's hero paragraph: a typewriter component ships its
        keyframes in a style element inside the paragraph. -->
@@ -60,8 +71,7 @@
                                         A paragraph held to a comfortable
                                         measure wraps long before the eye has
                                         far to travel back, and this one keeps
-                                        to about seventy characters a line
-                                        from its first sentence to its last.
+                                        to about seventy characters a line.
   </p>
 
   <h2>Pass: Devanagari prose on a 640px measure at 16px</h2>
@@ -73,5 +83,10 @@
   <!-- Under pre-wrap the runs of spaces render, so they are characters of
        the line and the column is as long as it looks. -->
   <p class="copy wide keep flag-preserved">Reading copy set across a column this wide asks the eye   to travel a long way back   to the start of every line,   and after a few lines of it   a reader starts to lose their place.   The measure is what a designer sets   with a max-width on the text block,   and this block sets none at all,   so every line runs the full width.</p>
+
+  <h2>Flag: the same preserved white space in a span inside a normal paragraph</h2>
+  <!-- Each text node keeps or folds its white space by the white-space it
+       inherits, so this reads the same as the pre-wrap paragraph above. -->
+  <p class="copy wide flag-preserved-nested">Reading copy set across a column this wide asks the eye<span class="keep">   to travel a long way back   to the start of every line,   and after a few lines of it   a reader starts to lose their place.   The measure is what a designer sets   with a max-width on the text block,   and this block sets none at all,   so every line runs the full width.</span></p>
 </body>
 </html>

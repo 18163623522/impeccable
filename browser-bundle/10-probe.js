@@ -177,6 +177,17 @@ const __impeccableDom = {
     }
     return out;
   },
+  // The element children and text nodes of el.childNodes in order: an
+  // element's handle, or 0 for a text node (its data is the matching entry of
+  // direct_text_nodes, which walks the same list).
+  child_node_kinds(el) {
+    const out = [];
+    for (const n of __el(el).childNodes) {
+      if (n.nodeType === 3) out.push(0);
+      else if (n.nodeType === 1) out.push(__intern(n));
+    }
+    return out;
+  },
   is_content_editable(el) { return !!__el(el).isContentEditable; },
   hidden_prop(el) { return !!__el(el).hidden; },
   style(el, prop) {

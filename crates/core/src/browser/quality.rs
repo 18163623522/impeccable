@@ -8,7 +8,7 @@
 #![allow(unused_imports)]
 use super::dom::{
     closest_or_none, direct_text, has_direct_text_longer_than, matches_or_false, pf0, safe_id,
-    style_px, tag_lower, Dom, ElId, Rect,
+    style_px, tag_lower, Dom, DomChild, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{
@@ -484,19 +484,76 @@ const UNRENDERED_TEXT_TAGS: [&str; 4] = ["style", "script", "noscript", "templat
 static COMBINING_OR_FORMAT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[\p{M}\p{Cf}]").expect("COMBINING_OR_FORMAT_RE"));
 
-/// The `textContent` of each topmost descendant of `el` that renders no
-/// text: a `<style>`, `<script>`, `<noscript>` or `<template>`, and a
-/// `display: none` box. Document order.
-fn unrendered_text_runs(dom: &dyn Dom, el: ElId, out: &mut Vec<String>) {
-    for child in dom.children(el) {
-        let tag = tag_lower(dom, child);
-        if UNRENDERED_TEXT_TAGS.contains(&tag.as_str()) || dom.style(child, "display") == "none" {
-            let text = dom.text_content(child);
-            if !text.is_empty() {
-                out.push(text);
+/// The running count of [`rendered_text_len`], fed one text node at a time.
+///
+/// White space is held back until a character that is not white space
+/// follows it, so a leading run is dropped and a trailing run never counts:
+/// the ends are trimmed as `String.prototype.trim` trims them, wherever the
+/// node boundaries fall. A run of collapsible white space counts once, and it
+/// runs on across node boundaries, the way `a <b> b</b>` renders one space.
+#[derive(Default)]
+struct RenderedTextCount {
+    count: usize,
+    /// White space seen since the last counted character.
+    pending: usize,
+    /// The last white space seen was collapsible, so more of it joins that run.
+    in_collapsible_run: bool,
+}
+
+impl RenderedTextCount {
+    fn feed(&mut self, text: &str, preserved: bool) {
+        let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        let mut buf = [0u8; 4];
+        for c in text.chars() {
+            if collapsible(c) && !preserved {
+                if !self.in_collapsible_run {
+                    self.pending += 1;
+                    self.in_collapsible_run = true;
+                }
+                continue;
             }
-        } else {
-            unrendered_text_runs(dom, child, out);
+            if js::is_js_whitespace(c) {
+                self.pending += 1;
+                self.in_collapsible_run = false;
+                continue;
+            }
+            // A mark is not on the line; it neither ends a run of white space
+            // nor counts as a character.
+            if COMBINING_OR_FORMAT_RE.is_match(c.encode_utf8(&mut buf)) {
+                continue;
+            }
+            if self.count > 0 {
+                self.count += self.pending;
+            }
+            self.pending = 0;
+            self.in_collapsible_run = false;
+            self.count += 1;
+        }
+    }
+}
+
+/// Feeds the text nodes under `el` in document order, each under its own
+/// parent's `white-space`, skipping every descendant that renders no text: a
+/// `<style>`, `<script>`, `<noscript>` or `<template>`, and a `display: none`
+/// box.
+fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
+    let mut preserved: Option<bool> = None;
+    for child in dom.child_nodes(el) {
+        match child {
+            DomChild::Text(text) => {
+                let preserved = *preserved.get_or_insert_with(|| {
+                    let white_space = dom.style(el, "whiteSpace");
+                    white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces"
+                });
+                out.feed(&text, preserved);
+            }
+            DomChild::Element(child) => {
+                let tag = tag_lower(dom, child);
+                if UNRENDERED_TEXT_TAGS.contains(&tag.as_str()) || dom.style(child, "display") == "none" {
+                    continue;
+                }
+                feed_rendered_text(dom, child, out);
+            }
         }
     }
 }
@@ -512,48 +569,16 @@ fn unrendered_text_runs(dom: &dyn Dom, el: ElId, out: &mut Vec<String>) {
 /// sits on its base and advances nothing, is charged as a character of its
 /// own: a third of a Devanagari paragraph is marks.
 ///
-/// So: the text with its unrendered descendants cut out, collapsible white
-/// space folded to one space unless the element preserves it, and combining
-/// marks and format characters (zero-width joiners, soft hyphens) left out.
+/// So the count is built from the text nodes themselves, in order: the
+/// unrendered descendants are never visited, each node's collapsible white
+/// space is folded to one space unless the element it sits in preserves it
+/// (a `pre-wrap` span inside a normal paragraph keeps its spaces, which are
+/// on the line), and combining marks and format characters (zero-width
+/// joiners, soft hyphens) are left out.
 fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
-    let full = dom.text_content(el);
-    let mut cuts = Vec::new();
-    unrendered_text_runs(dom, el, &mut cuts);
-    let mut text = String::with_capacity(full.len());
-    let mut rest = full.as_str();
-    // The runs are in document order and each is a substring of what is
-    // left, so cutting the first occurrence of each walks the text once.
-    for cut in &cuts {
-        if let Some(at) = rest.find(cut.as_str()) {
-            text.push_str(&rest[..at]);
-            rest = &rest[at + cut.len()..];
-        }
-    }
-    text.push_str(rest);
-
-    let white_space = dom.style(el, "whiteSpace");
-    let preserved = white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces";
-    let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
-    let mut count = 0usize;
-    let mut pending_space = false;
-    let mut buf = [0u8; 4];
-    for c in js::trim(&text).chars() {
-        if collapsible(c) && !preserved {
-            // Leading white space is dropped, a run counts once, and a
-            // trailing run never gets counted because nothing follows it.
-            pending_space = count > 0;
-            continue;
-        }
-        if COMBINING_OR_FORMAT_RE.is_match(c.encode_utf8(&mut buf)) {
-            continue;
-        }
-        if pending_space {
-            count += 1;
-            pending_space = false;
-        }
-        count += 1;
-    }
-    count
+    let mut count = RenderedTextCount::default();
+    feed_rendered_text(dom, el, &mut count);
+    count.count
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
@@ -4818,5 +4843,77 @@ mod rendered_text_tests {
             line_length(&d, p).as_deref(),
             Some("~100 chars on 2 of 2 rendered lines (aim for <80)")
         );
+    }
+
+    /// Each text node keeps or folds its white space by the `white-space` it
+    /// inherits, not the paragraph's. A `pre-wrap` span inside a normal
+    /// paragraph keeps its runs of spaces on the line, so it counts the same
+    /// as a `pre-wrap` paragraph and flags the same long lines.
+    #[test]
+    fn a_preserving_span_inside_a_normal_paragraph_keeps_its_spaces() {
+        let text = "word    ".repeat(22);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.set_text_lines(p, &[(100.0, 272.0, 640.0, 24.0), (100.0, 300.0, 640.0, 24.0)]);
+        d.add_text(p, "An opening line ");
+        let span = d.add(Some(p), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre-wrap");
+        d.add_text(span, &text);
+        assert_eq!(rendered_text_len(&d, p), "An opening line ".len() + 22 * 8 - 4);
+
+        let whole = two_line_p(&mut d, body);
+        d.set_text_lines(whole, &[(100.0, 272.0, 640.0, 24.0), (100.0, 300.0, 640.0, 24.0)]);
+        d.set_style(whole, "whiteSpace", "pre-wrap");
+        d.add_text(whole, &format!("An opening line {text}"));
+        assert_eq!(rendered_text_len(&d, whole), rendered_text_len(&d, p));
+        assert_eq!(line_length(&d, p), line_length(&d, whole));
+        assert_eq!(
+            line_length(&d, p).as_deref(),
+            Some("~94 chars on 2 of 2 rendered lines (aim for <80)")
+        );
+
+        // The reverse: a normal span inside a pre-wrap paragraph folds its
+        // own runs, and a collapsible run carries on across the boundary of
+        // an inline child the way `a <b> b</b>` renders one space.
+        let q = two_line_p(&mut d, body);
+        d.set_style(q, "whiteSpace", "pre-wrap");
+        d.add_text(q, "a  b");
+        let normal = d.add(Some(q), "span");
+        d.set_style(normal, "display", "inline");
+        d.set_style(normal, "whiteSpace", "normal");
+        d.add_text(normal, "   c   d");
+        assert_eq!(rendered_text_len(&d, q), "a  b c d".len());
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "a ");
+        let b = d.add(Some(r), "b");
+        d.set_style(b, "display", "inline");
+        d.add_text(b, " b");
+        assert_eq!(rendered_text_len(&d, r), "a b".len());
+    }
+
+    /// The text of a hidden child is skipped where it sits, so a hidden run
+    /// of white space never takes a visible space with it.
+    #[test]
+    fn a_hidden_child_is_skipped_where_it_sits() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, "one two");
+        let hidden = d.add(Some(p), "span");
+        d.set_style(hidden, "display", "none");
+        d.add_text(hidden, " ");
+        assert_eq!(rendered_text_len(&d, p), "one two".len());
+
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "one two three four");
+        for _ in 0..3 {
+            let hidden = d.add(Some(q), "span");
+            d.set_style(hidden, "display", "none");
+            d.add_text(hidden, " ");
+            d.add_text(q, "x");
+        }
+        assert_eq!(rendered_text_len(&d, q), "one two three fourxxx".len());
     }
 }

@@ -217,6 +217,8 @@ pub struct Runtime<'a> {
     /// The `HOOK_ADMIN_COMMAND` printed in the full footer
     /// (JS: `node '<abs>/hook-admin.mjs'`; here `'<self>' hooks`).
     pub hook_admin_command: String,
+    /// The engine as the printed commands spell it (`'<self>'`).
+    pub self_command: String,
     pub html: &'a dyn HtmlEngine,
     /// `process.platform === 'win32'` (command-arg quoting).
     pub win32: bool,
@@ -237,6 +239,7 @@ impl<'a> Runtime<'a> {
             env,
             impeccable_command,
             hook_admin_command: format!("{} hooks", quote_command_arg(self_cmd, win32)),
+            self_command: quote_command_arg(self_cmd, win32),
             html,
             win32,
             canonical_cache: std::cell::RefCell::new(HashMap::new()),
@@ -844,7 +847,7 @@ fn resolve_hook_git_exclude_target(rt: &Runtime, cwd: &str) -> Option<GitExclude
             let git_dir = resolve_git_dir(rt, &dot_git, &dir)?;
             let rel_prefix = jsp::to_posix(&rt.relative(&dir, &start));
             return Some(GitExcludeTarget {
-                path: jsp::join(&[&git_dir, "info", "exclude"]),
+                path: impeccable_common::git::info_exclude(&git_dir),
                 pattern_prefix: if rel_prefix.is_empty() || rel_prefix == "." {
                     String::new()
                 } else {
@@ -991,6 +994,7 @@ pub fn filter_findings(findings: Vec<Finding>, config: &HookConfig) -> Vec<Findi
         ignore_values: config.ignore_values.clone(),
         design_system_enabled: None,
         advisory_rules: None,
+        extensions: vec![],
     };
     filter_detection_findings(kept, &dc)
 }
@@ -1795,7 +1799,7 @@ pub fn payload(text: &str, event_name: &str, harness: &str) -> String {
         out.insert("additional_context".into(), Value::String(text.to_string()));
     } else if harness == "github" {
         out.insert("additionalContext".into(), Value::String(text.to_string()));
-    } else if harness == "codex" && event_name == "Stop" {
+    } else if matches!(harness, "codex" | "gemini") && event_name == "Stop" {
         // Codex shares Claude Code's PostToolUse additional-context shape,
         // but its Stop schema rejects unknown fields. Findings that should
         // continue the turn must be a top-level blocking decision (#603).
@@ -1803,7 +1807,7 @@ pub fn payload(text: &str, event_name: &str, harness: &str) -> String {
         if js::trim(text).is_empty() {
             return String::new();
         }
-        out.insert("decision".into(), Value::String("block".to_string()));
+        out.insert("decision".into(), Value::String(if harness == "gemini" { "deny" } else { "block" }.to_string()));
         out.insert("reason".into(), Value::String(text.to_string()));
     } else {
         let mut inner = Map::new();
@@ -1885,9 +1889,13 @@ pub fn resolve_harness(rt: &Runtime, event: Option<&Map<String, Value>>) -> &'st
         Some("grok") => return "grok",
         Some("claude") => return "claude",
         Some("codex") => return "codex",
+        Some("gemini") => return "gemini",
         _ => {}
     }
     if let Some(ev) = event {
+        if matches!(str_field(ev, "hook_event_name"), Some("BeforeTool" | "AfterAgent")) {
+            return "gemini";
+        }
         // Grok Build sends camelCase `toolName`/`toolInput`/`hookEventName`
         // and no snake_case pair. GitHub Copilot sends camelCase
         // `toolName`/`toolArgs`. Check Grok first: the old GitHub heuristic
@@ -1945,7 +1953,7 @@ pub fn is_stop_event(ev: &Map<String, Value>) -> bool {
         Some(v) => Some(v),
         None => ev.get("hookEventName"),
     };
-    matches!(name, Some(Value::String(s)) if js::to_lower_case(s) == "stop")
+    matches!(name, Some(Value::String(s)) if matches!(js::to_lower_case(s).as_str(), "stop" | "afteragent"))
 }
 
 /// JS: parseGitHubToolArgs(toolArgs)

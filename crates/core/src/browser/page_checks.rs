@@ -2278,7 +2278,9 @@ fn held_inside(dom: &dyn Dom, el: ElId, start: ElId) -> Option<ElId> {
         // `visibility` inherits, so a hidden box hides itself only where its
         // parent is visible: there the declaration is its own.
         let hidden = |e: ElId| matches!(dom.style(e, "visibility").as_str(), "hidden" | "collapse");
-        let own_hidden = hidden(b) && dom.parent(b).is_some_and(|p| !hidden(p));
+        // ...and only while `el` inherits it: a descendant that sets
+        // `visibility: visible` again shows through it.
+        let own_hidden = hidden(b) && hidden(el) && dom.parent(b).is_some_and(|p| !hidden(p));
         if (opacity.is_finite() && opacity <= 0.02) || own_hidden {
             found = Some(b);
         }
@@ -4557,6 +4559,19 @@ mod tests {
         mark_body_descendants(&mut d);
         let m = measure_hidden_text_dom(&d);
         assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0));
+
+        // A grandchild that sets visibility: visible again shows once its
+        // section does.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        let wrap = hidden_box(&mut d, section, "div", &[("visibility", "hidden")], "");
+        hidden_box(&mut d, wrap, "p", &[("visibility", "visible")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 0.0));
 
         // Below the reporting share nothing is probed, and nothing moves.
         let mut d = FakeDom::new();

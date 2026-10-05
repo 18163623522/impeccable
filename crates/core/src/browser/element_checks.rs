@@ -13,6 +13,7 @@ use super::dom::{
     class_attr, class_attr_or_prop, closest_or_none, direct_text, has_direct_text_longer_than,
     matches_or_false, pf0, safe_id, style_px, tag_lower, Dom, ElId, ElStyle, Rect,
 };
+use super::driver::{browser_colors_close, DesignSystemConfig};
 use super::BrowserFinding;
 use crate::browser::quality::is_visually_hidden;
 use crate::checks::measures::{
@@ -1181,13 +1182,30 @@ pub fn check_element_italic_serif_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     if tag != "h1" && tag != "h2" {
         return Vec::new();
     }
-    check_italic_serif(&ItalicSerifOpts {
-        tag,
-        font_style: Some(dom.style(el, "fontStyle")),
-        font_family: Some(dom.style(el, "fontFamily")),
-        font_size: style_px(dom, el, "fontSize"),
-        heading_text: Some(dom.text_content(el)),
-    })
+    // Computed typography belongs to the element that owns the text. A
+    // roman heading can contain italic display text (and vice versa).
+    let mut pending = vec![el];
+    while let Some(node) = pending.pop() {
+        if !is_rendered_for_browser_rule(dom, node) {
+            continue;
+        }
+        if !js::trim(&direct_text(dom, node)).is_empty() {
+            let hits = check_italic_serif(&ItalicSerifOpts {
+                tag: tag.clone(),
+                font_style: Some(dom.style(node, "fontStyle")),
+                font_family: Some(dom.style(node, "fontFamily")),
+                font_size: style_px(dom, node, "fontSize"),
+                heading_text: Some(dom.text_content(el)),
+            });
+            if !hits.is_empty() {
+                // Attribute one finding to the heading, even if several
+                // descendants contribute italic display text.
+                return hits;
+            }
+        }
+        pending.extend(dom.children(node).into_iter().rev());
+    }
+    Vec::new()
 }
 
 /// JS: checks.mjs#domAccentDashPseudo(el)
@@ -1344,9 +1362,6 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     })
 }
 
-/// The two hue bands the rule is about: the stock violet-to-cyan ramp.
-const AI_PALETTE_VIOLET_BAND: (f64, f64) = (260.0, 310.0);
-const AI_PALETTE_CYAN_BAND: (f64, f64) = (160.0, 200.0);
 /// A stop painting under this much alpha is a tint over whatever sits behind
 /// it, not a palette decision (Tailwind's `/5` and `/10` fills, 0.13 washes).
 const AI_PALETTE_MIN_STOP_ALPHA: f64 = 0.15;
@@ -1438,16 +1453,6 @@ fn own_opacity(dom: &dyn Dom, el: ElId) -> f64 {
     }
 }
 
-fn ai_palette_band(hue: f64) -> Option<&'static str> {
-    if hue >= AI_PALETTE_VIOLET_BAND.0 && hue <= AI_PALETTE_VIOLET_BAND.1 {
-        Some("Purple/violet")
-    } else if hue >= AI_PALETTE_CYAN_BAND.0 && hue <= AI_PALETTE_CYAN_BAND.1 {
-        Some("Cyan")
-    } else {
-        None
-    }
-}
-
 re!(
     BLUR_FN_RE,
     format!(
@@ -1535,7 +1540,11 @@ fn gradient_occluded_by_media_child(dom: &dyn Dom, el: ElId, rect: &Rect) -> boo
 /// cyan. Stops that paint nothing (too transparent, flat repeats of one
 /// color) and surfaces nobody sees (hairlines, heavy blur, covered by an
 /// image) never reach the hue test.
-fn ai_palette_gradient_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
+fn ai_palette_gradient_hit(
+    dom: &dyn Dom,
+    el: ElId,
+    design_system: Option<&DesignSystemConfig>,
+) -> Option<(TellHue, RuleHit)> {
     let bg_image = dom.style(el, "backgroundImage");
     let stops = parse_gradient_colors(Some(&bg_image));
     if stops.len() < 2 {
@@ -1568,8 +1577,13 @@ fn ai_palette_gradient_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
     let opacity = own_opacity(dom, el);
     let mut painted = 0usize;
     let mut in_band = 0usize;
-    let mut label: Option<&'static str> = None;
+    let mut tell: Option<TellHue> = None;
     for c in &stops {
+        // A stop DESIGN.md declares was picked; it is not the default
+        // palette and takes no part in the count.
+        if is_declared_design_color(design_system, c) {
+            continue;
+        }
         if c.alpha_or_one() * opacity < AI_PALETTE_MIN_STOP_ALPHA {
             continue;
         }
@@ -1577,29 +1591,36 @@ fn ai_palette_gradient_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
             continue;
         }
         painted += 1;
-        if let Some(band) = ai_palette_band(get_hue(Some(c))) {
+        if let Some(band) = TellHue::of(get_hue(Some(c))) {
             in_band += 1;
-            if label.is_none() {
-                label = Some(band);
+            if tell.is_none() {
+                tell = Some(band);
             }
         }
     }
-    let label = label?;
+    let tell = tell?;
     // One stop grazing a band edge inside an otherwise warm or brand ramp is
     // that ramp's accident, not a violet-to-cyan palette.
     if in_band * 2 < painted {
         return None;
     }
-    Some(RuleHit::new(
-        "ai-color-palette",
-        format!("{label} gradient background"),
+    Some((
+        tell,
+        RuleHit::new(
+            "ai-color-palette",
+            format!("{} gradient background", tell.label()),
+        ),
     ))
 }
 
 /// The neon-text half: a run of glyphs the element paints itself, in band,
 /// on a dark surface. SVG geometry, icon wrappers and spacer characters
 /// inherit `color` without painting text, and one glyph is a texture.
-fn ai_palette_text_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
+fn ai_palette_text_hit(
+    dom: &dyn Dom,
+    el: ElId,
+    design_system: Option<&DesignSystemConfig>,
+) -> Option<(TellHue, RuleHit)> {
     if dom.namespace_uri(el) == SVG_NS {
         return None;
     }
@@ -1610,14 +1631,15 @@ fn ai_palette_text_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
     if utf16_len(js::trim(&text)) < AI_PALETTE_MIN_TEXT_CHARS {
         return None;
     }
-    let tc = parse_rgb_or_any(&dom.style(el, "color"))?;
+    let tc = parse_rgb_or_any(&dom.style(el, "color"))
+        .filter(|c| !is_declared_design_color(design_system, c))?;
     if tc.alpha_or_one() * own_opacity(dom, el) < AI_PALETTE_MIN_STOP_ALPHA {
         return None;
     }
     if !has_chroma(Some(&tc), Some(80.0)) {
         return None;
     }
-    let label = ai_palette_band(get_hue(Some(&tc)))?;
+    let tell = TellHue::of(get_hue(Some(&tc)))?;
     let parent = dom.parent(el);
     let parent_bg_info = match parent {
         Some(p) => resolve_background_info(dom, p),
@@ -1634,9 +1656,12 @@ fn ai_palette_text_hit(dom: &dyn Dom, el: ElId) -> Option<RuleHit> {
     if relative_luminance(&bg) >= 0.1 {
         return None;
     }
-    Some(RuleHit::new(
-        "ai-color-palette",
-        format!("{label} neon text on dark background"),
+    Some((
+        tell,
+        RuleHit::new(
+            "ai-color-palette",
+            format!("{} neon text on dark background", tell.label()),
+        ),
     ))
 }
 
@@ -1652,17 +1677,101 @@ fn element_opacity(dom: &dyn Dom, el: ElId) -> f64 {
     }
 }
 
+/// True when the scan was given a DESIGN.md and that file declares this
+/// color as one of the project's own.
+///
+/// `ai-color-palette` is a rule about the *unchosen* palette: the purple and
+/// the cyan a model reaches for when nobody picked one. A color the author
+/// wrote down in DESIGN.md was picked, so it is not that default whatever
+/// its hue, and a site whose whole palette is its own documented tokens must
+/// not trip the rule on every element that wears one. With no design system
+/// there is nothing to consult and every color stays in scope, which is the
+/// behavior every scan without a DESIGN.md keeps.
+///
+/// The tolerance is `browser_colors_close`, the same one the
+/// `design-system-color` rule matches computed colors with, so a token the
+/// design-system rule calls declared is declared here too.
+fn is_declared_design_color(ds: Option<&DesignSystemConfig>, c: &Rgba) -> bool {
+    let Some(ds) = ds else { return false };
+    if !ds.has_colors {
+        return false;
+    }
+    ds.allowed_colors
+        .iter()
+        .any(|allowed| browser_colors_close(c, allowed))
+}
+
+/// The two hues the AI palette is built out of. A page that uses one of them
+/// has an accent; a page that uses both has the palette.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TellHue {
+    Cyan,
+    Purple,
+}
+
+impl TellHue {
+    /// The band a colour falls in, `None` outside both.
+    fn of(hue: f64) -> Option<TellHue> {
+        if (160.0..=200.0).contains(&hue) {
+            Some(TellHue::Cyan)
+        } else if (260.0..=310.0).contains(&hue) {
+            Some(TellHue::Purple)
+        } else {
+            None
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            TellHue::Cyan => "Cyan",
+            TellHue::Purple => "Purple/violet",
+        }
+    }
+}
+
+/// What one element contributes to the AI-palette reading.
+#[derive(Debug, Clone, Default)]
+pub struct AiPaletteReading {
+    /// Charged where they are found: a saturated cyan or purple *gradient* is
+    /// the pattern by itself, whatever else the page does.
+    pub hits: Vec<RuleHit>,
+    /// Neon ink on a near-black ground, held until a second tell hue shows up
+    /// somewhere on the page (REN-405).
+    pub ink: Option<RuleHit>,
+    /// The tell hues this element showed, gradient and ink alike.
+    pub tells: Vec<TellHue>,
+}
+
 /// JS: checks.mjs#checkElementAIPaletteDOM(el)
-pub fn check_element_ai_palette_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
+///
+/// One element's reading. The gradient half answers on its own; the ink half
+/// is held for the page pass, because a single saturated hue on a dark ground
+/// is how a great many ordinary systems draw their one accent: a teal
+/// `#2fb8a6` on near-black lit 18 places on the bench's base, and every one of
+/// them was the same deliberate accent (REN-405). Two different tell hues on
+/// one page is the palette the rule is named for.
+///
+/// A colour the scan's DESIGN.md declares is skipped in both halves, and
+/// each half keeps its own gates on what actually paints.
+pub fn check_element_ai_palette_dom(
+    dom: &dyn Dom,
+    el: ElId,
+    design_system: Option<&DesignSystemConfig>,
+) -> AiPaletteReading {
+    let mut reading = AiPaletteReading::default();
     // An element with no box paints nothing; see `ai_palette_is_visible` for
     // why the chain above it is read for the display switches only.
     if element_rect(dom, el).is_none() || !ai_palette_is_visible(dom, el) {
-        return Vec::new();
+        return reading;
     }
-    let mut findings = Vec::new();
-    findings.extend(ai_palette_gradient_hit(dom, el));
-    findings.extend(ai_palette_text_hit(dom, el));
-    findings
+    if let Some((tell, hit)) = ai_palette_gradient_hit(dom, el, design_system) {
+        reading.tells.push(tell);
+        reading.hits.push(hit);
+    }
+    if let Some((tell, hit)) = ai_palette_text_hit(dom, el, design_system) {
+        reading.tells.push(tell);
+        reading.ink = Some(hit);
+    }
+    reading
 }
 
 // ── radial spotlight ──────────────────────────────────────────────────────
@@ -2993,6 +3102,49 @@ mod tests {
                 ("backgroundImage", "none"),
             ],
         );
+    }
+
+    #[test]
+    fn italic_serif_checks_visible_heading_text_including_inline_children() {
+        let (mut d, body) = page();
+        let h = d.add(Some(body), "h1");
+        d.add_text(h, "Some places stay with ");
+        d.set_styles(h, &[("fontStyle", "normal"), ("fontFamily", "Georgia, serif"), ("fontSize", "72px")]);
+        let em = d.add(Some(h), "em");
+        d.add_text(em, "you");
+        d.set_styles(em, &[("fontStyle", "italic"), ("fontFamily", "Georgia, serif"), ("fontSize", "72px")]);
+        let hits = check_element_italic_serif_dom(&d, h);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "italic-serif-display");
+        // A second decorated word still produces one heading warning.
+        let span = d.add(Some(h), "span");
+        d.add_text(span, "forever");
+        d.set_styles(span, &[("fontStyle", "italic"), ("fontFamily", "Georgia, serif"), ("fontSize", "72px")]);
+        assert_eq!(check_element_italic_serif_dom(&d, h).len(), 1);
+        d.set_style(span, "fontStyle", "normal");
+        for (property, value) in [("display", "none"), ("visibility", "hidden"), ("opacity", "0"), ("fontSize", "24px"), ("fontFamily", "Arial, sans-serif"), ("fontStyle", "normal")] {
+            let old = d.style(em, property);
+            d.set_style(em, property, value);
+            assert!(check_element_italic_serif_dom(&d, h).is_empty(), "{property}: {value}");
+            d.set_style(em, property, &old);
+        }
+        d.set_style(h, "display", "none");
+        assert!(check_element_italic_serif_dom(&d, h).is_empty());
+    }
+
+    #[test]
+    fn italic_serif_uses_text_styles_not_an_overridden_parent() {
+        let (mut d, body) = page();
+        let h = d.add(Some(body), "h2");
+        d.add_text(h, "  ");
+        d.set_styles(h, &[("fontStyle", "italic"), ("fontFamily", "Georgia, serif"), ("fontSize", "72px")]);
+        let span = d.add(Some(h), "span");
+        d.add_text(span, "Roman headline");
+        d.set_styles(span, &[("fontStyle", "normal"), ("fontFamily", "Georgia, serif"), ("fontSize", "72px")]);
+        assert!(check_element_italic_serif_dom(&d, h).is_empty());
+        d.set_style(span, "fontStyle", "italic");
+        assert_eq!(check_element_italic_serif_dom(&d, h).len(), 1);
+        assert!(check_element_italic_serif_dom(&d, span).is_empty());
     }
 
     #[test]
@@ -4593,9 +4745,97 @@ mod tests {
             "linear-gradient(rgb(168, 85, 247), rgb(59, 130, 246))",
         );
         d.set_style(hero, "color", "rgb(0, 0, 0)");
-        let hits = check_element_ai_palette_dom(&d, hero);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].snippet, "Purple/violet gradient background");
+        let reading = check_element_ai_palette_dom(&d, hero, None);
+        assert_eq!(reading.hits.len(), 1);
+        assert_eq!(reading.hits[0].snippet, "Purple/violet gradient background");
+        assert!(reading.ink.is_none());
+        assert_eq!(reading.tells, vec![TellHue::Purple]);
+    }
+
+    /// A DESIGN.md palette built out of the project's own oklch tokens is not
+    /// the generic assistant default, however cyan or violet the tokens are.
+    /// The verdigris-on-instrument pair here is the shape that fired 80 times
+    /// on one site whose whole palette is documented.
+    /// Everything one element reports with no design system: its gradient
+    /// hit and its held ink, as the per-element rule read before the ink
+    /// waited on the page pass.
+    fn palette_hits(d: &FakeDom, el: ElId) -> Vec<RuleHit> {
+        let reading = check_element_ai_palette_dom(d, el, None);
+        reading.hits.into_iter().chain(reading.ink).collect()
+    }
+
+    fn design_system_with(colors: &[(f64, f64, f64)]) -> DesignSystemConfig {
+        DesignSystemConfig {
+            has_colors: true,
+            allowed_colors: colors
+                .iter()
+                .map(|&(r, g, b)| Rgba { r, g, b, a: None })
+                .collect(),
+            ..DesignSystemConfig::default()
+        }
+    }
+
+    #[test]
+    fn ai_palette_skips_colors_the_design_system_declares() {
+        let (mut d, body) = page();
+        // oklch(24% 0 0) instrument face, oklch(70% 0.12 188) verdigris text.
+        let panel = d.add(Some(body), "div");
+        d.set_style(panel, "backgroundColor", "rgb(58, 58, 58)");
+        d.set_rect(panel, 0.0, 0.0, 400.0, 80.0);
+        let label = d.add(Some(panel), "span");
+        d.add_text(label, "Live");
+        d.set_rect(label, 24.0, 24.0, 60.0, 20.0);
+        d.set_style(label, "color", "rgb(15, 182, 172)");
+
+        // With no DESIGN.md the teal contributes ink to the page-wide reading.
+        let reading = check_element_ai_palette_dom(&d, label, None);
+        assert!(reading.hits.is_empty());
+        assert_eq!(reading.ink.unwrap().snippet, "Cyan neon text on dark background");
+        assert_eq!(reading.tells, vec![TellHue::Cyan]);
+
+        // Declared in DESIGN.md, so it is the project's palette, not the default.
+        let ds = design_system_with(&[(15.0, 182.0, 172.0)]);
+        let declared = check_element_ai_palette_dom(&d, label, Some(&ds));
+        assert!(declared.hits.is_empty());
+        assert!(declared.ink.is_none());
+        assert!(declared.tells.is_empty());
+
+        // A design system that declares some other color leaves the rule alone.
+        let other = design_system_with(&[(200.0, 40.0, 30.0)]);
+        assert!(check_element_ai_palette_dom(&d, label, Some(&other)).ink.is_some());
+
+        // `hasColors: false` is a DESIGN.md with no palette section: no allowlist
+        // to consult, so the rule keeps its unconstrained behavior.
+        let empty = DesignSystemConfig::default();
+        assert!(check_element_ai_palette_dom(&d, label, Some(&empty)).ink.is_some());
+    }
+
+    #[test]
+    fn ai_palette_gradient_skips_declared_stops_but_not_undeclared_ones() {
+        let (mut d, body) = page();
+        let hero = d.add(Some(body), "section");
+        d.set_style(
+            hero,
+            "backgroundImage",
+            "linear-gradient(rgb(168, 85, 247), rgb(59, 130, 246))",
+        );
+        d.set_style(hero, "color", "rgb(0, 0, 0)");
+        d.set_rect(hero, 0.0, 0.0, 1280.0, 200.0);
+
+        // The violet stop is a declared token, so this gradient is the project's.
+        let ds = design_system_with(&[(168.0, 85.0, 247.0), (59.0, 130.0, 246.0)]);
+        let declared = check_element_ai_palette_dom(&d, hero, Some(&ds));
+        assert!(declared.hits.is_empty());
+        assert!(declared.ink.is_none());
+        assert!(declared.tells.is_empty());
+
+        // Declaring only the blue stop leaves the violet one in scope.
+        let partial = design_system_with(&[(59.0, 130.0, 246.0)]);
+        let reading = check_element_ai_palette_dom(&d, hero, Some(&partial));
+        assert_eq!(reading.hits.len(), 1);
+        assert_eq!(reading.hits[0].snippet, "Purple/violet gradient background");
+        assert!(reading.ink.is_none());
+        assert_eq!(reading.tells, vec![TellHue::Purple]);
     }
 
     /// A surface carrying `gradient`, sized and positioned so only the
@@ -4621,7 +4861,7 @@ mod tests {
             "linear-gradient(90deg, rgb(130, 255, 247) 0%, rgb(71, 81, 255) 49%, rgb(133, 38, 254) 100%)",
         );
         d.set_rect(cta, 0.0, 0.0, 186.0, 70.0);
-        let hits = check_element_ai_palette_dom(&d, cta);
+        let hits = palette_hits(&d, cta);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Cyan gradient background");
 
@@ -4632,7 +4872,7 @@ mod tests {
             "linear-gradient(135deg, rgb(255, 87, 36) 0%, rgb(192, 88, 243) 50%, rgb(42, 157, 144) 100%)",
         );
         d.set_rect(hero, 0.0, 0.0, 1280.0, 800.0);
-        let hits = check_element_ai_palette_dom(&d, hero);
+        let hits = palette_hits(&d, hero);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
 
@@ -4643,7 +4883,7 @@ mod tests {
             "radial-gradient(50% 50%, rgba(133, 38, 254, 0.82) 0%, rgba(171, 171, 171, 0) 100%)",
         );
         d.set_rect(glow, 0.0, 0.0, 158.0, 158.0);
-        let hits = check_element_ai_palette_dom(&d, glow);
+        let hits = palette_hits(&d, glow);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
 
@@ -4654,7 +4894,7 @@ mod tests {
             "linear-gradient(to right top, rgba(192, 88, 243, 0.2), rgba(255, 255, 255, 0.6), rgba(255, 87, 36, 0.25))",
         );
         d.set_rect(overlay, 0.0, 0.0, 1280.0, 800.0);
-        let hits = check_element_ai_palette_dom(&d, overlay);
+        let hits = palette_hits(&d, overlay);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
     }
@@ -4669,7 +4909,7 @@ mod tests {
             body,
             "linear-gradient(to right bottom, rgba(63, 176, 224, 0.05) 0%, rgba(42, 157, 144, 0.05) 100%)",
         );
-        assert!(check_element_ai_palette_dom(&d, tint).is_empty());
+        assert!(palette_hits(&d, tint).is_empty());
 
         // A 120px blur is atmosphere, not a palette.
         let wash = gradient_surface(
@@ -4678,7 +4918,7 @@ mod tests {
             "linear-gradient(90deg, rgb(130, 255, 247), rgb(255, 176, 5))",
         );
         d.set_style(wash, "filter", "blur(120px)");
-        assert!(check_element_ai_palette_dom(&d, wash).is_empty());
+        assert!(palette_hits(&d, wash).is_empty());
 
         // A 1px timeline rail is not a surface.
         let rail = gradient_surface(
@@ -4687,7 +4927,7 @@ mod tests {
             "linear-gradient(90deg, rgba(63, 227, 223, 0.35), rgba(96, 165, 250, 0.14))",
         );
         d.set_rect(rail, 0.0, 0.0, 237.0, 1.0);
-        assert!(check_element_ai_palette_dom(&d, rail).is_empty());
+        assert!(palette_hits(&d, rail).is_empty());
 
         // One magenta stop grazing the band inside a warm story ring.
         let ring = gradient_surface(
@@ -4696,7 +4936,7 @@ mod tests {
             "linear-gradient(rgb(213, 0, 194), rgb(255, 53, 60), rgb(255, 136, 0), rgb(255, 201, 0))",
         );
         d.set_rect(ring, 0.0, 0.0, 84.0, 84.0);
-        assert!(check_element_ai_palette_dom(&d, ring).is_empty());
+        assert!(palette_hits(&d, ring).is_empty());
 
         // Two identical stops, alpha included, are a flat fill written as a
         // gradient.
@@ -4705,13 +4945,13 @@ mod tests {
             body,
             "linear-gradient(270deg, rgb(77, 20, 140) 0%, rgb(77, 20, 140) 100%)",
         );
-        assert!(check_element_ai_palette_dom(&d, flat).is_empty());
+        assert!(palette_hits(&d, flat).is_empty());
         d.set_style(
             flat,
             "backgroundImage",
             "linear-gradient(270deg, rgba(77, 20, 140, 0.4) 0%, rgba(77, 20, 140, 0.4) 100%)",
         );
-        assert!(check_element_ai_palette_dom(&d, flat).is_empty());
+        assert!(palette_hits(&d, flat).is_empty());
 
         // display:none nav chrome with a zero box.
         let hidden = gradient_surface(
@@ -4720,7 +4960,7 @@ mod tests {
             "linear-gradient(90deg, rgb(0, 159, 219), rgb(130, 255, 247))",
         );
         d.set_style(hidden, "display", "none");
-        assert!(check_element_ai_palette_dom(&d, hidden).is_empty());
+        assert!(palette_hits(&d, hidden).is_empty());
 
         // A `visibility: hidden` ancestor hides the subtree for good.
         let shell = d.add(Some(body), "div");
@@ -4732,7 +4972,7 @@ mod tests {
             shell,
             "linear-gradient(90deg, rgb(0, 159, 219), rgb(130, 255, 247))",
         );
-        assert!(check_element_ai_palette_dom(&d, offscreen).is_empty());
+        assert!(palette_hits(&d, offscreen).is_empty());
     }
 
     #[test]
@@ -4747,15 +4987,15 @@ mod tests {
             wrapper,
             "radial-gradient(rgba(133, 38, 254, 0.82), rgba(133, 38, 254, 0) 100%)",
         );
-        assert_eq!(check_element_ai_palette_dom(&d, blob).len(), 1);
+        assert_eq!(palette_hits(&d, blob).len(), 1);
         d.set_style(wrapper, "filter", "blur(120px)");
-        assert!(check_element_ai_palette_dom(&d, blob).is_empty());
+        assert!(palette_hits(&d, blob).is_empty());
 
         // `backdrop-filter` blurs what is behind the element; the element's
         // own background is painted on top of it, sharp.
         d.set_style(wrapper, "filter", "none");
         d.set_style(blob, "backdropFilter", "blur(120px)");
-        assert_eq!(check_element_ai_palette_dom(&d, blob).len(), 1);
+        assert_eq!(palette_hits(&d, blob).len(), 1);
     }
 
     #[test]
@@ -4768,7 +5008,7 @@ mod tests {
             body,
             "radial-gradient(circle, rgba(168, 85, 247, 0.8) 0%, rgba(168, 85, 247, 0) 100%)",
         );
-        let hits = check_element_ai_palette_dom(&d, glow);
+        let hits = palette_hits(&d, glow);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Purple/violet gradient background");
     }
@@ -4787,7 +5027,7 @@ mod tests {
             reveal,
             "linear-gradient(90deg, rgb(168, 85, 247), rgb(130, 255, 247))",
         );
-        assert_eq!(check_element_ai_palette_dom(&d, hero).len(), 1);
+        assert_eq!(palette_hits(&d, hero).len(), 1);
     }
 
     #[test]
@@ -4799,24 +5039,24 @@ mod tests {
             "linear-gradient(150deg, rgb(168, 200, 232), rgb(167, 229, 211))",
         );
         d.set_rect(fill, 0.0, 0.0, 120.0, 213.0);
-        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+        assert_eq!(palette_hits(&d, fill).len(), 1);
 
         let img = d.add(Some(fill), "img");
         visible(&mut d, img);
         d.set_rect(img, 0.0, 0.0, 120.0, 213.0);
         d.set_style(img, "objectFit", "cover");
-        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+        assert!(palette_hits(&d, fill).is_empty());
 
         // A contained image letterboxes, so the gradient still shows.
         d.set_style(img, "objectFit", "contain");
-        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+        assert_eq!(palette_hits(&d, fill).len(), 1);
 
         // A hidden image covers nothing.
         d.set_style(img, "objectFit", "cover");
         d.set_style(img, "visibility", "hidden");
-        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+        assert_eq!(palette_hits(&d, fill).len(), 1);
         d.set_style(img, "visibility", "visible");
-        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+        assert!(palette_hits(&d, fill).is_empty());
     }
 
     #[test]
@@ -4838,10 +5078,10 @@ mod tests {
         visible(&mut d, inner);
         d.set_rect(inner, 0.0, 0.0, 120.0, 213.0);
         d.set_style(inner, "objectFit", "contain");
-        assert_eq!(check_element_ai_palette_dom(&d, fill).len(), 1);
+        assert_eq!(palette_hits(&d, fill).len(), 1);
 
         d.set_style(inner, "objectFit", "cover");
-        assert!(check_element_ai_palette_dom(&d, fill).is_empty());
+        assert!(palette_hits(&d, fill).is_empty());
     }
 
     /// A cyan run of text on a black page: only the element under test varies.
@@ -4867,13 +5107,13 @@ mod tests {
     fn ai_palette_neon_text_needs_painted_glyphs() {
         let (mut d, body) = page();
         let heading = neon_text_host(&mut d, body, "h3", "Download");
-        let hits = check_element_ai_palette_dom(&d, heading);
+        let hits = palette_hits(&d, heading);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Cyan neon text on dark background");
 
         // An icon wrapper carries the color but paints no text.
         let wrapper = neon_text_host(&mut d, body, "div", "");
-        assert!(check_element_ai_palette_dom(&d, wrapper).is_empty());
+        assert!(palette_hits(&d, wrapper).is_empty());
 
         // SVG geometry inherits currentColor from the icon above it. Each
         // host is given real text so the namespace is the only thing that
@@ -4881,7 +5121,7 @@ mod tests {
         for tag in ["svg", "path", "circle", "line", "g"] {
             let shape = neon_text_host(&mut d, body, tag, "Download");
             assert!(
-                check_element_ai_palette_dom(&d, shape).is_empty(),
+                palette_hits(&d, shape).is_empty(),
                 "<{tag}> reported"
             );
         }
@@ -4889,11 +5129,11 @@ mod tests {
         // A single glyph in a binary-rain texture is not neon text.
         let bit = neon_text_host(&mut d, body, "span", "1");
         d.set_rect(bit, 0.0, 0.0, 6.6, 11.0);
-        assert!(check_element_ai_palette_dom(&d, bit).is_empty());
+        assert!(palette_hits(&d, bit).is_empty());
 
         // A whitespace-only span paints nothing either.
         let spacer = neon_text_host(&mut d, body, "span", " ");
-        assert!(check_element_ai_palette_dom(&d, spacer).is_empty());
+        assert!(palette_hits(&d, spacer).is_empty());
 
         // A typewriter hero splits the word into one text node per glyph and
         // paints every one of them.
@@ -4901,7 +5141,7 @@ mod tests {
         for glyph in ["I", "m", "a", "g", "e"] {
             d.add_text(typed, glyph);
         }
-        let hits = check_element_ai_palette_dom(&d, typed);
+        let hits = palette_hits(&d, typed);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].snippet, "Cyan neon text on dark background");
     }

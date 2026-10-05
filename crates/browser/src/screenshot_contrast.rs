@@ -273,13 +273,23 @@ pub fn capture_visual_contrast_candidate(
     outcome
 }
 
-const BRING_INTO_VIEW_JS: &str = r#"(async (selector) => {
-  let el;
+/// `(selector, match) => element`: the element a candidate names. `match` is
+/// the candidate's `[n, count]` when its selector matched several elements
+/// (a repeated id), and then the `n`th match is the one, while the page still
+/// has `count` of them; `querySelector`'s first match would be a copy the
+/// candidate never came from. `null` for an invalid selector or no match.
+pub(crate) const PICK_CANDIDATE_JS: &str = r#"((selector, match) => {
+  let matches;
   try {
-    el = document.querySelector(selector);
+    matches = document.querySelectorAll(selector);
   } catch (e) {
     return null;
   }
+  if (Array.isArray(match) && matches.length === match[1] && matches[match[0]]) return matches[match[0]];
+  return matches[0] || null;
+})"#;
+
+const BRING_INTO_VIEW_JS: &str = r#"(async (el) => {
   if (!el) return null;
   const saved = [];
   for (let p = el.parentElement; p; p = p.parentElement) saved.push([p, p.scrollTop, p.scrollLeft]);
@@ -332,7 +342,11 @@ fn bring_into_view(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())?;
     let v = page
-        .evaluate_value(&format!("({BRING_INTO_VIEW_JS})({})", json!(selector)))
+        .evaluate_value(&format!(
+            "({BRING_INTO_VIEW_JS})(({PICK_CANDIDATE_JS})({}, {}))",
+            json!(selector),
+            candidate.get("match").cloned().unwrap_or(Value::Null)
+        ))
         .ok()?;
     if v.get("moved").and_then(Value::as_bool) != Some(true) {
         return None;
@@ -382,13 +396,8 @@ fn measure_candidate(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let apply_expr = format!(
-        r#"(({{ selector, token, backgroundClipText }}) => {{
-    let el;
-    try {{
-      el = document.querySelector(selector);
-    }} catch {{
-      return false;
-    }}
+        r#"(({{ selector, match, token, backgroundClipText }}) => {{
+    const el = ({PICK_CANDIDATE_JS})(selector, match);
     if (!el) return false;
     let style = document.getElementById('impeccable-visual-contrast-hide-style');
     if (!style) {{
@@ -410,7 +419,7 @@ fn measure_candidate(
     if (backgroundClipText) el.setAttribute('data-impeccable-bgclip-text', 'true');
     return true;
   }})({})"#,
-        json!({ "selector": selector, "token": token, "backgroundClipText": bgclip })
+        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip })
     );
     let applied = page.evaluate_value(&apply_expr)?;
     if applied.as_bool() != Some(true) {
@@ -419,17 +428,14 @@ fn measure_candidate(
     let after = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height);
     // finally: remove the marker attributes (errors swallowed).
     let cleanup_expr = format!(
-        r#"(({{ selector }}) => {{
-      try {{
-        const el = document.querySelector(selector);
-        if (el) {{
-          el.removeAttribute('data-impeccable-visual-contrast-target');
-          el.removeAttribute('data-impeccable-bgclip-text');
-        }}
-      }} catch {{
+        r#"(({{ token }}) => {{
+      for (const el of document.querySelectorAll('[data-impeccable-visual-contrast-target]')) {{
+        if (el.getAttribute('data-impeccable-visual-contrast-target') !== token) continue;
+        el.removeAttribute('data-impeccable-visual-contrast-target');
+        el.removeAttribute('data-impeccable-bgclip-text');
       }}
     }})({})"#,
-        json!({ "selector": selector })
+        json!({ "token": token })
     );
     let _ = page.evaluate(&cleanup_expr);
     let after = after?;

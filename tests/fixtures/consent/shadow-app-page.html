@@ -8,7 +8,8 @@
     /* A page whose own text lives in an open shadow root, under a
        light-DOM OneTrust dialog that holds all of body.innerText. The
        shadow text is the page's, so it is scanned, not refused as a consent
-       wall. Pinned by crates/browser/tests/consent_hiding.rs. */
+       wall, and the root's display: contents wrapper is looked through.
+       Pinned by crates/browser/tests/consent_hiding.rs. */
     body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: #fff; }
     #onetrust-pc-sdk { position: fixed; top: 80px; left: 50%; width: 640px; margin-left: -320px; padding: 32px; background: #fff; }
   </style>
@@ -23,7 +24,7 @@
   </div>
   <script>
     const root = document.querySelector('x-app').attachShadow({ mode: 'open' });
-    root.innerHTML = '<main style="display:block;padding:24px"><h1>Field notes</h1><p>The ferry leaves the harbour at seven, crosses the strait in a little under two hours and reaches the island before the morning market closes. Most visitors walk from the pier to the old town, stop at the bakery by the church and take the coast path north towards the lighthouse.</p></main>';
+    root.innerHTML = '<div style="display:contents"><main style="display:block;padding:24px"><h1>Field notes</h1><p>The ferry leaves the harbour at seven, crosses the strait in a little under two hours and reaches the island before the morning market closes. Most visitors walk from the pier to the old town, stop at the bakery by the church and take the coast path north towards the lighthouse.</p></main></div>';
   </script>
 </body>
 </html>

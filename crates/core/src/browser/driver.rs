@@ -861,13 +861,22 @@ fn names_logo(dom: &dyn Dom, el: ElId) -> bool {
     })
 }
 
-/// A class or id token whose last word is `logo` (`logo`, `site-logo`,
-/// `brand_logo`), the name of a logo rather than of something about logos.
+/// Words that make a name about logos rather than the name of one: a row,
+/// a gallery or a title for partner logos.
+const LOGO_COLLECTION_WORDS: &[&str] = &[
+    "logos", "gallery", "grid", "wall", "list", "strip", "row", "carousel", "cloud", "title", "heading", "section",
+];
+
+/// A class or id token that names a logo (`logo`, `site-logo`, `logo-text`,
+/// `logotype`, `wordmark`) rather than something about logos
+/// (`logo-gallery-title`, `partner-logos`).
 fn is_named_logo(dom: &dyn Dom, el: ElId) -> bool {
     ["id", "class"].iter().any(|attr| {
         dom.attr(el, attr).is_some_and(|v| {
             v.split_whitespace().any(|token| {
-                token.rsplit(['-', '_']).next().is_some_and(|w| w.eq_ignore_ascii_case("logo"))
+                let words: Vec<String> = token.split(['-', '_']).map(|w| w.to_ascii_lowercase()).collect();
+                words.iter().any(|w| w == "logo" || w == "logotype" || w == "wordmark")
+                    && !words.iter().any(|w| LOGO_COLLECTION_WORDS.contains(&w.as_str()))
             })
         })
     })
@@ -893,8 +902,8 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
     for el in dom.query_all(None, "*").unwrap_or_default() {
         let tag = tag_lower(dom, el);
         // A heading is not a brand surface, unless it is the logo itself (a
-        // type logo set as `h1.logo`): a class or id token that ends in the
-        // word logo. A heading about logos (`logo-gallery-title`) is not.
+        // type logo set as `h1.logo`, `h1.logo-text`, `h1.wordmark`). A
+        // heading about logos (`logo-gallery-title`) is not.
         if is_heading_tag(&tag) && !is_named_logo(dom, el) {
             continue;
         }
@@ -909,7 +918,7 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             .parent(el)
             .and_then(|p| super::dom::closest_or_none(dom, p, "main, article"))
             .is_some();
-        let logo = !local && names_logo(dom, el);
+        let logo = !local && (names_logo(dom, el) || is_named_logo(dom, el));
         let bar = !local
             && is_nav_bar(dom, el, &tag)
             && rect.width >= BRAND_BAR_MIN_WIDTH_SHARE * viewport_w;
@@ -2547,6 +2556,20 @@ mod tests {
             }),
             0
         );
+        // A wordmark heading is the logo.
+        for name in ["logo-text", "wordmark"] {
+            assert_eq!(
+                run(&|d, body| {
+                    let logo = d.add(Some(body), "h1");
+                    d.set_attr(logo, "class", name);
+                    d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                    d.add_text(logo, "Acme");
+                    d.set_style(logo, "color", "rgb(124, 58, 237)");
+                }),
+                0,
+                "{name}"
+            );
+        }
         // A heading about logos is not the logo.
         assert_eq!(
             run(&|d, body| {

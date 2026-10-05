@@ -103,6 +103,20 @@ function Thumb({ url }: { url?: string }) {
 `),
       args: ['--no-config', '--json', 'repro.tsx'],
     },
+    {
+      id: 'detect-unresolved-custom-property-padding', verb: 'detect',
+      setup: (ws) => fs.writeFileSync(path.join(ws, 'image-card.html'), `<!doctype html>
+<link rel="stylesheet" href="brand/tokens.css">
+<style>
+  .reverse {
+    background: #f5f5f5;
+    padding: var(--brand-pad-y) var(--brand-pad-x);
+  }
+</style>
+<div class="reverse"><p>Readable card copy</p></div>
+`),
+      args: ['--no-config', '--json', 'image-card.html'],
+    },
 
     // Flag surface and errors
     { id: 'detect-help', verb: 'detect', args: ['--help'] },
@@ -158,6 +172,9 @@ function Thumb({ url }: { url?: string }) {
     { id: 'detect-config-css-text', verb: 'detect', workspace: 'detect-config', args: ['src/styles.css'] },
     { id: 'detect-config-vendor-ignored', verb: 'detect', workspace: 'detect-config', args: ['--json', 'src/vendor/ignored.html'] },
     { id: 'detect-config-from-subdir', verb: 'detect', workspace: 'detect-config', cwd: 'src', args: ['--json', 'page.html'] },
+    // detector.extensions in directory walks (#822)
+    { id: 'detect-config-extensions-dir-json', verb: 'detect', workspace: 'detect-extensions', args: ['--json', '--no-design-system', 'app/views'] },
+    { id: 'detect-config-extensions-dir-no-config', verb: 'detect', workspace: 'detect-extensions', args: ['--no-config', '--json', 'app/views'] },
     // A file in one project must not pick up another project's DESIGN.md
     { id: 'detect-config-cross-project', verb: 'detect', workspace: 'detect-config', args: ['--json', `<REPO>/tests/fixtures/antipatterns/blinking-cursor.html`], isolateHome: false },
 

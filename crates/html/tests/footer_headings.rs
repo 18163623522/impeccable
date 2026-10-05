@@ -22,6 +22,11 @@ fn a_footer_that_opens_on_a_column_title_reports_the_next_skip() {
         skips("<h2>Ready to start?</h2><footer><h4>Company</h4><h6>Legal</h6></footer>"),
         vec!["<h4> \"Company\" followed by <h6> \"Legal\" (missing h5)"]
     );
+    // A footer heading that opens the page continues no outline.
+    assert_eq!(
+        skips("<footer><h4>Company</h4><h6>Legal</h6></footer>"),
+        vec!["<h4> \"Company\" followed by <h6> \"Legal\" (missing h5)"]
+    );
     // A closing call to action inside the footer still excuses the titles.
     assert!(skips("<h1>Energy</h1><footer><h2>Ready to level up?</h2><h4>Products</h4><h4>Company</h4></footer>").is_empty());
 }

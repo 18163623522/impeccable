@@ -174,6 +174,20 @@ const MODE_RULES_SKILL = `${REPO}/tests/fixtures/mode-rules-skill`;
 const seedEnv = (extra = {}) => env({ IMPECCABLE_SKILL_DIR: MODE_RULES_SKILL, IMPECCABLE_CATALOG_DIR: CATALOG, IMPECCABLE_API_URL: 'http://127.0.0.1:9/api', IMPECCABLE_API_TIMEOUT: '300', ...extra });
 const degradedEnv = (extra = {}) => env({ IMPECCABLE_SKILL_DIR: MODE_RULES_SKILL, IMPECCABLE_CATALOG_DIR: `${WS}/no-such-catalog`, IMPECCABLE_API_URL: 'http://127.0.0.1:9/api', IMPECCABLE_API_TIMEOUT: '300', ...extra });
 
+// A direction round as the eval run wrote it: comp-led with image generation, canon card, no comps.
+const DIRECTION_NO_COMPS = {
+  title: 'Choose the visual world',
+  options: [
+    { id: 'assigned', label: 'Ledger', kicker: 'THE ROLL', thesis: 'One.' },
+    { id: 'model-pick', label: 'Folio', kicker: 'IMPECCABLE’S PICK', thesis: 'Two.' },
+    { id: 'challenger-a', label: 'Rail', verdict: 'competitive', thesis: 'Three.', hero: 'https://x/a-hero.webp' },
+    { id: 'challenger-b', label: 'Field', verdict: 'declined', thesis: 'Four.', hero: 'https://x/b-hero.webp' },
+  ],
+  reroll: { registers: ['safer', 'bolder'] },
+  buildPath: { value: 'comp', toggle: true },
+  canon: true,
+  canonCard: { label: 'The category standard', thesis: 'Five.' },
+};
 const QUESTION_PAYLOAD = { title: 'Pick', options: [{ id: 'a', label: 'A', thesis: 'One.' }, { id: 'b', label: 'B', thesis: 'Two.' }] };
 
 const cases = [
@@ -751,6 +765,9 @@ const cases = [
   { id: 'question-update-no-key', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(QUESTION_PAYLOAD)), args: ['--update', '--payload', 'payload.json'], env: env() },
   { id: 'question-update-empty-options', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify({ options: [] })), args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-update-no-server', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(QUESTION_PAYLOAD)), args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
+  // A comp-led direction round with image generation (buildPath comp + toggle, canon exit present) owes a decision comp on every card, canon included, declined challengers excepted: --start refuses one that declares none before recording a hand or spawning a server, and --update refuses it before delivery.
+  { id: 'question-start-direction-missing-comps', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(DIRECTION_NO_COMPS)), args: ['--start', '--no-open', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
+  { id: 'question-update-direction-missing-comps', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/' })); write(ws, 'payload.json', JSON.stringify({ ...DIRECTION_NO_COMPS, options: DIRECTION_NO_COMPS.options.map((o) => (o.id === 'assigned' ? { ...o, comp: '.impeccable/mocks/decision/assigned.png' } : o)) })); }, args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-payload-no-options', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify({ title: 'no options' })), args: ['--payload', 'payload.json', '--no-open'], env: env(), files: ['.impeccable/questions/**'] },
 ];
 

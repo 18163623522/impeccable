@@ -357,13 +357,17 @@ fn scroll_to(page: &mut Page<'_>, x: f64, y: f64) -> CdpResult<()> {
     Ok(())
 }
 
-fn scroll_into_view(page: &mut Page<'_>, selector: &str) -> CdpResult<bool> {
+fn scroll_into_view(page: &mut Page<'_>, candidate: &Value) -> CdpResult<bool> {
+    let selector = candidate.get("selector").and_then(Value::as_str).unwrap_or("");
+    let identity = candidate.get("match").cloned().unwrap_or(Value::Null);
     // Every ancestor's offset is kept before the scroll, so an element scroller
     // it moves (a page that scrolls inside its body or an app shell's main) can
     // be put back: `window.scrollTo` never reaches those.
     let expr = format!(
-        "(function(){{ let el; try {{ el = document.querySelector({}); }} catch {{ return false; }} if (!el || typeof el.scrollIntoView !== 'function') return false; const saved = window.__impeccableVisualScrollSaved || (window.__impeccableVisualScrollSaved = new Map()); for (let p = el.parentElement; p; p = p.parentElement) {{ if (!saved.has(p)) saved.set(p, [p.scrollTop, p.scrollLeft]); }} el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
-        json!(selector)
+        "(function(){{ const el = ({})({}, {}); if (!el || typeof el.scrollIntoView !== 'function') return false; const saved = window.__impeccableVisualScrollSaved || (window.__impeccableVisualScrollSaved = new Map()); for (let p = el.parentElement; p; p = p.parentElement) {{ if (!saved.has(p)) saved.set(p, [p.scrollTop, p.scrollLeft]); }} el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
+        crate::screenshot_contrast::PICK_CANDIDATE_JS,
+        json!(selector),
+        identity
     );
     Ok(page.evaluate_value(&expr)?.as_bool() == Some(true))
 }
@@ -665,8 +669,7 @@ pub fn analyze_visual_contrast(
         }
         let mut result = analyze_candidate(page, base, candidate)?;
         if scroll_offscreen && visual::needs_scroll_retry(&result) {
-            let selector = candidate.get("selector").and_then(Value::as_str).unwrap_or("");
-            if scroll_into_view(page, selector)? {
+            if scroll_into_view(page, candidate)? {
                 retried = true;
                 wait_for_paint(page)?;
                 // Only geometry changed (the page scrolled); patch it onto the

@@ -64,6 +64,7 @@ pub const NS_MATHML: &str = "http://www.w3.org/1998/Math/MathML";
 pub const STYLE_PROPS: &[&str] = &[
     "animationIterationCount",
     "animationName",
+    "animationTimeline",
     "animationTimingFunction",
     "aspectRatio",
     "backdropFilter",

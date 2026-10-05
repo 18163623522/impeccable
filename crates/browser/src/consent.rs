@@ -288,10 +288,24 @@ pub fn probe_fragment() -> String {
     for (const s of m.roots) for (const el of q(s)) if (showing(el)) {{ on = true; consentRoots.push(el); }}
     if (on) consent.push(m.name);
   }}
+  // A manager that renders into a shadow root (Usercentrics) keeps its text
+  // out of the host's innerText, so each open shadow root under a root adds
+  // its own.
+  const visibleText = el => {{
+    let text = (el.innerText || '').replace(/\s+/g, ' ').trim().length;
+    const hosts = [el].concat(Array.from(el.querySelectorAll('*')).slice(0, 2000));
+    for (const host of hosts) {{
+      const root = host.shadowRoot;
+      if (!root) continue;
+      // innerText of an unrendered child (a <style>) is its source text.
+      for (const child of root.children) if (boxShows(child)) text += visibleText(child);
+    }}
+    return text;
+  }};
   let consentChars = 0;
   for (const el of consentRoots) {{
     if (consentRoots.some(o => o !== el && o.contains(el))) continue;
-    consentChars += (el.innerText || '').replace(/\s+/g, ' ').trim().length;
+    consentChars += visibleText(el);
   }}
   // Content outside the managers that is not text: a form control of any
   // size, or an image, video, canvas, SVG or frame of at least
@@ -377,9 +391,9 @@ pub fn hide_js() -> String {
   }}
   // Undo the scroll lock the manager applied, and only that: its own classes
   // on <html> and <body>, and an inline overflow: hidden on either while its
-  // backdrop was up (a modal consent layer locks the page that way) and the
-  // page is not an app shell that scrolls inside itself. A site's own
-  // overflow is left alone.
+  // backdrop was up (a modal consent layer locks the page that way), the
+  // page is not an app shell that scrolls inside itself, and no modal of the
+  // site's own is open. A site's own overflow is left alone.
   const html = document.documentElement;
   const body = document.body;
   for (const {{ m }} of present) {{
@@ -411,7 +425,12 @@ pub fn hide_js() -> String {
     }}
     return false;
   }};
-  if (showingBackdrop.length && !appShell()) {{
+  // The site's own modal, open beside the consent layer, may hold the lock
+  // itself: an inline overflow: hidden is then left alone.
+  const siteModal = () => q('dialog[open], [aria-modal="true"], [role="dialog"], [role="alertdialog"]').some(el =>
+    !present.some(({{ sels }}) => sels.some(s => {{ try {{ return !!el.closest(s); }} catch (e) {{ return false; }} }}))
+      && showing(el));
+  if (showingBackdrop.length && !appShell() && !siteModal()) {{
     for (const [el, tag] of [[html, 'html'], [body, 'body']]) {{
       if (!el) continue;
       for (const p of ['overflow', 'overflow-y']) {{

@@ -271,17 +271,23 @@ impl<'a> Ctx<'a> {
             &self.home,
         ) {
             Some(ds) => {
-                if let Some(note) = crate::design_system::declared_purple_note(&ds) {
-                    if !self.design_notes.contains(&note) {
-                        self.design_notes.push(note);
-                    }
-                }
                 ScanOptions {
                     design_system: Some(ds),
                     ..self.base.clone()
                 }
             }
             None => self.base.clone(),
+        }
+    }
+
+    /// Record the note a design system owes for a target once its scan has
+    /// run: a scan that failed switched nothing off.
+    fn note_scanned(&mut self, options: &ScanOptions) {
+        let Some(ds) = options.design_system.as_deref() else { return };
+        if let Some(note) = crate::design_system::declared_purple_note(ds) {
+            if !self.design_notes.contains(&note) {
+                self.design_notes.push(note);
+            }
         }
     }
 
@@ -331,7 +337,9 @@ impl<'a> Ctx<'a> {
             if let Some(fp) = fp {
                 if !fp.is_empty() && exists(&fp) {
                     let opts = self.scan_options_for(Some(&fp));
-                    return self.detect_local_file(&fp, &opts);
+                    let found = self.detect_local_file(&fp, &opts)?;
+                    self.note_scanned(&opts);
+                    return Ok(found);
                 }
             }
         }
@@ -723,6 +731,7 @@ fn scan_targets(
             };
             match result {
                 Ok(scan) => {
+                    ctx.note_scanned(&url_options);
                     all.extend(scan.findings);
                     for note in scan.notes {
                         if !ctx.design_notes.contains(&note) {
@@ -825,7 +834,10 @@ fn scan_targets(
                 }
                 let opts = ctx.scan_options_for(Some(file));
                 let mut file_findings = match ctx.detect_local_file(file, &opts) {
-                    Ok(f) => f,
+                    Ok(f) => {
+                        ctx.note_scanned(&opts);
+                        f
+                    }
                     Err(e) => {
                         let message = e.message.clone();
                         ctx.report_local_scan_failure(file, &message);
@@ -853,7 +865,10 @@ fn scan_targets(
             }
             let opts = ctx.scan_options_for(Some(&resolved));
             match ctx.detect_local_file(&resolved, &opts) {
-                Ok(f) => all.extend(f),
+                Ok(f) => {
+                    ctx.note_scanned(&opts);
+                    all.extend(f)
+                }
                 Err(e) => {
                     let message = e.message.clone();
                     ctx.report_local_scan_failure(target, &message);
@@ -887,5 +902,57 @@ fn stderr_is_tty() -> bool {
     #[cfg(not(unix))]
     {
         std::io::IsTerminal::is_terminal(&std::io::stderr())
+    }
+}
+
+#[cfg(test)]
+mod design_note_tests {
+    use super::*;
+    use crate::engines::{HtmlEngine, MissingHtmlEngine};
+
+    struct CleanHtml;
+    impl HtmlEngine for CleanHtml {
+        fn detect_html(
+            &self,
+            _path: &str,
+            _options: &ScanOptions,
+            _stderr: &mut dyn std::io::Write,
+        ) -> Result<Vec<Finding>, EngineError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn run(dir: &std::path::Path, target: &str, html: &dyn HtmlEngine) -> (i32, String) {
+        let (mut io, captured) = Io::captured_reader(
+            Box::new(std::io::empty()),
+            dir.to_path_buf(),
+            std::collections::HashMap::new(),
+        );
+        let engines = Engines { html, url: None };
+        let code = run_detect(&[target.to_string()], &mut io, &engines);
+        let err = String::from_utf8(captured.stderr.borrow().clone()).unwrap();
+        (code, err)
+    }
+
+    #[test]
+    fn the_purple_note_follows_only_a_scan_that_ran() {
+        let dir = std::env::temp_dir().join(format!("impeccable-design-note-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("DESIGN.md"), "---\ncolors:\n  primary: \"#5c2d91\"\n---\n# Design\n").unwrap();
+        std::fs::write(dir.join("page.html"), "<!doctype html><p>Hi</p>").unwrap();
+        let page = dir.join("page.html").to_string_lossy().into_owned();
+
+        // The file: URL cannot be scanned here (no URL engine), so the check
+        // was never switched off for anything.
+        let (code, err) = run(&dir, &format!("file://{page}"), &MissingHtmlEngine);
+        assert_eq!(code, 1, "{err}");
+        assert!(err.contains("Error: "), "{err}");
+        assert!(!err.contains("check is off"), "{err}");
+
+        // A local scan that ran says so.
+        let (_, err) = run(&dir, &page, &CleanHtml);
+        assert!(err.contains("purple/violet check is off"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

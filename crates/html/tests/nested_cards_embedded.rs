@@ -129,6 +129,9 @@ fn embedded_content_beside_ordinary_controls_still_reports() {
     for inner in [
         // A settings panel holding a hidden sound element.
         "<div class=\"border rounded-xl\"><audio preload=\"none\"></audio><p>Email me when a scan finishes, with a summary.</p><button>Save</button> <button>Cancel</button></div>",
+        // A player the page hides is not the box's content.
+        "<div class=\"border rounded-xl\"><audio controls hidden src=\"a.mp3\"></audio><p>Sample audio</p></div>",
+        "<div class=\"border rounded-xl\"><video controls style=\"display: none\"></video><p>Sample clip</p></div>",
         // A profile card with a small avatar video.
         "<div class=\"border rounded-xl\"><video width=\"48\" height=\"48\" muted></video><p>Jane Doe, head of design, writes about type.</p><button>Follow</button></div>",
         // A pricing tier with a promo's play button and a progress bar.

@@ -274,7 +274,12 @@ fn controls_in<'a>(el: &StaticElement<'a>) -> Vec<(StaticElement<'a>, Control, S
 ///   control but its own chrome (a copy button, an icon button).
 fn frames_embedded_content(el: &StaticElement<'_>, outer: &StaticElement<'_>) -> bool {
     let controls = controls_in(el);
-    let player_media = el.query_selector("audio[controls], video[controls]").is_some();
+    // Media the cascade hides (`hidden`, `display: none`) shows no player,
+    // as the URL engine, which needs the player's box, also finds.
+    let player_media = el
+        .query_selector_all("audio[controls], video[controls]")
+        .iter()
+        .any(is_rendered_type_element);
     let custom_player = controls
         .iter()
         .any(|(_, kind, name)| *kind == Control::Button && is_play_name(name))

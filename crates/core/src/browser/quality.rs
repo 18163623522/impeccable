@@ -495,13 +495,51 @@ struct RenderedTextCount {
     pending: usize,
     /// The last white space seen was collapsible, so more of it joins that run.
     in_collapsible_run: bool,
+    /// Preserved spaces before the first character, after the last line
+    /// break before it: indentation on the first line.
+    lead: usize,
+    /// Preserved spaces after the last counted character, before any line
+    /// break: they take room at the end of the last line.
+    tail: usize,
+    /// A line break has followed the last counted character.
+    tail_broken: bool,
 }
 
 impl RenderedTextCount {
-    fn feed(&mut self, text: &str, preserved: bool) {
+    /// The count, with the preserved spaces at the end of the last line.
+    fn finish(&self) -> usize {
+        if self.count > 0 {
+            self.count + self.tail
+        } else {
+            0
+        }
+    }
+
+    /// `trailing_counts`: the white space keeps spaces at the end of a line
+    /// on it (`pre`, `break-spaces`); under `pre-wrap` they hang.
+    fn feed(&mut self, text: &str, preserved: bool, trailing_counts: bool) {
         let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
         let mut buf = [0u8; 4];
         for c in text.chars() {
+            // Preserved white space renders where it sits on a line:
+            // indentation before the first word and spaces after the last.
+            // Only the line breaks around the text, and the blank lines they
+            // open, are on no line of it.
+            if collapsible(c) && preserved {
+                let line_break = matches!(c, '\n' | '\r' | '\u{c}');
+                if self.count == 0 {
+                    self.lead = if line_break { 0 } else { self.lead + 1 };
+                } else {
+                    self.pending += 1;
+                    self.in_collapsible_run = false;
+                    if line_break {
+                        self.tail_broken = true;
+                    } else if !self.tail_broken && trailing_counts {
+                        self.tail += 1;
+                    }
+                }
+                continue;
+            }
             if collapsible(c) && !preserved {
                 if !self.in_collapsible_run {
                     self.pending += 1;
@@ -521,9 +559,13 @@ impl RenderedTextCount {
             }
             if self.count > 0 {
                 self.count += self.pending;
+            } else {
+                self.count += self.lead;
             }
             self.pending = 0;
             self.in_collapsible_run = false;
+            self.tail = 0;
+            self.tail_broken = false;
             self.count += 1;
         }
     }
@@ -536,15 +578,18 @@ impl RenderedTextCount {
 /// same subtrees, so the count and the line widths it is divided among
 /// always describe the same text.
 fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
-    let mut preserved: Option<bool> = None;
+    let mut preserved: Option<(bool, bool)> = None;
     for child in dom.child_nodes(el) {
         match child {
             DomChild::Text(text) => {
-                let preserved = *preserved.get_or_insert_with(|| {
+                let (preserved, trailing_counts) = *preserved.get_or_insert_with(|| {
                     let white_space = dom.style(el, "whiteSpace");
-                    white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces"
+                    (
+                        white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces",
+                        white_space == "pre" || white_space == "break-spaces",
+                    )
                 });
-                out.feed(&text, preserved);
+                out.feed(&text, preserved, trailing_counts);
             }
             DomChild::Element(child) => {
                 if renders_no_text(dom, child) {
@@ -576,7 +621,7 @@ fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
 fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
     let mut count = RenderedTextCount::default();
     feed_rendered_text(dom, el, &mut count);
-    count.count
+    count.finish()
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
@@ -1779,10 +1824,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     let excerpt = slice_utf16_prefix(&dt, 40);
                     // A label with no reading job (taste call r5-p3) and
                     // text in a mockup (r5-p26) report as advisory. A
-                    // control's text is never a micro-label.
-                    let advisory = (!is_interactive
-                        && super::text_context::is_micro_label_dom(dom, el))
-                        || in_mock();
+                    // control's text is neither: a framed demo's controls
+                    // keep failing too, since a visitor can use them.
+                    let advisory = !is_interactive
+                        && (super::text_context::is_micro_label_dom(dom, el) || in_mock());
                     findings.push(advisory_if(
                         RuleHit::new(
                             "undersized-ui-text",
@@ -1927,9 +1972,9 @@ pub const FOOTER_SELECTOR: &str = "footer, [role=\"contentinfo\"], #footer";
 /// with h4 straight after the page's closing h2, and those titles are chrome,
 /// not part of the content outline. The skipped heading has to sit in a
 /// footer, and the heading it follows has to be the last one before that
-/// footer or the footer's own first heading (the closing call to action is
-/// often inside the footer). A skip between two later footer headings, and
-/// every skip in the content, reports.
+/// footer or the footer's own first heading when that one did not skip (the
+/// closing call to action is often inside the footer). A skip between two
+/// later footer headings, and every skip in the content, reports.
 pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
     let mut findings = Vec::new();
     let mut prev_level: i64 = 0;
@@ -1945,7 +1990,8 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         let footer = dom.closest(h, FOOTER_SELECTOR).ok().flatten();
         let opens_footer = footer.is_some() && footer != prev_footer;
         let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
-        if prev_level > 0 && level > prev_level + 1 && !into_footer {
+        let skips = prev_level > 0 && level > prev_level + 1;
+        if skips && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
                 format!(
@@ -1961,7 +2007,11 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         prev_level = level;
         prev_text = text;
         prev_footer = footer;
-        prev_opens_footer = opens_footer;
+        // The footer's first heading speaks for the next one only when it
+        // continues the outline (a closing call to action). One that skipped
+        // into the footer is itself a column title, and a skip after it is
+        // between two footer headings.
+        prev_opens_footer = opens_footer && !skips;
     }
     findings
 }
@@ -4688,6 +4738,17 @@ mod tests {
         heading(&mut d, footer, "h4", "Company");
         assert_eq!(details(&d), Vec::<String>::new());
 
+        // A footer that opens on a column title: the skip after it is
+        // between two footer headings.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        heading(&mut d, body, "h2", "Ready to start?");
+        let footer = d.add(Some(body), "footer");
+        d.add_selector(footer, FOOTER_SELECTOR);
+        heading(&mut d, footer, "h4", "Company");
+        heading(&mut d, footer, "h6", "Legal");
+        assert_eq!(details(&d), vec!["<h4> \"Company\" followed by <h6> \"Legal\" (missing h5)"]);
+
         // The same headings with no footer around them.
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
@@ -4806,10 +4867,17 @@ mod rendered_text_tests {
             "Copyright 2017, all rights reserved with the Directorate.".len()
         );
         d.set_style(p, "whiteSpace", "pre-wrap");
+        // The indentation before the first word is on the first line; the
+        // line breaks around the text are not.
         assert_eq!(
             rendered_text_len(&d, p),
-            "Copyright 2017, all rights reserved\n                with the Directorate.".len()
+            "        Copyright 2017, all rights reserved\n                with the Directorate.".len()
         );
+        // Spaces before and after the words of a one-line `pre` take room.
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "  indented  ");
+        d.set_style(q, "whiteSpace", "pre");
+        assert_eq!(rendered_text_len(&d, q), "  indented  ".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

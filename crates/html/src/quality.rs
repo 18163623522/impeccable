@@ -743,9 +743,11 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     let excerpt = slice_utf16_prefix(&direct_text, 40);
                     // A label with no reading job (taste call r5-p3) and
                     // text in a mockup (r5-p26) report as advisory. A
-                    // control's text is never a micro-label.
-                    let advisory = (!is_interactive && crate::text_context::is_micro_label(el))
-                        || crate::text_context::in_mock_context(el);
+                    // control's text is neither: a framed demo's controls
+                    // keep failing too, since a visitor can use them.
+                    let advisory = !is_interactive
+                        && (crate::text_context::is_micro_label(el)
+                            || crate::text_context::in_mock_context(el));
                     findings.push(advisory_if(
                         RuleHit::new(
                             "undersized-ui-text",

@@ -1226,9 +1226,8 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
         io.err("usage: comp-spec.mjs --comp <png> (--grid | --regions <json> | --auto) [--spec out.json]\n       comp-spec.mjs --print | --crop <id> [--out file] [--scale n] | --plate-prompt <id>\n");
         return 1;
     };
-    // Decode the comp's own bytes first: load_raster may read a stale sibling
-    // PNG cache for a WebP or JPEG source, and the spec must measure (and
-    // identify) the pixels the approved-comp record identifies.
+    // Decode the comp's own bytes first so the spec measures (and identifies)
+    // the same pixels as the approved-comp record.
     let own = std::fs::read(resolve(io, comp_path)).ok().and_then(|b| crate::approved_comp::decode_comp(&b));
     let comp = match own.map(Ok).unwrap_or_else(|| png_io::load_raster(&resolve(io, comp_path)).map(|(d, _)| d.image)) {
         Ok(img) => img,

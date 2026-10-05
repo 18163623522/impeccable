@@ -53,6 +53,17 @@ function __rectArray(r) {
 // rects belong to the same line. Nothing is merged here — the rects travel as
 // the page gave them and the consumer groups them into lines (see
 // merge_text_rects_into_lines in crates/foundation/src/browser/dom.rs).
+// A descendant whose text is on no line, the same test as renders_no_text in
+// crates/foundation/src/browser/dom.rs: the deep walk skips it so the line
+// rects and the characters line-length divides among them describe the same
+// text. Chrome reports no rects inside a content-visibility: hidden box
+// today; the walk skips it by the shared rule rather than relying on that.
+const __NO_TEXT_TAGS = new Set(['style', 'script', 'noscript', 'template']);
+function __rendersNoText(el) {
+  if (__NO_TEXT_TAGS.has(String(el.localName || '').toLowerCase())) return true;
+  const cs = getComputedStyle(el);
+  return cs.display === 'none' || String(cs.contentVisibility || '').toLowerCase() === 'hidden';
+}
 function __collectTextRects(node, deep, out) {
   for (const child of node.childNodes) {
     if (child.nodeType === 3) {
@@ -63,7 +74,7 @@ function __collectTextRects(node, deep, out) {
         if (rect.width >= 1 && rect.height >= 1) out.push(rect);
       }
       range.detach?.();
-    } else if (deep && child.nodeType === 1) {
+    } else if (deep && child.nodeType === 1 && !__rendersNoText(child)) {
       __collectTextRects(child, true, out);
     }
   }

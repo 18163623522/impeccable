@@ -132,12 +132,11 @@ fn snippet_for(found: &[(String, String)], class: &str) -> Option<String> {
 /// Every case is compared with a plain twin on the same page rather than with
 /// a fixed count: the fixture sets `system-ui`, so where the lines wrap, and
 /// with it the count per line, is the host's font's business. What the rule
-/// owes is that a case reports exactly what its twin reports. Counted from
-/// `textContent`, no case read what its twin reads: the style child's CSS,
-/// the hidden child and the script, and the indentation were charged to the
-/// lines, and the nested `pre-wrap` span's runs of spaces were folded away.
-/// The Devanagari paragraph has no twin and whether it flags is up to the
-/// font, so it is not asserted here; the unit tests pin the marks.
+/// owes is that a case reports exactly what its twin reports, and that
+/// nothing else on the page reports at all. Counted from `textContent`, no
+/// case read what its twin reads: the style child's CSS, the hidden children
+/// and the script, and the indentation were charged to the lines, and the
+/// nested `pre-wrap` span's runs of spaces were folded away.
 #[test]
 fn line_length_counts_the_characters_on_the_lines() {
     let Some(engine) = engine() else { return };
@@ -147,14 +146,16 @@ fn line_length_counts_the_characters_on_the_lines() {
     // A 1000px column at 16px is a long column in any font.
     let wide = snippet_for(&found, "plain-wide");
     assert!(wide.is_some(), "the plain wide column flags: {found:?}");
-    for case in ["flag-style-child", "flag-indented"] {
+    let wide_cases = ["flag-style-child", "flag-indented"];
+    for case in wide_cases {
         assert_eq!(snippet_for(&found, case), wide, ".{case} reads as its plain twin: {found:?}");
     }
 
     // Whether a 560px measure flags depends on the font; that each case
     // reads the same as the plain one does not.
     let measure = snippet_for(&found, "plain-measure");
-    for case in ["pass-style-child", "pass-hidden-child", "pass-indented"] {
+    let measure_cases = ["pass-style-child", "pass-hidden-child", "pass-cv-hidden", "pass-indented"];
+    for case in measure_cases {
         assert_eq!(snippet_for(&found, case), measure, ".{case} reads as its plain twin: {found:?}");
     }
 
@@ -163,4 +164,19 @@ fn line_length_counts_the_characters_on_the_lines() {
     let preserved = snippet_for(&found, "flag-preserved");
     assert!(preserved.is_some(), "the pre-wrap column flags: {found:?}");
     assert_eq!(snippet_for(&found, "flag-preserved-nested"), preserved, "{found:?}");
+
+    // Nothing outside those twins reports.
+    let paragraphs = paragraph_classes();
+    let known: Vec<&str> = ["plain-wide", "plain-measure", "flag-preserved", "flag-preserved-nested"]
+        .into_iter()
+        .chain(wide_cases)
+        .chain(measure_cases)
+        .collect();
+    for (snippet, selector) in &found {
+        let classes = classes_of(selector, &paragraphs);
+        assert!(
+            classes.iter().any(|c| known.contains(&c.as_str())),
+            "a finding outside the twins: {snippet} on {selector}: {found:?}"
+        );
+    }
 }

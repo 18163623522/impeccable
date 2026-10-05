@@ -361,6 +361,23 @@ pub fn tag_lower(dom: &dyn Dom, el: ElId) -> String {
     crate::js::to_lower_case(&dom.tag_name(el))
 }
 
+/// Elements whose text is in `textContent` and never on a line.
+pub const UNRENDERED_TEXT_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
+
+/// A descendant whose text is on no line: a `<style>`, `<script>`,
+/// `<noscript>` or `<template>`, a `display: none` box, and a
+/// `content-visibility: hidden` box (the box lays out, its contents do not).
+///
+/// One definition for both sides of `line-length`: the characters it counts
+/// and the line rects it divides them among skip the same subtrees, so the
+/// two cannot disagree about which text rendered. A DOM that does not
+/// record `contentVisibility` answers `""` and the subtree is kept.
+pub fn renders_no_text(dom: &dyn Dom, el: ElId) -> bool {
+    UNRENDERED_TEXT_TAGS.contains(&tag_lower(dom, el).as_str())
+        || dom.style(el, "display") == "none"
+        || crate::js::to_lower_case(&dom.style(el, "contentVisibility")) == "hidden"
+}
+
 /// `el.getAttribute('class') || ''`.
 pub fn class_attr(dom: &dyn Dom, el: ElId) -> String {
     dom.attr(el, "class").unwrap_or_default()

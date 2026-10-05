@@ -8,7 +8,7 @@
 #![allow(unused_imports)]
 use super::dom::{
     closest_or_none, direct_text, has_direct_text_longer_than, matches_or_false, pf0, safe_id,
-    style_px, tag_lower, Dom, DomChild, ElId, Rect,
+    renders_no_text, style_px, tag_lower, Dom, DomChild, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{
@@ -478,9 +478,6 @@ fn rendered_line_widths(dom: &dyn Dom, el: ElId) -> Option<Vec<f64>> {
     )
 }
 
-/// Elements whose text is in `textContent` and never on a line.
-const UNRENDERED_TEXT_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
-
 static COMBINING_OR_FORMAT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[\p{M}\p{Cf}]").expect("COMBINING_OR_FORMAT_RE"));
 
@@ -533,12 +530,11 @@ impl RenderedTextCount {
 }
 
 /// Feeds the text nodes under `el` in document order, each under its own
-/// parent's `white-space`, skipping every descendant that renders no text: a
-/// `<style>`, `<script>`, `<noscript>` or `<template>`, a `display: none`
-/// box, and the contents of a `content-visibility: hidden` box (the box
-/// itself lays out, its text is on no line). A DOM that does not record
-/// `contentVisibility` answers `""` and the subtree is counted, which errs
-/// toward the count `textContent` would give.
+/// parent's `white-space`, skipping every descendant that renders no text
+/// ([`renders_no_text`]: unrendered tags, `display: none`, and the contents
+/// of a `content-visibility: hidden` box). `Dom::text_line_rects` skips the
+/// same subtrees, so the count and the line widths it is divided among
+/// always describe the same text.
 fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
     let mut preserved: Option<bool> = None;
     for child in dom.child_nodes(el) {
@@ -551,11 +547,7 @@ fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
                 out.feed(&text, preserved);
             }
             DomChild::Element(child) => {
-                let tag = tag_lower(dom, child);
-                if UNRENDERED_TEXT_TAGS.contains(&tag.as_str())
-                    || dom.style(child, "display") == "none"
-                    || js::to_lower_case(&dom.style(child, "contentVisibility")) == "hidden"
-                {
+                if renders_no_text(dom, child) {
                     continue;
                 }
                 feed_rendered_text(dom, child, out);

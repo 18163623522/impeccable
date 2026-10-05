@@ -8,9 +8,10 @@
     line-length divides an element's characters among its rendered lines, so
     the count has to be of the characters that rendered. textContent is not
     that: it holds an inline <style> child's CSS, the source's indentation,
-    and one code unit for every combining mark. Each pass case here read as a
-    long column on textContent and is a comfortable one on the page. Explicit
-    pixel widths throughout.
+    and one code unit for every combining mark (the unit tests pin marks; a
+    script's glyph widths are too much the host font's business to assert in
+    a browser). Each pass case here read as a long column on textContent and
+    is a comfortable one on the page. Explicit pixel widths throughout.
 
     Every case has a plain twin on this page that renders the same characters
     on the same lines (plain-wide, plain-measure, flag-preserved), so a test
@@ -23,7 +24,6 @@
     .copy { font-size: 16px; line-height: 24px; margin: 0; }
     .wide { width: 1000px; }
     .measure { width: 560px; }
-    .marks { width: 640px; font-size: 16px; line-height: 28px; }
     .keep { white-space: pre-wrap; }
   </style>
 </head>
@@ -44,7 +44,7 @@
   </p>
 
   <!-- PASS: a comfortable measure that textContent overcounts -->
-  <h2>Pass: a plain 560px measure, the twin of the next three</h2>
+  <h2>Pass: a plain 560px measure, the twin of the next four</h2>
   <p class="copy measure plain-measure">A paragraph held to a comfortable measure wraps long before the eye has far to travel back, and this one keeps to about seventy characters a line.</p>
 
   <h2>Pass: a 560px measure with an inline style child</h2>
@@ -65,6 +65,11 @@
   <h2>Pass: a 560px measure with a hidden child and a script child</h2>
   <p class="copy measure pass-hidden-child">A paragraph held to a comfortable measure wraps long before the eye has far to travel back,<span style="display: none"> with a long run of words that a script reveals later and that take up no part of any line until then, however many of them there are in the source of the page,</span><script type="application/json">{"note": "data a component reads on hydration, which is text content and never a rendered character on any line of this paragraph"}</script> and this one keeps to about seventy characters a line.</p>
 
+  <h2>Pass: a 560px measure with a content-visibility: hidden child</h2>
+  <!-- The child's box lays out with no size and its text renders nowhere,
+       so neither its characters nor any rect of its text is on a line. -->
+  <p class="copy measure pass-cv-hidden">A paragraph held to a comfortable measure wraps long before the eye has far to travel back,<span style="display: inline-block; content-visibility: hidden"> with a long run of words that waits off screen for a reveal and takes up no part of any line until then, however many of them there are in the source,</span> and this one keeps to about seventy characters a line.</p>
+
   <h2>Pass: a 560px measure written with deep source indentation</h2>
   <!-- odishatreasury.gov.in: a template indents every wrapped source line. -->
   <p class="copy measure pass-indented">
@@ -73,11 +78,6 @@
                                         far to travel back, and this one keeps
                                         to about seventy characters a line.
   </p>
-
-  <h2>Pass: Devanagari prose on a 640px measure at 16px</h2>
-  <!-- v0-tripura-sundari-mandir.vercel.app: a third of the code units are
-       vowel signs and viramas, which sit on their consonant. -->
-  <p class="marks pass-combining-marks" lang="hi">राजस्थान के दक्षिणी भाग की अरावली पर्वतमाला के बीच स्थित यह प्राचीन मंदिर श्रद्धालुओं के लिए आस्था का प्रमुख केंद्र है और प्रतिवर्ष नवरात्रि के अवसर पर यहाँ विशाल मेले का आयोजन किया जाता है जिसमें दूर-दूर से भक्त आते हैं। इस क्षेत्र से बहने वाली माही नदी को पुराणों में पवित्र माना गया है और मंदिर की मूर्ति काले पत्थर से निर्मित है जिसकी अठारह भुजाएँ हैं।</p>
 
   <h2>Flag: preserved white space is on the line</h2>
   <!-- Under pre-wrap the runs of spaces render, so they are characters of

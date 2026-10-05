@@ -172,6 +172,7 @@ fn an_initial_is_decorative_only_when_its_box_centres_it() {
     assert_eq!(scan_box("display: flex; align-items: center; justify-content: center;"), "advisory");
     assert_eq!(scan_box("display: grid; place-items: center;"), "advisory");
     assert_eq!(scan_box("--a: center; display: grid; place-items: var(--a);"), "advisory");
+    assert_eq!(scan_box("--a: center stretch; display: grid; place-items: var(--a);"), "warning");
     // A flex or grid box that leaves the initial in a corner.
     assert_eq!(scan_box("display: flex; align-items: center; justify-content: flex-start;"), "warning");
     assert_eq!(scan_box("display: flex; align-items: flex-start; justify-content: center;"), "warning");

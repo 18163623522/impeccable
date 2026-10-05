@@ -979,9 +979,12 @@ fn late_consent_wall(page: &mut Page<'_>) -> Option<(PageProbe, PageValidity)> {
     // The first hide pass's rules are on: a root that was an empty stub then
     // is hidden by them now, though it holds the wall. The probe reads the
     // page with them off, in one task, so nothing paints in between.
+    // The same goes for the inline hides that pass stamped on a manager
+    // whose own inline `!important` outranked the rules.
     let expr = format!(
-        "(() => {{ const s = document.getElementById({id}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; }} }})()",
+        "(() => {{ const s = document.getElementById({id}); const marked = Array.from(document.querySelectorAll('[' + {mark} + ']')); const put = marked.map(el => {{ let prev = ['', '']; try {{ prev = JSON.parse(el.getAttribute({mark})); }} catch (e) {{}} if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display'); return el; }}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; for (const el of put) el.style.setProperty('display', 'none', 'important'); }} }})()",
         id = serde_json::json!(consent::HIDE_STYLE_ID),
+        mark = serde_json::json!(consent::INLINE_HIDE_MARK),
         probe = validity::probe_js(),
     );
     let raw = page.evaluate_value(&expr).ok()?;

@@ -91,7 +91,16 @@ fn centred(host: &StaticElement<'_>, el: &StaticElement<'_>, height: f64) -> boo
     // A flex or grid box centres its text only when it says so on both axes:
     // `justify-content: flex-start` or `align-items: flex-start` leaves an
     // initial in a corner of the painted box.
-    let is_center = |prop: &str| js::to_lower_case(sv(style, prop)).split_whitespace().any(|t| t == "center");
+    // One alignment keyword per axis. `place-items: var(--x)` reaches both
+    // longhands whole, so a two-value result (`center stretch`) is read as
+    // its first value for align-items and its last for justify-items;
+    // `safe` and `unsafe` only qualify the keyword after them.
+    let is_center = |prop: &str| {
+        let value = js::to_lower_case(sv(style, prop));
+        let tokens: Vec<&str> = value.split_whitespace().filter(|t| *t != "safe" && *t != "unsafe").collect();
+        let token = if prop == "alignItems" { tokens.first() } else { tokens.last() };
+        token == Some(&"center")
+    };
     if matches!(display, "flex" | "inline-flex") && is_center("justifyContent") && is_center("alignItems") {
         return true;
     }

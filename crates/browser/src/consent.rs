@@ -229,6 +229,11 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
 
 /// The id of the style element the hide step injects.
 pub const HIDE_STYLE_ID: &str = "impeccable-consent-hide";
+/// The attribute the hide step puts on an element it hid with an inline
+/// `display: none !important` (a manager whose own inline `!important`
+/// outranks the rule), holding the inline `display` it replaced as
+/// `[value, priority]`.
+pub const INLINE_HIDE_MARK: &str = "data-impeccable-consent-display";
 
 fn managers_json() -> Value {
     Value::Array(
@@ -367,6 +372,7 @@ pub fn hide_js() -> String {
         r#"(() => {{
   const managers = {managers};
   const STYLE_ID = {style_id};
+  const INLINE_MARK = {inline_mark};
   {showing}
   const out = {{ hidden: [], matched: {{}}, unlocked: [], changed: false }};
   const present = [];
@@ -402,7 +408,12 @@ pub fn hide_js() -> String {
   // A manager that sets `display` inline with !important outranks the rule.
   for (const {{ sels }} of present) for (const s of sels) for (const el of q(s)) {{
     try {{
-      if (getComputedStyle(el).display !== 'none') {{ el.style.setProperty('display', 'none', 'important'); out.changed = true; }}
+      if (getComputedStyle(el).display !== 'none') {{
+        // Kept, so a later read can see the element as the manager left it.
+        if (!el.hasAttribute(INLINE_MARK)) el.setAttribute(INLINE_MARK, JSON.stringify([el.style.getPropertyValue('display'), el.style.getPropertyPriority('display')]));
+        el.style.setProperty('display', 'none', 'important');
+        out.changed = true;
+      }}
     }} catch (e) {{}}
   }}
   // Undo the scroll lock the manager applied, and only that: its own classes
@@ -462,6 +473,7 @@ pub fn hide_js() -> String {
 }})()"#,
         managers = managers_json(),
         style_id = json!(HIDE_STYLE_ID),
+        inline_mark = json!(INLINE_HIDE_MARK),
         showing = SHOWING_JS,
     )
 }

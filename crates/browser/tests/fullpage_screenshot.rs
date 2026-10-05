@@ -47,9 +47,13 @@ fn handle(mut stream: TcpStream) {
         .unwrap_or("/")
         .to_string();
     let file = fixtures_dir().join(path.trim_start_matches('/'));
-    let (status, body) = match std::fs::read(&file) {
-        Ok(body) => ("200 OK", body),
-        Err(_) => ("404 Not Found", b"missing".to_vec()),
+    let (status, body) = if path == "/offset-scroller.html" {
+        ("200 OK", OFFSET_SCROLLER_PAGE.as_bytes().to_vec())
+    } else {
+        match std::fs::read(&file) {
+            Ok(body) => ("200 OK", body),
+            Err(_) => ("404 Not Found", b"missing".to_vec()),
+        }
     };
     let head = format!(
         "HTTP/1.0 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -416,4 +420,42 @@ fn a_right_to_left_page_records_where_its_screenshot_starts() {
     let wide_shot = wide.screenshot.as_ref().expect("screenshot");
     assert!(wide_shot.width >= 900.0, "{}", wide_shot.width);
     assert_eq!(wide_shot.origin_x, 0.0);
+}
+
+/// A page whose inner scroller is already scrolled when it is measured (a
+/// restored position), under a band that sits above the scroller. Served
+/// inline: it holds no findings, so it stays out of the fixture sweeps.
+const OFFSET_SCROLLER_PAGE: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Offset scroller</title>
+<style>
+  html, body { height: 100%; margin: 0; overflow: hidden; background: #ffffff; }
+  .band { height: 100px; background: #0a7d3b; }
+  .frame { position: absolute; top: 100px; left: 0; right: 0; bottom: 0; overflow: auto; }
+  .content { height: 3000px; background: #ffffff; }
+</style></head>
+<body>
+  <div class="band"></div>
+  <div class="frame" id="frame"><div class="content"></div></div>
+  <script>document.getElementById('frame').scrollTop = 600;</script>
+</body></html>"#;
+
+#[test]
+fn a_scroller_measured_mid_scroll_keeps_the_band_above_it() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let options = ScanOptions {
+        viewport: Some((1280, 800)),
+        ..Default::default()
+    };
+    let mut browser = engine.launch().expect("launch");
+    let url = format!("http://127.0.0.1:{port}/offset-scroller.html");
+    let (_, evidence) = detect_url_evidence(&mut browser, &url, &options, "load", 100, &EvidenceRequest::default())
+        .expect("evidence scan");
+    browser.close();
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    assert_eq!(shot.method, impeccable_browser::fullpage::method::STITCHED);
+    let img = decode(&shot.jpeg_base64);
+    // The band is the image's first hundred rows, as the rects measured it.
+    let p = img.get_pixel(40, 50).0;
+    assert!(p[1] > 90 && p[0] < 60, "band rows are not where they were measured: {p:?}");
 }

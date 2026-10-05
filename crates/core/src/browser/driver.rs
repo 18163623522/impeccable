@@ -870,7 +870,7 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             }
         }
         // A type logo's letters can sit in a child (`<a class=logo><span>`):
-        // its ink is the first text in the logo, wherever it is set.
+        // its ink is the first visible text in the logo, wherever it is set.
         let ink_el = if !logo {
             None
         } else if super::dom::has_direct_text_longer_than(dom, el, 0) {
@@ -879,7 +879,11 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             dom.query_all(Some(el), "*")
                 .unwrap_or_default()
                 .into_iter()
-                .find(|d| super::dom::has_direct_text_longer_than(dom, *d, 0))
+                .find(|d| {
+                    super::dom::has_direct_text_longer_than(dom, *d, 0)
+                        && element_rect(dom, *d).is_some()
+                        && ai_palette_is_visible(dom, *d)
+                })
         };
         if let Some(ink_el) = ink_el {
             if let Some(ink) = parse_any_color(Some(&dom.style(ink_el, "color"))) {
@@ -2373,6 +2377,23 @@ mod tests {
                 d.set_style(word, "color", "rgb(124, 58, 237)");
             }),
             0
+        );
+        // A hidden label before the logotype does not set the ink.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "a");
+                d.set_attr(logo, "class", "site-logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                let label = d.add(Some(logo), "span");
+                d.add_text(label, "Home");
+                d.set_style(label, "color", "rgb(124, 58, 237)");
+                d.set_style(label, "display", "none");
+                let word = d.add(Some(logo), "span");
+                d.set_rect(word, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(word, "Acme");
+                d.set_style(word, "color", "rgb(37, 99, 235)");
+            }),
+            1
         );
         // A partner logo in the page's content is not the site's brand, and
         // neither is an article's own header bar.

@@ -222,7 +222,18 @@ pub fn read_transform(value: &str) -> TransformRead {
                 if tilt >= TILT_MIN_SIN {
                     out.tilt_3d = true;
                 }
-                rotated = true;
+                // The browser folds a 2D scale under a 3D function
+                // (`translate3d(0,0,0) scale(0.7)`) into one matrix3d; read
+                // its scale the way `matrix` is read when nothing tilts it.
+                if [n[2], n[6], n[8], n[9], n[11]].iter().all(|v| v.abs() <= 0.01) {
+                    if n[1].abs() > 0.01 || n[4].abs() > 0.01 {
+                        rotated = true;
+                    }
+                    let (sx, sy) = (n[0].hypot(n[1]), n[4].hypot(n[5]));
+                    scale = Some(scale.map_or((sx, sy), |(a, b)| (a * sx, b * sy)));
+                } else {
+                    rotated = true;
+                }
             }
             "rotatex" | "rotatey" => {
                 if angle_sin(&c[2]).abs() >= TILT_MIN_SIN {
@@ -516,9 +527,25 @@ const FINE_PRINT_SKIP_TAGS: &[&str] = &["html", "body", "main", "article", "form
 /// A mark a footnote opens with.
 const FOOTNOTE_MARKS: &[char] = &['*', '†', '‡', '§', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
 
+/// Whether a class or id names fine print: a marker as a whole token
+/// (`legal`, `copyright-notice`, `fine-print`, `footnote_2`, plural
+/// `disclaimers`), never a part of a longer word (`illegal`,
+/// `testimonials`).
 fn has_fine_print_marker(class_or_id: &str) -> bool {
     let lower = class_or_id.to_lowercase();
-    FINE_PRINT_MARKERS.iter().any(|m| lower.contains(m))
+    lower.split_whitespace().any(|token| {
+        let words: Vec<&str> = token.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+        FINE_PRINT_MARKERS.iter().any(|m| {
+            // A marker of two words (`fine-print`) is two words in a row.
+            // The last word may be plural (`disclaimers`, `footnotes`).
+            let parts: Vec<&str> = m.split('-').collect();
+            words.windows(parts.len()).any(|w| {
+                let last = parts.len() - 1;
+                w[..last] == parts[..last]
+                    && (w[last] == parts[last] || w[last].strip_suffix('s') == Some(parts[last]))
+            })
+        })
+    })
 }
 
 /// The shortest block, in characters, that reads as a footnote when it
@@ -577,9 +604,19 @@ pub fn is_fine_print<N: ContextNode>(el: &N) -> bool {
     // A form control beside the text, or inside it, makes it the control's
     // label: a custom checkbox row keeps the input next to a span.
     let control = |k: &N| matches!(k.tag().as_str(), "input" | "select" | "textarea" | "button");
-    if el.children().iter().any(control)
-        || el.parent().is_some_and(|p| p.children().iter().any(control))
-    {
+    // A checkbox or radio right beside the text labels it (a custom checkbox
+    // row); a control elsewhere in the container is unrelated.
+    let check = |k: &N| {
+        k.tag() == "input"
+            && k.attr("type").is_some_and(|t| matches!(t.trim().to_ascii_lowercase().as_str(), "checkbox" | "radio"))
+    };
+    let beside = el.parent().is_some_and(|p| {
+        let kids = p.children();
+        kids.iter().position(|k| k.key() == el.key()).is_some_and(|i| {
+            (i > 0 && check(&kids[i - 1])) || kids.get(i + 1).is_some_and(|k| check(k))
+        })
+    });
+    if el.children().iter().any(control) || beside {
         return false;
     }
     let mut cur = Some(el.clone());
@@ -1020,6 +1057,14 @@ mod tests {
         assert!(!read_transform("rotate3d(0, 0, 1, 30deg)").tilt_3d);
         assert!(!read_transform("rotateX(0deg) rotateY(0deg)").tilt_3d);
         assert_eq!(read_transform("matrix(0.7, 0, 0, 0.7, 0, 0)").uniform_scale, Some(0.7));
+        // A 2D scale the browser folded into matrix3d (translate3d + scale).
+        assert_eq!(read_transform("matrix3d(0.7, 0, 0, 0, 0, 0.7, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)").uniform_scale, Some(0.7));
+        assert_eq!(read_transform("matrix3d(0.7, 0, 0.3, 0, 0, 0.7, 0, 0, -0.3, 0, 1, 0, 0, 0, 0, 1)").uniform_scale, None);
+        assert!(has_fine_print_marker("site-legal"));
+        assert!(has_fine_print_marker("fine-print note"));
+        assert!(has_fine_print_marker("copyright_notice"));
+        assert!(!has_fine_print_marker("illegal-moves"));
+        assert!(!has_fine_print_marker("testimonials"));
         assert_eq!(read_transform("scale(0.75)").uniform_scale, Some(0.75));
         assert_eq!(read_transform("matrix(1, 0, 0, 1, -5.4, 0)").uniform_scale, Some(1.0));
         assert_eq!(read_transform("scale(0.7, 1)").uniform_scale, None);

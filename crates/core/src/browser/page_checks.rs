@@ -3292,17 +3292,20 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let tall = &cols[0];
-        let shortest = &cols[cols.len() - 1];
-        if (tall.top - shortest.top).abs() > 0.25 * vh {
-            continue;
-        }
-        // Columns sit side by side. Two boxes that share an x range are
+        // The tall column is measured against the shortest box that sits
+        // beside it and starts with it. Two boxes that share an x range are
         // stacked: a flex or grid container laid out as one column at this
         // width (`flex-col lg:flex-row`), where a short block above a long
-        // one is the ordinary flow of a page.
-        if tall.left < shortest.right - 1.0 && shortest.left < tall.right - 1.0 {
+        // one is the ordinary flow of a page, and a short block stacked in
+        // the tall column's track says nothing about the column beside it.
+        let Some(shortest) = cols[1..]
+            .iter()
+            .filter(|c| !(tall.left < c.right - 1.0 && c.left < tall.right - 1.0))
+            .filter(|c| (tall.top - c.top).abs() <= 0.25 * vh)
+            .min_by(|a, b| a.content_h.partial_cmp(&b.content_h).unwrap_or(std::cmp::Ordering::Equal))
+        else {
             continue;
-        }
+        };
         if tall.content_h <= vh * 1.4 {
             continue;
         }
@@ -4834,6 +4837,10 @@ mod tests {
         d.set_rect(intro, 20.0, 100.0, 400.0, 44.0);
         d.set_rect(list, 440.0, 100.0, 800.0, 4200.0);
         assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "side by side");
+        // A short block stacked under the tall column, in its track, does
+        // not hide the column beside it.
+        let _extra = block(&mut d, (440.0, 120.0, 800.0, 30.0), 24.0);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "a short block in the tall track");
     }
 
     /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline

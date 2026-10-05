@@ -1403,7 +1403,7 @@ mod tests {
 
     #[test]
     fn ad_tech_errors_never_take_a_counted_errors_slot() {
-        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/p{n}.js:1:1")));
+        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/prebid-p{n}.js:1:1")));
         let mut errors: Vec<(String, Option<String>)> = (1..=4).map(prebid).collect();
         errors.push(("Uncaught TypeError: cart is undefined".to_string(), Some("at https://example.com/js/app.js:1:1".to_string())));
         for n in 1..=4 {

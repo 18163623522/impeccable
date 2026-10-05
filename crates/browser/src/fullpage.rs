@@ -189,7 +189,17 @@ const GEOMETRY_JS: &str = r#"(() => {
   if (se && se.scrollHeight > vh + 1) return out;
   let best = null;
   let extra = 1;
-  for (const el of document.querySelectorAll('*')) {
+  // Open shadow trees included: an app shell rendered inside a custom
+  // element scrolls a frame the document's own query never reaches.
+  const all = [];
+  const visit = (scope) => {
+    for (const el of scope.querySelectorAll('*')) {
+      all.push(el);
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  for (const el of all) {
     const more = el.scrollHeight - el.clientHeight;
     if (more <= extra) continue;
     // `hidden` included: a smooth-scroll library moves a viewport-tall frame
@@ -622,10 +632,13 @@ fn stitch(
     result.map(|_| canvas)
 }
 
-/// Whether a flagged element's document rect falls outside the screenshot
-/// (past the cut or the right edge) while something of it lies right of the
-/// image's left edge and below its top. `origin_x` is the image's left edge
-/// in document coordinates ([`Screenshot::origin_x`]).
+/// Whether a flagged element's document rect falls mostly outside the
+/// screenshot (less than half of it, or of the image's own height or width
+/// for an element larger than the image, inside the cut and the right edge,
+/// so a paragraph that starts just above the cut and runs below it counts)
+/// while something of it lies right of the image's left edge and below its
+/// top. `origin_x` is the
+/// image's left edge in document coordinates ([`Screenshot::origin_x`]).
 pub fn needs_element_shot(rect: &[f64], origin_x: f64, shot_width: f64, shot_height: f64) -> bool {
     if rect.len() < 4 || rect.iter().any(|v| !v.is_finite()) {
         return false;
@@ -634,7 +647,9 @@ pub fn needs_element_shot(rect: &[f64], origin_x: f64, shot_width: f64, shot_hei
     if w < 1.0 || h < 1.0 || x + w <= 0.0 || y + h <= 0.0 {
         return false;
     }
-    y >= shot_height || x >= shot_width
+    let shown_h = (y + h).min(shot_height) - y.max(0.0);
+    let shown_w = (x + w).min(shot_width) - x.max(0.0);
+    shown_h < h.min(shot_height) / 2.0 || shown_w < w.min(shot_width) / 2.0
 }
 
 /// A viewport shot per flagged element past the screenshot, the element
@@ -865,6 +880,12 @@ mod tests {
         assert!(needs_element_shot(&[100.0, 12500.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
         assert!(needs_element_shot(&[1400.0, 300.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
         assert!(!needs_element_shot(&[100.0, 11990.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
+        // Starting above the cut but mostly below it.
+        assert!(needs_element_shot(&[100.0, 11990.0, 200.0, 400.0], 0.0, 1280.0, 12000.0));
+        assert!(!needs_element_shot(&[100.0, 11900.0, 200.0, 120.0], 0.0, 1280.0, 12000.0));
+        assert!(needs_element_shot(&[1200.0, 300.0, 400.0, 20.0], 0.0, 1280.0, 12000.0));
+        // Taller than the image and filling it: the screenshot shows it.
+        assert!(!needs_element_shot(&[0.0, 0.0, 1280.0, 30000.0], 0.0, 1280.0, 12000.0));
         assert!(!needs_element_shot(&[100.0, 300.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));
         assert!(!needs_element_shot(&[100.0, 12500.0, 0.0, 20.0], 0.0, 1280.0, 12000.0));
         assert!(!needs_element_shot(&[-500.0, 12500.0, 200.0, 20.0], 0.0, 1280.0, 12000.0));

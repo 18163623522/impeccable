@@ -455,13 +455,20 @@ function __snapKeyframes() {
 }
 
 // The properties every running animation and transition animates, per
-// target element id: `document.getAnimations()` entries that are running or
-// still pending, on an element rather than a pseudo-element. `null` when the
-// Web Animations API is missing or throws, which the core reads as unknown.
-function __snapRunningAnimations(ids) {
+// target element id: `getAnimations()` entries that are running or still
+// pending, on an element rather than a pseudo-element. The document's list
+// leaves out targets inside shadow trees, so each captured shadow root adds
+// its own. `null` when the Web Animations API is missing or throws, which the
+// core reads as unknown.
+function __snapRunningAnimations(ids, shadowRoots = []) {
   if (typeof document.getAnimations !== 'function') return null;
   let animations;
-  try { animations = document.getAnimations(); }
+  try {
+    animations = document.getAnimations();
+    for (const root of shadowRoots) {
+      if (typeof root.getAnimations === 'function') animations = animations.concat(root.getAnimations());
+    }
+  }
   catch { return null; }
   const metadata = new Set(['offset', 'computedOffset', 'easing', 'composite']);
   const out = new Map();
@@ -624,31 +631,35 @@ const __impeccableSnapshot = {
     // not move. Their top-level nodes are nobody's child (`sh` names the
     // host), so the core's document walks never reach them; the flat-tree
     // walk the contrast surface reads does, through `as` and `ts`.
+    // Shadow trees are extra: a page whose light DOM fits the element budget
+    // still captures when its shadow trees do not. A tree that would cross
+    // the budget is dropped whole, and so is every tree after it.
     const shadowHosts = new Map();
-    for (let i = 1; i < elements.length; i++) {
+    const shadowRoots = [];
+    shadowWalk: for (let i = 1; i < elements.length; i++) {
       const host = elements[i];
       let root = null;
       try { root = host.shadowRoot; } catch { root = null; }
       if (!root) continue;
       const hostId = i;
+      const mark = elements.length;
       const shadowStack = [];
       const tops = root.children;
-      for (let k = tops.length - 1; k >= 0; k--) {
-        shadowHosts.set(tops[k], hostId);
-        shadowStack.push(tops[k]);
-      }
+      for (let k = tops.length - 1; k >= 0; k--) shadowStack.push(tops[k]);
       while (shadowStack.length) {
         const el = shadowStack.pop();
         if (options.exclude && options.exclude(el)) continue;
-        const id = elements.length;
-        elements.push(el);
-        ids.set(el, id);
-        if (elements.length > maxElements) {
-          return { error: `page has more than ${maxElements} elements` };
+        if (elements.length >= maxElements) {
+          for (const dropped of elements.splice(mark)) ids.delete(dropped);
+          break shadowWalk;
         }
+        ids.set(el, elements.length);
+        elements.push(el);
         const kids = el.children;
         for (let k = kids.length - 1; k >= 0; k--) shadowStack.push(kids[k]);
       }
+      for (let k = 0; k < tops.length; k++) shadowHosts.set(tops[k], hostId);
+      shadowRoots.push(root);
     }
 
     // 2. Intern style values.
@@ -662,7 +673,7 @@ const __impeccableSnapshot = {
     };
 
     const states = __snapStates(ids);
-    const animated = __snapRunningAnimations(ids);
+    const animated = __snapRunningAnimations(ids, shadowRoots);
     const els = new Array(elements.length - 1);
     for (let id = 1; id < elements.length; id++) {
       const el = elements[id];

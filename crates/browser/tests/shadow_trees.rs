@@ -211,3 +211,56 @@ fn a_fixed_shadow_shell_keeps_its_frame_and_drops_repeated_shadow_chrome() {
     assert!(green(0, 800) > 5000, "the widget is missing from the first viewport");
     assert_eq!(green(800, img.height()), 0, "the widget repeats below the first viewport");
 }
+
+const TRANSLATED_FIXED_PAGE: &str = r#"<!doctype html><html><head><style>
+html, body { margin: 0; height: 100%; overflow: hidden; }
+.frame { position: fixed; inset: 0; overflow: auto; }
+.row { height: 400px; display: flex; align-items: center; padding: 0 40px; font: 32px sans-serif; }
+.row:nth-child(odd) { background: #1d4ed8; color: #fff; }
+.row:nth-child(even) { background: #f59e0b; color: #111; }
+.shifted { translate: 0px 0px; }
+.pinned { position: fixed; top: 1600px; left: 40px; width: 200px; height: 200px; background: #16a34a; }
+</style></head><body>
+<div class="frame"><div class="shifted"><div class="pinned"></div>
+<div class="row">Row 1</div><div class="row">Row 2</div><div class="row">Row 3</div><div class="row">Row 4</div>
+<div class="row">Row 5</div><div class="row">Row 6</div><div class="row">Row 7</div><div class="row">Row 8</div>
+<div class="row">Row 9</div><div class="row">Row 10</div><div class="row">Row 11</div><div class="row">Row 12</div>
+</div></div>
+</body></html>"#;
+
+/// A fixed box under an ancestor with `translate` is laid out against that
+/// ancestor and scrolls with the page, so the tiles keep it.
+#[test]
+fn a_fixed_box_under_a_translated_ancestor_scrolls_with_the_page() {
+    let env: HashMap<String, String> = std::env::vars().collect();
+    if discovery::find_browser(&env).is_err() {
+        eprintln!("skip: no installed browser found");
+        return;
+    }
+    let port = serve(TRANSLATED_FIXED_PAGE);
+    let engine = BrowserEngine::new(env);
+    let mut browser = engine.launch().expect("launch");
+    let options = ScanOptions { viewport: Some((1280, 800)), ..Default::default() };
+    let (_, evidence) = detect_url_evidence(
+        &mut browser,
+        &format!("http://127.0.0.1:{port}/"),
+        &options,
+        "load",
+        100,
+        &EvidenceRequest::default(),
+    )
+    .expect("evidence scan");
+    browser.close();
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    assert_eq!(shot.method, fullpage::method::STITCHED);
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&shot.jpeg_base64).expect("base64");
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).expect("jpeg").to_rgb8();
+    let green = (1600..1800u32.min(img.height()))
+        .flat_map(|y| (40..240u32).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = img.get_pixel(x, y).0;
+            p[1] > 120 && p[0] < 60 && p[2] < 110
+        })
+        .count();
+    assert!(green > 20000, "the box under the translated ancestor is blank: {green}");
+}

@@ -803,11 +803,18 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
         {
             return true;
         }
+        // Each shadow layer, `rgb(...) x y blur spread`: one with no offset, no
+        // blur and no spread draws nothing outside the box it sits under.
         let shadow = dom.style(el, "boxShadow");
         if shadow != "none"
-            && SHADOW_COLOR_RE
-                .find_iter(&shadow)
-                .any(|m| painted(crate::color::parse_any_color(Some(m.as_str()))))
+            && SHADOW_COLOR_RE.captures_iter(&shadow).any(|c| {
+                let lengths = &c[2];
+                let draws = lengths
+                    .split_whitespace()
+                    .filter_map(|t| t.strip_suffix("px"))
+                    .any(|n| n.parse::<f64>().is_ok_and(|v| v != 0.0));
+                draws && painted(crate::color::parse_any_color(Some(&c[1])))
+            })
         {
             return true;
         }
@@ -815,9 +822,11 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
     false
 }
 
-/// The colours in a computed `box-shadow` (`rgb(...)` / `rgba(...)`).
-static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> =
-    once_cell::sync::Lazy::new(|| regex::Regex::new(r"rgba?\([^)]*\)").expect("SHADOW_COLOR_RE"));
+/// One layer of a computed `box-shadow`: its colour (`rgb(...)` /
+/// `rgba(...)`, which the computed value puts first) and the lengths after it.
+static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"(rgba?\([^)]*\))([^,]*)").expect("SHADOW_COLOR_RE")
+});
 
 // ─── Brand hue (corpus decision r3-23-ai-color-palette-brand-hue) ──────────
 
@@ -871,7 +880,9 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
     let mut out: Vec<crate::color::Rgba> = Vec::new();
     for el in dom.query_all(None, "*").unwrap_or_default() {
         let tag = tag_lower(dom, el);
-        if is_heading_tag(&tag) {
+        // A heading is not a brand surface, unless it is the logo itself (a
+        // type logo set as `h1.logo`).
+        if is_heading_tag(&tag) && !names_logo(dom, el) {
             continue;
         }
         let Some(rect) = element_rect(dom, el) else { continue };
@@ -2871,6 +2882,17 @@ mod tests {
             }),
             0
         );
+        // A type logo set as a heading.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "h1");
+                d.set_attr(logo, "class", "logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(logo, "Acme");
+                d.set_style(logo, "color", "rgb(124, 58, 237)");
+            }),
+            0
+        );
         // A hidden label before the logotype does not set the ink.
         assert_eq!(
             run(&|d, body| {
@@ -3305,6 +3327,8 @@ mod tests {
         d.set_styles(p, &[("outlineWidth", "2px"), ("outlineStyle", "solid"), ("outlineColor", "rgb(139, 92, 246)")]);
         assert!(purple_accent_reported(&d));
         d.set_style(p, "outlineStyle", "none");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 0px 0px 0px");
+        assert!(!purple_accent_reported(&d), "a shadow that draws nothing");
         d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 4px 12px 0px");
         assert!(purple_accent_reported(&d));
     }

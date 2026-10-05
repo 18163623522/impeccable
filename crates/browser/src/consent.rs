@@ -286,7 +286,13 @@ pub fn probe_fragment() -> String {
     // at all; one inside it is, all but its shadow-root text.
     const inBody = !!document.body && document.body.contains(el);
     consentShadowChars += inBody ? Math.max(0, all - (el.innerText || '').replace(/\s+/g, ' ').trim().length) : all;
-    for (const f of el.querySelectorAll('iframe')) {{
+    // A manager that draws its message in a frame inside its own shadow
+    // root holds that frame out of `querySelectorAll`'s reach.
+    const frames = [...el.querySelectorAll('iframe')];
+    for (const n of [el, ...el.querySelectorAll('*')]) {{
+      if (n.shadowRoot) frames.push(...n.shadowRoot.querySelectorAll('iframe'));
+    }}
+    for (const f of frames) {{
       if (!boxShows(f)) continue;
       const r = f.getBoundingClientRect();
       if (r.width * r.height >= {media_px}) consentFrames++;
@@ -310,21 +316,32 @@ pub fn probe_fragment() -> String {
     }} catch (e) {{}}
     return n;
   }};
+  // The page's open shadow roots, outside the managers: their form
+  // controls and media are the page's as much as their text is.
+  const pageShadows = [];
   if (consentRoots.length && document.body) {{
     const hosts = document.body.querySelectorAll('*');
     for (let i = 0; i < hosts.length && i < 30000; i++) {{
       const host = hosts[i];
       if (!host.shadowRoot || consentRoots.some(r => r.contains(host))) continue;
+      pageShadows.push(host.shadowRoot);
       for (const child of host.shadowRoot.children) consentPageShadowChars += shadowText(child);
     }}
   }}
   if (consentRoots.length) {{
     const inside = el => consentRoots.some(r => r.contains(el));
-    for (const el of q({controls})) {{
+    const all = sel => {{
+      const out = q(sel);
+      for (const root of pageShadows) {{
+        try {{ out.push(...root.querySelectorAll(sel)); }} catch (e) {{}}
+      }}
+      return out;
+    }};
+    for (const el of all({controls})) {{
       if (consentOutside >= 20) break;
       if (!inside(el) && boxShows(el)) consentOutside++;
     }}
-    for (const el of q({media})) {{
+    for (const el of all({media})) {{
       if (consentOutside >= 20) break;
       if (inside(el) || !boxShows(el)) continue;
       const r = el.getBoundingClientRect();

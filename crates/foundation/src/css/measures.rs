@@ -688,6 +688,29 @@ fn split_shadow_layers(s: &str) -> Vec<&str> {
     out
 }
 
+/// Whether a computed `box-shadow` draws anything: some layer with a visible
+/// color and a non-zero offset, blur or spread. Tailwind's ring and shadow
+/// variables compute to `rgba(0, 0, 0, 0) 0px 0px 0px 0px` layers, and a
+/// fully zero layer paints nothing even in an opaque color.
+pub fn box_shadow_paints(box_shadow: &str) -> bool {
+    re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
+    re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    let box_shadow = box_shadow.trim();
+    if box_shadow.is_empty() || box_shadow == "none" {
+        return false;
+    }
+    split_shadow_layers(box_shadow).into_iter().any(|layer| {
+        if shadow_layer_alpha(layer) <= 0.0 {
+            return false;
+        }
+        let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        let cleaned = WORD_RE.replace_all(&cleaned, " ");
+        NUM_RE
+            .find_iter(&cleaned)
+            .any(|m| parse_float(m.as_str()) != 0.0)
+    })
+}
+
 /// JS: checks.mjs#shadowMaxBlurPx. Largest blur radius across the layers
 /// whose color alpha is at least `min_alpha` (JS default 0).
 pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
@@ -1168,6 +1191,23 @@ mod tests {
             vec!["0 1px 2px rgba(0,0,0,0.3)", " 0 0 30px hsl(1, 2%, 3%)"]
         );
         assert_eq!(split_shadow_layers("none"), vec!["none"]);
+    }
+
+    #[test]
+    fn box_shadow_paints_cases() {
+        assert!(!box_shadow_paints("none"));
+        assert!(!box_shadow_paints(""));
+        // Tailwind's ring and shadow variables at rest.
+        assert!(!box_shadow_paints(
+            "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px"
+        ));
+        assert!(!box_shadow_paints("rgb(0, 0, 0) 0px 0px 0px 0px"));
+        assert!(!box_shadow_paints("rgba(0, 0, 0, 0) 0px 4px 6px 0px"));
+        assert!(box_shadow_paints("rgb(229, 231, 235) 0px 1px 0px 0px"));
+        assert!(box_shadow_paints(
+            "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 0px 0px 1px"
+        ));
+        assert!(box_shadow_paints("0 2px 4px"));
     }
 
     #[test]

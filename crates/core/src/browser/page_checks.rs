@@ -348,8 +348,7 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
         return true;
     }
-    let bs = dom.style(el, "boxShadow");
-    !bs.is_empty() && bs != "none"
+    crate::checks::measures::box_shadow_paints(&dom.style(el, "boxShadow"))
 }
 
 /// The flow box `s` presents to a walk: `s` itself, or for a
@@ -608,8 +607,7 @@ fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
     if style_px(dom, el, "borderBottomWidth") > 0.0 {
         return true;
     }
-    let bs = dom.style(el, "boxShadow");
-    if !bs.is_empty() && bs != "none" {
+    if crate::checks::measures::box_shadow_paints(&dom.style(el, "boxShadow")) {
         return true;
     }
     let Some(band) = rhythm_painted_background(dom, el) else { return false };
@@ -828,6 +826,12 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 cursor = p;
                 continue;
             };
+            // An empty spacer is gap, as it is to `edge_above`: step over it
+            // so a label above it still folds in.
+            if rhythm_is_spacer(dom, sib) {
+                cursor = sib;
+                continue;
+            }
             if !is_visible_flow(sib) {
                 break;
             }

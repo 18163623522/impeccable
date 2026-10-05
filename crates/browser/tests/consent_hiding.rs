@@ -351,3 +351,11 @@ fn a_late_banner_on_a_root_hidden_inline_is_reported() {
     browser.close();
     assert_eq!(evidence.consent.as_ref().expect("consent report").hidden, vec!["Usercentrics"]);
 }
+
+#[test]
+fn a_root_matched_by_two_selectors_is_counted_once() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/quantcast-short-page.html");
+    engine.detect_url_scan(&url, &ScanOptions::default()).expect("a short page is a page");
+}

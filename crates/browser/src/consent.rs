@@ -246,7 +246,9 @@ pub fn probe_fragment() -> String {
   const consentRoots = [];
   for (const m of consentManagers) {{
     let on = false;
-    for (const s of m.roots) for (const el of q(s)) if (showing(el)) {{ on = true; consentRoots.push(el); }}
+    // Two selectors can match one node (Quantcast's id and class): it is one
+    // root, counted once.
+    for (const s of m.roots) for (const el of q(s)) if (showing(el)) {{ on = true; if (!consentRoots.includes(el)) consentRoots.push(el); }}
     if (on) consent.push(m.name);
   }}
   // A manager that renders into a shadow root (Usercentrics) keeps its text

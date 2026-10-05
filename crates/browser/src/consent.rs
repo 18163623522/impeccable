@@ -348,12 +348,21 @@ pub fn probe_fragment() -> String {
   // shadow roots (a web-component app), which `body.innerText` does not see
   // either: it counts as text outside the managers.
   let consentPageShadowChars = 0;
+  // A `display: contents` wrapper has no box of its own; its children do.
+  const shadowText = el => {{
+    if (boxShows(el)) return visibleText(el);
+    let n = 0;
+    try {{
+      if (getComputedStyle(el).display === 'contents') for (const k of el.children) n += shadowText(k);
+    }} catch (e) {{}}
+    return n;
+  }};
   if (consentRoots.length && document.body) {{
     const hosts = document.body.querySelectorAll('*');
     for (let i = 0; i < hosts.length && i < 30000; i++) {{
       const host = hosts[i];
       if (!host.shadowRoot || consentRoots.some(r => r.contains(host))) continue;
-      for (const child of host.shadowRoot.children) if (boxShows(child)) consentPageShadowChars += visibleText(child);
+      for (const child of host.shadowRoot.children) consentPageShadowChars += shadowText(child);
     }}
   }}
   if (consentRoots.length) {{

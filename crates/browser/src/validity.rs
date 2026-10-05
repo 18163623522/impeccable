@@ -173,8 +173,9 @@ pub struct PageProbe {
     pub consent_chars: u64,
     /// Visible form controls and sizable media outside those roots (up to 20).
     pub consent_outside: u64,
-    /// The part of `consent_chars` in shadow roots, which `text_chars` (the
-    /// page's `innerText`) does not see.
+    /// The part of `consent_chars` that `text_chars` (the page's
+    /// `body.innerText`) does not see: shadow-root text, and a root outside
+    /// `<body>`.
     pub consent_shadow_chars: u64,
     /// Sizable frames inside those roots: a message drawn in an iframe,
     /// whose text the page cannot read.

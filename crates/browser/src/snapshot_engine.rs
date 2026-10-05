@@ -297,7 +297,7 @@ fn scroll_into_view(page: &mut Page<'_>, candidate: &Value) -> CdpResult<bool> {
     // it moves (a page that scrolls inside its body or an app shell's main) can
     // be put back: `window.scrollTo` never reaches those.
     let expr = format!(
-        "(function(){{ const el = ({})({}, {}); if (!el || typeof el.scrollIntoView !== 'function') return false; const saved = window.__impeccableVisualScrollSaved || (window.__impeccableVisualScrollSaved = new Map()); for (let p = el.parentElement; p; p = p.parentElement) {{ if (!saved.has(p)) saved.set(p, [p.scrollTop, p.scrollLeft]); }} el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
+        "(function(){{ const el = ({})({}, {}); if (!el || typeof el.scrollIntoView !== 'function') return false; const saved = window.__impeccableVisualScrollSaved || (window.__impeccableVisualScrollSaved = new Map()); const up = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null; for (let p = up(el); p; p = up(p)) {{ if (!saved.has(p)) saved.set(p, [p.scrollTop, p.scrollLeft]); }} el.scrollIntoView({{ block: 'center', inline: 'nearest', behavior: 'instant' }}); return true; }})()",
         crate::screenshot_contrast::PICK_CANDIDATE_JS,
         json!(selector),
         identity

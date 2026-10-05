@@ -368,3 +368,13 @@ Codex-harness runs read new-work.md through a shell that cut the middle of the f
 - Every seed golden that prints a roll (`seed-direction-local`, `-reroll`, `-reroll-bolder`, `-reroll-safer`, `-unscoped`, `-count-5`, `-operate`, `seed-direction-env-key`, `seed-mode-rules-*`, `seed-surface-local`, `-default-scope`, `-grain-flow`, `-compositions`, `-card-base`, `seed-degraded-direction`, `-surface`, `-safer`, `-bolder`): the block appended after the last line, reviewed by hand. Everything before it is byte-identical; exit status, stderr and files are unchanged. Validation errors, the PRODUCT.md gate and the telemetry pings print no block.
 
 New cases, recorded from the binary and reviewed by hand: `seed-presentation-build-path-code` (direction roll with `.impeccable/config.json` `code`: the code-led flip-reserve comp line and `recorded default code (from .impeccable/config.json)`) and `seed-presentation-build-path-local` (surface roll where `config.local.json` `code` beats `config.json` `comp`: the code-led wireframe line and `(from .impeccable/config.local.json)`).
+
+## Recorded 2026-10-05: decision comps get their render checks once per round
+
+A Gemini run wrote decision comp prompts that inventoried every region and never opened the rendered comps, so visualize.md's post-render checks never ran. `serve-question --wait` now prints `NEXT open each decision comp once and run ${visualize path}'s render checks (shipped screen, one dominant move); regenerate any that fail before the user answers.` as the last line of a WAITING return, once per hand, when a decision comp of this hand has landed with its sidecar. It records the hand's id in `<key>.render-check` so later polls of the same hand stay quiet.
+
+- `question-wait-comp-sidecar-missing`: b landed with its sidecar, so the new NEXT line follows `COMP SIDECAR MISSING`, and the files now include `.impeccable/questions/k1.render-check` with the empty id (the case has no hand file). Exit status and stderr are unchanged.
+
+New case, recorded from the binary and reviewed by hand:
+
+- `question-wait-render-check-once`: `k1.render-check` already holds the hand's id `h1`, so a poll with a landed, sidecar-carrying decision comp prints only the WAITING line and leaves the marker as it was.

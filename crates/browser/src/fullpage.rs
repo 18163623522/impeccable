@@ -604,8 +604,10 @@ fn stitch(
     };
     let result = (|| {
         // Each row steps on from where the last one actually scrolled to, so
-        // a scroll the page snaps short still leaves no gap.
-        let mut ty = 0.0f64;
+        // a scroll the page snaps short still leaves no gap. The first row
+        // starts where the rects were measured: a scroller already offset
+        // keeps the rows above it at the image's top.
+        let mut ty = origin;
         let mut previous: Option<f64> = None;
         for row in 0..MAX_TILES {
             let mut row_y = 0.0;

@@ -293,6 +293,15 @@ fn a_wall_that_fills_an_empty_root_after_load_is_refused() {
 }
 
 #[test]
+fn a_wall_on_a_root_the_first_pass_hid_inline_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-inline-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a late consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Usercentrics, "), "{}", err.message);
+}
+
+#[test]
 fn a_wall_drawn_in_a_frame_is_refused() {
     let Some(engine) = engine() else { return };
     let port = serve();

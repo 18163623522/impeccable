@@ -618,3 +618,44 @@ fn a_date_set_smaller_than_the_body_text_folds_into_a_card_title() {
     p.el(tags, "li", (0.0, y + 336.0, 80.0, 24.0), &[("fontSize", "12px")], "Raytheon");
     assert_only_crowded(&p);
 }
+
+#[test]
+fn a_spacer_between_an_eyebrow_and_its_heading_keeps_the_fold() {
+    // Builders put a spacer box between the label and the title. The walk
+    // above treats it as gap, so the fold steps over it too and the title is
+    // not measured against its own label.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(260.0);
+    p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+    p.el(sec, "p", (0.0, y + 120.0, W, 16.0), &[("fontSize", "12px")], "Introducing");
+    p.el(sec, "div", (0.0, y + 136.0, W, 12.0), &[], "");
+    p.el(sec, "h2", (0.0, y + 148.0, W, 36.0), &[("fontSize", "28px")], "Eyebrow Over A Spacer");
+    p.el(sec, "p", (0.0, y + 232.0, W, 48.0), &[], LONG);
+    assert_only_crowded(&p);
+}
+
+#[test]
+fn a_zero_shadow_is_not_an_edge() {
+    // Tailwind's ring and shadow variables compute to all-zero layers; they
+    // draw nothing, so the box's padding is still space below the heading.
+    let band = |shadow: &str| {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(340.0);
+        let band = p.el(
+            sec,
+            "div",
+            (0.0, y, W, 280.0),
+            &[("backgroundColor", "rgb(255, 255, 255)"), ("paddingBottom", "32px"), ("boxShadow", shadow)],
+            "",
+        );
+        p.el(band, "p", (0.0, y, W, 200.0), &[], LONG);
+        p.el(band, "h3", (0.0, y + 208.0, W, 40.0), &[("fontSize", "24px")], "Heading Ending A Band");
+        p.el(sec, "p", (0.0, y + 300.0, W, 48.0), &[], LONG);
+        p
+    };
+    assert_flags(
+        &band("rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px"),
+        "\"Heading Ending A Band\" has 8px above vs 52px below",
+    );
+    assert_only_crowded(&band("rgba(0, 0, 0, 0.1) 0px 1px 0px 0px"));
+}

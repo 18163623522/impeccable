@@ -810,7 +810,15 @@ fn check_validity(
 /// when the page is not a consent wall now, or the probe failed (the hide
 /// pass then runs as before).
 fn late_consent_wall(page: &mut Page<'_>) -> Option<(PageProbe, PageValidity)> {
-    let raw = page.evaluate_value(&validity::probe_js()).ok()?;
+    // The first hide pass's rules are on: a root that was an empty stub then
+    // is hidden by them now, though it holds the wall. The probe reads the
+    // page with them off, in one task, so nothing paints in between.
+    let expr = format!(
+        "(() => {{ const s = document.getElementById({id}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; }} }})()",
+        id = serde_json::json!(consent::HIDE_STYLE_ID),
+        probe = validity::probe_js(),
+    );
+    let raw = page.evaluate_value(&expr).ok()?;
     let probe = PageProbe::from_value(&raw);
     if probe.consent.is_empty() {
         return None;

@@ -2242,6 +2242,26 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
     false
 }
 
+/// The topmost box from `el` up to, but not including, `start` that holds
+/// itself at opacity 0.02 or less: a box inside a hidden one that stays
+/// transparent when the outer one is revealed. `None` when `el` is hidden only
+/// through `start`.
+fn held_inside(dom: &dyn Dom, el: ElId, start: ElId) -> Option<ElId> {
+    let mut found = None;
+    let mut cur = Some(el);
+    while let Some(b) = cur {
+        if b == start {
+            break;
+        }
+        let opacity = js::parse_float(&dom.style(b, "opacity"));
+        if opacity.is_finite() && opacity <= 0.02 {
+            found = Some(b);
+        }
+        cur = dom.parent(b);
+    }
+    found
+}
+
 /// JS: checks.mjs#measureHiddenTextDOM()
 ///
 /// Text in closed interface is left out of both counts, like text under
@@ -2259,7 +2279,9 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
 ///   to [`SCROLL_PROBE_MAX`]) are asked [`Dom::shown_when_scrolled_to`]. A box
 ///   that shows once the page is scrolled to it is a scroll-linked reveal the
 ///   measure caught at the top of the page: its text counts as shown, as a
-///   box a CSS scroll or view timeline holds at 0 does. A box the probe has
+///   box a CSS scroll or view timeline holds at 0 does, except text under a
+///   box inside it that holds itself at opacity 0, which is asked about on
+///   its own ([`held_inside`]). A box the probe has
 ///   not looked at (`None`: a replay of a recording made before the probe,
 ///   any DOM with no page behind it) stays hidden.
 pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
@@ -2363,7 +2385,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let mut unstarted_slider_samples: Vec<String> = Vec::new();
     // Each hidden text element and the box its invisible subtree starts at,
     // in document order, and the characters each such box holds.
-    let mut hidden_els: Vec<(ElId, ElId)> = Vec::new();
+    let mut hidden_els: Vec<(ElId, ElId, f64)> = Vec::new();
     let mut hidden_roots: Vec<(ElId, f64)> = Vec::new();
     for el in dom.query_all(None, "body *").unwrap_or_default() {
         let mut len = 0usize;
@@ -2400,7 +2422,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                 }
                 start = p;
             }
-            hidden_els.push((el, start));
+            hidden_els.push((el, start, len as f64));
             match hidden_roots.iter_mut().find(|(r, _)| *r == start) {
                 Some((_, chars)) => *chars += len as f64,
                 None => hidden_roots.push((start, len as f64)),
@@ -2409,24 +2431,51 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     }
 
     // Scroll-linked reveals, asked only of a page the share would report.
-    let mut shown_roots: Vec<ElId> = Vec::new();
+    // A shown box takes along the text that was hidden only through it. Text
+    // under a box of its own held at opacity 0 inside it (a staggered child,
+    // or one a reveal never reached) is asked about on its own, in a second
+    // probe round, and stays hidden until the probe says it shows.
+    let mut shown_els: Vec<ElId> = Vec::new();
     if crate::checks::measures::content_hidden_reports(total_chars, hidden_chars) {
         let mut by_size = hidden_roots.clone();
         by_size.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        for (start, chars) in by_size.into_iter().take(SCROLL_PROBE_MAX) {
+        let mut shown_roots: Vec<ElId> = Vec::new();
+        for (start, _) in by_size.into_iter().take(SCROLL_PROBE_MAX) {
             if dom.shown_when_scrolled_to(start) == Some(true) {
-                hidden_chars -= chars;
                 shown_roots.push(start);
+            }
+        }
+        let mut inner_asked: Vec<ElId> = Vec::new();
+        for &(el, start, len) in &hidden_els {
+            if !shown_roots.contains(&start) {
+                continue;
+            }
+            let inner = held_inside(dom, el, start);
+            let shown = match inner {
+                None => true,
+                Some(b) => {
+                    if !inner_asked.contains(&b) {
+                        if inner_asked.len() >= SCROLL_PROBE_MAX {
+                            continue;
+                        }
+                        inner_asked.push(b);
+                    }
+                    dom.shown_when_scrolled_to(b) == Some(true)
+                }
+            };
+            if shown {
+                hidden_chars -= len;
+                shown_els.push(el);
             }
         }
     }
 
     let mut hidden_samples: Vec<String> = Vec::new();
-    for (el, start) in hidden_els {
+    for (el, _, _) in hidden_els {
         if hidden_samples.len() >= 3 {
             break;
         }
-        if shown_roots.contains(&start) {
+        if shown_els.contains(&el) {
             continue;
         }
         let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
@@ -4389,6 +4438,26 @@ mod tests {
         );
         assert_eq!(m.hidden_samples, vec![text("f", 40), text("u", 40), text("e", 20)]);
         assert_eq!(m.unstarted_slider_samples, vec![text("a", 40), text("b", 30), text("c", 30)]);
+
+        // An outer section revealed on scroll, holding a child that stays at
+        // opacity 0: the child's text stays hidden until the probe says it
+        // shows too, and a child it says shows leaves with its section.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        let stuck = hidden_box(&mut d, section, "div", &[("opacity", "0")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0), "the inner box was not asked about");
+        d.set_shown_on_scroll(stuck, false);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0));
+        assert_eq!(m.hidden_samples, vec![text("k", 40)]);
+        d.set_shown_on_scroll(stuck, true);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 0.0));
 
         // Below the reporting share nothing is probed, and nothing moves.
         let mut d = FakeDom::new();

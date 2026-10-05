@@ -1153,9 +1153,13 @@ fn scan_page_inner(
         .map_err(cdp_err)?;
         // The boxes a share that would report asked about: scroll to each
         // and look, then measure again with the answers (recorded, so a
-        // replay of this capture reads them).
-        let probes = base.take_scroll_probes();
-        if !probes.is_empty() {
+        // replay of this capture reads them). A second round answers the
+        // boxes held at 0 inside a box the first round saw shown.
+        for _round in 0..2 {
+            let probes = base.take_scroll_probes();
+            if probes.is_empty() {
+                break;
+            }
             let answers = step(profile, "scan", "scroll-probe", url, || {
                 snapshot_engine::probe_shown_on_scroll(page, &probes)
             })
@@ -1169,11 +1173,11 @@ fn scan_page_inner(
                 &base,
                 page,
                 |d| measure_hidden_text_dom(d),
-                facts,
+                facts.as_deref_mut(),
             )
             .map_err(cdp_err)?;
-            let _ = base.take_scroll_probes();
         }
+        let _ = base.take_scroll_probes();
         if measured.unstarted_slider_chars > 0.0 {
             unstarted = Some((measured.unstarted_slider_chars, measured.unstarted_slider_samples.clone()));
         }

@@ -991,6 +991,17 @@ fn sass_scope_corners(source: &SourceText, i: usize, base: DeclaredCorners) -> D
     corners
 }
 
+/// Whether a `side-tab` match is the stripe-child form: a narrow coloured
+/// element drawn as the accent inside a card. Its own declarations are the
+/// stripe's, not the card's, so the rounded-card reading below cannot be
+/// taken off them; the form keeps the guards its matcher applies.
+pub fn is_stripe_child_match(m: &MatchCtx) -> bool {
+    let whole = m.whole();
+    SIDE_TAB_STRIPE_CHILD_TW_RE
+        .find(whole)
+        .is_some_and(|f| f.start() == 0 && f.end() == whole.len())
+}
+
 /// Whether a `side-tab` match sits on a card rounded away from its stripe.
 /// A utility class, a styled-system prop and a `style` attribute read the
 /// markup tag they sit in; a CSS declaration or style-object property reads

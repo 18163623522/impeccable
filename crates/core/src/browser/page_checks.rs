@@ -1949,7 +1949,8 @@ fn closed_controlled_ids(dom: &dyn Dom) -> std::collections::HashSet<String> {
 /// - the box itself carries a class token [`closed_container_class`] knows;
 /// - the box itself follows its trigger: the element before it, or that
 ///   element's first child (a heading wrapping a button), says
-///   `aria-expanded="false"`, the accordion that names no `aria-controls`;
+///   `aria-expanded="false"`, the accordion that names no `aria-controls`
+///   (the wrapper is a heading or holds nothing but the trigger);
 /// - the box itself is a drawer parked beside the page: `position: fixed`
 ///   and wholly left or right of the viewport.
 ///
@@ -1972,7 +1973,16 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
         dom.attr(e, "aria-expanded").map(|v| js::to_lower_case(js::trim(&v))).as_deref() == Some("false")
     };
     if let Some(before) = dom.previous_element_sibling(el) {
-        if collapsed(before) || dom.first_element_child(before).is_some_and(collapsed) {
+        // The wrapped trigger is the accordion heading's: a heading, or a
+        // box holding only the trigger. A site header whose first child is a
+        // closed hamburger says nothing about the hero after it.
+        let wraps_trigger = || {
+            let tag = tag_lower(dom, before);
+            matches!(tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+                || role(before) == "heading"
+                || dom.children(before).len() == 1
+        };
+        if collapsed(before) || (dom.first_element_child(before).is_some_and(collapsed) && wraps_trigger()) {
             return true;
         }
     }
@@ -3931,10 +3941,17 @@ mod tests {
         d.inner_width = 1280.0;
         let fixed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("position", "fixed")], "fixed on screen");
         d.set_rect(fixed, 680.0, 16.0, 520.0, 766.0);
+        // A site header whose first child is a closed hamburger, then a hero
+        // still at opacity 0: the hamburger closes its menu, not the hero.
+        let header = hidden_box(&mut d, body, "header", &[], "");
+        let burger = hidden_box(&mut d, header, "button", &[], "");
+        d.set_attr(burger, "aria-expanded", "false");
+        hidden_box(&mut d, header, "a", &[], "Logo");
+        hidden_box(&mut d, body, "section", OPACITY_0, "stalled hero");
         mark_body_descendants(&mut d);
         let m = measure_hidden_text_dom(&d);
-        let hidden = 19.0 + 28.0 + 2.0 * 19.0 + 5.0 * 13.0 + 15.0 + 15.0;
-        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 4.0 + 4.0 + 5.0 + hidden, hidden));
+        let hidden = 19.0 + 28.0 + 2.0 * 19.0 + 5.0 * 13.0 + 15.0 + 15.0 + 12.0;
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 4.0 + 4.0 + 5.0 + 4.0 + hidden, hidden));
     }
 
     /// sona8.com (217624 and five more) and directus.io (216125, 216180):

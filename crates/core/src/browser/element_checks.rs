@@ -3837,15 +3837,17 @@ fn spill_meets_another_box(
         regions.push((reach.0 - tolerance, box_.0));
     }
     for other in dom.query_all(None, "*").unwrap_or_default() {
-        if other == el || dom.contains(other, el) || dom.contains(el, other) {
-            continue;
-        }
+        // The stored box first: most of the page shares no line with `el`,
+        // and the tree walks below cost more than reading a rect.
         let r = dom.rect(other);
         if !(r.all_finite() && r.width > 0.0 && r.height > 0.0) {
             continue;
         }
         // Lines that only touch share no line.
         if js::math_min(r.bottom, own.bottom) - js::math_max(r.top, own.top) <= 1.0 {
+            continue;
+        }
+        if other == el || dom.contains(other, el) || dom.contains(el, other) {
             continue;
         }
         let holds_el = r.left <= own.left + 1.0

@@ -257,6 +257,8 @@ fn extra_specified_expansions(prop: &str, value: &str) -> Vec<Expanded> {
         "flex-direction" => vec![("flexDirection".into(), v.to_string())],
         "align-items" => vec![("alignItems".into(), v.to_string())],
         "align-self" => vec![("alignSelf".into(), v.to_string())],
+        "justify-content" => vec![("justifyContent".into(), v.to_string())],
+        "justify-items" => vec![("justifyItems".into(), v.to_string())],
         // `var()` and CSS-wide keywords resolve later, per longhand; the
         // stripe adapter picks the keyword out of the resolved list.
         "flex-flow" | "place-items" | "place-self"
@@ -286,11 +288,24 @@ fn extra_specified_expansions(prop: &str, value: &str) -> Vec<Expanded> {
                 .unwrap_or_else(|| "row".to_string());
             vec![("flexDirection".into(), direction)]
         }
-        "place-items" => split_css_tokens(v)
-            .into_iter()
-            .next()
-            .map(|t| vec![("alignItems".into(), t)])
-            .unwrap_or_default(),
+        // `place-items: <align> [<justify>]`, one value setting both.
+        "place-items" => {
+            let tokens = split_css_tokens(v);
+            match tokens.first() {
+                Some(align) => {
+                    let justify = tokens.get(1).unwrap_or(align).clone();
+                    vec![("alignItems".into(), align.clone()), ("justifyItems".into(), justify)]
+                }
+                None => Vec::new(),
+            }
+        }
+        "place-content" => {
+            let tokens = split_css_tokens(v);
+            match tokens.get(1).or(tokens.first()) {
+                Some(justify) => vec![("justifyContent".into(), justify.clone())],
+                None => Vec::new(),
+            }
+        }
         "place-self" => split_css_tokens(v)
             .into_iter()
             .next()

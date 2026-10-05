@@ -14,6 +14,9 @@
 //!   kept it is scanned, since the banner is what that scan asked for.
 //! - A short page under an ordinary banner (a sign-in form) is not a wall.
 //! - An app shell's own body lock stays when a manager's backdrop shows.
+//! - A wall that arrives after the load-time check, or renders its text in a
+//!   shadow root, is still refused as one.
+//! - A lock the site's own open modal holds stays.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -49,7 +52,13 @@ fn handle(mut stream: TcpStream) {
         .and_then(|l| l.split_whitespace().nth(1))
         .unwrap_or("/")
         .to_string();
-    let body = std::fs::read(fixtures_dir().join(path.trim_start_matches('/'))).unwrap_or_default();
+    // Only files in the fixture directory: no `..` segment, no absolute path.
+    let rel = path.trim_start_matches('/');
+    let body = if rel.split('/').any(|seg| seg == ".." || seg.contains('\\')) {
+        Vec::new()
+    } else {
+        std::fs::read(fixtures_dir().join(rel)).unwrap_or_default()
+    };
     let head = format!(
         "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -230,4 +239,44 @@ fn an_app_shells_own_body_lock_stays() {
     assert!(consent.unlocked.is_empty(), "{:?}", consent.unlocked);
     let snapshot = evidence.scan_snapshot.as_deref().unwrap();
     assert!(snapshot.contains("overflow: hidden"), "the body keeps its own lock");
+}
+
+#[test]
+fn a_wall_that_arrives_after_load_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a late consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager OneTrust, "), "{}", err.message);
+    let mut browser = engine.launch().expect("launch");
+    let (findings, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("evidence scan of a consent wall is Ok");
+    browser.close();
+    assert!(findings.is_empty());
+    assert_eq!(evidence.validity.as_ref().unwrap().to_value()["status"], "consent-wall");
+}
+
+#[test]
+fn a_wall_rendered_in_a_shadow_root_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/shadow-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a shadow-root consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Usercentrics, "), "{}", err.message);
+}
+
+#[test]
+fn a_lock_the_sites_own_modal_holds_stays() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/site-modal.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    let consent = evidence.consent.as_ref().expect("consent report");
+    assert_eq!(consent.hidden, vec!["Cookiebot"]);
+    assert!(consent.unlocked.is_empty(), "{:?}", consent.unlocked);
 }

@@ -291,8 +291,13 @@ const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
       let contained = false;
       for (let p = up(node); p && !contained; p = up(p)) {
         const cs = getComputedStyle(p);
-        contained = cs.transform !== 'none' || cs.filter !== 'none' || cs.perspective !== 'none'
-          || cs.willChange.includes('transform') || cs.contain.includes('paint');
+        // Every property that makes an ancestor the containing block of a
+        // fixed descendant.
+        const none = v => !v || v === 'none';
+        contained = !none(cs.transform) || !none(cs.translate) || !none(cs.scale) || !none(cs.rotate)
+          || !none(cs.filter) || !none(cs.backdropFilter) || !none(cs.perspective)
+          || /transform|translate|scale|rotate|filter|perspective/.test(cs.willChange)
+          || /paint|layout|strict|content/.test(cs.contain);
       }
       if (!contained) hide(node);
     }

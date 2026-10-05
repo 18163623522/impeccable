@@ -7,7 +7,8 @@
 //!   out of hit tests are removed; with `keep_overlays` (the CLI's
 //!   `--no-overlay-hiding`) the tour stays and its popover text is scored.
 //! - A preloader that never clears is waited for, then hidden and recorded,
-//!   one that lets clicks pass through (`pointer-events: none`) included.
+//!   one that lets clicks pass through (`pointer-events: none`) included,
+//!   and the scroll lock it kept on the page is undone.
 //! - A preloader that clears on its own is waited for and nothing is hidden.
 //! - A routing gate on a full-screen opaque layer named like a loader stays:
 //!   it holds controls, so it is not a preloader.
@@ -194,6 +195,21 @@ fn a_stuck_preloader_clicks_pass_through_is_hidden_too() {
     assert!(has(&flagged(&findings), "low-contrast", "#covered-copy"), "{findings:#?}");
     let report = evidence.overlays.as_ref().expect("overlay report");
     assert_eq!(report.hidden, vec![hidden("preloader", "div#preloader")]);
+}
+
+#[test]
+fn a_stuck_preloaders_scroll_lock_is_undone() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/preloader-locked.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    let report = evidence.overlays.as_ref().expect("overlay report");
+    assert_eq!(report.hidden, vec![hidden("preloader", "div#preloader")]);
+    assert_eq!(report.unlocked, vec!["body.is-loading", "body style overflow"]);
 }
 
 #[test]

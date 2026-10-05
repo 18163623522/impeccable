@@ -267,11 +267,26 @@ pub fn hide_js() -> String {
     const name = el.getAttribute(MARK);
     if (name && !out.hidden.some(h => h.kind === 'preloader' && h.name === name)) out.hidden.push({{ kind: 'preloader', name }});
   }}
+  let hidLoader = false;
   for (const {{ el, name }} of preloaders()) {{
     el.setAttribute(MARK, name);
     el.style.setProperty('display', 'none', 'important');
     out.changed = true;
+    hidLoader = true;
     if (!out.hidden.some(h => h.kind === 'preloader' && h.name === name)) out.hidden.push({{ kind: 'preloader', name }});
+  }}
+  // The page's own script would clear the loader and the scroll lock it
+  // keeps with it; hiding the loader does not run that script. Undo the
+  // lock: a loader-named class on <html> or <body> (`is-loading`) and an
+  // inline overflow: hidden on either.
+  if (hidLoader) {{
+    for (const [node, tag] of [[document.documentElement, 'html'], [document.body, 'body']]) {{
+      if (!node) continue;
+      for (const c of Array.from(node.classList)) if (namesLoader(c)) {{ node.classList.remove(c); out.unlocked.push(tag + '.' + c); }}
+      for (const p of ['overflow', 'overflow-y']) {{
+        if (node.style.getPropertyValue(p) === 'hidden') {{ node.style.removeProperty(p); out.unlocked.push(tag + ' style ' + p); }}
+      }}
+    }}
   }}
   if (out.unlocked.length) out.changed = true;
   return out;

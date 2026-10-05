@@ -1150,7 +1150,7 @@ fn reconcile_page_level_forms(
             // Both page forms describe one treatment, text clipped to a
             // gradient, and the element forms read it off every element.
             "gradient-text" => {
-                element_findings("gradient-text").is_empty() && !clipped_gradients_all_silent(dom)
+                element_findings("gradient-text").is_empty() && !gradient_declaration_silent(dom, &item)
             }
             "bounce-easing" => {
                 let page = bounce_declarations(&item.finding.detail);
@@ -1188,17 +1188,35 @@ fn clipped_gradients_all_silent(dom: &dyn Dom) -> bool {
         .query_all(None, "*")
         .unwrap_or_default()
         .into_iter()
-        .filter(|&el| {
-            let clip = dom.style(el, "webkitBackgroundClip");
-            let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
-            clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
-        })
+        .filter(|&el| computes_clipped_gradient(dom, el))
         .collect();
-    !clipped.is_empty()
-        && clipped.into_iter().all(|el| {
-            super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
-                || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
-        })
+    !clipped.is_empty() && clipped.into_iter().all(|el| clipped_gradient_silent(dom, el))
+}
+
+fn computes_clipped_gradient(dom: &dyn Dom, el: ElId) -> bool {
+    let clip = dom.style(el, "webkitBackgroundClip");
+    let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
+    clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
+}
+
+fn clipped_gradient_silent(dom: &dyn Dom, el: ElId) -> bool {
+    super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
+        || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
+}
+
+/// Whether the declaration a stylesheet gradient-text form names is silent:
+/// every element its selector resolves to computes the clipped gradient and
+/// was measured silent. A selector whose elements do not compute it (the
+/// hosts of a pseudo-element, which carries the gradient itself) is not
+/// silent, whatever other elements on the page do. A form with no resolved
+/// selector falls back to [`clipped_gradients_all_silent`].
+fn gradient_declaration_silent(dom: &dyn Dom, item: &PatternItem) -> bool {
+    match item.matches.as_deref() {
+        Some(matches) if !matches.is_empty() => matches
+            .iter()
+            .all(|&el| computes_clipped_gradient(dom, el) && clipped_gradient_silent(dom, el)),
+        _ => clipped_gradients_all_silent(dom),
+    }
 }
 
 /// One bounce declaration as a finding names it.
@@ -3349,6 +3367,36 @@ mod page_level_form_tests {
         let logo = d.add(Some(body), "div");
         d.add_selector(logo, ".logo");
         d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        assert_eq!(
+            details(&scan(&d), "gradient-text"),
+            vec![(body, "background-clip: text + gradient".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_silent_element_elsewhere_does_not_silence_a_pseudo_elements_gradient_text() {
+        // The logo's ::after draws gradient text; an unrelated `.ghost`
+        // computes a clipped gradient but is not painted, so it is silent.
+        let (mut d, body) = page(
+            ".logo::after{content:'AI';background:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;color:transparent}\
+             .ghost{background-image:linear-gradient(90deg,#000,#000);-webkit-background-clip:text;color:transparent}",
+        );
+        let logo = d.add(Some(body), "div");
+        d.add_selector(logo, ".logo");
+        d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        let ghost = d.add(Some(body), "p");
+        d.add_selector(ghost, ".ghost");
+        d.add_text(ghost, "Watermark");
+        d.set_rect(ghost, 0.0, 100.0, 400.0, 40.0);
+        d.set_styles(
+            ghost,
+            &[
+                ("backgroundImage", "linear-gradient(90deg, rgb(0, 0, 0), rgb(0, 0, 0))"),
+                ("webkitBackgroundClip", "text"),
+                ("backgroundClip", "text"),
+                ("opacity", "0"),
+            ],
+        );
         assert_eq!(
             details(&scan(&d), "gradient-text"),
             vec![(body, "background-clip: text + gradient".to_string())]

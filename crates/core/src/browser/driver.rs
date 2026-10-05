@@ -1761,10 +1761,21 @@ fn marquee_page_form_stands(
 /// look at: text, an image, video, canvas or frame, an SVG inside it (a logo
 /// in a strip; the element being one bare SVG drawing is not content), a
 /// `url()` background on it or under it, or generated content.
+/// Whether `el` holds text a visitor sees: text outside the elements that
+/// never paint theirs (an SVG's `title`, `desc` or `metadata`, a `style`
+/// or `script`), which a decorative drawing carries for its label.
+fn shows_text(dom: &dyn Dom, el: ElId) -> bool {
+    if matches!(tag_lower(dom, el).as_str(), "title" | "desc" | "metadata" | "style" | "script" | "template") {
+        return false;
+    }
+    dom.direct_text_nodes(el).iter().any(|t| !crate::js::trim(t).is_empty())
+        || dom.children(el).into_iter().any(|k| shows_text(dom, k))
+}
+
 fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
     const MEDIA: &str = "img, picture, video, canvas, iframe, object, embed, svg, image, use";
     const MEDIA_TAGS: [&str; 8] = ["img", "picture", "video", "canvas", "iframe", "object", "embed", "marquee"];
-    if !crate::js::trim(&dom.text_content(el)).is_empty() {
+    if shows_text(dom, el) {
         return true;
     }
     if MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
@@ -4312,6 +4323,9 @@ mod page_level_form_tests {
         let sweep = d.add(Some(pill), "span");
         d.add_selector(sweep, ".sweep");
         d.set_style(sweep, "backgroundImage", "linear-gradient(100deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 50%, rgba(255, 255, 255, 0) 100%)");
+        // A title on the looping drawing labels it; it paints nothing.
+        let label = d.add(Some(wave), "title");
+        d.add_text(label, "Decorative wave");
         assert!(details(&scan(&d), "marquee").is_empty());
 
         // What makes each one content: words in the track, an inline SVG

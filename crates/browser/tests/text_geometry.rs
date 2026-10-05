@@ -110,12 +110,12 @@ fn the_text_geometry_rules_measure_the_text() {
     assert_eq!(
         lines,
         vec![
-            ("~100 chars/line (aim for <80)".to_string(), "p.copy.flag-large-span".to_string()),
-            ("~101 chars/line (aim for <80)".to_string(), "p.copy.cjk-wide".to_string()),
-            ("~119 chars/line (aim for <80)".to_string(), "p.copy.flag-mono".to_string()),
-            ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(1)".to_string()),
-            ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(2)".to_string()),
-            ("~125 chars/line (aim for <80)".to_string(), "p.copy.wide:nth-of-type(3)".to_string()),
+            ("~102 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.cjk-wide".to_string()),
+            ("~115 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.flag-mono".to_string()),
+            ("~119 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.flag-large-span".to_string()),
+            ("~141 chars on 2 of 2 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(3)".to_string()),
+            ("~141 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(2)".to_string()),
+            ("~141 chars on 3 of 3 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(1)".to_string()),
         ],
         "the wide column, its inline-prose twin, its 2.4 line-height twin, the 12px CJK column, the \
          24px span across 1,200px and the monospace column; the 16px paragraph set in a 24px span \

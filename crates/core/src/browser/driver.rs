@@ -1785,7 +1785,11 @@ fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
     if MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
         return true;
     }
-    if dom.query_all(Some(el), MEDIA).map_or(true, |m| !m.is_empty()) {
+    // Inside one bare SVG drawing, its `use` copies and nested `svg`
+    // viewports are parts of the drawing (a wave tiled with `use`); only a
+    // raster `image` in it is a picture.
+    let media = if tag_lower(dom, el) == "svg" { "image" } else { MEDIA };
+    if dom.query_all(Some(el), media).map_or(true, |m| !m.is_empty()) {
         return true;
     }
     let paints_image = |e: ElId| dom.style(e, "backgroundImage").contains("url(");
@@ -4341,6 +4345,8 @@ mod page_level_form_tests {
         // A title on the looping drawing labels it; it paints nothing.
         let label = d.add(Some(wave), "title");
         d.add_text(label, "Decorative wave");
+        // The usual seamless loop draws the path once and tiles it with `use`.
+        let _tile = d.add(Some(wave), "use");
         assert!(details(&scan(&d), "marquee").is_empty());
 
         // What makes each one content: words in the track, an inline SVG

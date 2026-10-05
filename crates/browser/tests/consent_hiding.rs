@@ -406,3 +406,22 @@ fn a_root_matched_by_two_selectors_is_counted_once() {
     let url = format!("http://127.0.0.1:{port}/quantcast-short-page.html");
     engine.detect_url_scan(&url, &ScanOptions::default()).expect("a short page is a page");
 }
+
+#[test]
+fn a_web_component_page_under_a_banner_is_scanned() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/shadow-app-page.html");
+    engine
+        .detect_url_scan(&url, &ScanOptions::default())
+        .expect("text in the page's own shadow root is the page");
+}
+
+#[test]
+fn a_wall_under_a_visibility_hidden_root_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/hidden-host-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a visible dialog under a hidden root is a wall");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager OneTrust, "), "{}", err.message);
+}

@@ -213,7 +213,7 @@ fn gray_on_color_scales_its_bar_with_luminance() {
         &findings,
         "gray-on-color",
         &["#flag-gray-on-navy", "#flag-gray-on-teal", "#flag-gray-on-dark-navy", "#flag-tailwind-classes"],
-        &["#pass-gray-on-near-black-navy", "#pass-hover-variant"],
+        &["#pass-gray-on-near-black-navy", "#pass-off-white-on-navy", "#pass-off-white-on-teal", "#pass-hover-variant"],
     );
 }
 

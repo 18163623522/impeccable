@@ -227,7 +227,9 @@ const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.qu
   };"#;
 
 /// A probe fragment. Defines `consent` (the names of the managers whose roots
-/// are showing), `consentChars` (the visible text inside those roots) and
+/// are showing), `consentChars` (the visible text inside those roots, shadow
+/// roots included), `consentShadowChars` (the shadow-root part of it),
+/// `consentFrames` (sizable frames inside those roots) and
 /// `consentOutside` (visible form controls and sizable media outside them,
 /// counted up to 20).
 pub fn probe_fragment() -> String {
@@ -255,10 +257,24 @@ pub fn probe_fragment() -> String {
     }}
     return text;
   }};
+  // `consentShadowChars` is the part of that text the page's own
+  // `body.innerText` cannot see, so the probe adds it to the page's count and
+  // the two counts describe the same text. `consentFrames` counts sizable
+  // frames inside the roots: a manager that draws its message in an iframe
+  // (Sourcepoint) holds text no page script can read.
   let consentChars = 0;
+  let consentShadowChars = 0;
+  let consentFrames = 0;
   for (const el of consentRoots) {{
     if (consentRoots.some(o => o !== el && o.contains(el))) continue;
-    consentChars += visibleText(el);
+    const all = visibleText(el);
+    consentChars += all;
+    consentShadowChars += Math.max(0, all - (el.innerText || '').replace(/\s+/g, ' ').trim().length);
+    for (const f of el.querySelectorAll('iframe')) {{
+      if (!boxShows(f)) continue;
+      const r = f.getBoundingClientRect();
+      if (r.width * r.height >= {media_px}) consentFrames++;
+    }}
   }}
   // Content outside the managers that is not text: a form control of any
   // size, or an image, video, canvas, SVG or frame of at least

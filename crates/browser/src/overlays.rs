@@ -279,10 +279,31 @@ pub fn hide_js() -> String {
   // keeps with it; hiding the loader does not run that script. Undo the
   // lock: a loader-named class on <html> or <body> (`is-loading`) and an
   // inline overflow: hidden on either.
+  // The inline overflow stays where something else may hold it: an open
+  // modal of the site's own, or an app shell that scrolls inside itself.
+  const lockHeldElsewhere = () => {{
+    const vh = window.innerHeight || 0;
+    const shows = el => {{
+      try {{ if (el.checkVisibility && !el.checkVisibility({{ opacityProperty: true, visibilityProperty: true }})) return false; }} catch (e) {{}}
+      const r = el.getBoundingClientRect();
+      return r.width >= 1 && r.height >= 1;
+    }};
+    if (q('dialog[open], [aria-modal="true"], [role="dialog"], [role="alertdialog"]').some(el => !el.closest('[' + MARK + ']') && shows(el))) return true;
+    const all = document.body ? document.body.querySelectorAll('*') : [];
+    for (let i = 0; i < all.length && i < 5000; i++) {{
+      const el = all[i];
+      if (el.clientHeight < vh * 0.5 || el.scrollHeight <= el.clientHeight + 1 || el.closest('[' + MARK + ']')) continue;
+      const oy = getComputedStyle(el).overflowY;
+      if (oy === 'auto' || oy === 'scroll') return true;
+    }}
+    return false;
+  }};
   if (hidLoader) {{
+    const keepInline = lockHeldElsewhere();
     for (const [node, tag] of [[document.documentElement, 'html'], [document.body, 'body']]) {{
       if (!node) continue;
       for (const c of Array.from(node.classList)) if (namesLoader(c)) {{ node.classList.remove(c); out.unlocked.push(tag + '.' + c); }}
+      if (keepInline) continue;
       for (const p of ['overflow', 'overflow-y']) {{
         if (node.style.getPropertyValue(p) === 'hidden') {{ node.style.removeProperty(p); out.unlocked.push(tag + ' style ' + p); }}
       }}

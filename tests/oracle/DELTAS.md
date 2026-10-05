@@ -6644,10 +6644,9 @@ finding by finding against its predecessor.
 
 Corpus decision `r6-t8-gray-on-color-near-black` (narrow). The same change
 reached main as #935 and is recorded there ("Recorded 2026-10-02: near-black
-ink is not gray"); merging main replaced this branch's copy with it. On this
-stack it also moves one fixture that main does not have:
-
-- `detect-fixture-json-own-box-surface-and-ink-contrast-html`, `detect-fixture-text-own-box-surface-and-ink-contrast-html`: `gray-on-color` on `#363637` (lightness 0.21) on `#066bed` (`pass-label-repainted-by-filter`) is gone; the `low-contrast` 2.5:1 finding on the same pair stays. The directory sweeps lose the same finding.
+ink is not gray"); merging main replaced this branch's copy with it. The
+own-box fixture golden it also moves is recorded where that merge landed
+("main's near-black floor reaches the own-box fixture").
 
 ## Recorded 2026-10-03: the cyan band is 170 to 197 with a saturation floor (corpus/premise5-hues, r6-t7)
 
@@ -6939,3 +6938,9 @@ A Gemini run wrote decision comp prompts that inventoried every region and never
 New case, recorded from the binary and reviewed by hand:
 
 - `question-wait-render-check-once`: `k1.render-check` already holds the hand's id `h1`, so a poll with a landed, sidecar-carrying decision comp prints only the WAITING line and leaves the marker as it was.
+
+## Recorded 2026-10-05: main's near-black floor reaches the own-box fixture
+
+Merging main brought #935's `GRAY_INK_MIN_LIGHTNESS` = 0.3 floor (see "near-black ink is not gray" above). On this branch it also clears one static finding main has no fixture for:
+
+- `detect-fixture-json-own-box-surface-and-ink-contrast-html`, `detect-fixture-text-own-box-surface-and-ink-contrast-html`: `gray-on-color` on `#363637` (lightness 0.21) on `#066bed`, the `pass-label-repainted-by-filter` row, is gone; the `low-contrast` 2.5:1 finding on the same pair stays. The directory sweeps lose the same finding.

@@ -574,10 +574,11 @@ pub fn is_fine_print<N: ContextNode>(el: &N) -> bool {
         }
         cur = c.parent();
     }
-    if el
-        .children()
-        .iter()
-        .any(|k| matches!(k.tag().as_str(), "input" | "select" | "textarea" | "button"))
+    // A form control beside the text, or inside it, makes it the control's
+    // label: a custom checkbox row keeps the input next to a span.
+    let control = |k: &N| matches!(k.tag().as_str(), "input" | "select" | "textarea" | "button");
+    if el.children().iter().any(control)
+        || el.parent().is_some_and(|p| p.children().iter().any(control))
     {
         return false;
     }

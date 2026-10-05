@@ -1732,7 +1732,8 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         let footer = dom.closest(h, FOOTER_SELECTOR).ok().flatten();
         let opens_footer = footer.is_some() && footer != prev_footer;
         let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
-        let skips = prev_level > 0 && level > prev_level + 1;
+        let continues = prev_level > 0;
+        let skips = continues && level > prev_level + 1;
         if skips && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
@@ -1750,10 +1751,11 @@ pub fn check_page_quality_from_doc(dom: &dyn Dom) -> Vec<RuleHit> {
         prev_text = text;
         prev_footer = footer;
         // The footer's first heading speaks for the next one only when it
-        // continues the outline (a closing call to action). One that skipped
-        // into the footer is itself a column title, and a skip after it is
-        // between two footer headings.
-        prev_opens_footer = opens_footer && !skips;
+        // continues an outline (a closing call to action): one that skipped
+        // into the footer, or that opens the page with no outline before it,
+        // is itself a column title, and a skip after it is between two
+        // footer headings.
+        prev_opens_footer = opens_footer && continues && !skips;
     }
     findings
 }
@@ -4264,6 +4266,15 @@ mod tests {
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
         heading(&mut d, body, "h2", "Ready to start?");
+        let footer = d.add(Some(body), "footer");
+        d.add_selector(footer, FOOTER_SELECTOR);
+        heading(&mut d, footer, "h4", "Company");
+        heading(&mut d, footer, "h6", "Legal");
+        assert_eq!(details(&d), vec!["<h4> \"Company\" followed by <h6> \"Legal\" (missing h5)"]);
+
+        // A footer heading that opens the page continues no outline.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
         let footer = d.add(Some(body), "footer");
         d.add_selector(footer, FOOTER_SELECTOR);
         heading(&mut d, footer, "h4", "Company");

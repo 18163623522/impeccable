@@ -849,7 +849,8 @@ pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<Rule
             .map(|f| f.id());
         let opens_footer = footer.is_some() && footer != prev_footer;
         let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
-        let skips = prev_level > 0 && level > prev_level + 1;
+        let continues = prev_level > 0;
+        let skips = continues && level > prev_level + 1;
         if skips && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
@@ -868,7 +869,7 @@ pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<Rule
         prev_footer = footer;
         // As in the URL engine: a footer's first heading that skipped in is
         // a column title, and excuses nothing after it.
-        prev_opens_footer = opens_footer && !skips;
+        prev_opens_footer = opens_footer && continues && !skips;
     }
     findings
 }

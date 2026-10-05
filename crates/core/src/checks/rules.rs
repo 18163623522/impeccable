@@ -448,22 +448,11 @@ pub fn find_solid_chromatic_bg(s: &str) -> Option<&str> {
     None
 }
 
-/// The first gray text utility that applies at rest.
+/// The first gray text utility that applies at rest and is not near-black ink.
 fn find_resting_gray_text(s: &str) -> Option<regex::Match<'_>> {
     TW_GRAY_TEXT
         .find_iter(s)
         .find(|m| !in_state_variant(s, m.start()) && !is_near_black_neutral_class(m.as_str()))
-}
-
-/// `text-gray-700` and darker: every Tailwind neutral at shade 700 and up sits
-/// under `GRAY_INK_MIN_LIGHTNESS`, so the class path skips the same
-/// near-black inks the computed-colour path does (r6-t8).
-fn is_near_black_neutral_class(class: &str) -> bool {
-    class
-        .rsplit('-')
-        .next()
-        .and_then(|shade| shade.parse::<u32>().ok())
-        .is_some_and(|shade| shade >= 700)
 }
 
 /// Whether the utility starting at `start` sits behind a state variant
@@ -504,6 +493,19 @@ re!(
     TW_TO_PURPLE,
     format!(r"{B}to-(?:purple|violet|indigo|blue|cyan|pink|fuchsia)-{D}+{B}")
 );
+
+/// `text-gray-700` and darker: every Tailwind neutral at shade 700 and up sits
+/// under `GRAY_INK_MIN_LIGHTNESS`, so the class path skips the same
+/// near-black inks the computed-colour path does. The source-text scanner in
+/// `impeccable-detect` reads the same helper.
+pub fn is_near_black_neutral_class(class: &str) -> bool {
+    class
+        .trim()
+        .rsplit('-')
+        .next()
+        .and_then(|shade| shade.parse::<u32>().ok())
+        .is_some_and(|shade| shade >= 700)
+}
 
 fn is_heading_123(tag: &str) -> bool {
     matches!(tag, "h1" | "h2" | "h3")
@@ -2955,9 +2957,10 @@ mod tests {
         );
     }
 
-    /// r6-t8. Near-black ink on a colour reads as body ink: `#393939` on
-    /// `#ffc224` and `#413c38` on `#38e07b` measure 6 to 8:1 and were harmless
-    /// to both judges. A `-700` or darker neutral class is the same ink.
+    /// Near-black ink on a colour reads as body ink: `#393939` on `#ffc224`
+    /// and `#413c38` on `#38e07b` measure 6 to 8:1 and were judged harmless
+    /// on a corpus of real sites. A `-700` or darker neutral class is the
+    /// same ink.
     #[test]
     fn near_black_ink_on_a_colour_is_not_gray() {
         let ids = |text: Rgba, bg: Rgba| {
@@ -2996,7 +2999,10 @@ mod tests {
         };
         assert!(class_hits("text-gray-800 bg-yellow-400").is_empty());
         assert!(class_hits("text-neutral-700 bg-green-400").is_empty());
-        assert_eq!(class_hits("text-gray-600 bg-blue-600"), vec!["text-gray-600 on bg-blue-600"]);
+        assert_eq!(
+            class_hits("text-gray-600 bg-blue-600"),
+            vec!["text-gray-600 on bg-blue-600"]
+        );
         // A darker class first does not hide a gray one after it.
         assert_eq!(
             class_hits("text-gray-900 md:text-gray-400 bg-blue-600"),

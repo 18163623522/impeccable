@@ -1073,8 +1073,8 @@ pub fn is_no_paint_color_value(value: Option<&str>) -> bool {
 mod tests {
     use super::*;
 
-    /// r6-t8: near-black ink on a colour is ink, not gray. Main's gray-ink
-    /// test counted `#393939` and `#413c38`; the floor now sits at 0.3.
+    /// Near-black ink on a colour is ink, not gray: `#393939` and `#413c38`
+    /// sit under the 0.3 floor, `gray-600` over it.
     #[test]
     fn near_black_is_not_gray_ink() {
         let hex = |r: f64, g: f64, b: f64| Rgba::new(r, g, b, 1.0);

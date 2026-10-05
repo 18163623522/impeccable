@@ -4639,6 +4639,15 @@ mod tests {
         // An animation that runs once is not a marquee.
         d.set_styles(track, &[("animationName", "slide-in"), ("animationIterationCount", "1")]);
         assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
+        // Nor is a one-shot slide beside an endless pulse: the pulse moves
+        // nothing, and the counts pair with the names by position.
+        let frames = |p: &str| vec![crate::browser::dom::KeyframeFrame { decls: vec![(p.to_string(), "x".to_string())] }];
+        d.keyframes.insert("slide-in".to_string(), frames("transform"));
+        d.keyframes.insert("pulse".to_string(), frames("opacity"));
+        d.set_styles(track, &[("animationName", "slide-in, pulse"), ("animationIterationCount", "1, infinite")]);
+        assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
+        d.set_styles(track, &[("animationName", "pulse, slide-in"), ("animationIterationCount", "1, infinite")]);
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "the slide is the endless one");
     }
 
     #[test]

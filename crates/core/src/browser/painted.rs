@@ -1055,9 +1055,13 @@ fn opacity_in_motion(dom: &dyn Dom, el: ElId) -> bool {
 ///
 /// - an animation the capture saw running on the box moves its `opacity`;
 /// - an `animation-name` on the box has keyframes that set `opacity`;
-/// - a rule in `style_text` whose selector matches the box declares an
-///   `animation-timeline` that is a scroll progress timeline (`scroll()`), a
-///   view progress timeline (`view()`) or a named timeline (`--name`).
+/// - that opacity animation runs on a scroll progress timeline (`scroll()`),
+///   a view progress timeline (`view()`) or a named timeline (`--name`): the
+///   computed `animation-timeline` entry paired with its `animation-name`
+///   entry (the cascade has settled any override, and a box running a
+///   document-timeline fade beside a scroll-driven one is not held). A
+///   capture that did not record `animation-timeline` falls back to a rule
+///   in `style_text` whose selector matches the box and declares one.
 ///
 /// A probe that could not read running animations, a timeline attached by
 /// script (`new ScrollTimeline()`), and a scroll-linked reveal a script
@@ -1066,11 +1070,29 @@ pub fn opacity_held_by_scroll_timeline(dom: &dyn Dom, el: ElId, style_text: &str
     if !opacity_in_motion(dom, el) {
         return false;
     }
-    let sets_opacity = animation_names(dom, el).iter().any(|name| {
+    let fades = |name: &str| {
         dom.keyframes(name)
             .is_some_and(|frames| frames.iter().any(|f| f.decls.iter().any(|(p, _)| p == "opacity")))
-    });
-    if !sets_opacity {
+    };
+    let scroll_driven = |timeline: &str| {
+        let timeline = js::to_lower_case(js::trim(timeline));
+        timeline.starts_with("scroll(") || timeline.starts_with("view(") || timeline.starts_with("--")
+    };
+    let timelines = dom.style(el, "animationTimeline");
+    if !js::trim(&timelines).is_empty() {
+        // `animation-timeline` pairs with `animation-name` by position, its
+        // list repeating when it is the shorter one.
+        let timelines: Vec<&str> = timelines.split(',').collect();
+        return dom
+            .style(el, "animationName")
+            .split(',')
+            .enumerate()
+            .any(|(i, name)| {
+                let name = js::trim(name);
+                name != "none" && fades(name) && scroll_driven(timelines[i % timelines.len()])
+            });
+    }
+    if !animation_names(dom, el).iter().any(|name| fades(name)) {
         return false;
     }
     const DECL: &str = "animation-timeline";
@@ -2514,6 +2536,23 @@ mod tests {
         d.add_selector(timed, ".has-reveal .timed > *");
         assert!(!opacity_held_by_scroll_timeline(&d, timed, css));
         assert!(!opacity_held_by_scroll_timeline(&d, timed, ""), "no rule to read");
+
+        // With the computed timeline recorded, the cascade's answer decides:
+        // a later rule's `auto` wins over the stylesheet's `view()`.
+        d.set_style(block, "animationName", "lab-scrub-rise");
+        d.set_running_animations(block, &["opacity"]);
+        d.set_style(block, "animationTimeline", "auto");
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "the timeline was overridden");
+        d.set_style(block, "animationTimeline", "view()");
+        assert!(opacity_held_by_scroll_timeline(&d, block, css));
+        // A view() timeline on a transform animation beside a document-
+        // timeline fade does not hold the fade.
+        d.set_style(block, "animationName", "lab-grow, lab-rise");
+        d.set_style(block, "animationTimeline", "view(), auto");
+        assert!(!opacity_held_by_scroll_timeline(&d, block, css), "the fade runs on the document timeline");
+        d.set_style(block, "animationName", "lab-rise, lab-grow");
+        d.set_style(block, "animationTimeline", "view()");
+        assert!(opacity_held_by_scroll_timeline(&d, block, css), "one timeline repeats for every name");
     }
 
     /// directus.io: a closed FAQ row hides its overflow at 76px and parks the

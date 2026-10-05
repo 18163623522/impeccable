@@ -20,7 +20,7 @@
 // crates/core/src/browser/snapshot.rs (cargo xtask bundle checks the two
 // lists agree).
 const __SNAP_STYLE_PROPS = [
-  "animationIterationCount", "animationName", "animationTimingFunction",
+  "animationIterationCount", "animationName", "animationTimeline", "animationTimingFunction",
   "aspectRatio", "backdropFilter", "backfaceVisibility", "background", "backgroundClip",
   "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundSize",
   "blockSize", "borderBottomColor", "borderBottomWidth", "borderBottomStyle",

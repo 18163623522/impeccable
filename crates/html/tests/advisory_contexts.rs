@@ -115,6 +115,19 @@ fn fine_print_is_advisory_and_a_consent_label_fails() {
 }
 
 #[test]
+fn a_custom_checkbox_rows_label_is_not_fine_print() {
+    // The input sits beside the span that labels it, not around it.
+    let f = scan(
+        "<div class=\"legal\"><input type=\"checkbox\"><span style=\"font-size: 10px\">I agree that my data is processed under the terms above.</span></div>\
+         <div class=\"legal\"><span style=\"font-size: 10px\">Prices include VAT where it applies to the order.</span></div>",
+    );
+    // The checkbox row's label keeps failing; the VAT note is fine print.
+    let mut got: Vec<&str> = f.iter().filter(|x| x.antipattern == "tiny-text").map(|x| x.severity.as_str()).collect();
+    got.sort();
+    assert_eq!(got, vec!["advisory", "warning"], "{f:#?}");
+}
+
+#[test]
 fn text_in_a_framed_demo_is_advisory_under_three_rules() {
     let f = scan_fixture("mockup-structure.html");
     for label in ["847 results", "coldtea.ai"] {

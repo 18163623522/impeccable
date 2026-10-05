@@ -1826,6 +1826,74 @@ fn comps_gate_keeps_the_approved_comp_and_a_new_round_forgets_it() {
     assert!(state["phases"]["comps"]["forced"].is_null());
 }
 
+#[test]
+fn chosen_decision_comp_is_option_one_and_becomes_the_approved_reference() {
+    const CHOSEN: &str = ".impeccable/mocks/decision/assigned.png";
+    const OTHER: &str = ".impeccable/mocks/decision/pick.png";
+    let ws = Workspace::new();
+    for (file, color) in [(CHOSEN, [20u8, 70, 110, 255]), (OTHER, [200, 200, 20, 255])] {
+        ws.write(file, &png_io::encode_png(&r::create_image(40, 20, color), &[]).unwrap());
+        ws.write(&format!("{file}.json"), br#"{"prompt":"decision comp"}"#);
+    }
+    // Without --decision-comp no decision comp counts toward the round.
+    let mut io = ws.io();
+    assert_eq!(run(&["start", "--direction", "seed"].map(String::from), &mut io, &no_organic_scan), 0);
+    let gate = gate_comps(&io, &load_state(&io).unwrap());
+    assert!(gate.reasons[0].starts_with("0 comps under .impeccable/mocks;"), "{:?}", gate.reasons);
+    // --decision-comp goes with --direction only, and must exist.
+    let (mut io, c) = captured(&ws);
+    assert_eq!(run(&["start", "--reset", "--comp", CHOSEN, "--decision-comp", CHOSEN].map(String::from), &mut io, &no_organic_scan), 1);
+    assert!(out_err(&c).contains("goes with --direction and never with --comp"), "{}", out_err(&c));
+    let (mut io, c) = captured(&ws);
+    assert_eq!(run(&["start", "--reset", "--decision-comp", CHOSEN].map(String::from), &mut io, &no_organic_scan), 1);
+    assert!(out_err(&c).contains("goes with --direction and never with --comp"), "{}", out_err(&c));
+    assert_eq!(run(&["start", "--reset", "--direction", "seed", "--decision-comp", ".impeccable/mocks/decision/none.png"].map(String::from), &mut io, &no_organic_scan), 1);
+
+    let mut io = ws.io();
+    assert_eq!(run(&["start", "--reset", "--direction", "seed", "--decision-comp", CHOSEN].map(String::from), &mut io, &no_organic_scan), 0);
+    let state = load_state(&io).unwrap();
+    assert_eq!(state["decisionComp"], CHOSEN);
+    assert!(next_instruction(&io, &state).contains(&format!("The chosen decision comp {CHOSEN} is compositional option one")));
+    // The chosen decision comp counts as option one; the unrelated one never does.
+    let gate = gate_comps(&io, &state);
+    assert!(gate.reasons[0].starts_with(&format!("1 comp (the chosen decision comp {CHOSEN} as option one, the others directly under .impeccable/mocks);")), "{:?}", gate.reasons);
+    for (i, color) in [[90u8, 20, 20, 255], [10, 90, 10, 255]].iter().enumerate() {
+        let file = format!(".impeccable/mocks/comp-{}.png", i + 2);
+        ws.write(&file, &png_io::encode_png(&r::create_image(40, 20, *color), &[]).unwrap());
+        ws.write(&format!("{file}.json"), br#"{"prompt":"variation"}"#);
+    }
+    let gate = gate_comps(&io, &state);
+    assert_eq!(gate.reasons, vec!["no comp is approved: put the three comps in front of the user (decision page via serve-question.mjs, or the structured question tool), then set \"approved\": true in the chosen comp's sidecar. A delegated pick is recorded the same way and disclosed.".to_string()]);
+    // An approval on the unrelated decision comp is not an approval of the round.
+    ws.write(&format!("{OTHER}.json"), br#"{"prompt":"decision comp","approved":true}"#);
+    assert!(!gate_comps(&io, &state).ok);
+    // A deleted option one is not forgotten: three root comps cannot close the round without it.
+    let kept = std::fs::read(ws.path.join(CHOSEN)).unwrap();
+    std::fs::remove_file(ws.path.join(CHOSEN)).unwrap();
+    ws.write(".impeccable/mocks/comp-4.png", &png_io::encode_png(&r::create_image(40, 20, [5, 5, 5, 255]), &[]).unwrap());
+    ws.write(".impeccable/mocks/comp-4.png.json", br#"{"prompt":"replacement","approved":true}"#);
+    let gate = gate_comps(&io, &state);
+    assert!(!gate.ok && gate.reasons[0].starts_with(&format!("the chosen decision comp {CHOSEN} is missing")), "{:?}", gate.reasons);
+    std::fs::remove_file(ws.path.join(".impeccable/mocks/comp-4.png")).unwrap();
+    std::fs::remove_file(ws.path.join(".impeccable/mocks/comp-4.png.json")).unwrap();
+    ws.write(CHOSEN, &kept);
+    // The user keeps option one: the comps gate closes on it where it stands.
+    ws.write(&format!("{CHOSEN}.json"), br#"{"prompt":"decision comp","approved":true}"#);
+    assert_eq!(run(&["advance"].map(String::from), &mut io, &no_organic_scan), 0);
+    let state = load_state(&io).unwrap();
+    assert_eq!(state["comp"], CHOSEN);
+    assert_eq!(state["phase"], "spec");
+    let record: Value = serde_json::from_slice(&std::fs::read(ws.path.join(crate::approved_comp::RECORD_PATH)).unwrap()).unwrap();
+    assert_eq!(record["comp"], CHOSEN);
+    assert_eq!(record["pixelSha256"].as_str(), crate::approved_comp::file_pixel_sha256(&io, CHOSEN).as_deref());
+    assert_eq!(std::fs::read(ws.path.join(record["copy"].as_str().unwrap())).unwrap(), std::fs::read(ws.path.join(CHOSEN)).unwrap());
+    // The decision comp is now the fixed reference: an edit is refused and restore-comp puts it back.
+    ws.write(CHOSEN, &png_io::encode_png(&r::create_image(40, 20, [0, 0, 0, 255]), &[]).unwrap());
+    assert!(crate::approved_comp::issue_for_comp(&io, CHOSEN, "impeccable").is_some());
+    assert_eq!(run(&["restore-comp"].map(String::from), &mut io, &no_organic_scan), 0);
+    assert_eq!(crate::approved_comp::file_pixel_sha256(&io, CHOSEN).as_deref(), record["pixelSha256"].as_str());
+}
+
 /// The code-led first viewport with a lettered export control (`export`), or
 /// with that control left out of the page.
 fn lettered_text_only_hero(restyled: bool, export: bool) -> Image {

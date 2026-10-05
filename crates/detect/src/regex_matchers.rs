@@ -6,7 +6,7 @@ use impeccable_core::checks::css_scan::{
 };
 use impeccable_core::color::is_neutral_color;
 use impeccable_core::constants::{EM_DASH_CHARS_PER_DASH, EM_DASH_FLOOR, OVERUSED_FONTS};
-use impeccable_core::checks::rules::find_solid_chromatic_bg;
+use impeccable_core::checks::rules::{find_solid_chromatic_bg, is_near_black_neutral_class};
 use impeccable_core::findings::{finding, Finding};
 use impeccable_core::fonts::extract_google_font_families;
 use impeccable_core::js::{
@@ -1002,9 +1002,10 @@ pub static REGEX_MATCHERS: Lazy<Vec<Matcher>> = Lazy::new(|| {
             id: "gray-on-color",
             find_all: |l| all(&GRAY_TEXT_RE, l),
             test: |m, line| {
-                gray_on_color_pairs(line, m.whole(), m.index)
-                    .iter()
-                    .any(|scope| find_solid_chromatic_bg(scope).is_some())
+                !is_near_black_neutral_class(m.whole())
+                    && gray_on_color_pairs(line, m.whole(), m.index)
+                        .iter()
+                        .any(|scope| find_solid_chromatic_bg(scope).is_some())
             },
             fmt: |m, line| {
                 let pairs = gray_on_color_pairs(line, m.whole(), m.index);
@@ -1528,6 +1529,14 @@ mod tests {
         assert_eq!(
             g(r#"<div className={cn(a ? "bg-red-500" : "bg-blue-600", "text-slate-400")} />"#),
             vec!["text-slate-400 on bg-red-500"]
+        );
+        // Shade 700 and darker is near-black ink, the same split the DOM
+        // path draws at `GRAY_INK_MIN_LIGHTNESS`.
+        assert!(g(r#"<div className="text-gray-800 bg-yellow-400">Card</div>"#).is_empty());
+        assert!(g(r#"<div className="text-neutral-700 bg-green-400">Card</div>"#).is_empty());
+        assert_eq!(
+            g(r#"<div className="text-gray-600 bg-amber-400">Card</div>"#),
+            vec!["text-gray-600 on bg-amber-400"]
         );
     }
 

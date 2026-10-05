@@ -314,6 +314,28 @@ New cases, recorded from the engine and reviewed by hand (no JS golden ever cove
 - `build-phase-responsive-displaced`: a sign-off line pushed 40px below the first viewport by a growing column reads `displaced, not missing` with the offset and the visible share, the `LOOK FIRST` crop list and the displaced remedy line print, and the third failed `advance` leads with the three-attempt route to the first-viewport review.
 - `build-phase-responsive-missing`: the same region absent from the capture still reads `at desktop width, region sign-off is missing`, now with its repair crop listed.
 
+## Recorded 2026-10-02: near-black ink is not gray
+
+`is_gray_ink` counted any low-saturation ink over lightness 0.2 as gray, so
+`#393939` on a yellow card and `#413c38` on a green button, which read at 6 to
+8:1, reported as gray on colour. On a corpus of real sites those findings were
+judged harmless. The floor is now `GRAY_INK_MIN_LIGHTNESS` = 0.3: every
+Tailwind neutral at `-700` and darker sits under it, every `-600` and lighter
+over it. The Tailwind class paths (the DOM class check and the source-text
+matcher) skip `text-{gray,slate,zinc,neutral,stone}-N` for N of 700 and up the
+same way. No existing fixture finding moved; the goldens below change only
+because of the new `gray-on-color.html` fixture.
+
+- New cases `detect-fixture-json-gray-on-color-html` and `detect-fixture-text-gray-on-color-html`: the fixture's five should-flag rows report (`#d1d5db` on `#1e3a8a` and on `#115e59`, `text-gray-400 on bg-blue-600`, `#4b5563` on `#fcd34d`, `text-gray-600 on bg-amber-400`); its five should-pass rows do not (`#e5e7eb` on `#1e3a8a`, `#393939` on `#ffc224`, `#413c38` on `#38e07b`, `text-gray-800` on `bg-yellow-400`, `#4b5563` on the neutral `#f3f4f6`). The released 0.1.11 engine also reports the three near-black rows (`#393939`, `#413c38` and `text-gray-800`).
+- The sweeps `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json` and `detect-no-advisory-text` gain the same five findings (437 to 442 counted). Nothing else moved. `detect-dir-json-all-fixtures` was left unrecorded: it is already an accepted delta and a fresh recording also carries unrelated drift.
+
+### Known limits
+
+1. **Near-black ink that is genuinely too dark for its fill** (`#363637` on a
+   mid blue) now reports only as `low-contrast`, which is the rule that owns
+   that failure.
+2. **The class path reads the shade number, not the colour,** so a project
+   that redefines `gray-700` lighter than 0.3 is still skipped.
 ## Recorded 2026-10-04: a native ship binds every captured input
 
 A comp-led run recorded `finish --disposition ship`, then fixed padding findings the Stop hook reported after it, and stopped: the shipped page no longer matched the final native capture. Native `finish --disposition ship` now records `finish.captureInputs`, the `{path, sha256}` rows of the manifest the final responsive capture bound, and `build-phase completion` reports `changed-after-finish` when the entry or any of those files changed, listing them in `changedSinceFinish`. The NEXT lines after review and after a recorded ship now say that a later edit, a hook finding's fix included, needs ship recorded again, and what ship does with the current files under each capture policy. No existing golden printed these lines, so none moved.

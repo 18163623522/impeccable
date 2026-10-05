@@ -2263,8 +2263,9 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
 }
 
 /// The topmost box from `el` up to, but not including, `start` that holds
-/// itself at opacity 0.02 or less: a box inside a hidden one that stays
-/// transparent when the outer one is revealed. `None` when `el` is hidden only
+/// itself at opacity 0.02 or less, or hides itself with `visibility` under a
+/// visible parent: a box inside a hidden one that stays hidden when the outer
+/// one is revealed. `None` when `el` is hidden only
 /// through `start`.
 fn held_inside(dom: &dyn Dom, el: ElId, start: ElId) -> Option<ElId> {
     let mut found = None;
@@ -2274,7 +2275,11 @@ fn held_inside(dom: &dyn Dom, el: ElId, start: ElId) -> Option<ElId> {
             break;
         }
         let opacity = js::parse_float(&dom.style(b, "opacity"));
-        if opacity.is_finite() && opacity <= 0.02 {
+        // `visibility` inherits, so a hidden box hides itself only where its
+        // parent is visible: there the declaration is its own.
+        let hidden = |e: ElId| matches!(dom.style(e, "visibility").as_str(), "hidden" | "collapse");
+        let own_hidden = hidden(b) && dom.parent(b).is_some_and(|p| !hidden(p));
+        if (opacity.is_finite() && opacity <= 0.02) || own_hidden {
             found = Some(b);
         }
         cur = dom.parent(b);
@@ -4540,6 +4545,18 @@ mod tests {
         d.set_shown_on_scroll(stuck, true);
         let m = measure_hidden_text_dom(&d);
         assert_eq!((m.total_chars, m.hidden_chars), (310.0, 0.0));
+
+        // A child that hides itself with `visibility` inside a section held
+        // at opacity 0 stays hidden too until the probe says it shows.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        hidden_box(&mut d, section, "div", &[("visibility", "hidden")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0));
 
         // Below the reporting share nothing is probed, and nothing moves.
         let mut d = FakeDom::new();

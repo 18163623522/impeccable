@@ -844,8 +844,17 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
         if !ai_palette_is_visible(dom, el) {
             continue;
         }
-        let logo = names_logo(dom, el);
-        let bar = is_nav_bar(dom, el, &tag) && rect.width >= BRAND_BAR_MIN_WIDTH_SHARE * viewport_w;
+        // A logo or bar inside the page's content (an article's own header,
+        // a pagination nav, a row of partner logos in `main`) is local chrome,
+        // not the site's brand.
+        let local = dom
+            .parent(el)
+            .and_then(|p| super::dom::closest_or_none(dom, p, "main, article"))
+            .is_some();
+        let logo = !local && names_logo(dom, el);
+        let bar = !local
+            && is_nav_bar(dom, el, &tag)
+            && rect.width >= BRAND_BAR_MIN_WIDTH_SHARE * viewport_w;
         let large = rect.width >= BRAND_BAND_MIN_WIDTH_SHARE * viewport_w
             && rect.width * rect.height >= BRAND_SURFACE_MIN_VIEWPORT_SHARE * viewport_area;
         if !(logo || bar || large) {
@@ -860,8 +869,20 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
                 }
             }
         }
-        if logo && super::dom::has_direct_text_longer_than(dom, el, 0) {
-            if let Some(ink) = parse_any_color(Some(&dom.style(el, "color"))) {
+        // A type logo's letters can sit in a child (`<a class=logo><span>`):
+        // its ink is the first text in the logo, wherever it is set.
+        let ink_el = if !logo {
+            None
+        } else if super::dom::has_direct_text_longer_than(dom, el, 0) {
+            Some(el)
+        } else {
+            dom.query_all(Some(el), "*")
+                .unwrap_or_default()
+                .into_iter()
+                .find(|d| super::dom::has_direct_text_longer_than(dom, *d, 0))
+        };
+        if let Some(ink_el) = ink_el {
+            if let Some(ink) = parse_any_color(Some(&dom.style(ink_el, "color"))) {
                 if ink.alpha_or_one() >= 0.9 && has_chroma(Some(&ink), Some(50.0)) {
                     out.push(ink);
                 }
@@ -1153,14 +1174,18 @@ const CLASS_FORM_SUFFIX: &str = "(Tailwind)";
 
 /// The utility-class form of gradient text and bounce easing names the
 /// treatment the computed form reads off the same element. Once the computed
-/// form has reported the rule on that element, the class form is a second
-/// report of one declaration.
+/// form has reported that treatment on that element, the class form is a
+/// second report of one declaration. For bounce easing only the animation
+/// name is that twin (`animate-bounce` computes to `animation: bounce`); an
+/// overshooting `cubic-bezier()` is a separate declaration and leaves the
+/// class form standing.
 fn drop_covered_class_forms(findings: &mut Vec<BrowserFinding>) {
     let computed: Vec<String> = findings
         .iter()
         .filter(|f| {
-            (f.type_ == "gradient-text" || f.type_ == "bounce-easing")
-                && !f.detail.ends_with(CLASS_FORM_SUFFIX)
+            !f.detail.ends_with(CLASS_FORM_SUFFIX)
+                && (f.type_ == "gradient-text"
+                    || (f.type_ == "bounce-easing" && f.detail.starts_with("animation: ")))
         })
         .map(|f| f.type_.clone())
         .collect();
@@ -1278,7 +1303,7 @@ fn reconcile_page_level_forms(
             // Both page forms describe one treatment, text clipped to a
             // gradient, and the element forms read it off every element.
             "gradient-text" => {
-                element_findings("gradient-text").is_empty() && !clipped_gradients_all_silent(dom)
+                element_findings("gradient-text").is_empty() && !gradient_declaration_silent(dom, &item)
             }
             "bounce-easing" => {
                 let page = bounce_declarations(&item.finding.detail);
@@ -1316,17 +1341,35 @@ fn clipped_gradients_all_silent(dom: &dyn Dom) -> bool {
         .query_all(None, "*")
         .unwrap_or_default()
         .into_iter()
-        .filter(|&el| {
-            let clip = dom.style(el, "webkitBackgroundClip");
-            let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
-            clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
-        })
+        .filter(|&el| computes_clipped_gradient(dom, el))
         .collect();
-    !clipped.is_empty()
-        && clipped.into_iter().all(|el| {
-            super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
-                || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
-        })
+    !clipped.is_empty() && clipped.into_iter().all(|el| clipped_gradient_silent(dom, el))
+}
+
+fn computes_clipped_gradient(dom: &dyn Dom, el: ElId) -> bool {
+    let clip = dom.style(el, "webkitBackgroundClip");
+    let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
+    clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
+}
+
+fn clipped_gradient_silent(dom: &dyn Dom, el: ElId) -> bool {
+    super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
+        || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
+}
+
+/// Whether the declaration a stylesheet gradient-text form names is silent:
+/// every element its selector resolves to computes the clipped gradient and
+/// was measured silent. A selector whose elements do not compute it (the
+/// hosts of a pseudo-element, which carries the gradient itself) is not
+/// silent, whatever other elements on the page do. A form with no resolved
+/// selector falls back to [`clipped_gradients_all_silent`].
+fn gradient_declaration_silent(dom: &dyn Dom, item: &PatternItem) -> bool {
+    match item.matches.as_deref() {
+        Some(matches) if !matches.is_empty() => matches
+            .iter()
+            .all(|&el| computes_clipped_gradient(dom, el) && clipped_gradient_silent(dom, el)),
+        _ => clipped_gradients_all_silent(dom),
+    }
 }
 
 /// One bounce declaration as a finding names it.
@@ -2654,6 +2697,38 @@ mod tests {
             }),
             0
         );
+        // The letters of a type logo set in a child span.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "a");
+                d.set_attr(logo, "class", "site-logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                let word = d.add(Some(logo), "span");
+                d.set_rect(word, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(word, "Acme");
+                d.set_style(word, "color", "rgb(124, 58, 237)");
+            }),
+            0
+        );
+        // A partner logo in the page's content is not the site's brand, and
+        // neither is an article's own header bar.
+        assert_eq!(
+            run(&|d, body| {
+                let main = d.add(Some(body), "main");
+                d.set_rect(main, 0.0, 0.0, 1280.0, 3000.0);
+                let logo = d.add(Some(main), "a");
+                d.set_attr(logo, "class", "partner-logo");
+                d.set_rect(logo, 0.0, 1200.0, 120.0, 40.0);
+                d.add_text(logo, "Partner");
+                d.set_style(logo, "color", "rgb(124, 58, 237)");
+                let article = d.add(Some(main), "article");
+                d.set_rect(article, 0.0, 1300.0, 1280.0, 1000.0);
+                let header = d.add(Some(article), "header");
+                d.set_rect(header, 0.0, 1300.0, 1280.0, 80.0);
+                d.set_style(header, "backgroundColor", "rgb(124, 58, 237)");
+            }),
+            1
+        );
         // A footer band in the same violet.
         assert_eq!(
             run(&|d, body| {
@@ -3551,6 +3626,26 @@ mod page_level_form_tests {
     }
 
     #[test]
+    fn a_bounce_class_form_defers_only_to_the_animation_it_names() {
+        // animate-bounce computes to `animation: bounce`: one declaration.
+        let mut findings = vec![
+            BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("bounce-easing", "animate-bounce (Tailwind)"),
+        ];
+        drop_covered_class_forms(&mut findings);
+        let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(kept, vec!["animation: bounce"]);
+        // An overshooting curve on the same element is another declaration.
+        let mut findings = vec![
+            BrowserFinding::new("bounce-easing", "cubic-bezier(0.34, 1.56, 0.64, 1)"),
+            BrowserFinding::new("bounce-easing", "animate-bounce (Tailwind)"),
+        ];
+        drop_covered_class_forms(&mut findings);
+        let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(kept, vec!["cubic-bezier(0.34, 1.56, 0.64, 1)", "animate-bounce (Tailwind)"]);
+    }
+
+    #[test]
     fn gradient_text_reports_once_on_the_element() {
         let (mut d, body) = page(
             ".title{background-image:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;background-clip:text;color:transparent}",
@@ -3585,6 +3680,36 @@ mod page_level_form_tests {
         let logo = d.add(Some(body), "div");
         d.add_selector(logo, ".logo");
         d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        assert_eq!(
+            details(&scan(&d), "gradient-text"),
+            vec![(body, "background-clip: text + gradient".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_silent_element_elsewhere_does_not_silence_a_pseudo_elements_gradient_text() {
+        // The logo's ::after draws gradient text; an unrelated `.ghost`
+        // computes a clipped gradient but is not painted, so it is silent.
+        let (mut d, body) = page(
+            ".logo::after{content:'AI';background:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;color:transparent}\
+             .ghost{background-image:linear-gradient(90deg,#000,#000);-webkit-background-clip:text;color:transparent}",
+        );
+        let logo = d.add(Some(body), "div");
+        d.add_selector(logo, ".logo");
+        d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        let ghost = d.add(Some(body), "p");
+        d.add_selector(ghost, ".ghost");
+        d.add_text(ghost, "Watermark");
+        d.set_rect(ghost, 0.0, 100.0, 400.0, 40.0);
+        d.set_styles(
+            ghost,
+            &[
+                ("backgroundImage", "linear-gradient(90deg, rgb(0, 0, 0), rgb(0, 0, 0))"),
+                ("webkitBackgroundClip", "text"),
+                ("backgroundClip", "text"),
+                ("opacity", "0"),
+            ],
+        );
         assert_eq!(
             details(&scan(&d), "gradient-text"),
             vec![(body, "background-clip: text + gradient".to_string())]

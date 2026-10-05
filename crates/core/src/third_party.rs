@@ -149,6 +149,10 @@ pub struct AdTechVendor {
     pub name: &'static str,
     /// Substrings of the script URL the error was thrown from.
     pub sources: &'static [&'static str],
+    /// Prefixes of the script's file name, for a library a site serves from
+    /// its own host: the file is the vendor's, a directory named after it
+    /// is not.
+    pub files: &'static [&'static str],
 }
 
 /// The ad-tech hosts, from the corpus evidence: AnyMind's Prebid bundle and
@@ -165,18 +169,47 @@ pub struct AdTechVendor {
 /// cuisineactuelle.fr throws from its Prebid call (143089, 143154), which
 /// [`AD_TECH_APIS`] names.
 pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
-    AdTechVendor { name: "AnyMind", sources: &["anymind360.com"] },
-    AdTechVendor { name: "Prebid", sources: &["/prebid"] },
-    AdTechVendor { name: "Meta Pixel", sources: &["connect.facebook.net"] },
-    AdTechVendor { name: "Google Tag Manager", sources: &["googletagmanager.com"] },
-    AdTechVendor { name: "OneTrust", sources: &["cookielaw.org"] },
+    AdTechVendor { name: "AnyMind", sources: &["anymind360.com"], files: &[] },
+    AdTechVendor { name: "Prebid", sources: &[], files: &["prebid"] },
+    AdTechVendor { name: "Meta Pixel", sources: &["connect.facebook.net"], files: &[] },
+    AdTechVendor { name: "Google Tag Manager", sources: &["googletagmanager.com"], files: &[] },
+    AdTechVendor { name: "OneTrust", sources: &["cookielaw.org"], files: &[] },
     AdTechVendor {
         name: "Google Ads",
         sources: &["googlesyndication.com", "doubleclick.net", "googleadservices.com"],
+        files: &[],
     },
-    AdTechVendor { name: "Nagich", sources: &["nagich.co.il"] },
-    AdTechVendor { name: "Chase Reporting", sources: &["asset.chase.com/web/library/digddsautomation/reportingjs/"] },
+    AdTechVendor { name: "Nagich", sources: &["nagich.co.il"], files: &[] },
+    AdTechVendor {
+        name: "Chase Reporting",
+        sources: &["asset.chase.com/web/library/digddsautomation/reportingjs/"],
+        files: &[],
+    },
 ];
+
+/// The lower-cased file names of the script URLs in a page error's source
+/// (`at fn, https://host/dir/file.js:12:34`): the last path segment, with
+/// the query, fragment and line and column numbers dropped.
+fn script_file_names(source: &str) -> Vec<String> {
+    source
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .filter_map(|token| {
+            let rest = token.split_once("://")?.1;
+            let path = rest.split(['?', '#']).next().unwrap_or("");
+            let file = path.rsplit('/').next().unwrap_or("");
+            // Drop a trailing `:line:col` (or `:line`).
+            let mut file = file;
+            for _ in 0..2 {
+                if let Some((head, tail)) = file.rsplit_once(':') {
+                    if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
+                        file = head;
+                    }
+                }
+            }
+            (!file.is_empty() && path.contains('/')).then(|| file.to_ascii_lowercase())
+        })
+        .collect()
+}
 
 /// Ad APIs whose rejection names itself in the message: Chrome removed the
 /// Topics API (`document.browsingTopics() is deprecated and has been
@@ -199,8 +232,11 @@ pub const AD_TECH_APIS: &[(&str, &str)] = &[
 pub fn ad_tech_vendor(message: &str, source: Option<&str>) -> Option<&'static str> {
     if let Some(source) = source {
         let lower = source.to_ascii_lowercase();
+        let files = script_file_names(source);
         for vendor in AD_TECH_VENDORS {
-            if vendor.sources.iter().any(|s| lower.contains(s)) {
+            if vendor.sources.iter().any(|s| lower.contains(s))
+                || vendor.files.iter().any(|p| files.iter().any(|f| f.starts_with(p)))
+            {
                 return Some(vendor.name);
             }
         }
@@ -292,6 +328,20 @@ mod tests {
             None
         );
         assert_eq!(ad_tech_vendor("Minified React error #418", Some("at https://example.com/app.js:1:1")), None);
+        // Prebid is a library sites serve themselves: its file is the
+        // vendor's wherever it is hosted, a directory named after it is not.
+        assert_eq!(
+            ad_tech_vendor("Uncaught Error: bidder timeout", Some("at https://cdn.example.com/prebid/prebid-9.1.js:4:2")),
+            Some("Prebid")
+        );
+        assert_eq!(
+            ad_tech_vendor("Uncaught Error: x", Some("at load, https://shop.example/assets/prebid.min.js?v=3:1:1")),
+            Some("Prebid")
+        );
+        assert_eq!(
+            ad_tech_vendor("Uncaught TypeError: cart is undefined", Some("at https://shop.example/prebid/app.js:1:1")),
+            None
+        );
     }
 
     #[test]

@@ -88,7 +88,17 @@ fn box_paints(el: &StaticElement<'_>) -> bool {
 fn centred(host: &StaticElement<'_>, el: &StaticElement<'_>, height: f64) -> bool {
     let style = host.style();
     let display = sv(style, "display");
-    if matches!(display, "flex" | "inline-flex" | "grid" | "inline-grid") {
+    // A flex or grid box centres its text only when it says so on both axes:
+    // `justify-content: flex-start` or `align-items: flex-start` leaves an
+    // initial in a corner of the painted box.
+    let is_center = |prop: &str| js::to_lower_case(sv(style, prop)).split_whitespace().any(|t| t == "center");
+    if matches!(display, "flex" | "inline-flex") && is_center("justifyContent") && is_center("alignItems") {
+        return true;
+    }
+    if matches!(display, "grid" | "inline-grid")
+        && is_center("alignItems")
+        && (is_center("justifyItems") || is_center("justifyContent"))
+    {
         return true;
     }
     if sv(el.style(), "textAlign") == "center" || sv(style, "textAlign") == "center" {

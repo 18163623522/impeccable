@@ -914,14 +914,18 @@ const CLASS_FORM_SUFFIX: &str = "(Tailwind)";
 
 /// The utility-class form of gradient text and bounce easing names the
 /// treatment the computed form reads off the same element. Once the computed
-/// form has reported the rule on that element, the class form is a second
-/// report of one declaration.
+/// form has reported that treatment on that element, the class form is a
+/// second report of one declaration. For bounce easing only the animation
+/// name is that twin (`animate-bounce` computes to `animation: bounce`); an
+/// overshooting `cubic-bezier()` is a separate declaration and leaves the
+/// class form standing.
 fn drop_covered_class_forms(findings: &mut Vec<BrowserFinding>) {
     let computed: Vec<String> = findings
         .iter()
         .filter(|f| {
-            (f.type_ == "gradient-text" || f.type_ == "bounce-easing")
-                && !f.detail.ends_with(CLASS_FORM_SUFFIX)
+            !f.detail.ends_with(CLASS_FORM_SUFFIX)
+                && (f.type_ == "gradient-text"
+                    || (f.type_ == "bounce-easing" && f.detail.starts_with("animation: ")))
         })
         .map(|f| f.type_.clone())
         .collect();
@@ -2953,6 +2957,26 @@ mod page_level_form_tests {
         let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
         // The bounce class form has no computed twin on this element and stays.
         assert_eq!(kept, vec!["background-clip: text + gradient", "animate-bounce (Tailwind)"]);
+    }
+
+    #[test]
+    fn a_bounce_class_form_defers_only_to_the_animation_it_names() {
+        // animate-bounce computes to `animation: bounce`: one declaration.
+        let mut findings = vec![
+            BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("bounce-easing", "animate-bounce (Tailwind)"),
+        ];
+        drop_covered_class_forms(&mut findings);
+        let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(kept, vec!["animation: bounce"]);
+        // An overshooting curve on the same element is another declaration.
+        let mut findings = vec![
+            BrowserFinding::new("bounce-easing", "cubic-bezier(0.34, 1.56, 0.64, 1)"),
+            BrowserFinding::new("bounce-easing", "animate-bounce (Tailwind)"),
+        ];
+        drop_covered_class_forms(&mut findings);
+        let kept: Vec<&str> = findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(kept, vec!["cubic-bezier(0.34, 1.56, 0.64, 1)", "animate-bounce (Tailwind)"]);
     }
 
     #[test]

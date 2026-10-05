@@ -307,7 +307,11 @@ fn runs_endless_animation(dom: &dyn Dom, el: ElId) -> bool {
             && name != "none"
             && counts[i % counts.len()] == "infinite"
             && dom.keyframes(name).is_none_or(|frames| {
-                frames.iter().any(|f| f.decls.iter().any(|(p, _)| p == "transform" || p == "translate"))
+                frames.iter().any(|f| {
+                    f.decls.iter().any(|(p, _)| {
+                        matches!(p.strip_prefix("-webkit-").unwrap_or(p), "transform" | "translate")
+                    })
+                })
             })
     })
 }

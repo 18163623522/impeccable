@@ -6,7 +6,8 @@
 //!   finding carries `overlaysHidden`, and the body classes that took the page
 //!   out of hit tests are removed; with `keep_overlays` (the CLI's
 //!   `--no-overlay-hiding`) the tour stays and its popover text is scored.
-//! - A preloader that never clears is waited for, then hidden and recorded.
+//! - A preloader that never clears is waited for, then hidden and recorded,
+//!   one that lets clicks pass through (`pointer-events: none`) included.
 //! - A preloader that clears on its own is waited for and nothing is hidden.
 //! - A routing gate on a full-screen opaque layer named like a loader stays:
 //!   it holds controls, so it is not a preloader.
@@ -46,7 +47,13 @@ fn handle(mut stream: TcpStream) {
         .and_then(|l| l.split_whitespace().nth(1))
         .unwrap_or("/")
         .to_string();
-    let body = std::fs::read(fixtures_dir().join(path.trim_start_matches('/'))).unwrap_or_default();
+    // Only files in the fixture directory: no `..` segment, no absolute path.
+    let rel = path.trim_start_matches('/');
+    let body = if rel.split('/').any(|seg| seg == ".." || seg.contains('\\')) {
+        Vec::new()
+    } else {
+        std::fs::read(fixtures_dir().join(rel)).unwrap_or_default()
+    };
     let head = format!(
         "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -172,6 +179,21 @@ fn a_stuck_preloader_is_waited_for_then_hidden() {
     assert!(evidence.scan_snapshot.as_deref().unwrap().contains("data-impeccable-hidden"));
     // Kept, the white layer covers the copy and it is not scored.
     assert!(!has(&flagged(&kept), "low-contrast", "#covered-copy"), "{kept:#?}");
+}
+
+#[test]
+fn a_stuck_preloader_clicks_pass_through_is_hidden_too() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/preloader-pass-through.html");
+    let mut browser = engine.launch().expect("launch");
+    let (findings, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    assert!(has(&flagged(&findings), "low-contrast", "#covered-copy"), "{findings:#?}");
+    let report = evidence.overlays.as_ref().expect("overlay report");
+    assert_eq!(report.hidden, vec![hidden("preloader", "div#preloader")]);
 }
 
 #[test]

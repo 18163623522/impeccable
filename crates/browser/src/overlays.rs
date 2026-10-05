@@ -147,8 +147,23 @@ pub fn preloader_js() -> String {
         }}
       }}
       if (!opaque) continue;
-      // On top: every probe point lands on the layer or inside it.
-      if (!points.every(([x, y]) => {{ const hit = document.elementFromPoint(x, y); return !!hit && (hit === el || el.contains(hit)); }})) continue;
+      // On top: every probe point lands on the layer or inside it. Hit
+      // testing skips a layer with `pointer-events: none` (clicks pass
+      // through while it paints), so it is made hit-testable for the probe
+      // and put back in the same task, before anything paints.
+      const passThrough = cs.pointerEvents === 'none';
+      const pe = [el.style.getPropertyValue('pointer-events'), el.style.getPropertyPriority('pointer-events')];
+      if (passThrough) el.style.setProperty('pointer-events', 'auto', 'important');
+      let onTop;
+      try {{
+        onTop = points.every(([x, y]) => {{ const hit = document.elementFromPoint(x, y); return !!hit && (hit === el || el.contains(hit)); }});
+      }} finally {{
+        if (passThrough) {{
+          if (pe[0]) el.style.setProperty('pointer-events', pe[0], pe[1]);
+          else el.style.removeProperty('pointer-events');
+        }}
+      }}
+      if (!onTop) continue;
       // Not a gate or a dialog: no control, link, frame or dialog inside.
       if (el.matches('[role=dialog], [role=alertdialog], [aria-modal=true], dialog')) continue;
       if (el.querySelector('a[href], button, input:not([type=hidden]), select, textarea, iframe, [role=button], [role=dialog], [role=alertdialog], [aria-modal=true], dialog, [contenteditable=""], [contenteditable=true]')) continue;

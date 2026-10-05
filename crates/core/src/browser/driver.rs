@@ -861,6 +861,18 @@ fn names_logo(dom: &dyn Dom, el: ElId) -> bool {
     })
 }
 
+/// A class or id token whose last word is `logo` (`logo`, `site-logo`,
+/// `brand_logo`), the name of a logo rather than of something about logos.
+fn is_named_logo(dom: &dyn Dom, el: ElId) -> bool {
+    ["id", "class"].iter().any(|attr| {
+        dom.attr(el, attr).is_some_and(|v| {
+            v.split_whitespace().any(|token| {
+                token.rsplit(['-', '_']).next().is_some_and(|w| w.eq_ignore_ascii_case("logo"))
+            })
+        })
+    })
+}
+
 fn is_nav_bar(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
     let role = dom.attr(el, "role").unwrap_or_default();
     matches!(tag, "nav" | "header") || role == "navigation" || role == "banner"
@@ -881,8 +893,9 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
     for el in dom.query_all(None, "*").unwrap_or_default() {
         let tag = tag_lower(dom, el);
         // A heading is not a brand surface, unless it is the logo itself (a
-        // type logo set as `h1.logo`).
-        if is_heading_tag(&tag) && !names_logo(dom, el) {
+        // type logo set as `h1.logo`): a class or id token that ends in the
+        // word logo. A heading about logos (`logo-gallery-title`) is not.
+        if is_heading_tag(&tag) && !is_named_logo(dom, el) {
             continue;
         }
         let Some(rect) = element_rect(dom, el) else { continue };
@@ -2433,6 +2446,17 @@ mod tests {
                 d.set_style(logo, "color", "rgb(124, 58, 237)");
             }),
             0
+        );
+        // A heading about logos is not the logo.
+        assert_eq!(
+            run(&|d, body| {
+                let title = d.add(Some(body), "h2");
+                d.set_attr(title, "class", "logo-gallery-title");
+                d.set_rect(title, 0.0, 300.0, 400.0, 40.0);
+                d.add_text(title, "Our partners");
+                d.set_style(title, "color", "rgb(124, 58, 237)");
+            }),
+            1
         );
         // A hidden label before the logotype does not set the ink.
         assert_eq!(

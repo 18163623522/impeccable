@@ -189,7 +189,17 @@ const GEOMETRY_JS: &str = r#"(() => {
   if (se && se.scrollHeight > vh + 1) return out;
   let best = null;
   let extra = 1;
-  for (const el of document.querySelectorAll('*')) {
+  // Open shadow trees included: an app shell rendered inside a custom
+  // element scrolls a frame the document's own query never reaches.
+  const all = [];
+  const visit = (scope) => {
+    for (const el of scope.querySelectorAll('*')) {
+      all.push(el);
+      if (el.shadowRoot) visit(el.shadowRoot);
+    }
+  };
+  visit(document);
+  for (const el of all) {
     const more = el.scrollHeight - el.clientHeight;
     if (more <= extra) continue;
     // `hidden` included: a smooth-scroll library moves a viewport-tall frame

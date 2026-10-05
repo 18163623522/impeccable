@@ -918,7 +918,11 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             .parent(el)
             .and_then(|p| super::dom::closest_or_none(dom, p, "main, article"))
             .is_some();
-        let logo = !local && (names_logo(dom, el) || is_named_logo(dom, el));
+        // A heading names its logo strictly (logo, wordmark, logotype); any
+        // other element counts when its name contains logo, as before. A
+        // partner's `span.wordmark` in a footer is not the site's brand.
+        let logo = !local
+            && if is_heading_tag(&tag) { is_named_logo(dom, el) } else { names_logo(dom, el) };
         let bar = !local
             && is_nav_bar(dom, el, &tag)
             && rect.width >= BRAND_BAR_MIN_WIDTH_SHARE * viewport_w;
@@ -1761,10 +1765,21 @@ fn marquee_page_form_stands(
 /// look at: text, an image, video, canvas or frame, an SVG inside it (a logo
 /// in a strip; the element being one bare SVG drawing is not content), a
 /// `url()` background on it or under it, or generated content.
+/// Whether `el` holds text a visitor sees: text outside the elements that
+/// never paint theirs (an SVG's `title`, `desc` or `metadata`, a `style`
+/// or `script`), which a decorative drawing carries for its label.
+fn shows_text(dom: &dyn Dom, el: ElId) -> bool {
+    if matches!(tag_lower(dom, el).as_str(), "title" | "desc" | "metadata" | "style" | "script" | "template") {
+        return false;
+    }
+    dom.direct_text_nodes(el).iter().any(|t| !crate::js::trim(t).is_empty())
+        || dom.children(el).into_iter().any(|k| shows_text(dom, k))
+}
+
 fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
     const MEDIA: &str = "img, picture, video, canvas, iframe, object, embed, svg, image, use";
     const MEDIA_TAGS: [&str; 8] = ["img", "picture", "video", "canvas", "iframe", "object", "embed", "marquee"];
-    if !crate::js::trim(&dom.text_content(el)).is_empty() {
+    if shows_text(dom, el) {
         return true;
     }
     if MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
@@ -2927,6 +2942,19 @@ mod tests {
                 "{name}"
             );
         }
+        // A partner's wordmark that is not a heading is not the brand.
+        assert_eq!(
+            run(&|d, body| {
+                let footer = d.add(Some(body), "footer");
+                d.set_rect(footer, 0.0, 2600.0, 1280.0, 100.0);
+                let partner = d.add(Some(footer), "span");
+                d.set_attr(partner, "class", "wordmark");
+                d.set_rect(partner, 0.0, 2620.0, 120.0, 40.0);
+                d.add_text(partner, "Partner");
+                d.set_style(partner, "color", "rgb(124, 58, 237)");
+            }),
+            1
+        );
         // A heading about logos is not the logo.
         assert_eq!(
             run(&|d, body| {
@@ -4310,6 +4338,9 @@ mod page_level_form_tests {
         let sweep = d.add(Some(pill), "span");
         d.add_selector(sweep, ".sweep");
         d.set_style(sweep, "backgroundImage", "linear-gradient(100deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 50%, rgba(255, 255, 255, 0) 100%)");
+        // A title on the looping drawing labels it; it paints nothing.
+        let label = d.add(Some(wave), "title");
+        d.add_text(label, "Decorative wave");
         assert!(details(&scan(&d), "marquee").is_empty());
 
         // What makes each one content: words in the track, an inline SVG

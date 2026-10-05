@@ -121,6 +121,12 @@ fn a_custom_checkbox_rows_label_is_not_fine_print() {
         "<div class=\"legal\"><input type=\"checkbox\"><span style=\"font-size: 10px\">I agree that my data is processed under the terms above.</span></div>\
          <div class=\"legal\"><span style=\"font-size: 10px\">Prices include VAT where it applies to the order.</span></div>",
     );
+    // A control elsewhere in the container does not make the note a label.
+    let g = scan(
+        "<div class=\"legal\"><span style=\"font-size: 10px\">Prices include VAT where it applies to the order.</span><p>Questions?</p><button>Contact us</button></div>",
+    );
+    let sev: Vec<&str> = g.iter().filter(|x| x.antipattern == "tiny-text").map(|x| x.severity.as_str()).collect();
+    assert_eq!(sev, vec!["advisory"], "{g:#?}");
     // The checkbox row's label keeps failing; the VAT note is fine print.
     let mut got: Vec<&str> = f.iter().filter(|x| x.antipattern == "tiny-text").map(|x| x.severity.as_str()).collect();
     got.sort();

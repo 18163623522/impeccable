@@ -4690,6 +4690,9 @@ mod tests {
         assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
         d.set_styles(track, &[("animationName", "pulse, slide-in"), ("animationIterationCount", "1, infinite")]);
         assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "the slide is the endless one");
+        // A prefixed transform moves the track too.
+        d.keyframes.insert("slide-in".to_string(), frames("-webkit-transform"));
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "a -webkit-transform slide");
     }
 
     #[test]

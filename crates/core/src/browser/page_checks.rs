@@ -1436,7 +1436,9 @@ fn rhythm_draws_top_edge(dom: &dyn Dom, el: ElId) -> bool {
 /// background behind it (white when none is).
 fn rhythm_band_differs_from_backdrop(dom: &dyn Dom, el: ElId) -> bool {
     let Some(band) = rhythm_painted_background(dom, el) else { return false };
-    let mut backdrop = crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0);
+    // With no fill above it, the band sits on the canvas: white, or the
+    // browser's dark canvas on a page that asks for a dark scheme only.
+    let mut backdrop = rhythm_canvas(dom);
     let mut cur = dom.parent(el);
     while let Some(c) = cur {
         if let Some(bg) = rhythm_painted_background(dom, c) {
@@ -1449,6 +1451,22 @@ fn rhythm_band_differs_from_backdrop(dom: &dyn Dom, el: ElId) -> bool {
         || (band.g - backdrop.g).abs() > 2.0
         || (band.b - backdrop.b).abs() > 2.0
         || (band.alpha_or_one() - backdrop.alpha_or_one()).abs() > 0.02
+}
+
+/// The canvas colour a page paints under everything: Chrome's dark canvas
+/// (`#121212`) when the root's `color-scheme` names dark and not light,
+/// white otherwise.
+fn rhythm_canvas(dom: &dyn Dom) -> crate::color::Rgba {
+    let scheme = dom
+        .document_element()
+        .map(|root| js::to_lower_case(&dom.style(root, "colorScheme")))
+        .unwrap_or_default();
+    let words: Vec<&str> = scheme.split_whitespace().collect();
+    if words.contains(&"dark") && !words.contains(&"light") {
+        crate::color::Rgba::new(18.0, 18.0, 18.0, 1.0)
+    } else {
+        crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0)
+    }
 }
 
 /// The outline of a box's rendered structure: tags only, a few levels deep.
@@ -4286,6 +4304,22 @@ mod tests {
         // draws its placeholder, which is not DOM text.
         let f = check_heading_rhythm_dom(&build("input"));
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_band_on_a_dark_canvas_is_measured_against_it() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        let section = d.add(Some(body), "section");
+        d.set_styles(section, &[("display", "block"), ("backgroundColor", "rgb(18, 18, 18)")]);
+        d.set_rect(section, 0.0, 0.0, 800.0, 400.0);
+        // On the default white canvas the dark section is a band with an edge.
+        assert!(rhythm_draws_bottom_edge(&d, section));
+        // On a page that asks for a dark scheme the canvas is that dark.
+        d.set_style(html, "colorScheme", "dark");
+        assert!(!rhythm_draws_bottom_edge(&d, section));
+        d.set_style(html, "colorScheme", "light dark");
+        assert!(rhythm_draws_bottom_edge(&d, section));
     }
 
     #[test]

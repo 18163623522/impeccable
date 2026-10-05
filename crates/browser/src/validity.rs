@@ -125,6 +125,8 @@ pub fn probe_js() -> String {
       for (const el of document.querySelectorAll(selector)) {{
         const cs = getComputedStyle(el);
         if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) <= 0.02) continue;
+        // An ancestor can hide it too (a wrapper at opacity 0 or display: none).
+        try {{ if (el.checkVisibility && !el.checkVisibility({{ opacityProperty: true, visibilityProperty: true }})) continue; }} catch (e) {{}}
         const r = el.getBoundingClientRect();
         const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
         const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));

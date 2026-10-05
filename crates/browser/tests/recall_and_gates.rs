@@ -260,4 +260,6 @@ fn a_press_and_hold_sheet_over_the_page_is_a_challenge() {
     assert!(err.message.contains("overlay human-press-and-hold"), "{}", err.message);
     let closed = format!("http://127.0.0.1:{port}/validity/press-and-hold-closed.html");
     engine.detect_url(&closed, &options).expect("a closed sheet leaves the page");
+    let faded = format!("http://127.0.0.1:{port}/validity/press-and-hold-faded.html");
+    engine.detect_url(&faded, &options).expect("a sheet inside a faded wrapper leaves the page");
 }

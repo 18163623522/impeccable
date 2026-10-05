@@ -466,9 +466,15 @@ fn rhythm_rendered_children(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
 
 /// An empty box that only holds space open: no text, no picture, nothing
 /// laid out inside it, nothing painted. It is part of the gap, not a block.
+/// Form controls draw what they hold (a value, a placeholder) without DOM
+/// text, so an empty one is content, not space.
+const RHYTHM_CONTROL_TAGS: &[&str] = &["input", "textarea", "select", "button", "meter", "progress"];
+
 fn rhythm_is_spacer(dom: &dyn Dom, el: ElId) -> bool {
+    let tag = tag_lower(dom, el);
     !rhythm_paints_edge(dom, el, "Bottom")
-        && !RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, el).as_str())
+        && !RHYTHM_MEDIA_TAGS.contains(&tag.as_str())
+        && !RHYTHM_CONTROL_TAGS.contains(&tag.as_str())
         && rhythm_rendered_children(dom, el).is_empty()
         && js::trim(&dom.text_content(el)).is_empty()
 }
@@ -2077,44 +2083,51 @@ mod tests {
     #[test]
     fn heading_rhythm_reads_past_a_spacer_in_a_contents_wrapper() {
         let shown = [("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static")];
-        let mut d = FakeDom::new();
-        let (_h, body) = d.with_page();
-        let sec = d.add(Some(body), "section");
-        d.set_styles(sec, &[("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("borderTopWidth", "0px"), ("boxShadow", "none")]);
-        d.set_rect(sec, 0.0, 0.0, 800.0, 2000.0);
-        let mut y = 0.0;
-        for i in 0..2 {
-            let p0 = d.add(Some(sec), "p");
-            d.add_text(p0, "Intro paragraph text that runs well past forty characters");
-            d.set_styles(p0, &shown);
-            d.set_style(p0, "fontSize", "20px");
-            d.set_rect(p0, 0.0, y, 800.0, 20.0);
-            y += 28.0;
-            let h = d.add(Some(sec), "h2");
-            d.add_text(h, &format!("Heading number {i}"));
-            d.set_styles(h, &shown);
-            d.set_style(h, "fontSize", "24px");
-            d.set_rect(h, 0.0, y, 800.0, 30.0);
-            y += 30.0;
-            let wrap = d.add(Some(sec), "div");
-            d.set_style(wrap, "display", "contents");
-            let spacer = d.add(Some(wrap), "div");
-            d.set_styles(spacer, &shown);
-            d.set_rect(spacer, 0.0, y, 800.0, 16.0);
-            y += 40.0;
-            let p1 = d.add(Some(wrap), "p");
-            d.add_text(p1, "Body paragraph");
-            d.set_styles(p1, &shown);
-            d.set_style(p1, "fontSize", "16px");
-            d.set_rect(p1, 0.0, y, 800.0, 20.0);
-            y += 400.0;
-        }
-        let f = check_heading_rhythm_dom(&d);
+        let build = |spacer_tag: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let sec = d.add(Some(body), "section");
+            d.set_styles(sec, &[("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("borderTopWidth", "0px"), ("boxShadow", "none")]);
+            d.set_rect(sec, 0.0, 0.0, 800.0, 2000.0);
+            let mut y = 0.0;
+            for i in 0..2 {
+                let p0 = d.add(Some(sec), "p");
+                d.add_text(p0, "Intro paragraph text that runs well past forty characters");
+                d.set_styles(p0, &shown);
+                d.set_style(p0, "fontSize", "20px");
+                d.set_rect(p0, 0.0, y, 800.0, 20.0);
+                y += 28.0;
+                let h = d.add(Some(sec), "h2");
+                d.add_text(h, &format!("Heading number {i}"));
+                d.set_styles(h, &shown);
+                d.set_style(h, "fontSize", "24px");
+                d.set_rect(h, 0.0, y, 800.0, 30.0);
+                y += 30.0;
+                let wrap = d.add(Some(sec), "div");
+                d.set_style(wrap, "display", "contents");
+                let spacer = d.add(Some(wrap), spacer_tag);
+                d.set_styles(spacer, &shown);
+                d.set_rect(spacer, 0.0, y, 800.0, 16.0);
+                y += 40.0;
+                let p1 = d.add(Some(wrap), "p");
+                d.add_text(p1, "Body paragraph");
+                d.set_styles(p1, &shown);
+                d.set_style(p1, "fontSize", "16px");
+                d.set_rect(p1, 0.0, y, 800.0, 20.0);
+                y += 400.0;
+            }
+            d
+        };
+        let f = check_heading_rhythm_dom(&build("div"));
         assert_eq!(f.len(), 2, "{f:?}");
         assert_eq!(
             f[0].finding.detail,
             "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
         );
+        // A borderless input in the spacer's place is the block below: it
+        // draws its placeholder, which is not DOM text.
+        let f = check_heading_rhythm_dom(&build("input"));
+        assert!(f.is_empty(), "{f:?}");
     }
 
     #[test]

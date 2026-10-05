@@ -4878,6 +4878,9 @@ mod rendered_text_tests {
         d.add_text(q, "  indented  ");
         d.set_style(q, "whiteSpace", "pre");
         assert_eq!(rendered_text_len(&d, q), "  indented  ".len());
+        // Under `pre-wrap` the spaces at the end of the line hang.
+        d.set_style(q, "whiteSpace", "pre-wrap");
+        assert_eq!(rendered_text_len(&d, q), "  indented".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

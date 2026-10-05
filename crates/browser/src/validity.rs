@@ -30,8 +30,10 @@ use serde_json::{json, Value};
 /// treated as content even when its title or a marker looks like a challenge.
 pub const SMALL_PAGE_CHARS: u64 = 3000;
 
-/// A small page with a known consent manager showing is a consent wall when
-/// fewer than this many visible characters lie outside the manager's roots,
+/// A page with a known consent manager showing is a consent wall when fewer
+/// than this many visible characters lie outside the manager's roots (a
+/// preference center alone can run past [`SMALL_PAGE_CHARS`], so the page's
+/// total is not the test),
 /// nothing else shows outside them (no form control and no image, video or
 /// frame of 10,000 square pixels or more, see [`crate::consent`]), and the
 /// manager holds at least [`CONSENT_WALL_MIN_CHARS`] characters itself.
@@ -329,7 +331,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
             evidence: vec![format!("HTTP {status}")],
         };
     }
-    if consent_wall && small && !probe.consent.is_empty() {
+    if consent_wall && !probe.consent.is_empty() {
         let outside = probe.text_chars.saturating_sub(probe.consent_chars);
         if outside < CONSENT_WALL_OUTSIDE_CHARS
             && probe.consent_outside == 0
@@ -395,6 +397,24 @@ mod tests {
         assert!(v.error_message().unwrap().starts_with("the page is a consent wall"));
         // A scan that keeps the banners reads the wall instead.
         assert_eq!(classify_with(Some(&resp(200, &[])), &p, false), PageValidity::Ok);
+    }
+
+    #[test]
+    fn a_preference_center_longer_than_a_small_page_is_still_a_wall() {
+        // A OneTrust preference center lists every purpose and vendor: more
+        // text than a challenge page holds, and still nothing but the dialog.
+        let mut p = probe("Example", 5400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 5392;
+        assert!(matches!(
+            classify(Some(&resp(200, &[])), &p),
+            PageValidity::Blocked { kind: BlockKind::ConsentWall, .. }
+        ));
+        // The same dialog over a long page is the page.
+        let mut p = probe("Example", 9400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 5392;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
     }
 
     #[test]

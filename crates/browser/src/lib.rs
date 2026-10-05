@@ -1345,6 +1345,45 @@ fn reveal_sweep(page: &mut Page<'_>) -> Result<(), CdpError> {
     Ok(())
 }
 
+/// The findings the analytic and canvas analyses give, and the routed
+/// selectors whose element verdict they replace. A selector the element pass
+/// already reported keeps that report, except where the element pass handed
+/// the text over (`routed`): there an analysis that resolved it (`pass` or
+/// `fail`) has read what the walk could not, so its verdict replaces the
+/// element pass's, a `fail` with its own finding and a `pass` with none.
+fn analysis_findings(
+    browser_analyses: &[Value],
+    existing_low_contrast: &[String],
+    routed: &[String],
+) -> (Vec<RawResult>, Vec<String>) {
+    let is_routed = |sel: Option<&str>| routed.iter().any(|s| Some(s.as_str()) == sel);
+    let findings = browser_analyses
+        .iter()
+        .filter(|r| {
+            let sel = r.get("selector").and_then(Value::as_str);
+            truthy(r.get("finding"))
+                && (is_routed(sel) || !existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel))
+        })
+        .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
+        .map(|(f, selector)| RawResult {
+            selector,
+            severity: js_str(f.get("severity")),
+            ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
+        })
+        .collect();
+    let mut superseded: Vec<String> = Vec::new();
+    for r in browser_analyses {
+        let sel = r.get("selector").and_then(Value::as_str);
+        let resolved = matches!(r.get("status").and_then(Value::as_str), Some("fail") | Some("pass"));
+        if let Some(s) = sel.filter(|s| resolved && !s.is_empty() && is_routed(Some(s))) {
+            if !superseded.iter().any(|x| x == s) {
+                superseded.push(s.to_string());
+            }
+        }
+    }
+    (findings, superseded)
+}
+
 /// `runVisualContrastFallback(page, serializedGroups, options, profile,
 /// target)`: the JS post-processing of the analytic/canvas analyses
 /// (`analyzeVisualContrast`, computed natively in [`snapshot_engine`]) plus the
@@ -1382,21 +1421,8 @@ fn run_visual_contrast_fallback(
         .map(String::from)
         .collect();
 
-    let mut findings: Vec<RawResult> = browser_analyses
-        .iter()
-        .filter(|r| {
-            truthy(r.get("finding"))
-                && !existing_low_contrast
-                    .iter()
-                    .any(|s| Some(s.as_str()) == r.get("selector").and_then(Value::as_str))
-        })
-        .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
-        .map(|(f, selector)| RawResult {
-            selector,
-            severity: js_str(f.get("severity")),
-            ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
-        })
-        .collect();
+    let (mut findings, mut superseded) =
+        analysis_findings(browser_analyses, &existing_low_contrast, &routed);
 
     // JS `candidates = browserAnalyses.length ? browserAnalyses : collect(...)`.
     // An analysis is the candidate spread with its result, so the analyses are
@@ -1437,7 +1463,6 @@ fn run_visual_contrast_fallback(
             "document.querySelectorAll('video').forEach(v => { try { v.pause(); } catch (e) {} })",
         );
     }
-    let mut superseded: Vec<String> = Vec::new();
     let mut routed_spent = std::time::Duration::ZERO;
     let mut routed_misses = 0usize;
     for candidate in filtered {
@@ -1508,6 +1533,28 @@ fn truthy(v: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_resolved_analysis_replaces_a_routed_element_verdict() {
+        let analyses = vec![
+            // Routed (the walk never read the photo) and resolved as a fail.
+            json!({"selector": "#photo-copy", "routed": "unread layer", "status": "fail",
+                   "finding": {"id": "low-contrast", "snippet": "browser contrast 1.2:1", "severity": "warning"}}),
+            // Routed and resolved as a pass: no finding of its own.
+            json!({"selector": "#photo-ok", "routed": "unread layer", "status": "pass"}),
+            // Not routed, already reported by the element pass: that stays.
+            json!({"selector": "#plain", "status": "fail",
+                   "finding": {"id": "low-contrast", "snippet": "browser contrast 2.0:1", "severity": "warning"}}),
+            // Routed but unresolved: the pixel pass decides.
+            json!({"selector": "#vector", "routed": "unread layer", "status": "unresolved"}),
+        ];
+        let existing: Vec<String> = ["#photo-copy", "#photo-ok", "#plain", "#vector"].iter().map(|s| s.to_string()).collect();
+        let routed: Vec<String> = ["#photo-copy", "#photo-ok", "#vector"].iter().map(|s| s.to_string()).collect();
+        let (findings, superseded) = analysis_findings(&analyses, &existing, &routed);
+        let sels: Vec<&str> = findings.iter().filter_map(|f| f.selector.as_deref()).collect();
+        assert_eq!(sels, vec!["#photo-copy"]);
+        assert_eq!(superseded, vec!["#photo-copy", "#photo-ok"]);
+    }
 
     #[test]
     fn ad_tech_errors_never_take_a_counted_errors_slot() {

@@ -529,12 +529,26 @@ const FOOTNOTE_MARKS: &[char] = &['*', '†', '‡', '§', '¹', '²', '³', '�
 
 /// Whether a class or id names fine print: a marker as a whole token
 /// (`legal`, `copyright-notice`, `fine-print`, `footnote_2`, plural
-/// `disclaimers`), never a part of a longer word (`illegal`,
-/// `testimonials`).
+/// `disclaimers`, camelCase `legalNotice`), never a part of a longer word
+/// (`illegal`, `testimonials`).
 fn has_fine_print_marker(class_or_id: &str) -> bool {
-    let lower = class_or_id.to_lowercase();
-    lower.split_whitespace().any(|token| {
-        let words: Vec<&str> = token.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+    class_or_id.split_whitespace().any(|token| {
+        // Words split at `-`, `_` and a lowercase-to-uppercase step.
+        let mut spaced = String::with_capacity(token.len() + 4);
+        let mut prev_lower = false;
+        for ch in token.chars() {
+            if ch == '-' || ch == '_' {
+                spaced.push(' ');
+                prev_lower = false;
+                continue;
+            }
+            if ch.is_uppercase() && prev_lower {
+                spaced.push(' ');
+            }
+            prev_lower = ch.is_lowercase() || ch.is_ascii_digit();
+            spaced.extend(ch.to_lowercase());
+        }
+        let words: Vec<&str> = spaced.split_whitespace().collect();
         FINE_PRINT_MARKERS.iter().any(|m| {
             // A marker of two words (`fine-print`) is two words in a row.
             // The last word may be plural (`disclaimers`, `footnotes`).
@@ -610,10 +624,16 @@ pub fn is_fine_print<N: ContextNode>(el: &N) -> bool {
         k.tag() == "input"
             && k.attr("type").is_some_and(|t| matches!(t.trim().to_ascii_lowercase().as_str(), "checkbox" | "radio"))
     };
+    // A sibling with no text of its own that holds a checkbox (a styled
+    // wrapper around the input) labels it the same way.
+    fn wraps_check<N: ContextNode>(k: &N, check: &impl Fn(&N) -> bool, depth: usize) -> bool {
+        check(k) || (depth > 0 && k.children().iter().any(|c| wraps_check(c, check, depth - 1)))
+    }
+    let check_beside = |k: &N| check(k) || (collapse(&k.text()).is_empty() && wraps_check(k, &check, 3));
     let beside = el.parent().is_some_and(|p| {
         let kids = p.children();
         kids.iter().position(|k| k.key() == el.key()).is_some_and(|i| {
-            (i > 0 && check(&kids[i - 1])) || kids.get(i + 1).is_some_and(|k| check(k))
+            (i > 0 && check_beside(&kids[i - 1])) || kids.get(i + 1).is_some_and(|k| check_beside(k))
         })
     });
     if el.children().iter().any(control) || beside {
@@ -1065,6 +1085,10 @@ mod tests {
         assert!(has_fine_print_marker("copyright_notice"));
         assert!(!has_fine_print_marker("illegal-moves"));
         assert!(!has_fine_print_marker("testimonials"));
+        assert!(has_fine_print_marker("legalNotice"));
+        assert!(has_fine_print_marker("smallPrint"));
+        assert!(has_fine_print_marker("FinePrint"));
+        assert!(!has_fine_print_marker("illegalMoves"));
         assert_eq!(read_transform("scale(0.75)").uniform_scale, Some(0.75));
         assert_eq!(read_transform("matrix(1, 0, 0, 1, -5.4, 0)").uniform_scale, Some(1.0));
         assert_eq!(read_transform("scale(0.7, 1)").uniform_scale, None);
@@ -1266,6 +1290,11 @@ mod tests {
         let boxed = body.add("p").class("legal").text("I agree to the terms.");
         boxed.add("input");
         assert!(!is_fine_print(&boxed));
+        // A checkbox wrapped in a styled box beside the statement.
+        let row = body.add("div").class("legal");
+        row.add("span").class("box").add("input").attr("type", "checkbox");
+        let statement = row.add("span").text("I agree to the terms of sale.");
+        assert!(!is_fine_print(&statement));
         let required = body.add("p").text("* Indicates a required field in this form");
         assert!(!is_fine_print(&required));
         let h = body.add("h3").class("legal").text("Legal notice");

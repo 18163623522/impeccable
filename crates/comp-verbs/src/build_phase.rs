@@ -57,7 +57,7 @@ fn abs(io: &Io, p: &str) -> PathBuf {
     }
 }
 
-fn self_cmd(io: &Io) -> String {
+pub(crate) fn self_cmd(io: &Io) -> String {
     let value = io.env.get("IMPECCABLE_SELF").filter(|v| !v.is_empty()).cloned().unwrap_or_else(|| "impeccable".to_string());
     // The skill launcher exports a raw filename; the npm shim exports a
     // command prefix such as `npx impeccable`. Quote only a complete filename,
@@ -171,6 +171,8 @@ struct Gate {
     // plates: per-plate rows
     plates: Option<Vec<Value>>,
     error: bool,
+    // a failure no quoted --force may waive (the approved comp cannot be kept)
+    unforceable: bool,
 }
 
 impl Gate {
@@ -198,6 +200,7 @@ impl Gate {
             approved: None,
             plates: None,
             error: false,
+            unforceable: false,
         }
     }
     /// The subset stored on the phase (JS: `const { plates, ...gateRecord } = gate`).
@@ -325,6 +328,13 @@ fn gate_comps(io: &Io) -> Gate {
     g
 }
 
+/// The approved-comp refusal for the measured spec, when there is one. Every
+/// entry point that measures against the comp runs this before measuring.
+fn comp_refusal(io: &Io) -> Option<String> {
+    let spec = load_spec(&abs(io, SPEC_PATH))?;
+    crate::approved_comp::build_issue(io, &spec, &self_cmd(io))
+}
+
 fn spec_regions(spec: &Value) -> Vec<Value> {
     spec.get("regions").and_then(Value::as_array).cloned().unwrap_or_default()
 }
@@ -337,6 +347,7 @@ fn gate_spec(io: &Io, state: &Value) -> Gate {
             "no spec at {SPEC_PATH}: run comp-spec.mjs --comp {comp} --grid, name the regions, then --regions regions.json"
         )]);
     };
+    if let Some(why) = crate::approved_comp::build_issue(io, &spec, &s) { return Gate::fail(vec![why]); }
     if spec["draft"] == true { return Gate::fail(vec!["automatic region draft is not a measured element map; refine it with comp-spec --regions".into()]); }
     if let Some(issue) = crate::comp_spec::region_source_issue(io,&spec) { return Gate::fail(vec![issue]); }
     let regions = spec_regions(&spec);
@@ -514,6 +525,11 @@ fn gate_plates(io: &Io) -> Gate {
 
 fn gate_plates_for(io: &Io, spec: &Value, only_id: Option<&str>) -> Gate {
     let s = self_cmd(io);
+    if let Some(why) = crate::approved_comp::build_issue(io, spec, &s) {
+        let mut gate = Gate::fail(vec![why]);
+        gate.plates = Some(vec![]);
+        return gate;
+    }
     if let Some(issue) = crate::comp_spec::region_source_issue(io,spec) { return Gate::fail(vec![issue]); }
     let regions = spec_regions(&spec);
     let raster_regions: Vec<Value> = regions.iter().filter(|r| r.get("medium").and_then(Value::as_str) == Some("raster")
@@ -1480,6 +1496,11 @@ fn gate_hero(
     if let Err(e) = unavailable_report(io, out_dir, &pending, "hero") {
         return Gate::fail(vec![format!("cannot persist hero gate evidence: {e}")]);
     }
+    if let Some(why) = comp_refusal(io) {
+        let gate = Gate::fail(vec![why]);
+        let _ = unavailable_report(io, out_dir, &gate, "hero");
+        return gate;
+    }
     let native = match prepare_native_capture(io, state, artifact, renderer, EntryStage::Hero) {
         Ok(value) => value,
         Err(gate) => {
@@ -1665,10 +1686,15 @@ fn region_still_accepted(v: &Value) -> bool {
 /// Code regions (text, control, chrome) an accepted first-viewport review
 /// covers: the current capture still renders them as the approved one did.
 fn human_accepted_regions(human: Option<&Value>, regions: &[Value]) -> std::collections::HashSet<String> {
-    let reviewed = human.and_then(|h| h["comparison"]["regions"].as_array()).cloned().unwrap_or_default();
+    let rendered = human_rendered_as_accepted(human);
     regions.iter().filter(|r| matches!(r["kind"].as_str(), Some("text" | "control" | "chrome")))
-        .filter(|r| reviewed.iter().any(|v| v["id"] == r["id"] && region_still_accepted(v)))
-        .filter_map(|r| r["id"].as_str().map(String::from)).collect()
+        .filter_map(|r| r["id"].as_str().filter(|id| rendered.contains(*id)).map(String::from)).collect()
+}
+
+/// Regions of any kind the current capture still renders as the approved screenshot did.
+fn human_rendered_as_accepted(human: Option<&Value>) -> std::collections::HashSet<String> {
+    human.and_then(|h| h["comparison"]["regions"].as_array()).into_iter().flatten()
+        .filter(|v| region_still_accepted(v)).filter_map(|v| v["id"].as_str().map(String::from)).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1863,13 +1889,26 @@ fn gate_hero_inner(io: &Io, state: &mut Value, build_path: &str, min: f64, out_d
             }
         }
     }
+    // A region the user's accepted first viewport lacks too (the approved screenshot
+    // renders it as the current capture does) was seen and accepted without it.
+    let viewport_accepted = human_accepted_viewport(human);
+    let as_accepted = human_rendered_as_accepted(human);
+    // Missing plates the accepted screenshot lacks too: worded as a question once the reasons are final.
+    let mut plate_questions: Vec<(String, String)> = Vec::new();
     for id in &missing_ids {
         if let Some(r) = regions.iter().find(|r| r.get("id").and_then(Value::as_str) == Some(id.as_str())) {
             if r.get("verdict").and_then(Value::as_str) == Some("missing") {
-                push_region_blocker(&mut reasons, &mut region_reasons, id, format!(
+                let message = format!(
                     "region {id} is missing (detail {}%, structure {}%): the comp shows material the build does not",
                     pct0(rscore(r, "detail")), pct0(rscore(r, "structure"))
-                ));
+                );
+                // Code regions (text, control, chrome) carry: the user judged that drawing by eye.
+                if waive(id, &format!("{message}; the first viewport the user accepted lacks it too, so the acceptance covers it"), &mut advisories) { continue; }
+                // A produced plate must ship, so its absence stays material; when the accepted
+                // screenshot already lacks it, restoring cannot clear it, so the user decides.
+                let raster = matches!(r.get("kind").and_then(Value::as_str), Some("plate" | "image" | "texture"));
+                if raster && viewport_accepted && as_accepted.contains(id) { plate_questions.push((id.clone(), message.clone())); }
+                push_region_blocker(&mut reasons, &mut region_reasons, id, message);
                 material.push(reasons.last().unwrap().clone());
             }
         }
@@ -2111,7 +2150,6 @@ fn gate_hero_inner(io: &Io, state: &mut Value, build_path: &str, min: f64, out_d
     let region_dir = format!("{out_dir}/regions");
     // The user accepted this first viewport (the approved screenshot is the current
     // capture): the numeric fight is over. Every non-material reason becomes an advisory.
-    let viewport_accepted = human_accepted_viewport(human);
     if viewport_accepted {
         let (kept, numeric): (Vec<String>, Vec<String>) = reasons.into_iter().partition(|r| material.contains(r));
         reasons = kept;
@@ -2131,9 +2169,26 @@ fn gate_hero_inner(io: &Io, state: &mut Value, build_path: &str, min: f64, out_d
             None => advisories.insert(0, format!("(advisory) {lapse}")),
         }
     }
+    // Restoring cannot clear a plate the accepted screenshot lacks too, so the user decides.
+    // Force closes the whole gate, so it is offered only when nothing else blocks.
+    if !plate_questions.is_empty() {
+        let others = reasons.iter().filter(|r| !plate_questions.iter().any(|(_, m)| m == *r)).count();
+        for (id, plain) in &plate_questions {
+            let asked = if others == 0 {
+                format!("{plain}. The first viewport the user accepted already lacks it, so restoring what they accepted cannot clear this. Stop iterating and ask the user: place the plate at its box (the page then no longer matches the accepted screenshot, and the readings apply again until it passes), or keep the first viewport without it. Keeping it downgrades the comp, so it takes their words saying so, quoted in {s} build-phase advance --force --reason (for example: the user said: \"the plate does not need to match\"); force refuses any other reason.")
+            } else {
+                format!("{plain}. The first viewport the user accepted already lacks it, so restoring what they accepted cannot clear this. Clear the other blocking reasons first: once this plate is all that blocks, ask the user whether to place it at its box or keep the first viewport without it; force closes the whole gate, so it is never the answer while anything else blocks.")
+            };
+            for r in reasons.iter_mut().filter(|r| *r == plain) { *r = asked.clone(); }
+            for m in material.iter_mut().filter(|m| *m == plain) { *m = asked.clone(); }
+            if let Some(rows) = region_reasons.get_mut(id).and_then(Value::as_array_mut) {
+                for m in rows.iter_mut().filter(|m| m.as_str() == Some(plain.as_str())) { *m = json!(asked.clone()); }
+            }
+        }
+    }
     if let Some(h) = human {
         report["humanHeroReview"] = json!({"proof": h["proof"], "comparison": h["comparison"], "acceptedRegions": waived, "viewportAccepted": viewport_accepted,
-            "scope": if viewport_accepted { "first viewport accepted: overall bar, palette and every numeric reading are advisories; material vetoes retained" } else { "contradicted readings on text, control and chrome regions; material vetoes retained" }});
+            "scope": if viewport_accepted { "first viewport accepted: overall bar, palette and every numeric reading are advisories; text, control and chrome regions it renders as accepted carry, missing ones included; material vetoes retained" } else { "contradicted, missing and numeric readings on text, control and chrome regions that render as accepted; material vetoes retained" }});
     }
     let mut g = Gate::blank();
     g.ok = reasons.is_empty();
@@ -2265,7 +2320,7 @@ fn hero_loop_verdict(state: &mut Value, gate: &Gate, artifact_path: &str, io: &I
         } else { "The hero gate has failed three attempts in a row." };
         if viewport_accepted {
             // The review is closed once accepted: asking for another would loop.
-            return Some(format!("{lead} The user already accepted a first viewport, and that review is closed. Restore what they accepted: while the capture matches the approved screenshot, the overall bar, the palette check and every numeric reading are advisories. Until then the readings below apply; a missing or unreferenced plate, an SVG illustration, an organic clip, a clipped plate, invented ink and failed rendered presence block either way."));
+            return Some(format!("{lead} The user already accepted a first viewport, and that review is closed. Restore what they accepted: while the capture matches the approved screenshot, the overall bar, the palette check, every numeric reading and any text, control or chrome region the accepted screenshot also lacks are advisories. Until then the readings below apply; a missing or unreferenced plate, an SVG illustration, an organic clip, a clipped plate, invented ink and failed rendered presence block either way, and a plate the accepted screenshot itself lacks is a question for the user, which its reason spells out."));
         }
         return Some(format!("{lead} Stop iterating and present the first-viewport review (the assembled hero, stage hero, in component-review.md) so the user judges the page in context. An accepted review of this capture turns the overall bar, the palette check and every numeric reading into advisories; a missing or unreferenced plate, an SVG illustration, a clipped plate and invented ink still block. The blocking reasons below still apply."));
     }
@@ -2322,6 +2377,11 @@ fn gate_responsive(io: &Io, state: &mut Value, min: f64, out_dir: &str, renderer
     let pending = Gate::fail(vec!["responsive comparison has not completed".into()]);
     if let Err(e) = unavailable_report(io, out_dir, &pending, "responsive") {
         return Gate::fail(vec![format!("cannot persist responsive gate evidence: {e}")]);
+    }
+    if let Some(why) = comp_refusal(io) {
+        let gate = Gate::fail(vec![why]);
+        let _ = unavailable_report(io, out_dir, &gate, "responsive");
+        return gate;
     }
     let native=match prepare_native_capture(io,state,None,renderer,EntryStage::Responsive) {Ok(value)=>value,Err(gate)=>{let _=unavailable_report(io,out_dir,&gate,"responsive");return gate;}};
     let mut gate = gate_responsive_inner(io, state, min, out_dir, native.as_ref());
@@ -2471,11 +2531,18 @@ fn gate_responsive_inner(io: &Io, state: &mut Value, min: f64, out_dir: &str, na
             pct0(overall), pct0(min)
         ));
     }
+    let mut accepted_ids: Vec<Value> = Vec::new();
     for (id, message) in missing_reasons {
+        // A text, control or chrome region the accepted first viewport lacks too, and
+        // that the desktop frame renders as that screenshot does, was accepted without it.
+        if carried.contains(&id) {
+            advisories.push(format!("(advisory, accepted in the first-viewport review) {message}; the first viewport the user accepted lacks it too, so the acceptance covers it"));
+            accepted_ids.push(json!(id));
+            continue;
+        }
         push_region_blocker(&mut reasons, &mut region_reasons, &id, message);
     }
     let contradicted_direction: Vec<Value> = regions.iter().filter(|r| r.get("verdict").and_then(Value::as_str) == Some("contradicted") && matches!(r.get("kind").and_then(Value::as_str), Some("text" | "control"))).cloned().collect();
-    let mut accepted_ids: Vec<Value> = Vec::new();
     for r in &contradicted_direction {
         let id = r["id"].as_str().unwrap_or("");
         let message = format!("at desktop width, region {id} ({}) is contradicted (structure {}%)", r["kind"].as_str().unwrap_or(""), pct0(rscore(r, "structure")));
@@ -2586,7 +2653,21 @@ struct GateOpts {
 
 fn run_gate(io: &Io, state: &mut Value, phase: &str, opts: &GateOpts, organic_scan: OrganicScan, renderer: Option<&dyn EntryRenderer>) -> Gate {
     match phase {
-        "comps" => gate_comps(io),
+        "comps" => {
+            let mut gate = gate_comps(io);
+            // The approval fixes the reference: keep the engine's own copy now
+            // (a quoted --force closes on the approved comp too), and refuse to
+            // close on an approval that cannot be kept.
+            if let Some(approved) = gate.approved.clone() {
+                let failure = match crate::approved_comp::keep(io, &approved) {
+                    Ok(Some(_)) => None,
+                    Ok(None) => Some(format!("the approved comp {approved} is not a decodable PNG, WebP or JPEG image, so it cannot be kept as the fixed reference; approve a readable comp")),
+                    Err(e) => Some(format!("{e}; make {BUILD_DIR} writable and advance again")),
+                };
+                if let Some(why) = failure { gate.ok = false; gate.unforceable = true; gate.reasons.push(why); }
+            }
+            gate
+        }
         "spec" => gate_spec(io, state),
         "plates" => gate_plates(io),
         "hero" => {
@@ -2595,7 +2676,8 @@ fn run_gate(io: &Io, state: &mut Value, phase: &str, opts: &GateOpts, organic_sc
             gate_hero(io, state, &build_path, min, ".impeccable/review/diff/hero", opts.artifact.as_deref(), organic_scan, renderer)
         }
         "responsive" => gate_responsive(io, state, opts.min.unwrap_or(RESPONSIVE_MIN), ".impeccable/review/diff/desktop", renderer),
-        _ => Gate::ok("no mechanical gate".into()),
+        // No measurement here, but the build still stands on the approved comp.
+        _ => match comp_refusal(io) { Some(why) => Gate::fail(vec![why]), None => Gate::ok("no mechanical gate".into()) },
     }
 }
 
@@ -2603,6 +2685,12 @@ fn run_gate(io: &Io, state: &mut Value, phase: &str, opts: &GateOpts, organic_sc
 /// current spec. A hosted review lives in the host's store: the host names its trusted
 /// session directories, and the gate fails closed without them.
 fn plan_review_refusal(io: &Io) -> Option<String> {
+    // A spec with no plate and no code region to decide on has nothing to review;
+    // `component-review plan` says so and writes no packet, so demanding an
+    // acceptance here would deadlock the build on a review that cannot exist.
+    if !impeccable_context::component_review::plan::spec_needs_review(&io.cwd) {
+        return None;
+    }
     let s = self_cmd(io);
     if let Some(tool) = io.env("IMPECCABLE_COMPONENT_REVIEW_TOOL") {
         let Some(named) = io.env("IMPECCABLE_COMPONENT_REVIEW_SESSIONS") else {
@@ -2700,6 +2788,14 @@ fn advance(io: &Io, state: &mut Value, force: bool, reason: Option<&str>, opts: 
         // The same spec-change gate `record hero` applies: a reclassified region after
         // the plates closed reopens the plan review before the hero can close.
         if let Some(why) = hero_plan_review_refusal(io, state) { gate.ok = false; gate.reasons.push(why); }
+    }
+    if !gate.ok && force && gate.unforceable {
+        if let Some(p) = state.pointer_mut(&format!("/phases/{phase}")).and_then(|p| p.as_object_mut()) {
+            p.insert("status".into(), json!("open"));
+        }
+        let mut reasons = gate.reasons.clone();
+        reasons.push("--force refused: a quoted downgrade can relax the comp round, but never close it on an approved comp the engine cannot keep as the fixed reference; fix the reason above and advance again".into());
+        return AdvanceResult { ok: false, phase, next: None, reasons, worst_crops: gate.worst_crops, advisories: gate.advisories, side_by_side: gate.side_by_side, forced: false, gate_summary: gate.summary };
     }
     if !gate.ok && force && !force_allowed(reason) {
         if let Some(p) = state.pointer_mut(&format!("/phases/{phase}")).and_then(|p| p.as_object_mut()) {
@@ -3185,7 +3281,7 @@ pub fn run_with_renderer(argv: &[String],io: &mut Io,organic_scan: OrganicScan,r
     let cmd = argv.first().map(String::as_str);
     if cmd.is_none() || flag(argv, "help") {
         io.out("CANDIDATE CHECK: build-phase check-plate <region-id> --candidate <png> [--json] validates a separate file with the normal plate gate; never replaces the selected asset, records approval, or advances the phase.\n");
-        io.err("usage: build-phase.mjs start --comp <png> [--breakpoint WxH] [--artifact <entry file>] [--session-id <id>] | status [--json] | completion [--session-id <id>] | advance [--force --reason \"...\"] | record hero --build <png> | scaffold | note \"<text>\" | finish --disposition <word>\n");
+        io.err("usage: build-phase.mjs start --comp <png> [--breakpoint WxH] [--artifact <entry file>] [--session-id <id>] | status [--json] | completion [--session-id <id>] | advance [--force --reason \"...\"] | record hero --build <png> | scaffold | note \"<text>\" | finish --disposition <word> | restore-comp\n");
         return 1;
     }
     let cmd = cmd.unwrap();
@@ -3218,6 +3314,11 @@ pub fn run_with_renderer(argv: &[String],io: &mut Io,organic_scan: OrganicScan,r
             for reason in &gate.reasons { io.out(&format!("  - {reason}\n")); }
         }
         return if gate.ok { 0 } else { 2 };
+    }
+    if cmd == "restore-comp" {
+        let (message, code) = crate::approved_comp::restore(io);
+        if code == 0 { io.out(&message); } else { io.err(&message); }
+        return code;
     }
     if cmd == "completion" {
         let state = load_state(io);
@@ -3264,6 +3365,20 @@ pub fn run_with_renderer(argv: &[String],io: &mut Io,organic_scan: OrganicScan,r
                 io.out(&format!("{}\n", render_status(io, existing)));
                 return 0;
             }
+        }
+        match comp {
+            Some(c) => {
+                if let Some(why) = crate::approved_comp::restart_refusal(io, c, &self_cmd(io)) {
+                    io.err(&format!("build-phase: start refused: {why}\n"));
+                    return 2;
+                }
+                if let Err(e) = crate::approved_comp::keep(io, c) {
+                    io.err(&format!("build-phase: start refused: {e}; make {BUILD_DIR} writable and start again\n"));
+                    return 1;
+                }
+            }
+            // A new comp round: the comp it approves is kept when the comps gate closes.
+            None => crate::approved_comp::forget(io),
         }
         let mut state = new_state(comp, breakpoint.as_deref(), arg(argv, "artifact"), direction);
         if io.env("IMPECCABLE_NATIVE_CAPTURE")==Some("1") {state["capturePolicy"]=json!("native-html-v1");}
@@ -3431,6 +3546,12 @@ pub fn run_with_renderer(argv: &[String],io: &mut Io,organic_scan: OrganicScan,r
                 return 1;
             }
             let disposition = disposition.unwrap();
+            if disposition == "ship" {
+                if let Some(why) = comp_refusal(io) {
+                    io.err(&format!("build-phase: finish --disposition ship refused: {why}\n"));
+                    return 2;
+                }
+            }
             let open_before = crate::completion::open_phases(&state, false);
             if disposition == "ship" && !open_before.is_empty() {
                 let phase = state.get("phase").and_then(Value::as_str).unwrap_or("");

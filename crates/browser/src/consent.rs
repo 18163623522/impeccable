@@ -219,8 +219,11 @@ const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.qu
   };
   const showing = el => {
     if (!el || !el.isConnected) return false;
+    // A hidden or transparent root hides everything under it, but a root at
+    // `visibility: hidden` does not: a child at `visibility: visible`
+    // paints, so the walk below still looks at it.
     try {
-      if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return false;
+      if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true })) return false;
     } catch (e) {}
     if (boxShows(el)) return true;
     for (const scope of [el, el.shadowRoot]) {
@@ -235,7 +238,9 @@ const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.qu
 /// are showing), `consentChars` (the visible text inside those roots, shadow
 /// roots included), `consentShadowChars` (the part of it `body.innerText`
 /// does not see: shadow-root text, and a root outside `<body>`),
-/// `consentFrames` (sizable frames inside those roots) and
+/// `consentPageShadowChars` (visible text in the page's own open shadow
+/// roots, outside those roots), `consentFrames` (sizable frames inside
+/// those roots) and
 /// `consentOutside` (visible form controls and sizable media outside them,
 /// counted up to 20).
 pub fn probe_fragment() -> String {
@@ -292,6 +297,18 @@ pub fn probe_fragment() -> String {
   // {media_px} square pixels. A sign-in form or an image-first page has
   // little text of its own and is still a page.
   let consentOutside = 0;
+  // `consentPageShadowChars` is the visible text in the page's own open
+  // shadow roots (a web-component app), which `body.innerText` does not see
+  // either: it counts as text outside the managers.
+  let consentPageShadowChars = 0;
+  if (consentRoots.length && document.body) {{
+    const hosts = document.body.querySelectorAll('*');
+    for (let i = 0; i < hosts.length && i < 30000; i++) {{
+      const host = hosts[i];
+      if (!host.shadowRoot || consentRoots.some(r => r.contains(host))) continue;
+      for (const child of host.shadowRoot.children) if (boxShows(child)) consentPageShadowChars += visibleText(child);
+    }}
+  }}
   if (consentRoots.length) {{
     const inside = el => consentRoots.some(r => r.contains(el));
     for (const el of q({controls})) {{

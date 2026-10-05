@@ -147,6 +147,7 @@ pub fn probe_js() -> String {
     consent,
     consentChars,
     consentShadowChars,
+    consentPageShadowChars,
     consentFrames,
     consentOutside,
   }};
@@ -177,6 +178,9 @@ pub struct PageProbe {
     /// `body.innerText`) does not see: shadow-root text, and a root outside
     /// `<body>`.
     pub consent_shadow_chars: u64,
+    /// Visible text in the page's own open shadow roots, outside the
+    /// managers' roots: page text `text_chars` does not see.
+    pub consent_page_shadow_chars: u64,
     /// Sizable frames inside those roots: a message drawn in an iframe,
     /// whose text the page cannot read.
     pub consent_frames: u64,
@@ -206,6 +210,11 @@ impl PageProbe {
             consent_chars: v.get("consentChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
             consent_outside: v.get("consentOutside").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
             consent_shadow_chars: v.get("consentShadowChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
+            consent_page_shadow_chars: v
+                .get("consentPageShadowChars")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0)
+                .max(0.0) as u64,
             consent_frames: v.get("consentFrames").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
         }
     }
@@ -227,6 +236,9 @@ impl PageProbe {
         }
         if self.consent_shadow_chars > 0 {
             v["consentShadowChars"] = json!(self.consent_shadow_chars);
+        }
+        if self.consent_page_shadow_chars > 0 {
+            v["consentPageShadowChars"] = json!(self.consent_page_shadow_chars);
         }
         // Named only when one shows, so a page with none records what it did
         // before overlays were probed.
@@ -432,7 +444,8 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
         // shadow root, and the manager's count includes it: both are read
         // over the same text here, while the challenge checks above keep the
         // page's own count.
-        let total = probe.text_chars + probe.consent_shadow_chars;
+        // The page's own shadow-root text is outside the managers too.
+        let total = probe.text_chars + probe.consent_shadow_chars + probe.consent_page_shadow_chars;
         let outside = total.saturating_sub(probe.consent_chars);
         if outside < CONSENT_WALL_OUTSIDE_CHARS
             && probe.consent_outside == 0
@@ -550,6 +563,21 @@ mod tests {
             classify(Some(&resp(403, &[])), &c),
             PageValidity::Blocked { kind: BlockKind::Challenge, .. }
         ));
+    }
+
+    #[test]
+    fn the_pages_own_shadow_text_is_outside_the_banner() {
+        // A web-component app: its text lives in its own shadow roots, under
+        // a light-DOM OneTrust banner that holds all of body.innerText.
+        let mut p = probe("Example", 400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 400;
+        assert!(matches!(
+            classify(Some(&resp(200, &[])), &p),
+            PageValidity::Blocked { kind: BlockKind::ConsentWall, .. }
+        ));
+        p.consent_page_shadow_chars = 600;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
     }
 
     #[test]

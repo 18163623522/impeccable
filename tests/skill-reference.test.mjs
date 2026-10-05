@@ -68,6 +68,24 @@ describe('skill reference authoring contracts', () => {
     assert.doesNotMatch(polish, /git status|git log/);
   });
 
+  it('routes visual decision fallback through wait capability and start failure', () => {
+    const newWork = readFileSync(join(ROOT, 'skill/reference/new-work.md'), 'utf-8').replace(/\r\n?/g, '\n');
+    const visualDecisionPage = newWork.match(
+      /A harness that can leave a shell blocked[\s\S]*?<!-- rule:skill-visual-decision-page -->/,
+    )?.[0] ?? '';
+
+    assert.match(visualDecisionPage, /cannot hold a blocking `--wait`/);
+    assert.match(visualDecisionPage, /without starting the page/);
+    assert.match(visualDecisionPage, /structured tool/);
+    assert.match(visualDecisionPage, /first reply/);
+    assert.match(visualDecisionPage, /exit code 2 from starting it/);
+    assert.match(visualDecisionPage, /wait check before starting/);
+    assert.doesNotMatch(
+      visualDecisionPage,
+      /only exit code 2 from starting it routes the decision to the structured tool; that exit is the fallback/,
+    );
+  });
+
   it('keeps touch-gesture verification in the adapt, audit, and harden references', () => {
     const adapt = readFileSync(join(ROOT, 'skill/reference/adapt.md'), 'utf-8').replace(/\r\n?/g, '\n');
     const audit = readFileSync(join(ROOT, 'skill/reference/audit.md'), 'utf-8').replace(/\r\n?/g, '\n');
@@ -88,5 +106,18 @@ describe('skill reference authoring contracts', () => {
     assert.match(edgeCases, /\*\*Interrupted gestures\*\*[\s\S]*works without a reload/);
     assert.match(edgeCases, /clear the dragging state and release capture/);
     assert.match(verifyHardening, /\*\*Interrupted gestures\*\*/);
+  });
+});
+
+describe('mode rule files', () => {
+  it('each shipped mode file has exactly the Directions and Comps sections the engine prints', () => {
+    for (const mode of ['persuade', 'operate', 'read']) {
+      const text = readFileSync(join(ROOT, `skill/reference/mode-${mode}.md`), 'utf-8').replace(/\r\n?/g, '\n');
+      const headings = text.split('\n').filter((line) => line.startsWith('## '));
+      assert.deepEqual(headings, ['## Directions', '## Comps'], `mode-${mode}.md`);
+      for (const section of text.split(/^## (?:Directions|Comps)\n/m).slice(1)) {
+        assert.ok(section.trim().length > 200, `mode-${mode}.md has an empty or stub section`);
+      }
+    }
   });
 });

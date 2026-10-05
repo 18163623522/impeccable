@@ -6639,3 +6639,36 @@ finding by finding against its predecessor.
 8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
    `url()` background still reports from the stylesheet scan, as before.
 
+## Recorded 2026-10-01: MODE RULES printed by concept-seed
+
+Mode-specific rules for directions and comps moved out of the shared reference files into `skill/reference/mode-persuade.md` (persuade and experience), `mode-operate.md` and `mode-read.md`. With `--mode`, `concept-seed` now prints the bodies of the mode file's `## Directions` and `## Comps` sections inside a `MODE RULES (<mode>, from <path>). ...` block, so the agent gets them in output it already reads instead of a file it can skip. The block sits right after the richness instruction on a full roll and after the authority instruction on a degraded one, and prints on every round, re-rolls and both registers included. An unreadable file or a missing section prints one `MODE RULES unavailable: read <path> before writing directions or comps.` line and the roll still succeeds. The richness instruction lost its Persuade/Experience versus Operate/Read sentence, which now lives in the mode files, and reads `Keep a literal carrier only when it becomes functional.` where it read `Otherwise keep ...`.
+
+Seed cases now set `IMPECCABLE_SKILL_DIR` to `tests/fixtures/mode-rules-skill` (placeholder rule text), so these goldens do not move whenever the real mode prose changes. Nothing else concept-seed prints reads the skill dir while `IMPECCABLE_CATALOG_DIR` is pinned.
+
+- Every seed golden that prints the richness instruction (`seed-direction-local`, `-reroll`, `-reroll-bolder`, `-reroll-safer`, `-unscoped`, `-count-5`, `-operate`, `seed-direction-env-key`, `seed-surface-local`, `-default-scope`, `-grain-flow`, `-compositions`, `-card-base`): the richness sentence change above. Those that pass `--mode` also gain the MODE RULES block after it, naming the fixture file for their mode (`seed-surface-local-card-base` prints `experience` with `mode-persuade.md`). The unscoped and safer cases without `--mode` print no block.
+- `seed-degraded-direction`, `seed-degraded-surface`: the MODE RULES block after the authority instruction (persuade and operate). Degraded output carries no richness instruction, so nothing else moved.
+- `question-update-comps-next`, `question-wait-flip`: the NEXT line reads `it and the MODE RULES block concept-seed printed for this surface govern every card's image` where it read `its comp rules govern every card's image`.
+
+Exit status, stderr and files are unchanged everywhere. New cases: `seed-mode-rules-persuade`, `-experience` (reads `mode-persuade.md`), `-operate`, `-read` (one per mode file, `oracle-key-5`), and `seed-mode-rules-missing-file`, `-missing-section` against `tests/fixtures/mode-rules-skill-partial` (no `mode-read.md`; a `mode-operate.md` without `## Comps`), which print the unavailable line.
+
+## Recorded 2026-10-02: responsive gate names displaced regions, prints crops, escalates
+
+New cases, recorded from the engine and reviewed by hand (no JS golden ever covered the responsive gate's printed output).
+
+- `build-phase-responsive-displaced`: a sign-off line pushed 40px below the first viewport by a growing column reads `displaced, not missing` with the offset and the visible share, the `LOOK FIRST` crop list and the displaced remedy line print, and the third failed `advance` leads with the three-attempt route to the first-viewport review.
+- `build-phase-responsive-missing`: the same region absent from the capture still reads `at desktop width, region sign-off is missing`, now with its repair crop listed.
+
+## Recorded 2026-10-04: a native ship binds every captured input
+
+A comp-led run recorded `finish --disposition ship`, then fixed padding findings the Stop hook reported after it, and stopped: the shipped page no longer matched the final native capture. Native `finish --disposition ship` now records `finish.captureInputs`, the `{path, sha256}` rows of the manifest the final responsive capture bound, and `build-phase completion` reports `changed-after-finish` when the entry or any of those files changed, listing them in `changedSinceFinish`. The NEXT lines after review and after a recorded ship now say that a later edit, a hook finding's fix included, needs ship recorded again, and what ship does with the current files under each capture policy. No existing golden printed these lines, so none moved.
+
+New cases, recorded from the binary and reviewed by hand:
+
+- `build-phase-shipped-then-edited`: `status` over a native ship that still covers the page prints the `Finish is recorded for the current entry. Any later edit ...` NEXT; after a font the page loads changes (entry bytes unchanged), `status` prints `A file the final check bound changed after finish (fonts/face.ttf) ...` and `completion` reports `changed-after-finish` with `changedSinceFinish: ["fonts/face.ttf"]`.
+- `build-phase-review-next-native`: the review-phase NEXT under native capture, ending `Make every fix before ship: ship re-captures the current files natively and must pass the responsive gate again, and any edit after it, a fix for a hook finding included, needs ship recorded again.`
+
+## Recorded 2026-10-04: a component treatment is clothes
+
+The challenger instruction in direction-scope concept-seed output says what counts as a challenger's clothes. It read `A donation transfers ambition and system discipline, never the challenger's clothes; one world owns the page.` and now reads `A donation transfers ambition and system discipline, never the challenger's clothes. A component treatment, such as a button's shadow or a display face, is clothes, not discipline; one world owns the page.` The lines after it rewrap; their words are unchanged. A gallery run had filed a declined challenger's hard offset shadow on the primary button as a discipline raise.
+
+- `seed-direction-local`, `-reroll`, `-unscoped`, `-count-5`, `-operate`, `seed-direction-env-key`, `seed-mode-rules-persuade`, `-experience`, `-missing-file`, `-missing-section`: that sentence only, reviewed by hand. Exit status, stderr and files are unchanged.

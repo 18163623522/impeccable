@@ -157,6 +157,27 @@ fn an_advisory_copy_never_speaks_for_a_failing_one() {
 }
 
 #[test]
+fn an_initial_is_decorative_only_when_its_box_centres_it() {
+    let scan_box = |layout: &str| {
+        let html = format!(
+            r##"<!DOCTYPE html><html><head><style>
+    body {{ background: #ffffff; }}
+    .av {{ {layout} width: 40px; height: 40px; border-radius: 50%; color: #bbbbbb; font-size: 14px; border: 1px solid #bbbbbb; }}
+    </style></head><body><span class="av">JD</span></body></html>"##
+        );
+        let findings = scan(&html);
+        assert_eq!(findings.len(), 1, "{layout}: {findings:#?}");
+        findings[0].severity.clone()
+    };
+    assert_eq!(scan_box("display: flex; align-items: center; justify-content: center;"), "advisory");
+    assert_eq!(scan_box("display: grid; place-items: center;"), "advisory");
+    // A flex or grid box that leaves the initial in a corner.
+    assert_eq!(scan_box("display: flex; align-items: center; justify-content: flex-start;"), "warning");
+    assert_eq!(scan_box("display: flex; align-items: flex-start; justify-content: center;"), "warning");
+    assert_eq!(scan_box("display: grid;"), "warning");
+}
+
+#[test]
 fn a_failing_copy_first_hides_later_advisory_copies() {
     let html = r##"<!DOCTYPE html><html><head><style>
     body { background: #ffffff; }

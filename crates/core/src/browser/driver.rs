@@ -871,7 +871,9 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
     let mut out: Vec<crate::color::Rgba> = Vec::new();
     for el in dom.query_all(None, "*").unwrap_or_default() {
         let tag = tag_lower(dom, el);
-        if is_heading_tag(&tag) {
+        // A heading is not a brand surface, unless it is the logo itself (a
+        // type logo set as `h1.logo`).
+        if is_heading_tag(&tag) && !names_logo(dom, el) {
             continue;
         }
         let Some(rect) = element_rect(dom, el) else { continue };
@@ -2409,6 +2411,17 @@ mod tests {
                 d.set_rect(word, 0.0, 0.0, 120.0, 40.0);
                 d.add_text(word, "Acme");
                 d.set_style(word, "color", "rgb(124, 58, 237)");
+            }),
+            0
+        );
+        // A type logo set as a heading.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "h1");
+                d.set_attr(logo, "class", "logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(logo, "Acme");
+                d.set_style(logo, "color", "rgb(124, 58, 237)");
             }),
             0
         );

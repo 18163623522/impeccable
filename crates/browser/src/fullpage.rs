@@ -241,10 +241,30 @@ const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
     y: el ? el.scrollTop : window.scrollY,
     maxY: el ? el.scrollHeight - el.clientHeight : se.scrollHeight - window.innerHeight,
   };
+  // Every element under body, open shadow trees included: chrome a widget
+  // renders into a shadow root repeats on tiles like any other.
+  const deepAll = () => {
+    const all = [];
+    const visit = scope => {
+      for (const node of scope.querySelectorAll('*')) {
+        all.push(node);
+        if (node.shadowRoot) visit(node.shadowRoot);
+      }
+    };
+    if (document.body) visit(document.body);
+    return all;
+  };
+  // The flat-tree parent: a slotted node's slot, else its parent, else the
+  // host of the shadow root it sits at the top of.
+  const up = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  const holds = (node, target) => {
+    for (let n = target; n; n = up(n)) if (n === node) return true;
+    return false;
+  };
   // The first tile keeps where every positioned box sits in the viewport.
   if (!hideFixed && !window.__impeccableShotAnchors) {
     const boxes = [];
-    for (const node of document.querySelectorAll('body *')) {
+    for (const node of deepAll()) {
       const position = getComputedStyle(node).position;
       if (position !== 'absolute' && position !== 'sticky') continue;
       const r = node.getBoundingClientRect();
@@ -262,13 +282,14 @@ const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
       hidden.push([node, node.style.getPropertyValue('opacity'), node.style.getPropertyPriority('opacity')]);
       node.style.setProperty('opacity', '0', 'important');
     };
-    for (const node of document.querySelectorAll('body *')) {
+    for (const node of deepAll()) {
       if (getComputedStyle(node).position !== 'fixed') continue;
-      // A page can scroll a fixed frame: that frame is the content.
-      if (el && node.contains(el)) continue;
+      // A page can scroll a fixed frame: that frame is the content, even
+      // when the frame sits in the fixed box's shadow tree.
+      if (el && holds(node, el)) continue;
       // Under a transformed or filtered ancestor a fixed box scrolls along.
       let contained = false;
-      for (let p = node.parentElement; p && !contained; p = p.parentElement) {
+      for (let p = up(node); p && !contained; p = up(p)) {
         const cs = getComputedStyle(p);
         contained = cs.transform !== 'none' || cs.filter !== 'none' || cs.perspective !== 'none'
           || cs.willChange.includes('transform') || cs.contain.includes('paint');
@@ -281,7 +302,7 @@ const SCROLL_TO_JS: &str = r#"(async ({ x, y, useScroller, hideFixed }) => {
     const anchors = window.__impeccableShotAnchors;
     if (anchors && Math.abs(pos.x - anchors.x) + Math.abs(pos.y - anchors.y) >= 1) {
       for (const [node, left, top] of anchors.boxes) {
-        if (!node.isConnected || (el && node.contains(el))) continue;
+        if (!node.isConnected || (el && holds(node, el))) continue;
         const r = node.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) continue;
         if (Math.abs(r.left - left) + Math.abs(r.top - top) < 0.5) hide(node);
@@ -328,8 +349,11 @@ const ELEMENT_INTO_VIEW_JS: &str = r#"(async (resolve, { selector, identity, reu
     return null;
   }
   if (!el) return null;
+  // Ancestors through slots and shadow roots: a slotted element scrolls
+  // inside its host's shadow frame.
+  const up = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
   const chain = [];
-  for (let p = el.parentElement; p; p = p.parentElement) chain.push(p);
+  for (let p = up(el); p; p = up(p)) chain.push(p);
   // How much of the element shows: its box cut by the viewport and by every
   // ancestor that clips overflow, as a share of its own area.
   const showing = () => {

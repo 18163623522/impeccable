@@ -49,8 +49,13 @@ pub fn pf0(s: &str) -> f64 {
     }
 }
 
-/// JS: checks.mjs#resolveFontSizePx(el, win)
-pub fn resolve_font_size_px(el: &StaticElement<'_>) -> f64 {
+/// JS: checks.mjs#resolveFontSizePx(el, win). `None` when the font size is
+/// an unresolved var() (not defined in any stylesheet this engine read): the
+/// inherited size is not the element's, so nothing may be built on it.
+pub fn resolve_font_size_px(el: &StaticElement<'_>) -> Option<f64> {
+    if has_unresolved_var(sv(el.style(), "fontSize")) {
+        return None;
+    }
     let mut chain: Vec<String> = Vec::new();
     let mut cur = Some(*el);
     while let Some(e) = cur {
@@ -78,18 +83,21 @@ pub fn resolve_font_size_px(el: &StaticElement<'_>) -> f64 {
             px = num;
         }
     }
-    px
+    Some(px)
 }
 
 /// JS: checks.mjs#hasVisibleBackgroundBoundary(style, el, win)
 pub fn has_visible_background_boundary(style: &StyleValues, el: &StaticElement<'_>) -> bool {
     let bg = sv(style, "backgroundColor");
-    if css_color_is_transparent(Some(bg)) {
+    if has_unresolved_var(bg) || css_color_is_transparent(Some(bg)) {
         return false;
     }
     let mut parent = el.parent_element();
     while let Some(p) = parent {
         let parent_bg = sv(p.style(), "backgroundColor");
+        if has_unresolved_var(parent_bg) {
+            return false;
+        }
         if !css_color_is_transparent(Some(parent_bg)) {
             return !colors_nearly_match(Some(bg), Some(parent_bg));
         }
@@ -293,7 +301,7 @@ pub struct QualityInput<'a, 'b> {
     pub style: &'a StyleValues,
     pub has_direct_text: bool,
     pub text_len: usize,
-    pub font_size: f64,
+    pub font_size: Option<f64>,
     pub line_height_px: Option<f64>,
     pub letter_spacing_px: Option<f64>,
 }
@@ -310,8 +318,21 @@ const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [r
 const FURNITURE: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer, [class*=\"meta\" i], [class*=\"label\" i], [class*=\"badge\" i], [class*=\"chip\" i], [class*=\"pill\" i], [class*=\"tag\" i], [class*=\"kicker\" i], [class*=\"eyebrow\" i], [class*=\"breadcrumb\" i], [class*=\"timestamp\" i], [class*=\"category\" i], [class*=\"caption\" i], [class*=\"nav\" i]";
 const SMALLPRINT: &str = "small, footer, [class*=\"legal\" i], [class*=\"copyright\" i], [class*=\"fineprint\" i], [class*=\"fine-print\" i], [class*=\"smallprint\" i], [class*=\"small-print\" i], [class*=\"disclaimer\" i], [class*=\"disclosure\" i], [class*=\"footnote\" i]";
 
-fn side_len(style: &StyleValues, key: &str, font_size: f64) -> f64 {
-    resolve_length_px(sv_opt(style, key), font_size).unwrap_or(0.0)
+fn has_unresolved_var(value: &str) -> bool {
+    js::to_lower_case(value).contains("var(")
+}
+
+fn side_len(style: &StyleValues, key: &str, font_size: Option<f64>) -> Option<f64> {
+    let value = sv_opt(style, key)?;
+    if has_unresolved_var(value) {
+        return None;
+    }
+    let at = |fs: f64| resolve_length_px(Some(value), fs).unwrap_or(0.0);
+    match font_size {
+        Some(fs) => Some(at(fs)),
+        // Unknown only when the side depends on the font size (em, %).
+        None => (at(0.0) == at(1.0)).then(|| at(0.0)),
+    }
 }
 
 const PAD_KEYS: [&str; 4] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
@@ -331,12 +352,15 @@ const MAX_INSULATE_DEPTH: usize = 4;
 /// its own and the padding of another says nothing about it. The browser rule
 /// measures where the glyphs land and needs none of this; the static scan has
 /// no layout, so it reads the declarations that would move them.
-fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: f64, depth: usize) -> bool {
+fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: Option<f64>, depth: usize) -> bool {
     const CHILD_INSULATE_THRESHOLD: f64 = 4.0;
     let style = el.style();
-    if side_len(style, PAD_KEYS[s], font_size) >= CHILD_INSULATE_THRESHOLD
-        || side_len(style, MARGIN_KEYS[s], font_size) >= CHILD_INSULATE_THRESHOLD
-    {
+    // A side this engine cannot resolve (an unresolved var(), or an em or %
+    // length on an unknown font size) may well insulate, so it does.
+    let insulates = |key: &str| {
+        side_len(style, key, font_size).is_none_or(|v| v >= CHILD_INSULATE_THRESHOLD)
+    };
+    if insulates(PAD_KEYS[s]) || insulates(MARGIN_KEYS[s]) {
         return true;
     }
     if depth == 0 || el.has_direct_text_longer_than(4) {
@@ -414,12 +438,31 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 bw("borderBottomWidth"),
                 bw("borderLeftWidth"),
             ];
-            let bc = |k: &str| css_color_is_transparent(Some(sv(style, k)));
+            let bc = |k: &str| {
+                let value = sv(style, k);
+                has_unresolved_var(value) || css_color_is_transparent(Some(value))
+            };
+            let bs = |k: &str| {
+                let value = sv(style, k);
+                let value = js::to_lower_case(js::trim(value));
+                value.is_empty()
+                    || matches!(
+                        value.as_str(),
+                        "solid"
+                            | "dashed"
+                            | "dotted"
+                            | "double"
+                            | "groove"
+                            | "ridge"
+                            | "inset"
+                            | "outset"
+                    )
+            };
             let border_visible = [
-                border_w[0] > 0.0 && !bc("borderTopColor"),
-                border_w[1] > 0.0 && !bc("borderRightColor"),
-                border_w[2] > 0.0 && !bc("borderBottomColor"),
-                border_w[3] > 0.0 && !bc("borderLeftColor"),
+                border_w[0] > 0.0 && !bc("borderTopColor") && bs("borderTopStyle"),
+                border_w[1] > 0.0 && !bc("borderRightColor") && bs("borderRightStyle"),
+                border_w[2] > 0.0 && !bc("borderBottomColor") && bs("borderBottomStyle"),
+                border_w[3] > 0.0 && !bc("borderLeftColor") && bs("borderLeftStyle"),
             ];
             let outline_w = pf0(sv(style, "outlineWidth"));
             let outline_style_val = sv(style, "outlineStyle");
@@ -427,8 +470,10 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             // `style.outline` is never set on a static style: the shorthand
             // fallback branch is unreachable here.
             let outline_visible = outline_w > 0.0
+                && !has_unresolved_var(outline_color_val)
                 && !css_color_is_transparent(Some(outline_color_val))
                 && !outline_style_val.is_empty()
+                && !has_unresolved_var(outline_style_val)
                 && outline_style_val != "none";
             let bg_visible = has_visible_background_boundary(style, el);
             let any_visible = border_visible.iter().any(|b| *b) || outline_visible || bg_visible;
@@ -451,7 +496,10 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 for s in 0..4 {
                     let bg_bounds_side = bg_visible;
                     let side_bounded = border_visible[s] || outline_visible || bg_bounds_side;
-                    if side_bounded && pad[s] <= PAD_THRESHOLD && !children_insulate[s] {
+                    if side_bounded
+                        && pad[s].is_some_and(|v| v <= PAD_THRESHOLD)
+                        && !children_insulate[s]
+                    {
                         flush_sides.push(side_names[s]);
                     }
                 }
@@ -512,36 +560,25 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     let is_heading = matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
 
     // --- Tight line height ---
-    // The 1.3 floor is a reading-comfort floor for body copy. Display type
-    // sets its own leading, and a heading's text sits in a child <a> or
-    // <span> as often as in the heading element, so the exemption follows the
-    // nearest heading ancestor rather than the element's own tag. Source text
-    // that is never typeset (script, style, noscript, head content,
-    // display:none, the sr-only patterns) has no leading to measure. The
-    // wrap test the browser engine applies needs layout, so it has no static
-    // twin here.
-    if q.has_direct_text
-        && text_len > 50
-        && !is_heading
-        && font_size > 0.0
-        && font_size < LEADING_DISPLAY_TYPE_PX
-    {
-        if let Some(lh) = q.line_height_px {
-            let ratio = lh / font_size;
-            // Compare on the ratio the snippet prints, so a page that sets
-            // line-height: 1.3 exactly is never flagged for hitting the floor
-            // (46.8 / 36 is 1.2999999999999998 in binary floats).
-            let shown = js::math_round(ratio * 100.0) / 100.0;
-            if ratio > 0.0
-                && shown < 1.3
-                && !is_non_rendered_text(el, tag, Some(style))
-                && !is_visually_hidden(el, style)
-                && !is_heading_text(el, tag)
-            {
-                findings.push(RuleHit::new(
-                    "tight-leading",
-                    format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
-                ));
+    if q.has_direct_text && text_len > 50 && !is_heading {
+        if let (Some(lh), Some(font_size)) = (q.line_height_px, font_size) {
+            if font_size > 0.0 && font_size < LEADING_DISPLAY_TYPE_PX {
+                let ratio = lh / font_size;
+                // Compare on the ratio the snippet prints, so a page that sets
+                // line-height: 1.3 exactly is never flagged for hitting the floor
+                // (46.8 / 36 is 1.2999999999999998 in binary floats).
+                let shown = js::math_round(ratio * 100.0) / 100.0;
+                if ratio > 0.0
+                    && shown < 1.3
+                    && !is_non_rendered_text(el, tag, Some(style))
+                    && !is_visually_hidden(el, style)
+                    && !is_heading_text(el, tag)
+                {
+                    findings.push(RuleHit::new(
+                        "tight-leading",
+                        format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                    ));
+                }
             }
         }
     }
@@ -549,7 +586,10 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     // --- Justified text (without hyphens) ---
     // Only a narrow column stretches word spaces far enough to open rivers,
     // and only in a script that justifies on word spaces at all.
-    if q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") && font_size > 0.0 {
+    // An unresolved font size gives no measure to judge the column by.
+    if let Some(font_size) = font_size
+        .filter(|fs| q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") && *fs > 0.0)
+    {
         let hyphens = {
             let a = sv(style, "hyphens");
             if !a.is_empty() {
@@ -569,7 +609,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- Tiny body text ---
-    if q.has_direct_text && text_len > 20 && font_size < 12.0 {
+    if let Some(font_size) =
+        font_size.filter(|fs| q.has_direct_text && text_len > 20 && *fs < 12.0)
+    {
         let skip_tags = [
             "sub",
             "sup",
@@ -599,12 +641,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         let direct_text = js::trim(&collapse_ws(&el.direct_text())).to_string();
         let dt_len = utf16_len(&direct_text);
         let ui_skip_tags = ["sub", "sup", "option"];
-        if font_size > 0.0
-            && font_size < 11.0
-            && dt_len >= 2
-            && !ui_skip_tags.contains(&tag)
-            && !is_non_rendered_text(el, tag, Some(style))
-        {
+        if let Some(font_size) = font_size.filter(|fs| {
+            *fs > 0.0
+                && *fs < 11.0
+                && dt_len >= 2
+                && !ui_skip_tags.contains(&tag)
+                && !is_non_rendered_text(el, tag, Some(style))
+        }) {
             let is_exempt_context = el.closest(EXEMPT_CONTEXT).is_some();
             if !is_exempt_context && !is_visually_hidden(el, style) {
                 let is_interactive = el.closest(INTERACTIVE).is_some();
@@ -649,7 +692,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
 
     // --- Wide letter spacing on body text ---
     if q.has_direct_text && text_len > 20 {
-        if let Some(ls) = q.letter_spacing_px {
+        if let (Some(ls), Some(font_size)) = (q.letter_spacing_px, font_size) {
             if ls > 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_em > 0.05 {
@@ -677,9 +720,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- Crushed letter spacing ---
-    if q.has_direct_text && text_len > 20 && font_size > 0.0 {
-        if let Some(ls) = q.letter_spacing_px {
-            if ls < 0.0 {
+    if q.has_direct_text && text_len > 20 {
+        if let (Some(ls), Some(font_size)) = (q.letter_spacing_px, font_size) {
+            if ls < 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_is_crushed(tracking_em, font_size) {
                     let text = collapse_ws(js::trim(&el.text_content()));
@@ -711,8 +754,10 @@ pub fn check_element_quality(
     let has_direct_text = el.has_direct_text_longer_than(10);
     let text_len = utf16_len(js::trim(&el.text_content()));
     let font_size = resolve_font_size_px(el);
-    let line_height_px = resolve_length_px(sv_opt(style, "lineHeight"), font_size);
-    let letter_spacing_px = resolve_length_px(sv_opt(style, "letterSpacing"), font_size);
+    let line_height_px =
+        font_size.and_then(|fs| resolve_length_px(sv_opt(style, "lineHeight"), fs));
+    let letter_spacing_px =
+        font_size.and_then(|fs| resolve_length_px(sv_opt(style, "letterSpacing"), fs));
     check_quality(&QualityInput {
         el,
         tag,

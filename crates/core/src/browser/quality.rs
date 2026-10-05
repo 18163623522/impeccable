@@ -534,10 +534,29 @@ fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
     let white_space = dom.style(el, "whiteSpace");
     let preserved = white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces";
     let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+    // Preserved white space renders where it sits on a line: indentation
+    // before the first word and spaces after the last. Only the line breaks
+    // around the text, and the blank lines they open, are on no line of it.
+    let source: &str = if preserved {
+        let start = text
+            .char_indices()
+            .take_while(|(_, c)| collapsible(*c))
+            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{c}'))
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let body = &text[start..];
+        let content_end = body.trim_end_matches(collapsible).len();
+        let end = body[content_end..]
+            .find(['\n', '\r', '\u{c}'])
+            .map_or(body.len(), |i| content_end + i);
+        &body[..end]
+    } else {
+        js::trim(&text)
+    };
     let mut count = 0usize;
     let mut pending_space = false;
     let mut buf = [0u8; 4];
-    for c in js::trim(&text).chars() {
+    for c in source.chars() {
         if collapsible(c) && !preserved {
             // Leading white space is dropped, a run counts once, and a
             // trailing run never gets counted because nothing follows it.
@@ -4783,10 +4802,17 @@ mod rendered_text_tests {
             "Copyright 2017, all rights reserved with the Directorate.".len()
         );
         d.set_style(p, "whiteSpace", "pre-wrap");
+        // The indentation before the first word is on the first line; the
+        // line breaks around the text are not.
         assert_eq!(
             rendered_text_len(&d, p),
-            "Copyright 2017, all rights reserved\n                with the Directorate.".len()
+            "        Copyright 2017, all rights reserved\n                with the Directorate.".len()
         );
+        // Spaces before and after the words of a one-line `pre` take room.
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "  indented  ");
+        d.set_style(q, "whiteSpace", "pre");
+        assert_eq!(rendered_text_len(&d, q), "  indented  ".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

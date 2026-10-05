@@ -174,3 +174,15 @@ fn a_class_marked_mockup_reports_small_text_as_advisory() {
     assert_eq!(severities(&f, "undersized-ui-text", "Ready"), ["advisory"], "{f:#?}");
     assert_eq!(severities(&f, "undersized-ui-text", "Queued"), ["warning"], "{f:#?}");
 }
+
+#[test]
+fn a_control_inside_a_marked_mockup_keeps_failing() {
+    // A usable button in an illustrated card: its label is a control's, not
+    // a picture's.
+    let f = scan(
+        "<div class=\"hero-illustration\"><span style=\"font-size: 9px\">Ready</span>\
+         <button style=\"font-size: 9px\">Try it</button></div>",
+    );
+    assert_eq!(severities(&f, "undersized-ui-text", "Ready"), ["advisory"], "{f:#?}");
+    assert_eq!(severities(&f, "undersized-ui-text", "Try it"), ["warning"], "{f:#?}");
+}

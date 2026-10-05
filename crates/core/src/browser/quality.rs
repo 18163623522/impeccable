@@ -535,9 +535,18 @@ fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
     let preserved = white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces";
     let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
     // Preserved white space renders where it sits on a line: indentation
-    // before the first word and spaces after the last. Only the line breaks
-    // around the text, and the blank lines they open, are on no line of it.
-    let source: &str = if preserved {
+    // before the first word and, under `pre` and `break-spaces`, spaces after
+    // the last (under `pre-wrap` they hang). Only the line breaks around the
+    // text, and the blank lines they open, are on no line of it.
+    let source: &str = if white_space == "pre-wrap" {
+        let start = text
+            .char_indices()
+            .take_while(|(_, c)| collapsible(*c))
+            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{c}'))
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        text[start..].trim_end_matches(collapsible)
+    } else if preserved {
         let start = text
             .char_indices()
             .take_while(|(_, c)| collapsible(*c))
@@ -4829,6 +4838,9 @@ mod rendered_text_tests {
         d.add_text(q, "  indented  ");
         d.set_style(q, "whiteSpace", "pre");
         assert_eq!(rendered_text_len(&d, q), "  indented  ".len());
+        // Under `pre-wrap` the spaces at the end of the line hang.
+        d.set_style(q, "whiteSpace", "pre-wrap");
+        assert_eq!(rendered_text_len(&d, q), "  indented".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

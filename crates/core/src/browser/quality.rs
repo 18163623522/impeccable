@@ -528,7 +528,12 @@ impl RenderedTextCount {
             if collapsible(c) && preserved {
                 let line_break = matches!(c, '\n' | '\r' | '\u{c}');
                 if self.count == 0 {
-                    self.lead = if line_break { 0 } else { self.lead + 1 };
+                    // Collapsible white space before the first preserved
+                    // space starts the line and is removed; after it, it
+                    // renders, so it joins the indentation.
+                    self.lead = if line_break { 0 } else { self.lead + self.lead.min(1) * self.pending + 1 };
+                    self.pending = 0;
+                    self.in_collapsible_run = false;
                 } else {
                     self.pending += 1;
                     self.in_collapsible_run = false;
@@ -559,8 +564,9 @@ impl RenderedTextCount {
             }
             if self.count > 0 {
                 self.count += self.pending;
-            } else {
-                self.count += self.lead;
+            } else if self.lead > 0 {
+                // Indentation, then any white space that followed it.
+                self.count += self.lead + self.pending;
             }
             self.pending = 0;
             self.in_collapsible_run = false;
@@ -4904,6 +4910,23 @@ mod rendered_text_tests {
         // Under `pre-wrap` the spaces at the end of the line hang.
         d.set_style(q, "whiteSpace", "pre-wrap");
         assert_eq!(rendered_text_len(&d, q), "  indented".len());
+    }
+
+    /// Preserved indentation from one node and a collapsible space from the
+    /// next both paint before the first word; a collapsible space before
+    /// the indentation starts the line and is removed.
+    #[test]
+    fn indentation_and_a_following_collapsible_space_both_count() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, " ");
+        let span = d.add(Some(p), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre");
+        d.add_text(span, "  ");
+        d.add_text(p, " \n  hello");
+        assert_eq!(rendered_text_len(&d, p), "   hello".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

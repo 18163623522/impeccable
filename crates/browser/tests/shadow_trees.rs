@@ -17,6 +17,7 @@ use impeccable_browser::{
     EvidenceRequest,
 };
 use impeccable_detect::engines::ScanOptions;
+use base64::Engine as _;
 use serde_json::Value;
 
 fn serve(body: &'static str) -> u16 {
@@ -148,4 +149,65 @@ fn a_shadow_root_scroll_frame_is_captured_by_scrolling_the_frame() {
     assert_eq!(shot.method, fullpage::method::STITCHED);
     // Twelve 400px rows: the frame's whole height, not one viewport.
     assert!(shot.height >= 4800.0, "{}", shot.height);
+}
+
+const FIXED_SHADOW_SHELL_PAGE: &str = r#"<!doctype html><html><head><style>
+html, body { margin: 0; height: 100%; overflow: hidden; }
+app-shell { position: fixed; inset: 0; display: block; }
+</style></head><body>
+<app-shell></app-shell>
+<chat-widget></chat-widget>
+<script>
+  const root = document.querySelector('app-shell').attachShadow({ mode: 'open' });
+  root.innerHTML = `<style>
+    .frame { height: 100vh; overflow: auto; }
+    .row { height: 400px; display: flex; align-items: center; padding: 0 40px; font: 32px sans-serif; }
+    .row:nth-child(odd) { background: #1d4ed8; color: #fff; }
+    .row:nth-child(even) { background: #f59e0b; color: #111; }
+  </style><div class="frame">${Array.from({ length: 12 }, (_, i) => `<div class="row">Row ${i + 1}</div>`).join('')}</div>`;
+  document.querySelector('chat-widget').attachShadow({ mode: 'open' }).innerHTML =
+    '<div style="position:fixed;right:24px;bottom:24px;width:160px;height:160px;background:#16a34a;z-index:10"></div>';
+</script>
+</body></html>"#;
+
+#[test]
+fn a_fixed_shadow_shell_keeps_its_frame_and_drops_repeated_shadow_chrome() {
+    let env: HashMap<String, String> = std::env::vars().collect();
+    if discovery::find_browser(&env).is_err() {
+        eprintln!("skip: no installed browser found");
+        return;
+    }
+    let port = serve(FIXED_SHADOW_SHELL_PAGE);
+    let engine = BrowserEngine::new(env);
+    let mut browser = engine.launch().expect("launch");
+    let options = ScanOptions { viewport: Some((1280, 800)), ..Default::default() };
+    let (_, evidence) = detect_url_evidence(
+        &mut browser,
+        &format!("http://127.0.0.1:{port}/"),
+        &options,
+        "load",
+        100,
+        &EvidenceRequest::default(),
+    )
+    .expect("evidence scan");
+    browser.close();
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    assert_eq!(shot.method, fullpage::method::STITCHED);
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&shot.jpeg_base64).expect("base64");
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).expect("jpeg").to_rgb8();
+    // The fixed host holds the frame being scrolled, so later tiles keep it.
+    let (_, blank) = fullpage::longest_uniform_band(&img);
+    assert!(blank < 800, "a blank band of {blank} rows");
+    // The widget in a shadow root paints once, in the first viewport.
+    let green = |y0: u32, y1: u32| {
+        (y0..y1.min(img.height()))
+            .flat_map(|y| (0..img.width()).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = img.get_pixel(x, y).0;
+                p[1] > 120 && p[0] < 60 && p[2] < 110
+            })
+            .count()
+    };
+    assert!(green(0, 800) > 5000, "the widget is missing from the first viewport");
+    assert_eq!(green(800, img.height()), 0, "the widget repeats below the first viewport");
 }

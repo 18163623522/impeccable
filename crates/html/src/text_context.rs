@@ -74,8 +74,10 @@ impl ContextNode for StaticNode<'_> {
             _ => sv(self.0.style(), prop).to_string(),
         }
     }
+    // An unresolved var() font size is unknown; 0 is how the browser node
+    // reports a size it cannot read, and every caller guards on `> 0`.
     fn font_size(&self) -> f64 {
-        resolve_font_size_px(&self.0)
+        resolve_font_size_px(&self.0).unwrap_or(0.0)
     }
     fn rect(&self) -> Option<(f64, f64, f64, f64)> {
         None

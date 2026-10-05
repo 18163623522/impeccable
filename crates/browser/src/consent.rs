@@ -233,7 +233,8 @@ const SHOWING_JS: &str = r#"const q = s => { try { return Array.from(document.qu
 
 /// A probe fragment. Defines `consent` (the names of the managers whose roots
 /// are showing), `consentChars` (the visible text inside those roots, shadow
-/// roots included), `consentShadowChars` (the shadow-root part of it),
+/// roots included), `consentShadowChars` (the part of it `body.innerText`
+/// does not see: shadow-root text, and a root outside `<body>`),
 /// `consentFrames` (sizable frames inside those roots) and
 /// `consentOutside` (visible form controls and sizable media outside them,
 /// counted up to 20).
@@ -274,7 +275,10 @@ pub fn probe_fragment() -> String {
     if (consentRoots.some(o => o !== el && o.contains(el))) continue;
     const all = visibleText(el);
     consentChars += all;
-    consentShadowChars += Math.max(0, all - (el.innerText || '').replace(/\s+/g, ' ').trim().length);
+    // A root outside <body> (appended to <html>) is not in body.innerText
+    // at all; one inside it is, all but its shadow-root text.
+    const inBody = !!document.body && document.body.contains(el);
+    consentShadowChars += inBody ? Math.max(0, all - (el.innerText || '').replace(/\s+/g, ' ').trim().length) : all;
     for (const f of el.querySelectorAll('iframe')) {{
       if (!boxShows(f)) continue;
       const r = f.getBoundingClientRect();
@@ -339,6 +343,14 @@ pub fn hide_js() -> String {
   // injected after the first pass) is still reported. Nothing paints between
   // disabling and re-enabling it: this runs in one task.
   if (style) style.disabled = true;
+  // So are the inline hides an earlier pass stamped, while they are still
+  // its own (a manager that has since set its own display keeps it).
+  const lifted = q('[' + INLINE_MARK + ']').filter(el => el.style.getPropertyValue('display') === 'none' && el.style.getPropertyPriority('display') === 'important');
+  for (const el of lifted) {{
+    let prev = ['', ''];
+    try {{ prev = JSON.parse(el.getAttribute(INLINE_MARK)); }} catch (e) {{}}
+    if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display');
+  }}
   const showingBackdrop = [];
   for (const {{ m, sels }} of present) {{
     const on = sels.filter(s => q(s).some(showing));
@@ -354,6 +366,7 @@ pub fn hide_js() -> String {
     (document.head || document.documentElement).appendChild(style);
   }}
   style.disabled = false;
+  for (const el of lifted) el.style.setProperty('display', 'none', 'important');
   const rules = [];
   for (const {{ sels }} of present) for (const s of sels) rules.push(s + ' {{ display: none !important; }}');
   const text = rules.join('\n');

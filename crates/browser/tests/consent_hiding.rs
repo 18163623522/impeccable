@@ -17,6 +17,8 @@
 //! - A wall that arrives after the load-time check, or renders its text in a
 //!   shadow root, is still refused as one.
 //! - A lock the site's own open modal holds stays.
+//! - A wall that fills a root already in the page, or is drawn in a frame,
+//!   is refused; a short page under a shadow-root banner is scanned.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -279,4 +281,33 @@ fn a_lock_the_sites_own_modal_holds_stays() {
     let consent = evidence.consent.as_ref().expect("consent report");
     assert_eq!(consent.hidden, vec!["Cookiebot"]);
     assert!(consent.unlocked.is_empty(), "{:?}", consent.unlocked);
+}
+
+#[test]
+fn a_wall_that_fills_an_empty_root_after_load_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-stub-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a late consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Usercentrics, "), "{}", err.message);
+}
+
+#[test]
+fn a_wall_drawn_in_a_frame_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/frame-wall.html");
+    let err = engine.detect_url(&url, &ScanOptions::default()).expect_err("a framed consent wall must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Sourcepoint, "), "{}", err.message);
+}
+
+#[test]
+fn a_short_page_under_a_shadow_root_banner_is_scanned() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/shadow-short-page.html");
+    let scan = engine.detect_url_scan(&url, &ScanOptions::default()).expect("a short page is a page");
+    for f in &scan.findings {
+        assert_eq!(f.extras.get("consentHidden"), Some(&serde_json::json!(["Usercentrics"])), "{f:?}");
+    }
 }

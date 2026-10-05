@@ -314,7 +314,10 @@ pub(crate) const PICK_CANDIDATE_JS: &str = r#"((selector, match) => {
 const BRING_INTO_VIEW_JS: &str = r#"(async (el) => {
   if (!el) return null;
   const saved = [];
-  for (let p = el.parentElement; p; p = p.parentElement) saved.push([p, p.scrollTop, p.scrollLeft]);
+  // Ancestors through slots and shadow roots, so a shadow frame the scroll
+  // moves is put back too.
+  const up = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  for (let p = up(el); p; p = up(p)) saved.push([p, p.scrollTop, p.scrollLeft]);
   const sx = window.scrollX;
   const sy = window.scrollY;
   el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
@@ -570,6 +573,34 @@ fn rand_token() -> String {
 mod tests {
     use super::*;
     use impeccable_core::js::to_fixed;
+
+    /// A slotted element scrolls inside its host's shadow frame: bringing it
+    /// into view records that frame, and the restore puts it back.
+    #[test]
+    fn a_shadow_frame_the_scroll_moves_is_put_back() {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let Ok(exe) = crate::discovery::find_browser(&env) else { return };
+        let Ok(mut browser) = crate::cdp::Browser::launch(&exe, &[], false) else { return };
+        let mut page = browser.new_page().unwrap();
+        page.goto("about:blank", "load", std::time::Duration::from_secs(15)).unwrap();
+        let setup = r#"(() => {
+  document.body.innerHTML = '<x-frame><p id="deep">Deep copy</p></x-frame>';
+  document.querySelector('x-frame').attachShadow({ mode: 'open' }).innerHTML =
+    '<div id="frame" style="height:300px;overflow:auto"><div style="height:3000px"></div><slot></slot></div>';
+  return true;
+})()"#;
+        page.evaluate_value(setup).unwrap();
+        let moved = page
+            .evaluate_value(&format!("({BRING_INTO_VIEW_JS})(document.getElementById('deep'))"))
+            .unwrap();
+        assert_eq!(moved.get("moved").and_then(Value::as_bool), Some(true), "{moved}");
+        let frame = "document.querySelector('x-frame').shadowRoot.getElementById('frame').scrollTop";
+        assert!(page.evaluate_value(frame).unwrap().as_f64().unwrap() > 0.0);
+        page.evaluate_value(RESTORE_SCROLL_JS).unwrap();
+        assert_eq!(page.evaluate_value(frame).unwrap().as_f64(), Some(0.0));
+        page.close();
+        browser.close();
+    }
 
     #[test]
     fn pixel_snippet_never_prints_a_failing_verdict_as_the_bar() {

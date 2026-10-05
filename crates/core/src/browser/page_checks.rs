@@ -921,9 +921,11 @@ fn rhythm_flow_box(
         if from_end {
             kids.reverse();
         }
-        return kids
-            .into_iter()
-            .find_map(|k| rhythm_flow_box(dom, k, rect, from_end, pick));
+        // A spacer child is space, not the wrapper's block: the walk goes on
+        // to the content beside it.
+        return kids.into_iter().find_map(|k| {
+            rhythm_flow_box(dom, k, rect, from_end, pick).filter(|&b| !rhythm_is_spacer(dom, b))
+        });
     }
     if !rhythm_visible_flow(dom, s) {
         return None;
@@ -3151,6 +3153,51 @@ mod tests {
         assert_eq!(details.len(), 2, "{details:?}");
         assert!(details.iter().all(|x| x.ends_with("(2 headings on page)")), "{details:?}");
         assert!(!details.iter().any(|x| x.contains("parked")), "{details:?}");
+    }
+
+    /// A `display: contents` wrapper whose first child is a spacer: the
+    /// block below the heading is the content after the spacer.
+    #[test]
+    fn heading_rhythm_reads_past_a_spacer_in_a_contents_wrapper() {
+        let shown = [("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static")];
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let sec = d.add(Some(body), "section");
+        d.set_styles(sec, &[("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static"), ("backgroundColor", "rgba(0, 0, 0, 0)"), ("borderTopWidth", "0px"), ("boxShadow", "none")]);
+        d.set_rect(sec, 0.0, 0.0, 800.0, 2000.0);
+        let mut y = 0.0;
+        for i in 0..2 {
+            let p0 = d.add(Some(sec), "p");
+            d.add_text(p0, "Intro paragraph text that runs well past forty characters");
+            d.set_styles(p0, &shown);
+            d.set_style(p0, "fontSize", "20px");
+            d.set_rect(p0, 0.0, y, 800.0, 20.0);
+            y += 28.0;
+            let h = d.add(Some(sec), "h2");
+            d.add_text(h, &format!("Heading number {i}"));
+            d.set_styles(h, &shown);
+            d.set_style(h, "fontSize", "24px");
+            d.set_rect(h, 0.0, y, 800.0, 30.0);
+            y += 30.0;
+            let wrap = d.add(Some(sec), "div");
+            d.set_style(wrap, "display", "contents");
+            let spacer = d.add(Some(wrap), "div");
+            d.set_styles(spacer, &shown);
+            d.set_rect(spacer, 0.0, y, 800.0, 16.0);
+            y += 40.0;
+            let p1 = d.add(Some(wrap), "p");
+            d.add_text(p1, "Body paragraph");
+            d.set_styles(p1, &shown);
+            d.set_style(p1, "fontSize", "16px");
+            d.set_rect(p1, 0.0, y, 800.0, 20.0);
+            y += 400.0;
+        }
+        let f = check_heading_rhythm_dom(&d);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert_eq!(
+            f[0].finding.detail,
+            "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
+        );
     }
 
     #[test]

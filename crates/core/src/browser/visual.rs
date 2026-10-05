@@ -2065,7 +2065,9 @@ fn candidate_value(dom: &dyn Dom, el: ElId, tag: &str, direct: &str, rect: &Rect
         });
     let text = slice_utf16_prefix(&collapse_ws(js::trim(direct)), 80);
     let mut m = Map::new();
-    m.insert("selector".into(), Value::String(super::driver::generate_selector(dom, el)));
+    let selector = super::driver::generate_selector(dom, el);
+    let identity = candidate_match(dom, &selector, el);
+    m.insert("selector".into(), Value::String(selector));
     m.insert("tagName".into(), Value::String(tag.to_string()));
     m.insert("text".into(), Value::String(text));
     m.insert("threshold".into(), json!(threshold));
@@ -2081,6 +2083,9 @@ fn candidate_value(dom: &dyn Dom, el: ElId, tag: &str, direct: &str, rect: &Rect
     // pass; the key is only written when it holds.
     if super::decorative_text::is_decorative_text_dom(dom, el) {
         m.insert("decorative".into(), Value::Bool(true));
+    }
+    if let Some(identity) = identity {
+        m.insert("match".into(), identity);
     }
     Value::Object(m)
 }
@@ -2954,9 +2959,41 @@ fn unresolved(candidate: &Value, reason: &str) -> Value {
 
 /// JS: index.mjs#analyzeVisualContrastCandidate — everything before the
 /// sampling loop.
-pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
+/// `[n, count]` when `selector` matches `count` elements and `el` is the
+/// `n`th, in document order. A generated selector names one element unless
+/// the page repeats the id that anchors it (a search box rendered once per
+/// breakpoint), and then the first match can be a collapsed copy the
+/// candidate never came from. `None` for a selector that names one element.
+fn candidate_match(dom: &dyn Dom, selector: &str, el: ElId) -> Option<Value> {
+    if !selector.contains('#') {
+        return None;
+    }
+    let matches = dom.query_all(None, selector).ok()?;
+    if matches.len() < 2 {
+        return None;
+    }
+    let n = matches.iter().position(|m| *m == el)?;
+    Some(json!([n, matches.len()]))
+}
+
+/// The element a candidate names: the `n`th match its `match` field records
+/// while the page still has that many, the first match otherwise.
+pub fn candidate_element(dom: &dyn Dom, candidate: &Value) -> Result<Option<ElId>, ()> {
     let selector = str_or_empty(candidate.get("selector"));
-    let el = match dom.query_one(None, &selector) {
+    let identity = candidate.get("match").and_then(Value::as_array).and_then(|a| {
+        Some((a.first()?.as_u64()? as usize, a.get(1)?.as_u64()? as usize))
+    });
+    match identity {
+        Some((n, count)) => {
+            let matches = dom.query_all(None, &selector).map_err(|_| ())?;
+            Ok(if matches.len() == count { matches.get(n).copied() } else { matches.first().copied() })
+        }
+        None => dom.query_one(None, &selector).map_err(|_| ()),
+    }
+}
+
+pub fn prepare_analysis(dom: &dyn Dom, candidate: &Value) -> Prepared {
+    let el = match candidate_element(dom, candidate) {
         Err(_) => return Prepared::Early { early: unresolved(candidate, "stale selector") },
         Ok(None) => return Prepared::Early { early: unresolved(candidate, "missing element") },
         Ok(Some(el)) => el,

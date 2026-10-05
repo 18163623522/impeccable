@@ -846,6 +846,21 @@ fn check_validity(
     Ok((response, probe, verdict))
 }
 
+/// The consent-wall verdict for a page whose consent manager arrived after
+/// the load-time validity check, with the probe it was read from. `None`
+/// when the page is not a consent wall now, or the probe failed (the hide
+/// pass then runs as before).
+fn late_consent_wall(page: &mut Page<'_>) -> Option<(PageProbe, PageValidity)> {
+    let raw = page.evaluate_value(&validity::probe_js()).ok()?;
+    let probe = PageProbe::from_value(&raw);
+    if probe.consent.is_empty() {
+        return None;
+    }
+    let verdict = validity::classify_with(None, &probe, true);
+    matches!(verdict, PageValidity::Blocked { kind: validity::BlockKind::ConsentWall, .. })
+        .then_some((probe, verdict))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_page_inner(
     page: &mut Page<'_>,
@@ -931,8 +946,22 @@ fn scan_page_inner(
     step(profile, "scan", "reveal-sweep", url, || reveal_sweep(page)).map_err(cdp_err)?;
 
     // A manager that injects its banner late (after load, or on the first
-    // scroll) is hidden here, before the capture every pass reads.
+    // scroll) is hidden here, before the capture every pass reads. A late
+    // banner can be the whole page, so the consent-wall gate runs again
+    // first: hiding a wall would leave nothing to read and report it clean.
     if hide_consent {
+        if let Some((probe, verdict)) = late_consent_wall(page) {
+            let message = verdict.error_message().unwrap_or_default();
+            return match evidence {
+                None => Err(EngineError::new(message)),
+                Some((ev, request)) => {
+                    ev.probe = Some(probe);
+                    ev.validity = Some(verdict);
+                    capture_post_scan(page, ev, request, &[], &Map::new());
+                    Ok(Vec::new())
+                }
+            };
+        }
         step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
     }
 
@@ -1558,7 +1587,7 @@ mod tests {
 
     #[test]
     fn ad_tech_errors_never_take_a_counted_errors_slot() {
-        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/p{n}.js:1:1")));
+        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/prebid-p{n}.js:1:1")));
         let mut errors: Vec<(String, Option<String>)> = (1..=4).map(prebid).collect();
         errors.push(("Uncaught TypeError: cart is undefined".to_string(), Some("at https://example.com/js/app.js:1:1".to_string())));
         for n in 1..=4 {

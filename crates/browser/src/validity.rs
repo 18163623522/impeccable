@@ -8,7 +8,7 @@
 //! always describes the site that was asked about.
 //!
 //! The decision is pure ([`classify`]) over two inputs: the main document's
-//! HTTP response as CDP saw it, and a small in-page probe ([`PROBE_JS`]).
+//! HTTP response as CDP saw it, and a small in-page probe ([`probe_js`]).
 //! Header and HTTP-status signals stand alone. Titles and DOM markers only
 //! count on a small page, because a real page can carry a captcha widget on a
 //! form or be titled "Access denied" in a CMS without being a block page.
@@ -33,8 +33,10 @@ use serde_json::{json, Value};
 /// treated as content even when its title or a marker looks like a challenge.
 pub const SMALL_PAGE_CHARS: u64 = 3000;
 
-/// A small page with a known consent manager showing is a consent wall when
-/// fewer than this many visible characters lie outside the manager's roots,
+/// A page with a known consent manager showing is a consent wall when fewer
+/// than this many visible characters lie outside the manager's roots (a
+/// preference center alone can run past [`SMALL_PAGE_CHARS`], so the page's
+/// total is not the test),
 /// nothing else shows outside them (no form control and no image, video or
 /// frame of 10,000 square pixels or more, see [`crate::consent`]), and the
 /// manager holds at least [`CONSENT_WALL_MIN_CHARS`] characters itself.
@@ -331,6 +333,22 @@ impl PageValidity {
     }
 }
 
+/// Page- and server-supplied text made safe to print: control characters
+/// (an escape sequence in a `<title>`, a newline in a header) are written as
+/// `\u{..}` escapes, so the evidence the CLI prints to a terminal cannot drive
+/// that terminal.
+fn printable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Classify a loaded page. `response` is `None` when no main-document
 /// response was seen (a `file://` URL, or a same-document navigation).
 /// `consent_wall` turns the consent-wall gate on; a scan that keeps the
@@ -339,7 +357,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
     let mut challenge: Vec<String> = Vec::new();
     if let Some(r) = response {
         if let Some(action) = r.header("x-amzn-waf-action") {
-            challenge.push(format!("x-amzn-waf-action: {action}"));
+            challenge.push(format!("x-amzn-waf-action: {}", printable(action)));
         }
         if let Some(v) = r.header("cf-mitigated") {
             if v.eq_ignore_ascii_case("challenge") {
@@ -367,7 +385,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
     if small {
         let title = probe.title.trim().to_lowercase();
         if !title.is_empty() && CHALLENGE_TITLE_PREFIXES.iter().any(|p| title.starts_with(p)) {
-            challenge.push(format!("title \"{}\"", probe.title.trim()));
+            challenge.push(format!("title \"{}\"", printable(probe.title.trim())));
         }
         for m in &probe.markers {
             challenge.push(format!("marker {m}"));
@@ -389,7 +407,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
             evidence: vec![format!("HTTP {status}")],
         };
     }
-    if consent_wall && small && !probe.consent.is_empty() {
+    if consent_wall && !probe.consent.is_empty() {
         let outside = probe.text_chars.saturating_sub(probe.consent_chars);
         if outside < CONSENT_WALL_OUTSIDE_CHARS
             && probe.consent_outside == 0
@@ -458,6 +476,24 @@ mod tests {
     }
 
     #[test]
+    fn a_preference_center_longer_than_a_small_page_is_still_a_wall() {
+        // A OneTrust preference center lists every purpose and vendor: more
+        // text than a challenge page holds, and still nothing but the dialog.
+        let mut p = probe("Example", 5400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 5392;
+        assert!(matches!(
+            classify(Some(&resp(200, &[])), &p),
+            PageValidity::Blocked { kind: BlockKind::ConsentWall, .. }
+        ));
+        // The same dialog over a long page is the page.
+        let mut p = probe("Example", 9400, &[]);
+        p.consent = vec!["OneTrust".into()];
+        p.consent_chars = 5392;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+    }
+
+    #[test]
     fn a_short_page_under_a_banner_is_the_page() {
         // The review's sign-in page: an h1, two fields, a hint and a button
         // under a OneTrust bar. 48 characters of its own and four controls.
@@ -521,6 +557,18 @@ mod tests {
             }
         );
         assert!(v.error_message().unwrap().starts_with("the page is a bot challenge"));
+    }
+
+    #[test]
+    fn page_supplied_evidence_cannot_carry_control_characters() {
+        let v = classify(
+            Some(&resp(403, &[("x-amzn-waf-action", "captcha\r\n\u{1b}[2J")])),
+            &probe("Human Verification\u{1b}]0;owned\u{7}", 120, &[]),
+        );
+        let message = v.error_message().unwrap();
+        assert!(!message.chars().any(|c| c.is_control()), "{message:?}");
+        assert!(message.contains("title \"Human Verification\\u{1b}]0;owned\\u{7}\""), "{message}");
+        assert!(message.contains("x-amzn-waf-action: captcha\\u{d}\\u{a}\\u{1b}[2J"), "{message}");
     }
 
     #[test]

@@ -781,9 +781,43 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
         {
             return true;
         }
+        // A border, an outline or a shadow paints its colour too.
+        let painted = |c: Option<crate::color::Rgba>| c.is_some_and(|c| c.alpha_or_one() > 0.1 && is_stock_violet(&c));
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            let width = crate::js::parse_float(&dom.style(el, &format!("border{side}Width")));
+            let style = dom.style(el, &format!("border{side}Style"));
+            if width > 0.0
+                && style != "none"
+                && style != "hidden"
+                && painted(crate::color::parse_any_color(Some(&dom.style(el, &format!("border{side}Color")))))
+            {
+                return true;
+            }
+        }
+        let outline = crate::js::parse_float(&dom.style(el, "outlineWidth"));
+        let outline_style = dom.style(el, "outlineStyle");
+        if outline > 0.0
+            && !outline_style.is_empty()
+            && outline_style != "none"
+            && painted(crate::color::parse_any_color(Some(&dom.style(el, "outlineColor"))))
+        {
+            return true;
+        }
+        let shadow = dom.style(el, "boxShadow");
+        if shadow != "none"
+            && SHADOW_COLOR_RE
+                .find_iter(&shadow)
+                .any(|m| painted(crate::color::parse_any_color(Some(m.as_str()))))
+        {
+            return true;
+        }
     }
     false
 }
+
+/// The colours in a computed `box-shadow` (`rgb(...)` / `rgba(...)`).
+static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"rgba?\([^)]*\)").expect("SHADOW_COLOR_RE"));
 
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
@@ -1971,6 +2005,19 @@ mod tests {
             "backgroundImage",
             "linear-gradient(90deg, rgb(102, 126, 234), rgb(255, 176, 5))",
         );
+        assert!(purple_accent_reported(&d));
+
+        // So does a border, an outline or a shadow in it.
+        d.set_style(p, "backgroundImage", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("borderLeftWidth", "2px"), ("borderLeftStyle", "solid"), ("borderLeftColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "borderLeftStyle", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("outlineWidth", "2px"), ("outlineStyle", "solid"), ("outlineColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "outlineStyle", "none");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 4px 12px 0px");
         assert!(purple_accent_reported(&d));
     }
 

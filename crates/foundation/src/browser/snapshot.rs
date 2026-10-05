@@ -465,6 +465,9 @@ pub struct Snapshot {
     style_index: HashMap<String, usize>,
     #[serde(skip)]
     pseudo_index: HashMap<String, usize>,
+    /// Derived on load: the top-level shadow-tree nodes of each host.
+    #[serde(skip)]
+    shadow_kids: HashMap<u32, Vec<u32>>,
 }
 
 impl Snapshot {
@@ -511,6 +514,12 @@ impl Snapshot {
                 }
             }
             self.els[i].children = kids;
+        }
+        self.shadow_kids.clear();
+        for i in 0..self.els.len() {
+            if let Some(host) = self.els[i].shadow_host {
+                self.shadow_kids.entry(host).or_default().push(i as u32 + 1);
+            }
         }
     }
 
@@ -817,6 +826,16 @@ impl Dom for SnapshotDom {
             return None;
         }
         self.snap.node(el).text_slot.filter(|s| self.valid(*s))
+    }
+    fn shadow_children(&self, el: ElId) -> Vec<ElId> {
+        if !self.valid(el) {
+            return Vec::new();
+        }
+        self.snap
+            .shadow_kids
+            .get(&el)
+            .map(|kids| kids.iter().copied().filter(|k| self.valid(*k)).collect())
+            .unwrap_or_default()
     }
     fn shadow_trees_recorded(&self) -> bool {
         self.snap.shadow_trees_recorded

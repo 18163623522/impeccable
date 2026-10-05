@@ -262,6 +262,13 @@ pub trait Dom {
     fn text_slot(&self, _el: ElId) -> Option<ElId> {
         None
     }
+    /// The top-level nodes of the open shadow tree `el` hosts, in order:
+    /// the elements whose [`Dom::flat_parent`] is `el` without being its
+    /// children. Empty for an element that hosts no shadow tree, and from a
+    /// probe that cannot see shadow trees (the default).
+    fn shadow_children(&self, _el: ElId) -> Vec<ElId> {
+        Vec::new()
+    }
     /// Whether the probe reads open shadow trees ([`Dom::flat_parent`]), so
     /// that an element with no assigned slot is not slotted anywhere. A
     /// snapshot recorded before shadow trees were captured answers `false`.

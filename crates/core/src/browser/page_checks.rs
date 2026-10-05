@@ -1113,9 +1113,49 @@ fn rhythm_is_empty_box(dom: &dyn Dom, el: ElId, depth: usize) -> bool {
     if rhythm_paints_edge(dom, el, "Bottom") || RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
         return false;
     }
+    // A rule drawn along the top of an empty box (an `hr`, a divider `div`)
+    // is a line a reader sees, not space: the walk above meets it as the
+    // block that separates the heading from the content above.
+    if tag_lower(dom, el) == "hr" || style_px(dom, el, "borderTopWidth") > 0.0 {
+        return false;
+    }
+    if rhythm_shadow_content(dom, el, depth) {
+        return false;
+    }
     let children = rhythm_rendered_children(dom, el);
     children.is_empty() || (depth > 0 && children.into_iter().all(|k| rhythm_is_empty_box(dom, k, depth - 1)))
 }
+
+/// A shadow host whose shadow tree lays out content: a box there with words,
+/// or one that is not itself an empty box. The light tree of a web component
+/// can be empty while its shadow tree draws a whole carousel (otto.de's
+/// `oc-cinema-v1`, cisco.com's and hp.com's custom elements); read through
+/// `children` and `text_content` alone, such a host looks like a spacer and
+/// the walks measured past it. A shadow tree that holds only a `<slot>` and
+/// `<style>` lays out nothing of its own, and the host's light children are
+/// judged as before. A probe that cannot see shadow trees lists none.
+fn rhythm_shadow_content(dom: &dyn Dom, el: ElId, depth: usize) -> bool {
+    dom.shadow_children(el).into_iter().any(|k| {
+        if dom.style(k, "display") == "none" {
+            return false;
+        }
+        let pos = dom.style(k, "position");
+        if pos == "absolute" || pos == "fixed" {
+            return false;
+        }
+        let r = dom.rect(k);
+        if r.width < 1.0 || r.height < 1.0 {
+            return false;
+        }
+        if RHYTHM_UNRENDERED_TAGS.contains(&tag_lower(dom, k).as_str()) {
+            return false;
+        }
+        !js::trim(&dom.text_content(k)).is_empty() || !rhythm_is_empty_box(dom, k, depth)
+    })
+}
+
+/// Elements whose text is in `textContent` and never on screen.
+const RHYTHM_UNRENDERED_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
 
 /// A page landmark other than the main content: the footer, a navigation
 /// block, a sidebar, a banner. A heading introduces none of them.
@@ -1357,6 +1397,34 @@ fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
     if !bs.is_empty() && bs != "none" {
         return true;
     }
+    rhythm_band_differs_from_backdrop(dom, el)
+}
+
+/// A wrapper the walk above cannot look past: one that shows where it
+/// starts with a top border, a shadow, a background image that bands it, or
+/// a background colour that differs from the backdrop behind it. A wrapper
+/// filled with the same colour as the page around it (a white section on a
+/// white page, samsung.com's and costco.com's full-width module boxes) has no
+/// edge a reader sees, so the block above it is still the heading's
+/// neighbour, as [`rhythm_draws_bottom_edge`] already holds for the walk
+/// below.
+fn rhythm_draws_top_edge(dom: &dyn Dom, el: ElId) -> bool {
+    if rhythm_is_contents(dom, el) {
+        return false;
+    }
+    if style_px(dom, el, "borderTopWidth") > 0.0 || rhythm_image_band(dom, el) {
+        return true;
+    }
+    let bs = dom.style(el, "boxShadow");
+    if !bs.is_empty() && bs != "none" {
+        return true;
+    }
+    rhythm_band_differs_from_backdrop(dom, el)
+}
+
+/// `el` paints a background colour that differs from the nearest painted
+/// background behind it (white when none is).
+fn rhythm_band_differs_from_backdrop(dom: &dyn Dom, el: ElId) -> bool {
     let Some(band) = rhythm_painted_background(dom, el) else { return false };
     let mut backdrop = crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0);
     let mut cur = dom.parent(el);
@@ -1514,6 +1582,80 @@ fn rhythm_repeats(dom: &dyn Dom, el: ElId, h: ElId) -> bool {
     false
 }
 
+/// Subpixel layout puts two gaps set with one margin a fraction of a pixel
+/// apart; a gap above this much larger than the gap below still reads as
+/// equal.
+const RHYTHM_EVEN_SLACK_PX: f64 = 0.5;
+
+/// Running prose has at least this many characters...
+const RHYTHM_PROSE_MIN_CHARS: usize = 80;
+/// ...on at least this many rendered lines...
+const RHYTHM_PROSE_MIN_LINES: usize = 2;
+/// ...set no larger than this multiple of the body text size...
+const RHYTHM_PROSE_MAX_SIZE_RATIO: f64 = 1.25;
+/// ...across at least this share of the heading's width.
+const RHYTHM_PROSE_MIN_WIDTH_SHARE: f64 = 0.5;
+
+/// The text block a reader sees at the bottom of `block`: the block itself
+/// when it sets words, else the lowest box it lays out, followed down until
+/// one does. `None` when that edge is a picture or a box that shows where it
+/// ends (a card, a panel, a band): the heading then sits under that edge,
+/// not under text.
+fn rhythm_closing_text(dom: &dyn Dom, block: ElId) -> Option<ElId> {
+    let mut cur = block;
+    for _ in 0..12 {
+        if RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, cur).as_str()) || rhythm_draws_bottom_edge(dom, cur) {
+            return None;
+        }
+        if rhythm_has_words(dom, cur) {
+            return Some(cur);
+        }
+        cur = rhythm_rendered_children(dom, cur)
+            .into_iter()
+            .filter(|&k| !rhythm_is_spacer(dom, k))
+            .max_by(|&a, &b| {
+                dom.rect(a)
+                    .bottom
+                    .partial_cmp(&dom.rect(b).bottom)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+    }
+    None
+}
+
+/// The block above a heading ends in running prose: a paragraph or text
+/// block of several lines of body-size text, set across the column. The
+/// text that closes the block ([`rhythm_closing_text`]) has at least 80
+/// characters on at least two rendered lines, is set smaller than the
+/// heading and no larger than 1.25 times the body text (`text_size`), is
+/// not itself a heading, and spans at least half the heading's width.
+///
+/// Each part keeps out something the probe on run 38 found reading fine
+/// with even gaps: a short closing line or a pull statement (a line or two
+/// of large type), a card grid whose last caption is the block's bottom (a
+/// column a third as wide as the heading), and an eyebrow set like body text
+/// (one line). Lines are read from the capture's line boxes; a DOM that
+/// cannot say where the lines are (snapshots recorded before line rects)
+/// stands down, and the heading is judged by the crowded test alone.
+fn rhythm_ends_in_prose(dom: &dyn Dom, block: ElId, heading: ElId, text_size: f64) -> bool {
+    let Some(text_el) = rhythm_closing_text(dom, block) else { return false };
+    if matches!(tag_lower(dom, text_el).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+        return false;
+    }
+    let size = rhythm_font_size(dom, text_el);
+    if size >= rhythm_font_size(dom, heading) || size > text_size * RHYTHM_PROSE_MAX_SIZE_RATIO {
+        return false;
+    }
+    if utf16_len(js::trim(&collapse_ws(&dom.text_content(text_el)))) < RHYTHM_PROSE_MIN_CHARS {
+        return false;
+    }
+    if dom.rect(text_el).width < dom.rect(heading).width * RHYTHM_PROSE_MIN_WIDTH_SHARE {
+        return false;
+    }
+    let Some(lines) = dom.text_line_rects(text_el) else { return false };
+    lines.iter().filter(|r| r.width > 0.0 && r.height > 0.0).count() >= RHYTHM_PROSE_MIN_LINES
+}
+
 /// JS: checks.mjs#checkHeadingRhythmDOM()
 pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     const MIN_VIOLATIONS: usize = 2;
@@ -1610,7 +1752,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     // runs from that content to the cluster's own first line: empty spacer
     // boxes are part of the gap, so is the bottom padding of a block that
     // paints no edge, and so is top padding on the cluster's first box.
-    let edge_above = |start_el: ElId, top: f64, rect: &Rect| -> Option<(f64, ElId)> {
+    let edge_above = |h: ElId, start_el: ElId, top: f64, rect: &Rect| -> Option<(f64, ElId)> {
         let pick = |sr: &Rect| sr.bottom <= top + 2.0;
         let inset = if rhythm_paints_edge(dom, start_el, "Top") {
             0.0
@@ -1645,7 +1787,15 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if Some(p) == body {
                 return None;
             }
-            if has_own_top_boundary(p) {
+            // A wrapper whose start a reader sees separates the heading from
+            // whatever is above it; one painted the colour behind it does not,
+            // unless it is one of a run of like boxes. Then its fill marks a
+            // card (haraj.com.sa's listings alternate grey and white rows) and
+            // the box above is the card before it, not content the heading
+            // follows, as before.
+            if rhythm_draws_top_edge(dom, p)
+                || (rhythm_paints_edge(dom, p, "Top") && rhythm_repeats(dom, p, h))
+            {
                 return None;
             }
             node = Some(p);
@@ -1760,7 +1910,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             rhythm_text_size(dom, below_el),
         );
         let (top_el, top) = cluster_top(h, &rect, text_size);
-        let Some((above_bottom, above_el)) = edge_above(top_el, top, &rect) else { continue };
+        let Some((above_bottom, above_el)) = edge_above(h, top_el, top, &rect) else { continue };
         if inside_small_card(h) {
             continue;
         }
@@ -1769,10 +1919,16 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if below < 6.0 || below > MAX_BELOW_PX {
             continue;
         }
-        if above < below * 0.75
-            && below - above >= MIN_DEFICIT_PX
-            && !rhythm_block_separates(dom, above_el)
-        {
+        // Crowded: clearly less space above than below. Even: no more space
+        // above than below, under running prose, where the paragraph above
+        // and the heading read as one run of text (Paul, round 7:
+        // r7-t1-heading-rhythm-equal-gaps). Under any other block an even
+        // gap mostly reads fine: a band edge, a card grid, a kicker.
+        let crowded = above < below * 0.75 && below - above >= MIN_DEFICIT_PX;
+        let even_under_prose = !crowded
+            && above <= below + RHYTHM_EVEN_SLACK_PX
+            && rhythm_ends_in_prose(dom, above_el, h, text_size);
+        if (crowded || even_under_prose) && !rhythm_block_separates(dom, above_el) {
             candidates.push(Cand {
                 el: h,
                 tag: tag_lower(dom, h),

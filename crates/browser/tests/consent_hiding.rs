@@ -18,7 +18,9 @@
 //!   shadow root, is still refused as one.
 //! - A lock the site's own open modal holds stays.
 //! - A wall that fills a root already in the page, or is drawn in a frame,
-//!   is refused; a short page under a shadow-root banner is scanned.
+//!   is refused; a short page under a shadow-root banner, or one appended
+//!   outside <body>, is scanned, as is a page whose late banner closed
+//!   itself; a late banner on a root the first pass hid inline is reported.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -319,4 +321,33 @@ fn a_short_page_under_a_shadow_root_banner_is_scanned() {
     for f in &scan.findings {
         assert_eq!(f.extras.get("consentHidden"), Some(&serde_json::json!(["Usercentrics"])), "{f:?}");
     }
+}
+
+#[test]
+fn a_short_page_under_a_banner_outside_body_is_scanned() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/html-root-banner.html");
+    engine.detect_url_scan(&url, &ScanOptions::default()).expect("a short page is a page");
+}
+
+#[test]
+fn a_late_banner_that_closed_itself_is_not_a_wall() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-closed-banner.html");
+    engine.detect_url_scan(&url, &ScanOptions::default()).expect("a closed banner leaves the page");
+}
+
+#[test]
+fn a_late_banner_on_a_root_hidden_inline_is_reported() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/late-inline-banner.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    assert_eq!(evidence.consent.as_ref().expect("consent report").hidden, vec!["Usercentrics"]);
 }

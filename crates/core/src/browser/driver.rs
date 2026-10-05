@@ -803,11 +803,18 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
         {
             return true;
         }
+        // Each shadow layer, `rgb(...) x y blur spread`: one with no offset, no
+        // blur and no spread draws nothing outside the box it sits under.
         let shadow = dom.style(el, "boxShadow");
         if shadow != "none"
-            && SHADOW_COLOR_RE
-                .find_iter(&shadow)
-                .any(|m| painted(crate::color::parse_any_color(Some(m.as_str()))))
+            && SHADOW_COLOR_RE.captures_iter(&shadow).any(|c| {
+                let lengths = &c[2];
+                let draws = lengths
+                    .split_whitespace()
+                    .filter_map(|t| t.strip_suffix("px"))
+                    .any(|n| n.parse::<f64>().is_ok_and(|v| v != 0.0));
+                draws && painted(crate::color::parse_any_color(Some(&c[1])))
+            })
         {
             return true;
         }
@@ -815,9 +822,11 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
     false
 }
 
-/// The colours in a computed `box-shadow` (`rgb(...)` / `rgba(...)`).
-static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> =
-    once_cell::sync::Lazy::new(|| regex::Regex::new(r"rgba?\([^)]*\)").expect("SHADOW_COLOR_RE"));
+/// One layer of a computed `box-shadow`: its colour (`rgb(...)` /
+/// `rgba(...)`, which the computed value puts first) and the lengths after it.
+static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"(rgba?\([^)]*\))([^,]*)").expect("SHADOW_COLOR_RE")
+});
 
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
@@ -2017,6 +2026,8 @@ mod tests {
         d.set_styles(p, &[("outlineWidth", "2px"), ("outlineStyle", "solid"), ("outlineColor", "rgb(139, 92, 246)")]);
         assert!(purple_accent_reported(&d));
         d.set_style(p, "outlineStyle", "none");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 0px 0px 0px");
+        assert!(!purple_accent_reported(&d), "a shadow that draws nothing");
         d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 4px 12px 0px");
         assert!(purple_accent_reported(&d));
     }

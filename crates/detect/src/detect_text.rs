@@ -18,7 +18,8 @@ use crate::design_system::{check_source_design_system, DesignSystem};
 use crate::profiler::{profile_findings, profile_step, DetectorProfile, ProfileMeta};
 use crate::regex_matchers::{
     analyzer_rule_id, is_neutral_authored_color, sass_sheet_corners,
-    side_tab_known_square_in_sheet, side_tab_markup_known_square, side_tab_rounded_in_scope,
+    is_stripe_child_match, side_tab_known_square_in_sheet, side_tab_markup_known_square,
+    side_tab_rounded_in_scope,
     MatchCtx, SourceText,
     REGEX_ANALYZERS, REGEX_MATCHERS, TEXT_CONTENT_ANALYZER_IDS,
 };
@@ -1752,7 +1753,7 @@ pub fn run_regex_matchers(
                     // declarations around the match read square, and in
                     // stylesheet text the stylesheet agrees.
                     if (matcher.test)(&m, &context)
-                        && (matcher.id != "side-tab" || {
+                        && (matcher.id != "side-tab" || is_stripe_child_match(&m) || {
                             let source = source.get_or_init(|| SourceText::new(lines));
                             side_tab_rounded_in_scope(&m, source, i, sass)
                                 || sheet.is_some_and(|sheet| {

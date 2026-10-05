@@ -101,11 +101,12 @@ pub fn probe_js() -> String {
   const text = (document.body && document.body.innerText) || '';
   return {{
     title: String(document.title || ''),
-    textChars: text.replace(/\s+/g, ' ').trim().length + consentShadowChars,
+    textChars: text.replace(/\s+/g, ' ').trim().length,
     href: String(location.href || ''),
     markers: found,
     consent,
     consentChars,
+    consentShadowChars,
     consentFrames,
     consentOutside,
   }};
@@ -128,6 +129,9 @@ pub struct PageProbe {
     pub consent_chars: u64,
     /// Visible form controls and sizable media outside those roots (up to 20).
     pub consent_outside: u64,
+    /// The part of `consent_chars` in shadow roots, which `text_chars` (the
+    /// page's `innerText`) does not see.
+    pub consent_shadow_chars: u64,
     /// Sizable frames inside those roots: a message drawn in an iframe,
     /// whose text the page cannot read.
     pub consent_frames: u64,
@@ -151,12 +155,13 @@ impl PageProbe {
                 .unwrap_or_default(),
             consent_chars: v.get("consentChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
             consent_outside: v.get("consentOutside").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
+            consent_shadow_chars: v.get("consentShadowChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
             consent_frames: v.get("consentFrames").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
         }
     }
 
     pub fn to_value(&self) -> Value {
-        json!({
+        let mut v = json!({
             "title": self.title,
             "textChars": self.text_chars,
             "href": self.href,
@@ -164,9 +169,18 @@ impl PageProbe {
             "consent": self.consent,
             "consentChars": self.consent_chars,
             "consentOutside": self.consent_outside,
-            "consentFrames": self.consent_frames,
-        })
+        });
+        // Named only when they hold something, so a page without them
+        // records what it did before they were measured.
+        if self.consent_frames > 0 {
+            v["consentFrames"] = json!(self.consent_frames);
+        }
+        if self.consent_shadow_chars > 0 {
+            v["consentShadowChars"] = json!(self.consent_shadow_chars);
+        }
+        v
     }
+
 }
 
 /// The main document's HTTP response (the last one for the main frame, so
@@ -354,7 +368,12 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
         };
     }
     if consent_wall && !probe.consent.is_empty() {
-        let outside = probe.text_chars.saturating_sub(probe.consent_chars);
+        // The page's own text count leaves out what the manager renders in a
+        // shadow root, and the manager's count includes it: both are read
+        // over the same text here, while the challenge checks above keep the
+        // page's own count.
+        let total = probe.text_chars + probe.consent_shadow_chars;
+        let outside = total.saturating_sub(probe.consent_chars);
         if outside < CONSENT_WALL_OUTSIDE_CHARS
             && probe.consent_outside == 0
             && (probe.consent_chars >= CONSENT_WALL_MIN_CHARS || probe.consent_frames > 0)
@@ -363,7 +382,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
                 kind: BlockKind::ConsentWall,
                 evidence: vec![
                     format!("consent manager {}", probe.consent.join(", ")),
-                    format!("{outside} of {} visible characters outside it", probe.text_chars),
+                    format!("{outside} of {total} visible characters outside it"),
                     "no control or image outside it".to_string(),
                 ],
             };
@@ -451,6 +470,26 @@ mod tests {
         // The same frame over a page with copy of its own is the page.
         p.text_chars = 400;
         assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+    }
+
+    #[test]
+    fn shadow_consent_text_is_counted_on_both_sides_and_not_against_challenges() {
+        // 90 characters of the page's own under a 300-character shadow-root
+        // banner: the page's count does not include the banner.
+        let mut p = probe("Example", 90, &[]);
+        p.consent = vec!["Usercentrics".into()];
+        p.consent_chars = 300;
+        p.consent_shadow_chars = 300;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+        // A challenge page under a long shadow-root banner is still small.
+        let mut c = probe("Just a moment...", 2900, &[]);
+        c.consent = vec!["Usercentrics".into()];
+        c.consent_chars = 800;
+        c.consent_shadow_chars = 800;
+        assert!(matches!(
+            classify(Some(&resp(403, &[])), &c),
+            PageValidity::Blocked { kind: BlockKind::Challenge, .. }
+        ));
     }
 
     #[test]

@@ -781,9 +781,43 @@ fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
         {
             return true;
         }
+        // A border, an outline or a shadow paints its colour too.
+        let painted = |c: Option<crate::color::Rgba>| c.is_some_and(|c| c.alpha_or_one() > 0.1 && is_stock_violet(&c));
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            let width = crate::js::parse_float(&dom.style(el, &format!("border{side}Width")));
+            let style = dom.style(el, &format!("border{side}Style"));
+            if width > 0.0
+                && style != "none"
+                && style != "hidden"
+                && painted(crate::color::parse_any_color(Some(&dom.style(el, &format!("border{side}Color")))))
+            {
+                return true;
+            }
+        }
+        let outline = crate::js::parse_float(&dom.style(el, "outlineWidth"));
+        let outline_style = dom.style(el, "outlineStyle");
+        if outline > 0.0
+            && !outline_style.is_empty()
+            && outline_style != "none"
+            && painted(crate::color::parse_any_color(Some(&dom.style(el, "outlineColor"))))
+        {
+            return true;
+        }
+        let shadow = dom.style(el, "boxShadow");
+        if shadow != "none"
+            && SHADOW_COLOR_RE
+                .find_iter(&shadow)
+                .any(|m| painted(crate::color::parse_any_color(Some(m.as_str()))))
+        {
+            return true;
+        }
     }
     false
 }
+
+/// The colours in a computed `box-shadow` (`rgb(...)` / `rgba(...)`).
+static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"rgba?\([^)]*\)").expect("SHADOW_COLOR_RE"));
 
 // ─── Brand hue (corpus decision r3-23-ai-color-palette-brand-hue) ──────────
 
@@ -870,7 +904,7 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             }
         }
         // A type logo's letters can sit in a child (`<a class=logo><span>`):
-        // its ink is the first text in the logo, wherever it is set.
+        // its ink is the first visible text in the logo, wherever it is set.
         let ink_el = if !logo {
             None
         } else if super::dom::has_direct_text_longer_than(dom, el, 0) {
@@ -879,7 +913,11 @@ fn brand_surface_colors(dom: &dyn Dom) -> Vec<crate::color::Rgba> {
             dom.query_all(Some(el), "*")
                 .unwrap_or_default()
                 .into_iter()
-                .find(|d| super::dom::has_direct_text_longer_than(dom, *d, 0))
+                .find(|d| {
+                    super::dom::has_direct_text_longer_than(dom, *d, 0)
+                        && element_rect(dom, *d).is_some()
+                        && ai_palette_is_visible(dom, *d)
+                })
         };
         if let Some(ink_el) = ink_el {
             if let Some(ink) = parse_any_color(Some(&dom.style(ink_el, "color"))) {
@@ -2831,6 +2869,23 @@ mod tests {
             }),
             0
         );
+        // A hidden label before the logotype does not set the ink.
+        assert_eq!(
+            run(&|d, body| {
+                let logo = d.add(Some(body), "a");
+                d.set_attr(logo, "class", "site-logo");
+                d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+                let label = d.add(Some(logo), "span");
+                d.add_text(label, "Home");
+                d.set_style(label, "color", "rgb(124, 58, 237)");
+                d.set_style(label, "display", "none");
+                let word = d.add(Some(logo), "span");
+                d.set_rect(word, 0.0, 0.0, 120.0, 40.0);
+                d.add_text(word, "Acme");
+                d.set_style(word, "color", "rgb(37, 99, 235)");
+            }),
+            1
+        );
         // A partner logo in the page's content is not the site's brand, and
         // neither is an article's own header bar.
         assert_eq!(
@@ -3236,6 +3291,19 @@ mod tests {
             "backgroundImage",
             "linear-gradient(90deg, rgb(102, 126, 234), rgb(255, 176, 5))",
         );
+        assert!(purple_accent_reported(&d));
+
+        // So does a border, an outline or a shadow in it.
+        d.set_style(p, "backgroundImage", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("borderLeftWidth", "2px"), ("borderLeftStyle", "solid"), ("borderLeftColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "borderLeftStyle", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("outlineWidth", "2px"), ("outlineStyle", "solid"), ("outlineColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "outlineStyle", "none");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 4px 12px 0px");
         assert!(purple_accent_reported(&d));
     }
 

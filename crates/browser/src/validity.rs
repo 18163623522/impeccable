@@ -140,12 +140,13 @@ pub fn probe_js() -> String {
   const text = (document.body && document.body.innerText) || '';
   return {{
     title: String(document.title || ''),
-    textChars: text.replace(/\s+/g, ' ').trim().length,
+    textChars: text.replace(/\s+/g, ' ').trim().length + consentShadowChars,
     href: String(location.href || ''),
     markers: found,
     overlays,
     consent,
     consentChars,
+    consentFrames,
     consentOutside,
   }};
 }})()"#,
@@ -171,6 +172,9 @@ pub struct PageProbe {
     pub consent_chars: u64,
     /// Visible form controls and sizable media outside those roots (up to 20).
     pub consent_outside: u64,
+    /// Sizable frames inside those roots: a message drawn in an iframe,
+    /// whose text the page cannot read.
+    pub consent_frames: u64,
 }
 
 impl PageProbe {
@@ -196,6 +200,7 @@ impl PageProbe {
                 .unwrap_or_default(),
             consent_chars: v.get("consentChars").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
             consent_outside: v.get("consentOutside").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
+            consent_frames: v.get("consentFrames").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64,
         }
     }
 
@@ -209,6 +214,9 @@ impl PageProbe {
             "consentChars": self.consent_chars,
             "consentOutside": self.consent_outside,
         });
+        if self.consent_frames > 0 {
+            v["consentFrames"] = json!(self.consent_frames);
+        }
         // Named only when one shows, so a page with none records what it did
         // before overlays were probed.
         if !self.overlays.is_empty() {
@@ -411,7 +419,7 @@ pub fn classify_with(response: Option<&DocumentResponse>, probe: &PageProbe, con
         let outside = probe.text_chars.saturating_sub(probe.consent_chars);
         if outside < CONSENT_WALL_OUTSIDE_CHARS
             && probe.consent_outside == 0
-            && probe.consent_chars >= CONSENT_WALL_MIN_CHARS
+            && (probe.consent_chars >= CONSENT_WALL_MIN_CHARS || probe.consent_frames > 0)
         {
             return PageValidity::Blocked {
                 kind: BlockKind::ConsentWall,
@@ -490,6 +498,20 @@ mod tests {
         let mut p = probe("Example", 9400, &[]);
         p.consent = vec!["OneTrust".into()];
         p.consent_chars = 5392;
+        assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
+    }
+
+    #[test]
+    fn a_manager_drawn_in_a_frame_is_a_wall_over_an_empty_page() {
+        let mut p = probe("Example", 0, &[]);
+        p.consent = vec!["Sourcepoint".into()];
+        p.consent_frames = 1;
+        assert!(matches!(
+            classify(Some(&resp(200, &[])), &p),
+            PageValidity::Blocked { kind: BlockKind::ConsentWall, .. }
+        ));
+        // The same frame over a page with copy of its own is the page.
+        p.text_chars = 400;
         assert_eq!(classify(Some(&resp(200, &[])), &p), PageValidity::Ok);
     }
 

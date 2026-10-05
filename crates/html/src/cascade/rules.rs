@@ -273,7 +273,12 @@ fn extra_specified_expansions(prop: &str, value: &str) -> Vec<Expanded> {
                 "place-items" => "alignItems",
                 _ => "alignSelf",
             };
-            vec![(longhand.into(), v.to_string())]
+            let mut out: Vec<Expanded> = vec![(longhand.into(), v.to_string())];
+            // `place-items` sets both axes; a single var() answers for both.
+            if p == "place-items" {
+                out.push(("justifyItems".into(), v.to_string()));
+            }
+            out
         }
         // Shorthands reset what they omit: `flex-flow: wrap` is a row.
         "flex-flow" => {

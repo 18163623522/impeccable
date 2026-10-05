@@ -290,12 +290,26 @@ pub fn rides_a_running_track(dom: &dyn Dom, el: ElId) -> bool {
     false
 }
 
-/// A CSS animation that never ends: a name other than `none` with an
-/// `infinite` iteration count.
+/// A CSS animation that never ends and moves the box: a name other than
+/// `none` whose own `infinite` iteration count (the lists pair by position,
+/// the shorter one repeating) sits on keyframes that move it (`transform` or
+/// `translate`), or on keyframes the capture could not read. A one-shot
+/// slide beside an endless fade or pulse is not a moving track.
 fn runs_endless_animation(dom: &dyn Dom, el: ElId) -> bool {
-    let name = dom.style(el, "animationName");
-    let named = !name.is_empty() && name.split(',').any(|n| js::trim(n) != "none");
-    named && dom.style(el, "animationIterationCount").split(',').any(|n| js::trim(n) == "infinite")
+    let counts_raw = dom.style(el, "animationIterationCount");
+    let counts: Vec<&str> = counts_raw.split(',').map(js::trim).collect();
+    if counts.is_empty() {
+        return false;
+    }
+    dom.style(el, "animationName").split(',').enumerate().any(|(i, name)| {
+        let name = js::trim(name);
+        !name.is_empty()
+            && name != "none"
+            && counts[i % counts.len()] == "infinite"
+            && dom.keyframes(name).is_none_or(|frames| {
+                frames.iter().any(|f| f.decls.iter().any(|(p, _)| p == "transform" || p == "translate"))
+            })
+    })
 }
 
 /// The x range of a truncated line: text measured at `(left, right)` cut to

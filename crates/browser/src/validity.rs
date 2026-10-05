@@ -8,7 +8,7 @@
 //! always describes the site that was asked about.
 //!
 //! The decision is pure ([`classify`]) over two inputs: the main document's
-//! HTTP response as CDP saw it, and a small in-page probe ([`PROBE_JS`]).
+//! HTTP response as CDP saw it, and a small in-page probe ([`probe_js`]).
 //! Header and HTTP-status signals stand alone. Titles and DOM markers only
 //! count on a small page, because a real page can carry a captcha widget on a
 //! form or be titled "Access denied" in a CMS without being a block page.
@@ -229,13 +229,29 @@ impl PageValidity {
     }
 }
 
+/// Page- and server-supplied text made safe to print: control characters
+/// (an escape sequence in a `<title>`, a newline in a header) are written as
+/// `\u{..}` escapes, so the evidence the CLI prints to a terminal cannot drive
+/// that terminal.
+fn printable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Classify a loaded page. `response` is `None` when no main-document
 /// response was seen (a `file://` URL, or a same-document navigation).
 pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageValidity {
     let mut challenge: Vec<String> = Vec::new();
     if let Some(r) = response {
         if let Some(action) = r.header("x-amzn-waf-action") {
-            challenge.push(format!("x-amzn-waf-action: {action}"));
+            challenge.push(format!("x-amzn-waf-action: {}", printable(action)));
         }
         if let Some(v) = r.header("cf-mitigated") {
             if v.eq_ignore_ascii_case("challenge") {
@@ -258,7 +274,7 @@ pub fn classify(response: Option<&DocumentResponse>, probe: &PageProbe) -> PageV
     if small {
         let title = probe.title.trim().to_lowercase();
         if !title.is_empty() && CHALLENGE_TITLE_PREFIXES.iter().any(|p| title.starts_with(p)) {
-            challenge.push(format!("title \"{}\"", probe.title.trim()));
+            challenge.push(format!("title \"{}\"", printable(probe.title.trim())));
         }
         for m in &probe.markers {
             challenge.push(format!("marker {m}"));
@@ -323,6 +339,18 @@ mod tests {
             }
         );
         assert!(v.error_message().unwrap().starts_with("the page is a bot challenge"));
+    }
+
+    #[test]
+    fn page_supplied_evidence_cannot_carry_control_characters() {
+        let v = classify(
+            Some(&resp(403, &[("x-amzn-waf-action", "captcha\r\n\u{1b}[2J")])),
+            &probe("Human Verification\u{1b}]0;owned\u{7}", 120, &[]),
+        );
+        let message = v.error_message().unwrap();
+        assert!(!message.chars().any(|c| c.is_control()), "{message:?}");
+        assert!(message.contains("title \"Human Verification\\u{1b}]0;owned\\u{7}\""), "{message}");
+        assert!(message.contains("x-amzn-waf-action: captcha\\u{d}\\u{a}\\u{1b}[2J"), "{message}");
     }
 
     #[test]

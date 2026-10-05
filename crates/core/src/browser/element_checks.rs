@@ -3270,6 +3270,18 @@ fn wrapper_painted_rects(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, budget: &
         if dom.style(child, "display") == "none" {
             continue;
         }
+        // A subtree at opacity 0 paints nothing, and a box hidden by
+        // `visibility` paints nothing of its own (a child can still show).
+        let opacity = js::parse_float(&dom.style(child, "opacity"));
+        if opacity.is_finite() && opacity <= 0.01 {
+            continue;
+        }
+        if matches!(dom.style(child, "visibility").as_str(), "hidden" | "collapse") {
+            if !wrapper_painted_rects(dom, child, out, budget) {
+                return false;
+            }
+            continue;
+        }
         if generated_content_unmeasured(dom, child) {
             return false;
         }
@@ -7504,6 +7516,17 @@ mod tests {
         d.set_text_rect(label, 345.0, 70.0, 46.0, 14.0);
         assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "text past the edge");
         d.set_text_rect(label, 345.0, 70.0, 26.0, 14.0);
+        // A closed tooltip past the clip, hidden or transparent, paints
+        // nothing a visitor sees.
+        let tip = d.add(Some(wrap), "div");
+        d.set_styles(tip, &[("display", "block"), ("backgroundColor", "rgb(20, 20, 20)"), ("visibility", "hidden")]);
+        d.set_rect(tip, 343.0, 100.0, 120.0, 40.0);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "a hidden tooltip");
+        d.set_styles(tip, &[("visibility", "visible"), ("opacity", "0")]);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "a transparent tooltip");
+        d.set_style(tip, "opacity", "1");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "a shown tooltip");
+        d.set_style(tip, "display", "none");
         // A menu keeps reporting whatever it measures.
         d.set_attr(wrap, "role", "menu");
         d.add_selector(wrap, "[role=\"menu\"]");

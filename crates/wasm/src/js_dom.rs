@@ -5,7 +5,9 @@
 //! (`u32::MAX`, or a first element of `u32::MAX` in arrays) because the probe
 //! catches the DOM's SyntaxError and cannot throw across the boundary.
 
-use impeccable_core::browser::dom::{Dom, ElId, KeyframeFrame, Rect, SelectorError};
+use impeccable_core::browser::dom::{
+    merge_text_rects_into_lines, Dom, ElId, KeyframeFrame, Rect, SelectorError,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -60,6 +62,7 @@ extern "C" {
     fn check_visibility(el: u32) -> i32;
     fn direct_text_rect(el: u32) -> Vec<f64>;
     fn running_animation_properties(el: u32) -> Option<String>;
+    fn text_rects(el: u32) -> Vec<f64>;
 }
 
 fn opt(id: u32) -> Option<ElId> {
@@ -358,5 +361,15 @@ impl Dom for JsDom {
         } else {
             Some(to_rect(&v))
         }
+    }
+    /// A live page can always say where its lines are. The probe flattens the
+    /// rects of every text node under the element into one array of eights, in
+    /// the order `rect` uses (a tail shorter than a rect is ignored), and the
+    /// fragments that share a row are merged back into the line they came
+    /// from here.
+    fn text_line_rects(&self, el: ElId) -> Option<Vec<Rect>> {
+        Some(merge_text_rects_into_lines(
+            text_rects(el).chunks_exact(8).map(to_rect).collect(),
+        ))
     }
 }

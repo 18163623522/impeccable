@@ -1763,15 +1763,180 @@ enum HiddenState {
     Excluded,
 }
 
+/// Roles that make an invisible box, or an invisible box inside one, closed
+/// navigation: a menu that opens on demand.
+const CLOSED_NAV_ROLES: &[&str] = &["navigation", "menu", "menubar"];
+
+/// Roles that make an invisible box itself a closed overlay or an unselected
+/// panel. Read on the box only: a selected tab panel or an open dialog can
+/// hold a reveal that never ran.
+const CLOSED_PANEL_ROLES: &[&str] = &["dialog", "alertdialog", "tabpanel"];
+
+/// The words of a class token: split at anything that is not a letter or a
+/// digit and at each lower-to-upper step, lowercased (`sp-tab-content`,
+/// `Tabs_panel__x1`, `megaMenu`).
+fn class_words(token: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut prev_lower = false;
+    for c in token.chars() {
+        if !c.is_ascii_alphanumeric() || (c.is_ascii_uppercase() && prev_lower) {
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        }
+        if c.is_ascii_alphanumeric() {
+            word.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase();
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
+/// Whether a class token names a container that is closed until its trigger
+/// opens it: a drawer (`offcanvas`, `drawer`), a menu flyout (`megamenu`,
+/// `submenu`, `dropdown`, `flyout`), a modal, or a tab or accordion panel
+/// (`tab-content`, `tab-pane`, `accordion-panel`). A bare `menu` or `tab` is
+/// not enough: a restaurant's `menu-section` and a `tab` button are content.
+fn closed_container_class(token: &str) -> bool {
+    let words = class_words(token);
+    let has = |w: &str| words.iter().any(|x| x == w);
+    let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
+    if ["offcanvas", "drawer", "megamenu", "submenu", "dropdown", "flyout", "modal", "tabpanel", "tabpane"]
+        .iter()
+        .any(|w| has(w))
+        || pair("off", "canvas")
+        || pair("mega", "menu")
+        || pair("sub", "menu")
+    {
+        return true;
+    }
+    let panel = ["content", "panel", "pane", "body"].iter().any(|w| has(w));
+    panel && (has("tab") || has("tabs") || has("accordion"))
+}
+
+/// The ids whose controlling triggers all say closed: every element whose
+/// `aria-controls` names the id carries `aria-expanded="false"` or
+/// `aria-selected="false"`, and none says `true`.
+fn closed_controlled_ids(dom: &dyn Dom) -> std::collections::HashSet<String> {
+    let mut closed = std::collections::HashSet::new();
+    let mut open = std::collections::HashSet::new();
+    for trigger in dom.query_all(None, "[aria-controls]").unwrap_or_default() {
+        let Some(ids) = dom.attr(trigger, "aria-controls") else { continue };
+        let state = |name: &str| dom.attr(trigger, name).map(|v| js::to_lower_case(js::trim(&v)));
+        let (expanded, selected) = (state("aria-expanded"), state("aria-selected"));
+        let is = |v: &Option<String>, want: &str| v.as_deref() == Some(want);
+        let says_open = is(&expanded, "true") || is(&selected, "true");
+        let says_closed = is(&expanded, "false") || is(&selected, "false");
+        for id in ids.split_whitespace() {
+            if says_open {
+                open.insert(id.to_string());
+            } else if says_closed {
+                closed.insert(id.to_string());
+            }
+        }
+    }
+    closed.retain(|id| !open.contains(id));
+    closed
+}
+
+/// Whether `el`, a box that is itself transparent or `visibility: hidden`,
+/// is closed interface waiting for its trigger rather than content whose
+/// reveal never ran (corpus decision r5-p5-content-hidden-closed-navigation).
+/// Any one of:
+///
+/// - it sits in navigation: the box or an ancestor is a `nav`, or carries a
+///   role in [`CLOSED_NAV_ROLES`];
+/// - the box or an ancestor is `inert`;
+/// - the box or an ancestor is named by an `aria-controls` trigger that says
+///   `aria-expanded="false"` or `aria-selected="false"` (`closed_ids`);
+/// - the box itself carries a role in [`CLOSED_PANEL_ROLES`];
+/// - the box itself carries a class token [`closed_container_class`] knows;
+/// - the box itself follows its trigger: the element before it, or that
+///   element's first child (a heading wrapping a button), says
+///   `aria-expanded="false"`, the accordion that names no `aria-controls`
+///   (the wrapper is a heading or holds nothing but the trigger);
+/// - the box itself is a drawer parked beside the page: `position: fixed`
+///   and wholly left or right of the viewport.
+///
+/// A box none of these describe is base behaviour: its text counts as hidden.
+fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::HashSet<String>) -> bool {
+    let role = |e: ElId| dom.attr(e, "role").map(|r| js::to_lower_case(js::trim(&r))).unwrap_or_default();
+    let own_role = role(el);
+    if CLOSED_PANEL_ROLES.contains(&own_role.as_str()) {
+        return true;
+    }
+    if dom
+        .attr(el, "class")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(closed_container_class)
+    {
+        return true;
+    }
+    let collapsed = |e: ElId| {
+        dom.attr(e, "aria-expanded").map(|v| js::to_lower_case(js::trim(&v))).as_deref() == Some("false")
+    };
+    if let Some(before) = dom.previous_element_sibling(el) {
+        // The wrapped trigger is the accordion heading's: a heading, or a
+        // box holding only the trigger. A site header whose first child is a
+        // closed hamburger says nothing about the hero after it.
+        let wraps_trigger = || {
+            let tag = tag_lower(dom, before);
+            matches!(tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+                || role(before) == "heading"
+                || dom.children(before).len() == 1
+        };
+        if collapsed(before) || (dom.first_element_child(before).is_some_and(collapsed) && wraps_trigger()) {
+            return true;
+        }
+    }
+    if js::to_lower_case(&dom.style(el, "position")) == "fixed" {
+        let rect = dom.rect(el);
+        let viewport_width = dom.inner_width();
+        if rect.width > 0.0 && (rect.right <= 0.0 || (viewport_width > 0.0 && rect.left >= viewport_width)) {
+            return true;
+        }
+    }
+    for a in ancestors_inclusive(dom, el) {
+        if tag_lower(dom, a) == "nav" || CLOSED_NAV_ROLES.contains(&role(a).as_str()) {
+            return true;
+        }
+        if dom.attr(a, "inert").is_some() {
+            return true;
+        }
+        if !closed_ids.is_empty() {
+            if let Some(id) = dom.attr(a, "id") {
+                if closed_ids.contains(&id) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// JS: checks.mjs#measureHiddenTextDOM()
+///
+/// Text in closed interface is left out of both counts, like text under
+/// `display: none` or `aria-hidden`: a box that starts a transparent or
+/// `visibility: hidden` subtree and is a [`closed_container`] (a closed menu,
+/// drawer or dialog, an unselected tab or accordion panel). Nobody expects a
+/// closed menu to show, so it is not content a reveal failed to show.
 pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let root = dom.document_element();
     let mut cache: std::collections::HashMap<ElId, HiddenState> = std::collections::HashMap::new();
+    // Read once, and only when the page has an invisible box to classify.
+    let closed_ids: std::cell::OnceCell<std::collections::HashSet<String>> = std::cell::OnceCell::new();
 
     fn state_of(
         dom: &dyn Dom,
         root: Option<ElId>,
         cache: &mut std::collections::HashMap<ElId, HiddenState>,
+        closed_ids: &std::cell::OnceCell<std::collections::HashSet<String>>,
         el: Option<ElId>,
     ) -> HiddenState {
         let Some(el) = el else { return HiddenState::Visible };
@@ -1785,7 +1950,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         let state = if HIDDEN_TEXT_EXCLUDE_TAGS.contains(&tag.as_str()) {
             HiddenState::Excluded
         } else {
-            let parent_state = state_of(dom, root, cache, dom.parent(el));
+            let parent_state = state_of(dom, root, cache, closed_ids, dom.parent(el));
             if parent_state == HiddenState::Excluded {
                 HiddenState::Excluded
             } else {
@@ -1797,11 +1962,18 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                     || cv == "hidden"
                 {
                     HiddenState::Excluded
-                } else if parent_state == HiddenState::Invisible
-                    || pf0(&dom.style(el, "opacity")) <= 0.02
+                } else if parent_state == HiddenState::Invisible {
+                    HiddenState::Invisible
+                } else if pf0(&dom.style(el, "opacity")) <= 0.02
                     || HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility"))
                 {
-                    HiddenState::Invisible
+                    // The box where the invisible subtree starts decides for
+                    // everything under it.
+                    if closed_container(dom, el, closed_ids.get_or_init(|| closed_controlled_ids(dom))) {
+                        HiddenState::Excluded
+                    } else {
+                        HiddenState::Invisible
+                    }
                 } else {
                     HiddenState::Visible
                 }
@@ -1822,7 +1994,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         if len == 0 {
             continue;
         }
-        let state = state_of(dom, root, &mut cache, Some(el));
+        let state = state_of(dom, root, &mut cache, &closed_ids, Some(el));
         if state == HiddenState::Excluded {
             continue;
         }
@@ -3270,6 +3442,145 @@ mod tests {
         assert_eq!(m.total_chars, 12.0 + 17.0);
         assert_eq!(m.hidden_chars, 17.0);
         assert_eq!(m.hidden_samples, vec!["hidden words here".to_string()]);
+    }
+
+    /// A box of text under `parent`, shown or hidden by `styles`.
+    fn hidden_box(d: &mut FakeDom, parent: ElId, tag: &str, styles: &[(&str, &str)], text: &str) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.set_styles(el, &[("display", "block"), ("opacity", "1"), ("visibility", "visible")]);
+        d.set_styles(el, styles);
+        if !text.is_empty() {
+            d.add_text(el, text);
+        }
+        el
+    }
+
+    const OPACITY_0: &[(&str, &str)] = &[("opacity", "0")];
+    const VIS_HIDDEN: &[(&str, &str)] = &[("visibility", "hidden")];
+
+    /// r5-p5-content-hidden-closed-navigation: closed menus, drawers, dialogs
+    /// and unselected panels leave both counts.
+    #[test]
+    fn hidden_text_measure_leaves_out_closed_interface() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        // nike.com: a transparent flyout inside the site nav.
+        let nav = hidden_box(&mut d, body, "nav", &[], "");
+        hidden_box(&mut d, nav, "div", OPACITY_0, "closed flyout in a nav");
+        // A role=menu list that is itself hidden.
+        let menu = hidden_box(&mut d, body, "ul", VIS_HIDDEN, "");
+        d.set_attr(menu, "role", "menu");
+        hidden_box(&mut d, menu, "li", VIS_HIDDEN, "closed menu item");
+        // phillips66.com: an inert mega-menu.
+        let mega = hidden_box(&mut d, body, "section", OPACITY_0, "inert mega menu");
+        d.set_attr(mega, "inert", "");
+        // cencora.com, apple.com: a flyout whose trigger says collapsed.
+        let trigger = hidden_box(&mut d, body, "button", &[], "Who we are");
+        d.set_attr(trigger, "aria-controls", "who-we-are other-panel");
+        d.set_attr(trigger, "aria-expanded", "false");
+        d.add_selector(trigger, "[aria-controls]");
+        let flyout = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(flyout, "id", "who-we-are");
+        hidden_box(&mut d, flyout, "div", VIS_HIDDEN, "controlled flyout text");
+        // capitalone.com: a dialog that is not open.
+        let dialog = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("visibility", "hidden")], "closed dialog");
+        d.set_attr(dialog, "role", "dialog");
+        // An unselected tab panel by role, and lpga.or.jp's by class.
+        let panel = hidden_box(&mut d, body, "div", VIS_HIDDEN, "unselected tab panel");
+        d.set_attr(panel, "role", "tabpanel");
+        let sp = hidden_box(&mut d, body, "div", VIS_HIDDEN, "unselected class panel");
+        d.set_attr(sp, "class", "merit02 news sp-tab-content sp-tab-content-5");
+        // airsoft-verzeichnis.de: a Bootstrap off-canvas drawer.
+        let drawer = hidden_box(&mut d, body, "div", VIS_HIDDEN, "drawer links");
+        d.set_attr(drawer, "class", "offcanvas offcanvas-start");
+        // climatempo.com.br, becomeautonomous.com: an accordion answer that
+        // follows a collapsed trigger, bare or wrapped in a heading.
+        let q = hidden_box(&mut d, body, "button", &[], "Question");
+        d.set_attr(q, "aria-expanded", "false");
+        hidden_box(&mut d, body, "div", OPACITY_0, "collapsed answer one");
+        let h = hidden_box(&mut d, body, "h3", &[], "");
+        let hq = hidden_box(&mut d, h, "button", &[], "Question");
+        d.set_attr(hq, "aria-expanded", "false");
+        hidden_box(&mut d, body, "div", OPACITY_0, "collapsed answer two");
+        // yna.co.kr: a fixed whole-site menu parked right of a 390px viewport.
+        d.inner_width = 390.0;
+        let parked = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("position", "fixed")], "parked whole menu");
+        d.set_rect(parked, 390.0, 0.0, 390.0, 844.0);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 10.0 + 16.0, 0.0), "{:?}", m.hidden_samples);
+    }
+
+    /// The counter-evidence (vestris.ai, findings 141184, 141225) and its
+    /// neighbours: content a reveal never showed still counts.
+    #[test]
+    fn hidden_text_measure_keeps_reveals_that_never_ran() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        // An in-flow section still at opacity 0.
+        let section = hidden_box(&mut d, body, "div", OPACITY_0, "");
+        d.set_attr(section, "class", "framer-11o8is2");
+        hidden_box(&mut d, section, "p", &[], "never revealed copy");
+        // A reveal inside the selected tab panel and inside an open dialog:
+        // the role is on an ancestor that shows, not on the hidden box.
+        let panel = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(panel, "role", "tabpanel");
+        hidden_box(&mut d, panel, "p", OPACITY_0, "reveal in the selected panel");
+        // A panel whose trigger says expanded, and one with two triggers of
+        // which one says expanded.
+        let trigger = hidden_box(&mut d, body, "button", &[], "Open");
+        d.set_attr(trigger, "aria-controls", "open-panel shared-panel");
+        d.set_attr(trigger, "aria-expanded", "true");
+        d.add_selector(trigger, "[aria-controls]");
+        let other = hidden_box(&mut d, body, "button", &[], "Shut");
+        d.set_attr(other, "aria-controls", "shared-panel");
+        d.set_attr(other, "aria-expanded", "false");
+        d.add_selector(other, "[aria-controls]");
+        for id in ["open-panel", "shared-panel"] {
+            hidden_box(&mut d, body, "hr", &[], "");
+            let p = hidden_box(&mut d, body, "div", OPACITY_0, "expanded panel text");
+            d.set_attr(p, "id", id);
+        }
+        // Class words that are content, not closed interface.
+        for class in ["menu-section", "tab", "content", "drawing-board", "modality"] {
+            let el = hidden_box(&mut d, body, "div", OPACITY_0, "plain content");
+            d.set_attr(el, "class", class);
+        }
+        // An answer after an expanded trigger, and a fixed box that is on
+        // screen (ktb.gov.tr's unmarked panel): neither is known closed.
+        let q = hidden_box(&mut d, body, "button", &[], "Asked");
+        d.set_attr(q, "aria-expanded", "true");
+        hidden_box(&mut d, body, "div", OPACITY_0, "expanded answer");
+        d.inner_width = 1280.0;
+        let fixed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("position", "fixed")], "fixed on screen");
+        d.set_rect(fixed, 680.0, 16.0, 520.0, 766.0);
+        // A site header whose first child is a closed hamburger, then a hero
+        // still at opacity 0: the hamburger closes its menu, not the hero.
+        let header = hidden_box(&mut d, body, "header", &[], "");
+        let burger = hidden_box(&mut d, header, "button", &[], "");
+        d.set_attr(burger, "aria-expanded", "false");
+        hidden_box(&mut d, header, "a", &[], "Logo");
+        hidden_box(&mut d, body, "section", OPACITY_0, "stalled hero");
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        let hidden = 19.0 + 28.0 + 2.0 * 19.0 + 5.0 * 13.0 + 15.0 + 15.0 + 12.0;
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 4.0 + 4.0 + 5.0 + 4.0 + hidden, hidden));
+    }
+
+    #[test]
+    fn closed_container_class_words() {
+        for token in [
+            "offcanvas", "offcanvas-start", "off-canvas", "nav-drawer", "megamenu", "mega-menu", "megaMenu",
+            "sub-menu", "globalnav-submenu", "user-item-dropdown-popover", "globalnav-flyout", "modal",
+            "sp-tab-content", "tab-pane", "Tabs_panel__x1", "tabpanel", "accordion-body", "accordion__content",
+        ] {
+            assert!(closed_container_class(token), "{token}");
+        }
+        for token in ["menu", "menu-section", "tab", "tabs", "content", "table-content", "panel", "accordion", "reveal", "framer-11o8is2", "submenus-list-x"] {
+            assert!(!closed_container_class(token), "{token}");
+        }
     }
 
     /// agora.co.il, joongang.co.kr, v0-optimus-delta.vercel.app: the root, a

@@ -29,7 +29,12 @@
 //!   text is read). Under a class marker, sentence-length copy is still
 //!   copy (`mockups-grid` marketing text), and a `mock-exam` or an
 //!   `illustration-credit` is not a mockup at all. A mockup built from
-//!   utility classes alone says nothing, and its text keeps failing.
+//!   utility classes says so by its structure or not at all (taste call
+//!   r5-p26, [`crate::checks::text_context::in_framed_demo`]): a window with
+//!   three title-bar dots, a framed box under a preview caption, a device
+//!   frame that is scaled or tilted in 3D. Sentence-length copy inside is
+//!   still copy. `undersized-ui-text` and `tiny-text` report text in a
+//!   mockup as advisory too.
 //!
 //! The adapters gather [`DecorativeTextFacts`] against their own DOM; the
 //! decision is made here, once, for both engines.
@@ -93,6 +98,11 @@ pub struct DecorativeTextFacts {
     /// An ancestor is an HTML element marked `role="img"` outside any `svg`:
     /// the author declared the subtree a picture.
     pub picture_ancestor: bool,
+    /// An ancestor is a framed HTML demo by its structure: a window with
+    /// three title-bar dots, a framed box under a preview caption, a device
+    /// frame that is scaled or tilted in 3D
+    /// ([`crate::checks::text_context::in_framed_demo`], taste call r5-p26).
+    pub framed_demo: bool,
 }
 
 /// The shape a text with no reading job was recognised by.
@@ -112,7 +122,7 @@ pub fn classify_decorative_text(f: &DecorativeTextFacts) -> Option<DecorativeSha
     if f.text.is_empty() {
         return None;
     }
-    if f.mockup_ancestor && !is_sentence_copy(&f.text) {
+    if (f.mockup_ancestor || f.framed_demo) && !is_sentence_copy(&f.text) {
         return Some(DecorativeShape::Mockup);
     }
     if f.avatar_box
@@ -291,7 +301,7 @@ const MOCKUP_COPY_PARTS: &[&str] = &[
 /// A class or id token's parts: split on `-`, `_`, `:`, `/` and `.`, and
 /// where a lower-case letter meets a capital (`heroIllustration`), lower
 /// cased.
-fn token_parts(token: &str) -> Vec<String> {
+pub(crate) fn token_parts(token: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut prev_lower = false;
@@ -557,6 +567,11 @@ mod tests {
         // A picture the author marked role="img" is a picture, sentences and all.
         let pic = DecorativeTextFacts { picture_ancestor: true, ..copy.clone() };
         assert_eq!(classify_decorative_text(&pic), Some(DecorativeShape::Mockup));
+        // A demo framed by structure reads the same way as a marked one.
+        let framed = DecorativeTextFacts { framed_demo: true, ..facts("847 results") };
+        assert_eq!(classify_decorative_text(&framed), Some(DecorativeShape::Mockup));
+        let framed_copy = DecorativeTextFacts { framed_demo: true, ..copy.clone() };
+        assert_eq!(classify_decorative_text(&framed_copy), None);
         assert!(!is_sentence_copy("Draft saved"));
         assert!(!is_sentence_copy("$ npm run build --watch"));
         assert!(is_sentence_copy("Your export is ready to download."));

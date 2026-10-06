@@ -1141,20 +1141,27 @@ const ROUTED_PIXEL_MISSES: usize = 4;
 const ROUTED_PIXEL_SLOW_MISS: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// At most this many counted script errors per scan, and separately at
-/// most this many ad-tech ones.
+/// most this many ad-tech ones and this many recoverable hydration ones.
 const SCRIPT_ERROR_CAP: usize = 3;
 
 /// The page's deduped errors as `script-error` results, in arrival order.
-/// The cap applies to counted errors and advisory ad-tech errors
-/// separately, after classifying, so ad-tech errors never take the slots a
-/// first-party error needs: three failing ad scripts ahead of a broken app
-/// bundle still report the bundle as an error.
+/// The cap applies to counted errors, advisory ad-tech errors and advisory
+/// hydration errors separately, after classifying, so advisory errors never
+/// take the slots a first-party error needs: three failing ad scripts, or a
+/// hydration chain, ahead of a broken app bundle still report the bundle as
+/// an error.
 fn capped_script_errors<'a>(errors: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Vec<RawResult> {
-    let (mut counted, mut ad_tech) = (0usize, 0usize);
+    let (mut counted, mut ad_tech, mut hydration) = (0usize, 0usize, 0usize);
     let mut out = Vec::new();
     for (message, source) in errors {
         let r = script_error_result(message, source);
-        let slot = if r.third_party.is_some() { &mut ad_tech } else { &mut counted };
+        let slot = if r.third_party.is_some() {
+            &mut ad_tech
+        } else if r.severity == "advisory" {
+            &mut hydration
+        } else {
+            &mut counted
+        };
         if *slot < SCRIPT_ERROR_CAP {
             *slot += 1;
             out.push(r);
@@ -1168,7 +1175,10 @@ fn capped_script_errors<'a>(errors: impl IntoIterator<Item = (&'a str, Option<&'
 /// React invariant), so the finding names where it was thrown. An error an
 /// ad-tech script threw, or an ad API rejected, names the vendor and reports
 /// as advisory: the page renders fine and the fix is the vendor's (corpus
-/// decision r3-31-script-error-ad-tech).
+/// decision r3-31-script-error-ad-tech). One of React's recoverable
+/// hydration errors reports as advisory with its text unchanged: React
+/// renders the page again on the client and the page shows complete (corpus
+/// decision r5-p13-script-error-hydration).
 fn script_error_result(message: &str, source: Option<&str>) -> RawResult {
     let snippet = match source {
         Some(source) => format!("{message} ({source})"),
@@ -1183,6 +1193,10 @@ fn script_error_result(message: &str, source: Option<&str>) -> RawResult {
                 "script-error".to_string(),
                 impeccable_core::third_party::tag_detail(&snippet, vendor),
             )
+        },
+        None if impeccable_core::script_errors::react_recoverable_hydration_error(message).is_some() => RawResult {
+            severity: "advisory".to_string(),
+            ..RawResult::new(origin::SCRIPT_ERROR, "script-error".to_string(), snippet)
         },
         None => RawResult::new(origin::SCRIPT_ERROR, "script-error".to_string(), snippet),
     }
@@ -1681,6 +1695,40 @@ mod tests {
         let (findings, _) = results_to_findings("https://example.com/", vec![r], None).unwrap();
         assert_eq!((findings[0].severity.as_str(), findings[0].advisory), ("error", None));
         assert!(findings[0].extras.get("thirdParty").is_none());
+    }
+
+    /// r5-p13-script-error-hydration: React's recoverable hydration errors
+    /// are advisory, text unchanged; other React invariants and first-party
+    /// errors stay the rule's error, and the chain takes no counted slot.
+    #[test]
+    fn recoverable_hydration_errors_are_advisory() {
+        let src = Some("at rK, https://www.example.com/_next/static/chunks/app.js:1:46331");
+        let chain = [
+            "Uncaught Error: Minified React error #418: Hydration failed because the initial UI does not match what was rendered on the server.",
+            "Uncaught Error: Minified React error #423: There was an error while hydrating. Because the error happened outside of a Suspense boundary, the entire root will switch to client rendering.",
+            "Uncaught Error: Minified React error #425: Text content does not match server-rendered HTML.",
+            "Uncaught Error: Minified React error #422: There was an error while hydrating this Suspense boundary. Switched to client rendering.",
+        ];
+        let own = [
+            "Uncaught Error: Minified React error #185: Maximum update depth exceeded.",
+            "Uncaught TypeError: $.evo.article is not a function",
+            "Uncaught TypeError: $.evo.io is not a function",
+            "Uncaught TypeError: cart is undefined",
+        ];
+        let results = capped_script_errors(chain.iter().chain(own.iter()).map(|m| (*m, src)));
+        let (findings, _) = results_to_findings("https://example.com/", results, None).unwrap();
+        let summary: Vec<(&str, Option<bool>, &str)> =
+            findings.iter().map(|f| (f.severity.as_str(), f.advisory, f.snippet.as_str())).collect();
+        // Three of the four hydration errors (their own cap), then three of
+        // the four counted ones.
+        assert_eq!(summary.len(), 6, "{summary:#?}");
+        for (i, message) in chain[..3].iter().enumerate() {
+            assert_eq!(summary[i], ("advisory", Some(true), format!("{message} ({})", src.unwrap()).as_str()));
+            assert!(findings[i].extras.get("thirdParty").is_none());
+        }
+        for (i, message) in own[..3].iter().enumerate() {
+            assert_eq!(summary[3 + i], ("error", None, format!("{message} ({})", src.unwrap()).as_str()));
+        }
     }
 
     /// A design system that declares a purple drops the purple forms of

@@ -393,6 +393,14 @@ fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: Option<f64>, dept
     }
 }
 
+/// The hit, at advisory severity when `advisory` holds.
+fn advisory_if(mut hit: RuleHit, advisory: bool) -> RuleHit {
+    if advisory {
+        hit.severity = Some(impeccable_core::checks::rules::ADVISORY_SEVERITY.to_string());
+    }
+    hit
+}
+
 /// JS: checks.mjs#checkQuality(opts), static (`rect: null`) branches.
 pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     let el = q.el;
@@ -608,9 +616,12 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                         is_line_clamp(sv(style, "display"), sv(style, "webkitLineClamp")),
                     )
                 {
-                    findings.push(RuleHit::new(
-                        "tight-leading",
-                        format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                    findings.push(advisory_if(
+                        RuleHit::new(
+                            "tight-leading",
+                            format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
+                        ),
+                        crate::text_context::is_fine_print(el),
                     ));
                 }
             }
@@ -663,9 +674,11 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
             && !is_uppercase
             && !is_non_rendered_text(el, tag, Some(style))
         {
-            findings.push(RuleHit::new(
-                "tiny-text",
-                format!("{}px body text", number_to_string(font_size)),
+            // Fine print (taste call r5-p27) and text in a mockup (r5-p26)
+            // report as advisory.
+            findings.push(advisory_if(
+                RuleHit::new("tiny-text", format!("{}px body text", number_to_string(font_size))),
+                crate::text_context::is_fine_print(el) || crate::text_context::in_mock_context(el),
             ));
         }
     }
@@ -700,14 +713,24 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     && (is_interactive || is_furniture || dt_len <= 20)
                 {
                     let excerpt = slice_utf16_prefix(&direct_text, 40);
-                    findings.push(RuleHit::new(
-                        "undersized-ui-text",
-                        format!(
-                            "{}px functional text \"{}\" (below {}px floor)",
-                            number_to_string(font_size),
-                            excerpt,
-                            number_to_string(floor)
+                    // A label with no reading job (taste call r5-p3) and
+                    // text in a mockup (r5-p26) report as advisory. A
+                    // control's text is neither: a framed demo's controls
+                    // keep failing too, since a visitor can use them.
+                    let advisory = !is_interactive
+                        && (crate::text_context::is_micro_label(el)
+                            || crate::text_context::in_mock_context(el));
+                    findings.push(advisory_if(
+                        RuleHit::new(
+                            "undersized-ui-text",
+                            format!(
+                                "{}px functional text \"{}\" (below {}px floor)",
+                                number_to_string(font_size),
+                                excerpt,
+                                number_to_string(floor)
+                            ),
                         ),
+                        advisory,
                     ));
                 }
             }
@@ -811,15 +834,28 @@ pub fn check_element_quality(
 }
 
 /// JS: checks.mjs#checkPageQualityFromDoc(doc)
+///
+/// A skip into the footer is not reported; see the browser twin
+/// (`impeccable_core::browser::quality::check_page_quality_from_doc`) for
+/// the rule (corpus decision r5-p29-skipped-heading-footer-titles).
 pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<RuleHit> {
     let mut findings = Vec::new();
     let mut prev_level: i64 = 0;
     let mut prev_text = String::new();
+    let mut prev_footer = None;
+    let mut prev_opens_footer = false;
     for h in doc.query_selector_all("h1, h2, h3, h4, h5, h6") {
         let tag = h.tag_upper();
         let level = tag[1..2].parse::<i64>().unwrap_or(0);
         let text = slice_utf16_prefix(&collapse_ws(js::trim(&h.text_content())), 60);
-        if prev_level > 0 && level > prev_level + 1 {
+        let footer = h
+            .closest(impeccable_core::browser::quality::FOOTER_SELECTOR)
+            .map(|f| f.id());
+        let opens_footer = footer.is_some() && footer != prev_footer;
+        let into_footer = footer.is_some() && (opens_footer || prev_opens_footer);
+        let continues = prev_level > 0;
+        let skips = continues && level > prev_level + 1;
+        if skips && !into_footer {
             findings.push(RuleHit::new(
                 "skipped-heading",
                 format!(
@@ -834,6 +870,10 @@ pub fn check_page_quality_from_doc(doc: &crate::dom::StaticDocument) -> Vec<Rule
         }
         prev_level = level;
         prev_text = text;
+        prev_footer = footer;
+        // As in the URL engine: a footer's first heading that skipped in is
+        // a column title, and excuses nothing after it.
+        prev_opens_footer = opens_footer && continues && !skips;
     }
     findings
 }

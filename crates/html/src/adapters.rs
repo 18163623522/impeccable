@@ -1080,6 +1080,8 @@ pub fn check_element_colors(
             400.0
         }
     };
+    let font_weight =
+        impeccable_core::checks::rules::contrast_font_weight(font_weight, sv(style, "fontFamily"));
     let bg_clip = {
         let a = sv(style, "webkitBackgroundClip");
         if !a.is_empty() {
@@ -1157,7 +1159,9 @@ pub fn check_element_colors(
                         .or_else(|| parse_any_color(sv_opt(ph_style, "color")));
                     if let Some(ph_color) = ph_color {
                         let mut hits = check_placeholder_colors(&color_opts, placeholder, ph_color);
-                        if hits.iter().any(|h| h.id == "low-contrast") && is_decorative() {
+                        if hits.iter().any(|h| h.id == "low-contrast")
+                            && (is_decorative() || crate::field_label::field_has_visible_label(el))
+                        {
                             impeccable_core::checks::rules::demote_low_contrast(&mut hits);
                         }
                         findings.extend(hits);
@@ -1212,6 +1216,8 @@ pub fn check_element_hover_contrast(
             400.0
         }
     };
+    let font_weight =
+        impeccable_core::checks::rules::contrast_font_weight(font_weight, sv(style, "fontFamily"));
     let font_size = {
         let n = parse_float(sv(style, "fontSize"));
         if num_truthy(n) {

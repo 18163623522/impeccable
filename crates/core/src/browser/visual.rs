@@ -1968,6 +1968,8 @@ pub fn routed_reason(dom: &dyn Dom, el: ElId) -> Option<&'static str> {
             400.0
         }
     };
+    let font_weight =
+        crate::checks::rules::contrast_font_weight(font_weight, &dom.style(ink, "fontFamily"));
     let icons = icon_hosts(dom, el);
     let surface = super::background::resolve_text_surface(
         dom,
@@ -2039,6 +2041,8 @@ fn candidate_value(dom: &dyn Dom, el: ElId, tag: &str, direct: &str, rect: &Rect
             400.0
         }
     };
+    let font_weight =
+        crate::checks::rules::contrast_font_weight(font_weight, &dom.style(el, "fontFamily"));
     let is_large_text = font_size >= WCAG_LARGE_TEXT_PX
         || (font_size >= WCAG_LARGE_BOLD_TEXT_PX && font_weight >= 700.0);
     let threshold = if is_large_text { 3.0 } else { 4.5 };

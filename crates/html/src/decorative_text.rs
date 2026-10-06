@@ -184,6 +184,7 @@ pub fn decorative_text_facts(el: &StaticElement<'_>) -> DecorativeTextFacts {
         signature_marked,
         mockup_ancestor,
         picture_ancestor,
+        framed_demo: crate::text_context::in_framed_demo(el),
         text,
     }
 }

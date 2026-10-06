@@ -1767,13 +1767,24 @@ fn marquee_page_form_stands(
 /// `url()` background on it or under it, or generated content.
 /// Whether `el` holds text a visitor sees: text outside the elements that
 /// never paint theirs (an SVG's `title`, `desc` or `metadata`, a `style`
-/// or `script`), which a decorative drawing carries for its label.
+/// or `script`), which a decorative drawing carries for its label, and
+/// outside boxes that render none (`display: none`, a `content-visibility:
+/// hidden` box's contents, a transparent descendant). A `visibility:
+/// hidden` box hides its own text; a child that sets `visible` again shows.
 fn shows_text(dom: &dyn Dom, el: ElId) -> bool {
-    if matches!(tag_lower(dom, el).as_str(), "title" | "desc" | "metadata" | "style" | "script" | "template") {
+    shows_text_at(dom, el, true)
+}
+
+fn shows_text_at(dom: &dyn Dom, el: ElId, root: bool) -> bool {
+    if matches!(tag_lower(dom, el).as_str(), "title" | "desc" | "metadata" | "style" | "script" | "template")
+        || super::dom::renders_no_text(dom, el)
+        || (!root && crate::js::parse_float(&dom.style(el, "opacity")) == 0.0)
+    {
         return false;
     }
-    dom.direct_text_nodes(el).iter().any(|t| !crate::js::trim(t).is_empty())
-        || dom.children(el).into_iter().any(|k| shows_text(dom, k))
+    let visible = !matches!(dom.style(el, "visibility").as_str(), "hidden" | "collapse");
+    (visible && dom.direct_text_nodes(el).iter().any(|t| !crate::js::trim(t).is_empty()))
+        || dom.children(el).into_iter().any(|k| shows_text_at(dom, k, false))
 }
 
 fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
@@ -4349,6 +4360,12 @@ mod page_level_form_tests {
         d.add_text(label, "Decorative wave");
         // The usual seamless loop draws the path once and tiles it with `use`.
         let _tile = d.add(Some(wave), "use");
+        // Labels the drawing carries hidden paint nothing either.
+        for (prop, value) in [("display", "none"), ("visibility", "hidden"), ("opacity", "0")] {
+            let hidden = d.add(Some(wave), "text");
+            d.set_style(hidden, prop, value);
+            d.add_text(hidden, "Hidden label");
+        }
         assert!(details(&scan(&d), "marquee").is_empty());
 
         // What makes each one content: words in the track, an inline SVG

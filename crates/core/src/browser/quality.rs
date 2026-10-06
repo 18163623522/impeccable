@@ -531,15 +531,17 @@ impl RenderedTextCount {
                 continue;
             }
             if js::is_js_whitespace(c) && !self.keep_fixed_spaces {
+                // A no-break space under a preserving white-space renders at
+                // the edges like a preserved space does.
                 if preserved && self.count == 0 {
                     if line_break(c) {
                         self.lead = 0;
-                    } else if collapsible(c) {
+                    } else {
                         self.lead += 1;
                     }
                 } else if preserved && line_break(c) {
                     self.tail_open = false;
-                } else if preserved && !hangs && collapsible(c) && self.tail_open {
+                } else if preserved && !hangs && self.tail_open {
                     self.tail += 1;
                 }
                 self.pending += 1;
@@ -4956,6 +4958,11 @@ mod rendered_text_tests {
         // Under `pre-wrap` the spaces at the end of the line hang.
         d.set_style(q, "whiteSpace", "pre-wrap");
         assert_eq!(rendered_text_len(&d, q), "  indented".len());
+        // No-break spaces at the edges of a `pre` line take room too.
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "\u{a0}indented\u{a0}");
+        d.set_style(r, "whiteSpace", "pre");
+        assert_eq!(rendered_text_len(&d, r), "_indented_".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

@@ -18,7 +18,7 @@ use crate::checks::measures::{
 use crate::checks::rules::RuleHit;
 use super::text_geometry::{
     holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent, phrasing_text_font,
-    scrolling_ancestor_cuts, text_line_count,
+    clamp_to_own_clip, rides_a_running_track, scrolling_ancestor_cuts, text_line_count,
 };
 use crate::checks::text_rules::{
     average_glyph_advance_em_at, font_weight_number, is_bold_title_leading, is_cjk_text,
@@ -71,7 +71,42 @@ const FLUSH_SKIP_TAGS: &[&str] = &[
 
 const TINY_TEXT_UI_CONTEXT: &str = "button, a, label, summary, pre, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], nav, footer, [aria-hidden=\"true\"], [class*=\"badge\" i], [class*=\"caption\" i], [class*=\"chip\" i], [class*=\"code\" i], [class*=\"console\" i], [class*=\"diff\" i], [class*=\"label\" i], [class*=\"meta\" i], [class*=\"mock\" i], [class*=\"pill\" i], [class*=\"preview\" i], [class*=\"tag\" i], [class*=\"terminal\" i], [class*=\"writes\" i]";
 const EXEMPT_CONTEXT: &str = "pre, code, kbd, samp, var, svg, [aria-hidden=\"true\"], [class*=\"terminal\" i], [class*=\"console\" i], [class*=\"code\" i], [class*=\"mock\" i], [class*=\"editor\" i], [class*=\"syntax\" i], [class*=\"diff\" i]";
-const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"], [tabindex]";
+const INTERACTIVE: &str = "a[href], button, summary, label, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"checkbox\"], [role=\"radio\"], [role=\"switch\"], [role=\"treeitem\"]";
+
+/// The most text, in UTF-16 units, a focusable box holds while it still reads
+/// as one control with a label: a tab, a chip, a custom button. Past this the
+/// box is a region a visitor can focus (a card, an accordion item, a scroll
+/// area), and the text inside it is content.
+const FOCUSABLE_CONTROL_MAX_CHARS: usize = 80;
+
+/// Whether `el` is, or sits in, a control: one of the [`INTERACTIVE`]
+/// elements and roles, or a box made focusable with `tabindex`.
+///
+/// `tabindex` alone names no control. A negative value takes the box out of
+/// the tab order (a skip-link target, a dialog focused from script), and
+/// builders put `tabindex="0"` on whole components: directus.io's Framer
+/// accordion item is a 358 by 531px focusable box around a code sample, a
+/// heading and a paragraph. So a `tabindex` box counts when its value is not
+/// negative and it holds at most [`FOCUSABLE_CONTROL_MAX_CHARS`] of text.
+fn is_in_control(dom: &dyn Dom, el: ElId) -> bool {
+    if matches_or_closest(dom, el, INTERACTIVE) {
+        return true;
+    }
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if let Some(value) = dom.attr(c, "tabindex") {
+            let index = parse_float(js::trim(&value));
+            let focusable = !(index.is_finite() && index < 0.0);
+            if focusable
+                && utf16_len(js::trim(&collapse_ws(&dom.text_content(c)))) <= FOCUSABLE_CONTROL_MAX_CHARS
+            {
+                return true;
+            }
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
 const FURNITURE: &str = "nav, [role=\"navigation\"], td, th, [role=\"gridcell\"], [role=\"cell\"], caption, figcaption, dt, dd, footer, [class*=\"meta\" i], [class*=\"label\" i], [class*=\"badge\" i], [class*=\"chip\" i], [class*=\"pill\" i], [class*=\"tag\" i], [class*=\"kicker\" i], [class*=\"eyebrow\" i], [class*=\"breadcrumb\" i], [class*=\"timestamp\" i], [class*=\"category\" i], [class*=\"caption\" i], [class*=\"nav\" i]";
 const SMALLPRINT: &str = "small, footer, [class*=\"legal\" i], [class*=\"copyright\" i], [class*=\"fineprint\" i], [class*=\"fine-print\" i], [class*=\"smallprint\" i], [class*=\"small-print\" i], [class*=\"disclaimer\" i], [class*=\"disclosure\" i], [class*=\"footnote\" i]";
 const TEXT_EDGE_QUERY: &str =
@@ -464,11 +499,28 @@ struct RenderedTextCount {
     /// space) where it stands, edges included. Set for an atomic inline's
     /// contents, whose edges trim only collapsible white space.
     keep_fixed_spaces: bool,
+    /// Preserved spaces before the first character, after the last line
+    /// break ahead of it: indentation on the first line.
+    lead: usize,
+    /// Preserved spaces after the last character, before any line break,
+    /// under `pre` or `break-spaces`, where they take room on the line.
+    tail: usize,
+    /// No line break has come since the last counted character, so a kept
+    /// trailing space is still on that character's line.
+    tail_open: bool,
 }
 
 impl RenderedTextCount {
-    fn feed(&mut self, text: &str, preserved: bool) {
+    /// Feeds one text node. `preserved` is whether its `white-space` keeps
+    /// its spaces (`pre`, `pre-wrap`, `break-spaces`); `hangs` is whether
+    /// spaces at the end of a line hang rather than take room (`pre-wrap`).
+    /// Preserved white space renders where it sits on a line: indentation
+    /// before the first word and, unless they hang, spaces after the last.
+    /// Only the line breaks around the text, and the blank lines they open,
+    /// are on no line of it.
+    fn feed(&mut self, text: &str, preserved: bool, hangs: bool) {
         let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        let line_break = |c: char| matches!(c, '\n' | '\r' | '\u{c}');
         let mut buf = [0u8; 4];
         for c in text.chars() {
             if collapsible(c) && !preserved {
@@ -479,6 +531,19 @@ impl RenderedTextCount {
                 continue;
             }
             if js::is_js_whitespace(c) && !self.keep_fixed_spaces {
+                // A no-break space under a preserving white-space renders at
+                // the edges like a preserved space does.
+                if preserved && self.count == 0 {
+                    if line_break(c) {
+                        self.lead = 0;
+                    } else {
+                        self.lead += 1;
+                    }
+                } else if preserved && line_break(c) {
+                    self.tail_open = false;
+                } else if preserved && !hangs && self.tail_open {
+                    self.tail += 1;
+                }
                 self.pending += 1;
                 self.in_collapsible_run = false;
                 continue;
@@ -490,10 +555,24 @@ impl RenderedTextCount {
             }
             if self.count > 0 {
                 self.count += self.pending;
+            } else {
+                self.count += self.lead;
             }
             self.pending = 0;
+            self.lead = 0;
+            self.tail = 0;
+            self.tail_open = true;
             self.in_collapsible_run = false;
             self.count += 1;
+        }
+    }
+
+    /// The count, with the kept spaces that end the last line.
+    fn total(&self) -> usize {
+        if self.count > 0 {
+            self.count + self.tail
+        } else {
+            0
         }
     }
 
@@ -511,8 +590,13 @@ impl RenderedTextCount {
         }
         if self.count > 0 {
             self.count += self.pending;
+        } else {
+            self.count += self.lead;
         }
         self.pending = 0;
+        self.lead = 0;
+        self.tail = 0;
+        self.tail_open = true;
         self.count += inner;
     }
 }
@@ -534,15 +618,18 @@ fn is_atomic_inline(dom: &dyn Dom, el: ElId) -> bool {
 /// same subtrees, so the count and the line widths it is divided among
 /// always describe the same text.
 fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
-    let mut preserved: Option<bool> = None;
+    let mut preserved: Option<(bool, bool)> = None;
     for child in dom.child_nodes(el) {
         match child {
             DomChild::Text(text) => {
-                let preserved = *preserved.get_or_insert_with(|| {
+                let (preserved, hangs) = *preserved.get_or_insert_with(|| {
                     let white_space = dom.style(el, "whiteSpace");
-                    white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces"
+                    (
+                        white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces",
+                        white_space == "pre-wrap",
+                    )
                 });
-                out.feed(&text, preserved);
+                out.feed(&text, preserved, hangs);
             }
             DomChild::Element(child) => {
                 if renders_no_text(dom, child) {
@@ -580,7 +667,7 @@ fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
 fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
     let mut count = RenderedTextCount::default();
     feed_rendered_text(dom, el, &mut count);
-    count.count
+    count.total()
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
@@ -651,17 +738,25 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         let Some((left, right, cut_left, cut_right)) = visible_x_extent(dom, el, node, &nr, edge_threshold) else {
             continue;
         };
+        // Text lands on a side when it stops within the threshold of it, on
+        // either side of the edge. Text further past the edge than that is
+        // not held against it: it runs out of the box (a block parked 64px
+        // to the left of its column until its scroll reveal brings it in).
+        let lands = |gap: f64| gap <= edge_threshold && gap >= -edge_threshold;
         let sides = [
-            nr.top - rect.top <= edge_threshold,
-            !cut_right && rect.right - right <= edge_threshold,
-            rect.bottom - nr.bottom <= edge_threshold,
-            !cut_left && left - rect.left <= edge_threshold,
+            lands(nr.top - rect.top),
+            !cut_right && lands(rect.right - right),
+            lands(rect.bottom - nr.bottom),
+            !cut_left && lands(left - rect.left),
         ];
-        // The two remaining tests run only for text that reached an edge.
+        // The remaining tests run only for text that reached an edge.
         if !sides.iter().any(|s| *s) {
             continue;
         }
         if is_visually_hidden(dom, node) || !text_rect_survives_clipping(dom, el, node, &nr) {
+            continue;
+        }
+        if !text_is_the_wrappers(dom, el, node) {
             continue;
         }
         for s in 0..4 {
@@ -669,6 +764,47 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         }
     }
     flush
+}
+
+/// The opacity at or under which a box on the way from a text to its wrapper
+/// shows nothing of that text.
+const WRAPPER_TEXT_UNSEEN_OPACITY: f64 = 0.02;
+
+/// Whether the text of `node` is text the padding of `el` is there to hold
+/// off its edge, asked of every box from `node` up to `el`, `el` excluded.
+/// It is not when one of them:
+///
+/// - is at an opacity of [`WRAPPER_TEXT_UNSEEN_OPACITY`] or less: nothing of
+///   the text shows, and a block waiting at 0 for its scroll reveal is
+///   measured where the reveal starts it, not where it rests;
+/// - is out of flow (`position: absolute` or `fixed`): the wrapper's padding
+///   does not place it, its own offsets do (a promo badge pinned to a card's
+///   corner);
+/// - is a box that paints a surface of its own, a fill that differs from
+///   what is behind it: the text sits on that surface, and its inset is that
+///   box's to give. Inline boxes do not count: a highlighted word at the
+///   start of a line is still a line of the wrapper's text.
+fn text_is_the_wrappers(dom: &dyn Dom, el: ElId, node: ElId) -> bool {
+    const MAX_DEPTH: usize = 256;
+    let mut cur = Some(node);
+    for _ in 0..MAX_DEPTH {
+        let Some(c) = cur else { return true };
+        if c == el {
+            return true;
+        }
+        let opacity = parse_float(&dom.style(c, "opacity"));
+        if opacity.is_finite() && opacity <= WRAPPER_TEXT_UNSEEN_OPACITY {
+            return false;
+        }
+        if matches!(dom.style(c, "position").as_str(), "absolute" | "fixed") {
+            return false;
+        }
+        if dom.style(c, "display") != "inline" && has_visible_background_boundary(dom, c) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
 }
 
 /// JS: checks.mjs#isVisuallyHidden(el, style)
@@ -1052,7 +1188,22 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     }
     let (left, right) = match phrasing_text_extent(dom, el) {
         Some(t) if scrolling_ancestor_cuts(dom, el, &t) => return None,
+        // Text on a track a running animation moves stands wherever the
+        // capture caught it.
+        Some(_) if rides_a_running_track(dom, el) => return None,
         Some(t) => {
+            // A line its own box truncates with an ellipsis or a clamp ends
+            // at that box, wherever the Range rect of its text runs on to.
+            let t = if super::element_checks::truncates_its_own_line(dom, el) {
+                let (t_left, t_right) = clamp_to_own_clip(dom, el, t.left, t.right);
+                if t_right > t_left {
+                    Rect::from_xywh(t_left, t.top, t_right - t_left, t.height)
+                } else {
+                    t
+                }
+            } else {
+                t
+            };
             let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
             let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
             let pitch = q
@@ -1691,9 +1842,18 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             && closest_or_none(dom, el, "sub, sup").is_none()
             && !is_non_rendered_text(dom, el, tag)
         {
-            let is_exempt_context = matches_or_closest(dom, el, EXEMPT_CONTEXT);
+            // A run set in a monospace face with its whitespace kept is
+            // code, whatever its class names: the test `tiny-text` applies
+            // to a long run. directus.io's JSON sample is Framer text with
+            // hashed classes, 8px IBM Plex Mono at `white-space: pre-wrap`.
+            // The same site sets its pricing labels that way, so a short run
+            // also has to read as code.
+            let is_code_run = crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
+                && st("whiteSpace").starts_with("pre")
+                && crate::checks::text_rules::reads_as_code(&dt);
+            let is_exempt_context = is_code_run || matches_or_closest(dom, el, EXEMPT_CONTEXT);
             if !is_exempt_context && !is_visually_hidden(dom, el) {
-                let is_interactive = matches_or_closest(dom, el, INTERACTIVE);
+                let is_interactive = is_in_control(dom, el);
                 let is_furniture = matches_or_closest(dom, el, FURNITURE);
                 let is_smallprint = matches_or_closest(dom, el, SMALLPRINT);
                 let floor = if !is_interactive && is_smallprint {
@@ -2870,6 +3030,72 @@ mod tests {
         );
     }
 
+    /// freenet.de (218500, 218548) and sona8.com (217614, 217742, 217750,
+    /// 217758): text the wrapper's padding does not place, or that a scroll
+    /// reveal has not brought in yet.
+    #[test]
+    fn flush_ignores_text_that_is_not_the_wrappers() {
+        let flush = vec!["<div> \"border\": children flush against border on top/bottom (no inset)".to_string()];
+        let hits = |d: &FakeDom, row: ElId| -> Vec<String> {
+            check_element_quality_dom(d, row, &BrowserConfig::default())
+                .into_iter()
+                .map(|h| h.snippet)
+                .collect()
+        };
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        let h3 = d.parent(button).unwrap();
+        d.set_text_rect(button, 24.0, 1.0, 300.0, 56.0);
+        d.set_styles(button, &[("display", "block"), ("opacity", "1"), ("position", "static")]);
+        d.set_styles(h3, &[("display", "block"), ("opacity", "1"), ("position", "static")]);
+        assert_eq!(hits(&d, row), flush);
+
+        // A box on the way to the wrapper waits at opacity 0 for its reveal.
+        d.set_style(h3, "opacity", "0");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "opacity", "0.02");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "opacity", "0.6");
+        assert_eq!(hits(&d, row), flush);
+        d.set_style(h3, "opacity", "1");
+
+        // A badge pinned to the corner: the padding does not place it.
+        d.set_style(button, "position", "absolute");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(button, "position", "fixed");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(button, "position", "relative");
+        assert_eq!(hits(&d, row), flush);
+        d.set_style(button, "position", "static");
+
+        // A box that paints its own surface holds its own text; an inline
+        // highlight is still the wrapper's line.
+        d.set_style(h3, "backgroundColor", "rgb(20, 20, 20)");
+        assert!(hits(&d, row).is_empty());
+        d.set_style(h3, "display", "inline");
+        assert_eq!(hits(&d, row), flush);
+        d.set_styles(h3, &[("display", "block"), ("backgroundColor", "rgba(0, 0, 0, 0)")]);
+        assert_eq!(hits(&d, row), flush);
+
+        // Text further past an edge than the threshold has left the box (a
+        // block a reveal starts 56px low); a pixel or two over it still lands
+        // on the edge. The text is read inside its own box, so the box moves.
+        let place = |d: &mut FakeDom, y: f64, h: f64| {
+            d.set_rect(button, 24.0, y, 552.0, h);
+            d.set_text_rect(button, 24.0, y, 300.0, h);
+        };
+        place(&mut d, -30.0, 50.0);
+        assert!(hits(&d, row).is_empty(), "30px above the top rule, 38px off the bottom one");
+        place(&mut d, -3.0, 64.0);
+        assert_eq!(hits(&d, row), flush, "3px over each rule");
+        place(&mut d, 1.0, 80.0);
+        assert_eq!(
+            hits(&d, row),
+            vec!["<div> \"border\": children flush against border on top (no inset)".to_string()],
+            "23px past the bottom rule"
+        );
+    }
+
     #[test]
     fn flush_ignores_hidden_and_clipped_text() {
         let mut d = FakeDom::new();
@@ -3118,8 +3344,13 @@ mod tests {
         d.set_rect(run, 32.0, 112.0, 380.0, 20.0);
         d.set_text_rect(run, 32.0, 112.0, 380.0, 20.0);
         assert!(cramped(&d, band).is_empty(), "cut by the ellipsis box: {:?}", cramped(&d, band));
-        // Unclipped, the run reaches past the band's right side.
+        // Unclipped, the run ends 38px past the band's right side: it runs
+        // out of the band, which is not text held against its edge.
         d.set_style(name, "overflowX", "visible");
+        assert!(cramped(&d, band).is_empty(), "past the edge: {:?}", cramped(&d, band));
+        // Ending on the edge, it is.
+        d.set_rect(run, 32.0, 112.0, 342.0, 20.0);
+        d.set_text_rect(run, 32.0, 112.0, 342.0, 20.0);
         assert_eq!(cramped(&d, band), vec!["<div> \"band\": children flush against bg on right (no inset)"]);
     }
 
@@ -4356,6 +4587,168 @@ mod tests {
         );
     }
 
+    /// observations-35 row 6 (directus.io 216043 to 216058): `tabindex`
+    /// alone names no control, and a monospace run that reads as code is
+    /// code whatever its class names.
+    #[test]
+    fn undersized_ui_text_reads_focusable_regions_and_code_runs() {
+        fn undersized(d: &FakeDom, el: ElId) -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "undersized-ui-text")
+                .map(|h| h.snippet)
+                .collect()
+        }
+        let long = "A caption that runs well past twenty characters";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        // A custom control: a short label in a focusable box.
+        let chip = d.add(Some(body), "div");
+        d.set_attr(chip, "tabindex", "0");
+        let label = text_el(&mut d, chip, "span", "Show the full comparison table", "9px");
+        d.set_rect(label, 20.0, 100.0, 140.0, 12.0);
+        assert_eq!(undersized(&d, label).len(), 1, "a control's label, however long");
+        // The same text in a box taken out of the tab order is content: over
+        // twenty characters, it is body text and not this rule's.
+        d.set_attr(chip, "tabindex", "-1");
+        assert!(undersized(&d, label).is_empty(), "tabindex -1");
+        // So is a focusable region holding more than a label.
+        d.set_attr(chip, "tabindex", "0");
+        let more = text_el(&mut d, chip, "p", "The region also holds a paragraph of copy, a heading and a code sample.", "16px");
+        d.set_rect(more, 20.0, 120.0, 400.0, 20.0);
+        assert!(undersized(&d, label).is_empty(), "a focusable region");
+        // A short label in it still reports, as any short label does.
+        let short = text_el(&mut d, chip, "span", "Beta", "9px");
+        d.set_rect(short, 20.0, 150.0, 30.0, 12.0);
+        assert_eq!(undersized(&d, short), vec!["9px functional text \"Beta\" (below 11px floor)"]);
+        // A real control inside the region keeps the interactive reading.
+        let button = d.add(Some(chip), "button");
+        d.add_selector(button, INTERACTIVE);
+        let in_button = text_el(&mut d, button, "span", long, "9px");
+        d.set_rect(in_button, 20.0, 170.0, 200.0, 12.0);
+        d.add_selector(in_button, INTERACTIVE);
+        assert_eq!(undersized(&d, in_button).len(), 1);
+
+        // Code: monospace, whitespace kept, and it reads as code.
+        let line = text_el(&mut d, body, "p", "\"id\": 7,", "8px");
+        d.set_rect(line, 20.0, 300.0, 80.0, 11.0);
+        d.set_styles(line, &[("fontFamily", "\"IBM Plex Mono\", monospace"), ("whiteSpace", "pre-wrap")]);
+        assert!(undersized(&d, line).is_empty(), "a JSON line");
+        // The same face on a pricing label is a label (directus.io 216153).
+        let price = text_el(&mut d, body, "p", "$50/seat", "9px");
+        d.set_rect(price, 20.0, 320.0, 60.0, 11.0);
+        d.set_styles(price, &[("fontFamily", "\"IBM Plex Mono\", monospace"), ("whiteSpace", "pre-wrap")]);
+        assert_eq!(undersized(&d, price), vec!["9px functional text \"$50/seat\" (below 11px floor)"]);
+        // Code in a proportional face, or with its whitespace collapsed, is
+        // not told from a label.
+        d.set_style(line, "whiteSpace", "normal");
+        assert_eq!(undersized(&d, line).len(), 1);
+        d.set_styles(line, &[("whiteSpace", "pre"), ("fontFamily", "Inter, sans-serif")]);
+        assert_eq!(undersized(&d, line).len(), 1);
+    }
+
+    /// observations-35 row 15 (keydris.com 217085, leilonozap.vercel.app
+    /// 215445, paseo.sh 217250): a line its own box truncates ends at that
+    /// box, and text on a running marquee track stands where the capture
+    /// caught it.
+    #[test]
+    fn viewport_edge_reads_a_truncated_line_at_its_box_and_skips_running_tracks() {
+        let copy = "A long single line that the box truncates with an ellipsis well before the edge";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 390.0;
+        let card = d.add(Some(body), "div");
+        d.set_rect(card, 37.0, 600.0, 316.0, 200.0);
+        let line = text_el(&mut d, card, "p", copy, "14px");
+        d.set_styles(
+            line,
+            &[("overflowX", "hidden"), ("overflow", "hidden"), ("textOverflow", "ellipsis"), ("display", "block"), ("lineHeight", "20px")],
+        );
+        d.set_rect(line, 50.0, 834.0, 290.0, 20.0);
+        d.el_mut(line).client_width = 290.0;
+        d.el_mut(line).scroll_width = 437.0;
+        // The Range rect runs to x 487, 97px past a 390px viewport.
+        d.set_text_rect(line, 50.0, 835.0, 437.0, 17.0);
+        assert!(snippets(&d, line, "body-text-viewport-edge").is_empty(), "the line ends at 340");
+        assert!(check_page_overflow_dom(&d).is_empty(), "and nothing runs past the page");
+        // A line clamp truncates the same way.
+        d.set_styles(line, &[("textOverflow", "clip"), ("webkitLineClamp", "2")]);
+        assert!(check_page_overflow_dom(&d).is_empty());
+        // A box that hides its overflow with no marker cuts text mid-word:
+        // that is not truncation by design, and it reports as before.
+        d.set_style(line, "webkitLineClamp", "none");
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "no marker");
+        // So does an inline box, which clips nothing.
+        d.set_styles(line, &[("textOverflow", "ellipsis"), ("display", "inline")]);
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "an inline box");
+        d.set_style(line, "display", "block");
+        // Text an ancestor cuts is not the line's own truncation
+        // (simplybudget.framer.ai's card, kept by the review of
+        // observations-20 row 31).
+        d.set_styles(line, &[("overflowX", "visible"), ("overflow", "visible")]);
+        d.set_styles(card, &[("overflowX", "hidden"), ("overflow", "hidden"), ("display", "block")]);
+        d.el_mut(card).client_width = 316.0;
+        assert_eq!(check_page_overflow_dom(&d).len(), 1, "cut by the card");
+        // A truncated line whose box reaches the viewport edge has no gutter.
+        d.set_styles(card, &[("overflowX", "visible"), ("overflow", "visible")]);
+        d.set_styles(line, &[("overflowX", "hidden"), ("overflow", "hidden")]);
+        d.set_rect(line, 50.0, 834.0, 336.0, 20.0);
+        d.el_mut(line).client_width = 336.0;
+        assert_eq!(
+            snippets(&d, line, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (right 4px)")]
+        );
+
+        // paseo.sh: a card in a track a running animation moves.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 390.0;
+        let window = d.add(Some(body), "div");
+        d.set_styles(window, &[("overflowX", "hidden"), ("overflow", "hidden"), ("display", "block")]);
+        d.set_rect(window, 0.0, 1794.0, 390.0, 324.0);
+        d.el_mut(window).client_width = 390.0;
+        d.el_mut(window).scroll_width = 3247.0;
+        let track = d.add(Some(window), "div");
+        d.set_styles(
+            track,
+            &[("display", "flex"), ("transform", "matrix(1, 0, 0, 1, -1264.31, 0)"), ("animationName", "social-proof-scroll"), ("animationIterationCount", "infinite")],
+        );
+        d.set_rect(track, -1264.0, 1964.0, 2688.0, 154.0);
+        d.el_mut(track).client_width = 2688.0;
+        d.el_mut(track).scroll_width = 2688.0;
+        let first = d.add(Some(track), "a");
+        d.set_rect(first, -256.0, 1964.0, 320.0, 154.0);
+        let second = d.add(Some(track), "a");
+        d.set_rect(second, 80.0, 1964.0, 320.0, 154.0);
+        let quote = text_el(&mut d, second, "p", copy, "14px");
+        d.set_style(quote, "lineHeight", "22px");
+        d.set_rect(quote, 97.0, 2025.0, 286.0, 68.0);
+        d.set_text_rect(quote, 97.0, 2027.0, 281.0, 64.0);
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "a running track");
+        // The same track held still by a script reports the gutter it shows.
+        d.set_style(track, "animationName", "none");
+        assert_eq!(
+            snippets(&d, quote, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (right 7px)")]
+        );
+        // An animation that runs once is not a marquee.
+        d.set_styles(track, &[("animationName", "slide-in"), ("animationIterationCount", "1")]);
+        assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
+        // Nor is a one-shot slide beside an endless pulse: the pulse moves
+        // nothing, and the counts pair with the names by position.
+        let frames = |p: &str| vec![crate::browser::dom::KeyframeFrame { decls: vec![(p.to_string(), "x".to_string())] }];
+        d.keyframes.insert("slide-in".to_string(), frames("transform"));
+        d.keyframes.insert("pulse".to_string(), frames("opacity"));
+        d.set_styles(track, &[("animationName", "slide-in, pulse"), ("animationIterationCount", "1, infinite")]);
+        assert_eq!(snippets(&d, quote, "body-text-viewport-edge").len(), 1);
+        d.set_styles(track, &[("animationName", "pulse, slide-in"), ("animationIterationCount", "1, infinite")]);
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "the slide is the endless one");
+        // A prefixed transform moves the track too.
+        d.keyframes.insert("slide-in".to_string(), frames("-webkit-transform"));
+        assert!(snippets(&d, quote, "body-text-viewport-edge").is_empty(), "a -webkit-transform slide");
+    }
+
     #[test]
     fn skipped_heading() {
         let mut d = FakeDom::new();
@@ -4551,10 +4944,25 @@ mod rendered_text_tests {
             "Copyright 2017, all rights reserved with the Directorate.".len()
         );
         d.set_style(p, "whiteSpace", "pre-wrap");
+        // The indentation before the first word is on the first line; the
+        // line breaks around the text are not.
         assert_eq!(
             rendered_text_len(&d, p),
-            "Copyright 2017, all rights reserved\n                with the Directorate.".len()
+            "        Copyright 2017, all rights reserved\n                with the Directorate.".len()
         );
+        // Spaces before and after the words of a one-line `pre` take room.
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "  indented  ");
+        d.set_style(q, "whiteSpace", "pre");
+        assert_eq!(rendered_text_len(&d, q), "  indented  ".len());
+        // Under `pre-wrap` the spaces at the end of the line hang.
+        d.set_style(q, "whiteSpace", "pre-wrap");
+        assert_eq!(rendered_text_len(&d, q), "  indented".len());
+        // No-break spaces at the edges of a `pre` line take room too.
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "\u{a0}indented\u{a0}");
+        d.set_style(r, "whiteSpace", "pre");
+        assert_eq!(rendered_text_len(&d, r), "_indented_".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

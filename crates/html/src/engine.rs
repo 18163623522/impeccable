@@ -251,6 +251,18 @@ pub fn detect_html_source(
                 if scoped_ignore_active(el, &h.id) {
                     continue;
                 }
+                // A bounce by name whose keyframes the stylesheet shows and
+                // that only pulse (a loader dot scaling from nothing to its
+                // size and back) neither moves nor overshoots.
+                if h.id == "bounce-easing"
+                    && h.snippet.strip_prefix("animation: ").is_some_and(|names| {
+                        impeccable_core::checks::css_scan::bounce_names_only_pulse(names, |name| {
+                            impeccable_core::checks::css_scan::css_keyframes_only_pulse(&css_text, name)
+                        })
+                    })
+                {
+                    continue;
+                }
                 if let Some(mut f) = mk(&h.id, &h.snippet) {
                     // A hit's own severity (a contrast ratio just under its
                     // bar) overrides the registry's.

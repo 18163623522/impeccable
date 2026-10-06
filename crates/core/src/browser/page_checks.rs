@@ -100,6 +100,62 @@ fn has_visible_direct_text(dom: &dyn Dom, el: ElId) -> bool {
     has_direct_text_longer_than(dom, el, 0)
 }
 
+/// Below this share of the characters in text that has a box, a face named
+/// primary by its element count sets next to none of what a visitor reads,
+/// and `overused-font` stands down.
+///
+/// Counted per element, a page of short labels in one face over long copy
+/// in another names the label face: walla.co.il's Arial at "40% of text"
+/// sets 2% of the characters. But the element count is also how a display
+/// face that sets every heading gets named, and judges call that the
+/// pattern too: of the findings both judges called harmful, the lowest
+/// character share is mrtarget.de's Montserrat at 6.6%, then vestris.ai's
+/// Instrument Serif at 7.9%. One character in twenty sits clear of both.
+/// A finding above it is never moved or renamed.
+pub const OVERUSED_FONT_MIN_CHAR_SHARE: f64 = 0.05;
+
+/// Whether `font` sets under [`OVERUSED_FONT_MIN_CHAR_SHARE`] of the
+/// characters in text that has a box. With no such text there is nothing to
+/// weigh, and the element count stands.
+fn sets_next_to_none_of_the_text(font: &str, chars: &[(String, f64)], total: f64) -> bool {
+    if !(total > 0.0) {
+        return false;
+    }
+    let own = chars.iter().find(|(k, _)| k == font).map_or(0.0, |(_, c)| *c);
+    own / total < OVERUSED_FONT_MIN_CHAR_SHARE
+}
+
+/// The characters of `el`'s own text nodes as they render: white space
+/// collapsed, and the indentation around each node dropped.
+fn direct_text_chars(dom: &dyn Dom, el: ElId) -> f64 {
+    dom.direct_text_nodes(el)
+        .iter()
+        .map(|t| collapse_ws(js::trim(t)).chars().count() as f64)
+        .sum()
+}
+
+/// Whether an element's text is laid out for a visitor: neither it nor an
+/// ancestor is `hidden`, `display: none`, `visibility: hidden` or
+/// `content-visibility: hidden`. Opacity is deliberately not read: copy
+/// waiting at `opacity: 0` for a scroll reveal is the page's copy and a
+/// visitor reads all of it.
+fn font_text_has_a_box(dom: &dyn Dom, el: ElId) -> bool {
+    for current in ancestors_inclusive(dom, el) {
+        if dom.hidden_prop(current) || dom.attr(current, "hidden").is_some() {
+            return false;
+        }
+        let visibility = js::to_lower_case(&dom.style(current, "visibility"));
+        if js::to_lower_case(&dom.style(current, "display")) == "none"
+            || visibility == "hidden"
+            || visibility == "collapse"
+            || js::to_lower_case(&dom.style(current, "contentVisibility")) == "hidden"
+        {
+            return false;
+        }
+    }
+    true
+}
+
 const IMPECCABLE_OWN: &str =
     ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip";
 
@@ -109,6 +165,8 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
 
     let mut font_usage: Vec<(String, f64)> = Vec::new();
     let mut total_text_elements = 0.0f64;
+    let mut font_chars: Vec<(String, f64)> = Vec::new();
+    let mut total_text_chars = 0.0f64;
     for el in dom
         .query_all(
             None,
@@ -122,6 +180,10 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
         if !has_visible_direct_text(dom, el) {
             continue;
         }
+        // The characters each face sets in text that has a box: what
+        // stands a finding down when the face it names sets next to none of
+        // what a visitor reads (below).
+        let weight = if font_text_has_a_box(dom, el) { direct_text_chars(dom, el) } else { 0.0 };
         let ff = dom.style(el, "fontFamily");
         if ff.is_empty() {
             continue;
@@ -145,6 +207,14 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
             font_usage.push((primary.clone(), 1.0));
         }
         total_text_elements += 1.0;
+        if weight > 0.0 {
+            if let Some(slot) = font_chars.iter_mut().find(|(k, _)| k == primary) {
+                slot.1 += weight;
+            } else {
+                font_chars.push((primary.clone(), weight));
+            }
+            total_text_chars += weight;
+        }
     }
 
     if total_text_elements >= 20.0 {
@@ -161,6 +231,7 @@ pub fn check_typography(dom: &dyn Dom) -> Vec<BrowserFinding> {
                 let share = count / total_text_elements;
                 if OVERUSED_FONTS.contains(&font.as_str())
                     && !is_brand_font_on_own_domain(font, Some(&hostname))
+                    && !sets_next_to_none_of_the_text(font, &font_chars, total_text_chars)
                 {
                     findings.push(BrowserFinding::new(
                         "overused-font",
@@ -695,11 +766,17 @@ fn is_dialog_card(dom: &dyn Dom, outer: ElId) -> bool {
 }
 
 /// `role="menu"` or `role="listbox"`: a popup panel, however card-like it is
-/// drawn.
+/// drawn. `role="tablist"`, `role="radiogroup"` and `role="toolbar"`: a
+/// composite control (easyveo.com's Video / Image switch is a bordered,
+/// rounded `tablist` of two buttons), which is one control, not a card.
 fn has_popup_role(dom: &dyn Dom, el: ElId) -> bool {
     dom.attr(el, "role").is_some_and(|role| {
-        role.split_ascii_whitespace()
-            .any(|token| matches!(js::to_lower_case(token).as_str(), "menu" | "listbox"))
+        role.split_ascii_whitespace().any(|token| {
+            matches!(
+                js::to_lower_case(token).as_str(),
+                "menu" | "listbox" | "tablist" | "radiogroup" | "toolbar"
+            )
+        })
     })
 }
 
@@ -1017,19 +1094,54 @@ fn rhythm_rendered_children(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
         .collect()
 }
 
-/// An empty box that only holds space open: no text, no picture, nothing
-/// laid out inside it, nothing painted. It is part of the gap, not a block.
+/// How many wrappers deep a spacer is looked for.
+const RHYTHM_SPACER_MAX_DEPTH: usize = 4;
+
 /// Form controls draw what they hold (a value, a placeholder) without DOM
 /// text, so an empty one is content, not space.
 const RHYTHM_CONTROL_TAGS: &[&str] = &["input", "textarea", "select", "button", "meter", "progress"];
 
+/// An empty box that only holds space open: no text, no picture, nothing
+/// painted, and nothing laid out inside it but boxes that are spacers too.
+/// It is part of the gap, not a block. kinghost.com.br wraps each 40px
+/// `wp-block-spacer` in a bare `div`; the wrapper holds space open exactly as
+/// the spacer does.
 fn rhythm_is_spacer(dom: &dyn Dom, el: ElId) -> bool {
+    js::trim(&dom.text_content(el)).is_empty() && rhythm_is_empty_box(dom, el, RHYTHM_SPACER_MAX_DEPTH)
+}
+
+fn rhythm_is_empty_box(dom: &dyn Dom, el: ElId, depth: usize) -> bool {
     let tag = tag_lower(dom, el);
-    !rhythm_paints_edge(dom, el, "Bottom")
-        && !RHYTHM_MEDIA_TAGS.contains(&tag.as_str())
-        && !RHYTHM_CONTROL_TAGS.contains(&tag.as_str())
-        && rhythm_rendered_children(dom, el).is_empty()
-        && js::trim(&dom.text_content(el)).is_empty()
+    if rhythm_paints_edge(dom, el, "Bottom")
+        || RHYTHM_MEDIA_TAGS.contains(&tag.as_str())
+        || RHYTHM_CONTROL_TAGS.contains(&tag.as_str())
+    {
+        return false;
+    }
+    let children = rhythm_rendered_children(dom, el);
+    children.is_empty() || (depth > 0 && children.into_iter().all(|k| rhythm_is_empty_box(dom, k, depth - 1)))
+}
+
+/// A page landmark other than the main content: the footer, a navigation
+/// block, a sidebar, a banner. A heading introduces none of them.
+fn rhythm_is_side_landmark(dom: &dyn Dom, el: ElId) -> bool {
+    matches!(tag_lower(dom, el).as_str(), "footer" | "nav" | "aside" | "header")
+        || dom.attr(el, "role").is_some_and(|role| {
+            role.split_ascii_whitespace().any(|token| {
+                matches!(
+                    js::to_lower_case(token).as_str(),
+                    "contentinfo" | "navigation" | "complementary" | "banner"
+                )
+            })
+        })
+}
+
+/// The page's main content landmark.
+fn rhythm_is_main_landmark(dom: &dyn Dom, el: ElId) -> bool {
+    tag_lower(dom, el) == "main"
+        || dom.attr(el, "role").is_some_and(|role| {
+            role.split_ascii_whitespace().any(|token| js::to_lower_case(token) == "main")
+        })
 }
 
 /// Where a block's content ends, as a reader sees it: a box that paints its
@@ -1597,7 +1709,14 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 }
                 sib = dom.next_element_sibling(s);
             }
-            if nearest.is_some() {
+            if let Some((_, b)) = nearest {
+                // Once the walk has left the heading's own box, a landmark
+                // below is the next region of the page, not the content the
+                // heading introduces: a heading that closes the main column
+                // is not bound to the page footer under it.
+                if n != h && rhythm_is_side_landmark(dom, b) {
+                    return None;
+                }
                 return nearest;
             }
             let p = dom.parent(n)?;
@@ -1605,6 +1724,11 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
                 && !rhythm_is_contents(dom, p)
                 && (rhythm_draws_bottom_edge(dom, p) || rhythm_repeats(dom, p, h))
             {
+                return None;
+            }
+            // Nothing below the heading inside the main content: what follows
+            // `main` belongs to another landmark.
+            if rhythm_is_main_landmark(dom, p) {
                 return None;
             }
             node = Some(p);
@@ -1931,12 +2055,23 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let mut cache: std::collections::HashMap<ElId, HiddenState> = std::collections::HashMap::new();
     // Read once, and only when the page has an invisible box to classify.
     let closed_ids: std::cell::OnceCell<std::collections::HashSet<String>> = std::cell::OnceCell::new();
+    // The page's CSS, read once and only for a box an animation holds at 0.
+    let style_text: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+
+    fn page_style_text(dom: &dyn Dom) -> String {
+        let html = dom.document_html_for_patterns();
+        let mut text = crate::checks::html_patterns::build_html_pattern_corpora(&html).style_text;
+        text.push('\n');
+        text.push_str(&dom.linked_stylesheet_text());
+        text
+    }
 
     fn state_of(
         dom: &dyn Dom,
         root: Option<ElId>,
         cache: &mut std::collections::HashMap<ElId, HiddenState>,
         closed_ids: &std::cell::OnceCell<std::collections::HashSet<String>>,
+        style_text: &std::cell::OnceCell<String>,
         el: Option<ElId>,
     ) -> HiddenState {
         let Some(el) = el else { return HiddenState::Visible };
@@ -1950,7 +2085,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         let state = if HIDDEN_TEXT_EXCLUDE_TAGS.contains(&tag.as_str()) {
             HiddenState::Excluded
         } else {
-            let parent_state = state_of(dom, root, cache, closed_ids, dom.parent(el));
+            let parent_state = state_of(dom, root, cache, closed_ids, style_text, dom.parent(el));
             if parent_state == HiddenState::Excluded {
                 HiddenState::Excluded
             } else {
@@ -1969,8 +2104,27 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                 {
                     // The box where the invisible subtree starts decides for
                     // everything under it.
+                    let by_visibility = HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility"));
                     if closed_container(dom, el, closed_ids.get_or_init(|| closed_controlled_ids(dom))) {
                         HiddenState::Excluded
+                    } else if super::painted::parked_outside_clip(dom, el) {
+                        // A box parked outside the ancestor that clips it
+                        // shows nothing at any opacity: collapsed interface,
+                        // not content a reveal failed to show.
+                        HiddenState::Excluded
+                    } else if !by_visibility
+                        && dom.running_animation_properties(el).is_some_and(|p| !p.is_empty())
+                        && super::painted::opacity_held_by_scroll_timeline(
+                            dom,
+                            el,
+                            style_text.get_or_init(|| page_style_text(dom)),
+                        )
+                    {
+                        // A scroll or view timeline holds the box at 0 while
+                        // the page sits at the top, where this is measured,
+                        // and shows it to a visitor who scrolls: its text is
+                        // content they read.
+                        HiddenState::Visible
                     } else {
                         HiddenState::Invisible
                     }
@@ -1994,7 +2148,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         if len == 0 {
             continue;
         }
-        let state = state_of(dom, root, &mut cache, &closed_ids, Some(el));
+        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, Some(el));
         if state == HiddenState::Excluded {
             continue;
         }
@@ -2021,6 +2175,25 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
 /// scrolls only vertically.
 fn is_scroller(dom: &dyn Dom, el: ElId) -> bool {
     SCROLL_RE.is_match(&super::text_geometry::overflow_x(dom, el))
+}
+
+/// A part of a table: a cell, a row, a row group or a caption, by its tag or
+/// by its computed `display`.
+fn is_table_part(dom: &dyn Dom, el: ElId) -> bool {
+    matches!(
+        tag_lower(dom, el).as_str(),
+        "td" | "th" | "tr" | "thead" | "tbody" | "tfoot" | "caption" | "colgroup" | "col"
+    ) || matches!(
+        dom.style(el, "display").as_str(),
+        "table-cell"
+            | "table-row"
+            | "table-row-group"
+            | "table-header-group"
+            | "table-footer-group"
+            | "table-caption"
+            | "table-column"
+            | "table-column-group"
+    )
 }
 
 /// JS: checks.mjs#checkEdgeFlushCardsDOM()
@@ -2094,6 +2267,12 @@ pub fn check_edge_flush_cards_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             }
             let rect = dom.rect(card);
             if rect.width < 80.0 || rect.height < 40.0 {
+                continue;
+            }
+            // A cell, a row or a row group of a table is a part of that
+            // table, not a card: a data table that scrolls sideways starts
+            // its first column at its edge.
+            if is_table_part(dom, card) {
                 continue;
             }
             let bg = parse_any_color(Some(&dom.style(card, "backgroundColor")));
@@ -2422,6 +2601,100 @@ fn glyphs_may_cover(answer: Option<Rect>, victim: Option<&Rect>, x: f64, y: f64)
             && victim.top < answer.bottom)
 }
 
+/// Where the ascender line of Latin text sits below the top of its content
+/// area, as a share of that area's height, at the least: the ascent of a text
+/// face is 75 to 88% of ascent plus descent.
+const INK_ASCENT_SHARE_MIN: f64 = 0.75;
+/// The same share at the most, for placing the baseline when the bottom of
+/// the ink is read.
+const INK_ASCENT_SHARE_MAX: f64 = 0.82;
+/// How far above the baseline unaccented Latin letters and digits reach, in
+/// ems, at the most.
+const INK_ASCENDER_EM: f64 = 0.8;
+/// How far below the baseline their descenders reach, in ems, at the most.
+const INK_DESCENDER_EM: f64 = 0.25;
+
+/// Whether every character draws inside the ascender-to-descender band of a
+/// Latin face: ASCII, common currency signs and spaces. An accented capital,
+/// an emoji or a CJK glyph reaches further, and its content area stands.
+fn draws_inside_latin_band(text: &str) -> bool {
+    text.chars()
+        .all(|c| c.is_ascii() || c.is_whitespace() || matches!(c, '€' | '£' | '¥' | '¢'))
+}
+
+/// The band of a text rect that its glyphs ink, top to bottom. A Range rect
+/// spans the font's content area (ascent plus descent, about 1.2 to 1.5em a
+/// line) whatever the line box holds, so a 40px price on a 40px line carries
+/// a 57px rect that starts 9px above its own box, and reads as lying over the
+/// 12px label above it while its digits sit well clear (freenet.de 218507).
+/// The band drops the room above the ascenders of the first line and below
+/// the descenders of the last. Both insets are underestimates: the ascent is
+/// taken at its smallest plausible share for the top and its largest for the
+/// bottom, so the band never ends inside real ink.
+///
+/// `None` keeps the content area: the text holds characters that reach past
+/// the Latin band, the font size is unknown, or the rect is taller than one
+/// line and the capture recorded no line rects.
+fn glyph_ink_band(dom: &dyn Dom, el: ElId, rect: &Rect) -> Option<Rect> {
+    if !draws_inside_latin_band(&direct_text(dom, el)) {
+        return None;
+    }
+    let font_size = parse_float(&dom.style(el, "fontSize"));
+    if !(font_size.is_finite() && font_size > 0.0) {
+        return None;
+    }
+    let lines = dom
+        .text_line_rects(el)
+        .filter(|l| !l.is_empty() && l.iter().all(|r| r.all_finite()));
+    let (first_height, last_height) = match &lines {
+        Some(l) => {
+            let first = l.iter().fold(None::<&Rect>, |a, r| match a {
+                Some(a) if a.top <= r.top => Some(a),
+                _ => Some(r),
+            })?;
+            let last = l.iter().fold(None::<&Rect>, |a, r| match a {
+                Some(a) if a.bottom >= r.bottom => Some(a),
+                _ => Some(r),
+            })?;
+            (first.height, last.height)
+        }
+        None if rect.height < font_size * 2.0 => (rect.height, rect.height),
+        None => return None,
+    };
+    let top_inset = math_max(0.0, first_height * INK_ASCENT_SHARE_MIN - font_size * INK_ASCENDER_EM);
+    let bottom_inset = math_max(
+        0.0,
+        last_height * (1.0 - INK_ASCENT_SHARE_MAX) - font_size * INK_DESCENDER_EM,
+    );
+    let height = rect.height - top_inset - bottom_inset;
+    if height.is_nan() || height <= 0.0 {
+        return None;
+    }
+    Some(Rect::from_xywh(rect.left, rect.top + top_inset, rect.width, height))
+}
+
+/// Whether the hit-test stack at a point shows `victim` buried, with the
+/// element that answered (`stack[0]`) lying on what buries it rather than on
+/// the victim. Between the answer and the victim in paint order sits either
+/// a picture (`img`, `picture`, `video`, `canvas`: the rule never counts a
+/// picture as covering text), or an ancestor of the victim that paints an
+/// opaque fill over it, which only a negative `z-index` arranges.
+/// bankofamerica.com parks its collapsed sign-in form at `z-index: -1` under
+/// the hero photo and the white masthead that holds it; the headline set on
+/// the photo collides with none of the form's labels.
+///
+/// `false` whenever the stack does not place the victim under the answer: no
+/// stack was recorded, or the victim is not in it.
+fn buried_under_answer(dom: &dyn Dom, stack: &[ElId], victim: ElId) -> bool {
+    let Some(at) = stack.iter().position(|&e| e == victim) else {
+        return false;
+    };
+    stack[..at].iter().skip(1).any(|&layer| {
+        matches!(tag_lower(dom, layer).as_str(), "img" | "video" | "canvas" | "picture")
+            || (dom.contains(layer, victim) && paints_opaque_fill(dom, layer))
+    })
+}
+
 /// How many ancestors of a hit-test answer text-occlusion asks whether they
 /// are a moving ticker track.
 const MARQUEE_TRACK_MAX_DEPTH: usize = 4;
@@ -2608,7 +2881,12 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         // sit below the text rather than over it, and cannot be counted. Text
         // it names overlaps the victim whichever of the two is on top.
         let passes_through = ignores_pointer_events(dom, el);
-        let victim_glyphs = dom.direct_text_rect(el).filter(|r| r.all_finite());
+        // Each side's glyphs are read as the band they ink where that can
+        // be told, the content area otherwise.
+        let victim_glyphs = dom
+            .direct_text_rect(el)
+            .filter(|r| r.all_finite())
+            .map(|r| glyph_ink_band(dom, el, &r).unwrap_or(r));
         let mut total = 0usize;
         let mut occluded = 0usize;
         let mut occluder_el: Option<ElId> = None;
@@ -2635,13 +2913,21 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
                 continue;
             }
+            // The answer may lie on a layer that buries the victim, not on
+            // the victim.
+            if buried_under_answer(dom, &dom.elements_from_point(x, y), el) {
+                continue;
+            }
             // A label at `font-size: 0` (a hidden link's) draws nothing, and
             // text covers the point only where its glyphs could: a stretched
             // link's transparent `::after` answers for the whole card while
             // its title sits elsewhere.
+            let top_glyphs = dom
+                .direct_text_rect(top)
+                .map(|r| if r.all_finite() { glyph_ink_band(dom, top, &r).unwrap_or(r) } else { r });
             let top_own_text = !element_direct_text(dom, top).is_empty()
                 && !super::painted::under_1px(&dom.style(top, "fontSize"))
-                && glyphs_may_cover(dom.direct_text_rect(top), victim_glyphs.as_ref(), x, y);
+                && glyphs_may_cover(top_glyphs, victim_glyphs.as_ref(), x, y);
             let top_in_svg = closest_or_none(dom, top, "svg").is_some();
             let top_has_text = top_own_text || top_in_svg;
             let top_style = ElStyle { dom, el: top };
@@ -2972,6 +3258,8 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
 
         struct Col {
             top: f64,
+            left: f64,
+            right: f64,
             content_h: f64,
         }
         let mut cols: Vec<Col> = Vec::new();
@@ -3032,6 +3320,8 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
             }
             cols.push(Col {
                 top: cr.top,
+                left: cr.left,
+                right: cr.right,
                 content_h: content_bottom - cr.top,
             });
         }
@@ -3044,10 +3334,20 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let tall = &cols[0];
-        let shortest = &cols[cols.len() - 1];
-        if (tall.top - shortest.top).abs() > 0.25 * vh {
+        // The tall column is measured against the shortest box that sits
+        // beside it and starts with it. Two boxes that share an x range are
+        // stacked: a flex or grid container laid out as one column at this
+        // width (`flex-col lg:flex-row`), where a short block above a long
+        // one is the ordinary flow of a page, and a short block stacked in
+        // the tall column's track says nothing about the column beside it.
+        let Some(shortest) = cols[1..]
+            .iter()
+            .filter(|c| !(tall.left < c.right - 1.0 && c.left < tall.right - 1.0))
+            .filter(|c| (tall.top - c.top).abs() <= 0.25 * vh)
+            .min_by(|a, b| a.content_h.partial_cmp(&b.content_h).unwrap_or(std::cmp::Ordering::Equal))
+        else {
             continue;
-        }
+        };
         if tall.content_h <= vh * 1.4 {
             continue;
         }
@@ -3127,6 +3427,80 @@ mod tests {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].type_, "overused-font");
         assert_eq!(f[0].detail, "Primary font: inter (95% of text)");
+    }
+
+    fn typeset(d: &mut FakeDom, parent: ElId, tag: &str, text: &str, family: &str) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.add_text(el, text);
+        d.set_style(el, "fontFamily", family);
+        d.set_style(el, "fontSize", "16px");
+        el
+    }
+
+    fn font_finding(d: &FakeDom) -> Option<String> {
+        check_typography(d).into_iter().find(|f| f.type_ == "overused-font").map(|f| f.detail)
+    }
+
+    /// walla.co.il: Arial is "40% of text" by element and sets 2% of the
+    /// characters. Under one in twenty the finding stands down; above it the
+    /// element count names the face and the snippet is unchanged.
+    #[test]
+    fn a_face_that_sets_next_to_none_of_the_text_stands_down() {
+        let build = |label: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            for _ in 0..20 {
+                typeset(&mut d, body, "span", label, "Inter, sans-serif");
+            }
+            for _ in 0..5 {
+                typeset(&mut d, body, "p", &"w".repeat(200), "Georgia, serif");
+            }
+            d
+        };
+        // 40 of 1,040 characters: 3.8%.
+        assert_eq!(font_finding(&build("Go")), None);
+        // 100 of 1,100: 9.1%, and the snippet is the element share.
+        assert_eq!(font_finding(&build("Label")).as_deref(), Some("Primary font: inter (80% of text)"));
+    }
+
+    /// Only text with a box is weighed: the long copy in a closed drawer does
+    /// not lift the face it is set in, and copy waiting for a scroll reveal
+    /// at `opacity: 0` is weighed like any other.
+    #[test]
+    fn the_character_share_weighs_only_text_with_a_box() {
+        let build = |hide: (&str, &str)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            for _ in 0..20 {
+                typeset(&mut d, body, "span", "Go", "Inter, sans-serif");
+            }
+            let drawer = d.add(Some(body), "div");
+            d.set_style(drawer, hide.0, hide.1);
+            for _ in 0..30 {
+                typeset(&mut d, drawer, "p", &"w".repeat(200), "Inter, sans-serif");
+            }
+            for _ in 0..5 {
+                typeset(&mut d, body, "p", &"w".repeat(200), "Georgia, serif");
+            }
+            d
+        };
+        assert_eq!(font_finding(&build(("display", "none"))), None);
+        assert_eq!(font_finding(&build(("visibility", "hidden"))), None);
+        assert_eq!(
+            font_finding(&build(("opacity", "0"))).as_deref(),
+            Some("Primary font: inter (91% of text)")
+        );
+
+        // With no text that has a box there is nothing to weigh, and the
+        // element count stands as before.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let hidden = d.add(Some(body), "div");
+        d.set_style(hidden, "display", "none");
+        for _ in 0..25 {
+            typeset(&mut d, hidden, "p", "hidden", "Inter, sans-serif");
+        }
+        assert_eq!(font_finding(&d).as_deref(), Some("Primary font: inter (100% of text)"));
     }
 
     #[test]
@@ -3210,6 +3584,12 @@ mod tests {
         assert_eq!(nested(None, Some("menu"), "visible"), 0);
         assert_eq!(nested(None, Some("listbox"), "visible"), 0);
         assert_eq!(nested(None, Some("region"), "visible"), 1);
+        // A composite control (observations-35 row 8, easyveo.com 217313: a
+        // `tablist` switch of two buttons).
+        assert_eq!(nested(None, Some("tablist"), "visible"), 0);
+        assert_eq!(nested(None, Some("radiogroup"), "visible"), 0);
+        assert_eq!(nested(None, Some("toolbar"), "visible"), 0);
+        assert_eq!(nested(None, Some("tabpanel"), "visible"), 1);
         // A panel not painted at capture.
         assert_eq!(nested(None, None, "hidden"), 0);
     }
@@ -3265,6 +3645,111 @@ mod tests {
             f[0].finding.detail,
             "h2 \"Heading number 0\" has 8px above vs 40px below — it reads as bound to the block above (2 headings on page)"
         );
+    }
+
+    const FLOW: &[(&str, &str)] = &[
+        ("display", "block"),
+        ("visibility", "visible"),
+        ("opacity", "1"),
+        ("position", "static"),
+        ("backgroundColor", "rgba(0, 0, 0, 0)"),
+        ("borderTopWidth", "0px"),
+        ("borderBottomWidth", "0px"),
+        ("boxShadow", "none"),
+    ];
+
+    fn flow(d: &mut FakeDom, parent: ElId, tag: &str, rect: (f64, f64, f64, f64), text: &str) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.set_styles(el, FLOW);
+        d.set_style(el, "fontSize", if tag == "h2" { "24px" } else { "16px" });
+        d.set_rect(el, rect.0, rect.1, rect.2, rect.3);
+        if !text.is_empty() {
+            d.add_text(el, text);
+        }
+        el
+    }
+
+    /// observations-35 row 12 (kinghost.com.br 218700, 218716): a bare `div`
+    /// around a 40px spacer block holds space open as the spacer does. Read
+    /// as a block, it put the heading 0px under "the block above".
+    #[test]
+    fn heading_rhythm_reads_a_wrapper_of_spacers_as_space() {
+        let build = |wrapped: bool| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let page = flow(&mut d, body, "div", (0.0, 0.0, 800.0, 1000.0), "");
+            let mut y = 0.0;
+            for i in 0..2 {
+                flow(&mut d, page, "p", (0.0, y, 800.0, 20.0), "The paragraph that closes the section above this heading");
+                y += 20.0;
+                // 40px of spacer, then the heading, then 24px to its content.
+                let holder = if wrapped { flow(&mut d, page, "div", (0.0, y, 800.0, 40.0), "") } else { page };
+                flow(&mut d, holder, "div", (0.0, y, 800.0, 40.0), "");
+                y += 40.0;
+                let section = flow(&mut d, page, "section", (0.0, y, 800.0, 200.0), "");
+                flow(&mut d, section, "h2", (0.0, y, 800.0, 30.0), &format!("Section title {i}"));
+                flow(&mut d, section, "p", (0.0, y + 54.0, 800.0, 100.0), "What the heading introduces");
+                y += 200.0;
+            }
+            check_heading_rhythm_dom(&d).len()
+        };
+        assert_eq!(build(false), 0, "a bare spacer is space: 40px above, 24px below");
+        assert_eq!(build(true), 0, "so is a wrapper that holds only the spacer");
+        // Wrappers nest, and a picture anywhere inside makes a block.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let wrap = flow(&mut d, body, "div", (0.0, 0.0, 800.0, 40.0), "");
+        let inner = flow(&mut d, wrap, "div", (0.0, 0.0, 800.0, 40.0), "");
+        assert!(rhythm_is_spacer(&d, wrap));
+        let deep = flow(&mut d, inner, "div", (0.0, 0.0, 800.0, 40.0), "");
+        assert!(rhythm_is_spacer(&d, wrap));
+        let img = d.add(Some(deep), "img");
+        d.set_styles(img, FLOW);
+        d.set_rect(img, 0.0, 0.0, 800.0, 40.0);
+        assert!(!rhythm_is_spacer(&d, wrap), "a picture inside");
+        // A wrapper that paints its bottom edge is a block.
+        let ruled = flow(&mut d, body, "div", (0.0, 100.0, 800.0, 40.0), "");
+        flow(&mut d, ruled, "div", (0.0, 100.0, 800.0, 40.0), "");
+        assert!(rhythm_is_spacer(&d, ruled));
+        d.set_style(ruled, "borderBottomWidth", "1px");
+        assert!(!rhythm_is_spacer(&d, ruled));
+        // And one that holds words.
+        let worded = flow(&mut d, body, "div", (0.0, 200.0, 800.0, 40.0), "");
+        flow(&mut d, worded, "div", (0.0, 200.0, 800.0, 40.0), "Words");
+        assert!(!rhythm_is_spacer(&d, worded));
+    }
+
+    /// observations-35 row 12 (improved-rotary-phone-two.vercel.app 213861):
+    /// the heading's own content rendered at height 0, and the walk climbed
+    /// out of `section` and `main` and measured 86px to the page footer.
+    #[test]
+    fn heading_rhythm_does_not_measure_to_another_landmark() {
+        let build = |below_tag: &str, inside_main: bool| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let main = flow(&mut d, body, if inside_main { "main" } else { "div" }, (0.0, 0.0, 800.0, 420.0), "");
+            let mut y = 0.0;
+            // Two headings 8px under the paragraph above and 40px over their
+            // own content.
+            for i in 0..2 {
+                flow(&mut d, main, "p", (0.0, y, 800.0, 20.0), "The paragraph that closes the block above this heading");
+                flow(&mut d, main, "h2", (0.0, y + 28.0, 800.0, 30.0), &format!("Section title {i}"));
+                flow(&mut d, main, "p", (0.0, y + 98.0, 800.0, 20.0), "What the heading introduces, at some length");
+                y += 150.0;
+            }
+            // A third ends its box, and the column: the next block sits 40px
+            // under it, outside.
+            let last = flow(&mut d, main, "div", (0.0, y, 800.0, 58.0), "");
+            flow(&mut d, last, "p", (0.0, y, 800.0, 20.0), "The paragraph that closes the block above this heading");
+            flow(&mut d, last, "h2", (0.0, y + 28.0, 800.0, 30.0), "Closing title");
+            let after = if inside_main { body } else { main };
+            flow(&mut d, after, below_tag, (0.0, y + 98.0, 800.0, 60.0), "Copyright and links");
+            check_heading_rhythm_dom(&d).len()
+        };
+        assert_eq!(build("div", false), 3, "a block below, in the same column");
+        assert_eq!(build("footer", false), 2, "a footer is not what the heading introduces");
+        assert_eq!(build("nav", false), 2);
+        assert_eq!(build("div", true), 2, "nothing is measured past the end of main");
     }
 
     /// observations-28 row 4: a background image paints a band a heading walk
@@ -3569,6 +4054,56 @@ mod tests {
         assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 4.0 + 4.0 + 5.0 + 4.0 + hidden, hidden));
     }
 
+    /// sona8.com (217624 and five more) and directus.io (216125, 216180):
+    /// text a view timeline holds at 0 counts as shown, and an answer parked
+    /// outside its closed row leaves both counts.
+    #[test]
+    fn hidden_text_measure_leaves_out_scroll_timelines_and_parked_panels() {
+        let fade = || vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0".to_string())] }];
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.html_for_patterns = "<html><head><style>.reveal > * { animation-name: rise; animation-timeline: view(); }\
+.stagger > * { animation-name: rise; animation-timeline: auto; }</style></head><body></body></html>"
+            .to_string();
+        d.keyframes.insert("rise".to_string(), fade());
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        // Held by a view timeline: content a visitor scrolls to.
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "");
+        d.add_selector(scrubbed, ".reveal > *");
+        d.set_running_animations(scrubbed, &["opacity", "transform"]);
+        hidden_box(&mut d, scrubbed, "p", &[], "scrubbed in on scroll");
+        // The same animation on the document timeline, and a scrubbed box
+        // from a probe that read no animations: reveals that have not run.
+        let timed = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "waits on a class");
+        d.add_selector(timed, ".stagger > *");
+        d.set_running_animations(timed, &["opacity"]);
+        let unread = hidden_box(&mut d, body, "div", &[("opacity", "0"), ("animationName", "rise")], "no animations read");
+        d.add_selector(unread, ".reveal > *");
+        // A `visibility: hidden` box is not held by its opacity.
+        let vis = hidden_box(&mut d, body, "div", &[("visibility", "hidden"), ("animationName", "rise")], "hidden by visibility");
+        d.add_selector(vis, ".reveal > *");
+        d.set_running_animations(vis, &["opacity"]);
+        // An answer parked below its closed, clipped row.
+        let row = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(row, 108.0, 3617.0, 1064.0, 76.0);
+        let answer = hidden_box(&mut d, row, "div", &[("opacity", "0"), ("position", "absolute")], "parked answer text");
+        d.set_rect(answer, 132.0, 3744.0, 1016.0, 45.0);
+        // The same answer inside its row's box, and one under a slider that
+        // never got its height: both still count.
+        let open_row = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(open_row, 108.0, 4000.0, 1064.0, 200.0);
+        let shown = hidden_box(&mut d, open_row, "div", &[("opacity", "0"), ("position", "absolute")], "answer in an open row");
+        d.set_rect(shown, 132.0, 4060.0, 1016.0, 45.0);
+        let slider = hidden_box(&mut d, body, "div", &[("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")], "");
+        d.set_rect(slider, 0.0, 5000.0, 1280.0, 0.0);
+        let slide = hidden_box(&mut d, slider, "div", &[("opacity", "0"), ("position", "absolute")], "slide never shown");
+        d.set_rect(slide, 0.0, 5000.0, 1280.0, 400.0);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        let hidden = 16.0 + 18.0 + 20.0 + 21.0 + 17.0;
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 21.0 + hidden, hidden), "{:?}", m.hidden_samples);
+    }
+
     #[test]
     fn closed_container_class_words() {
         for token in [
@@ -3669,6 +4204,31 @@ mod tests {
         );
         d.set_rect(card, 24.0, 110.0, 540.0, 150.0);
         assert!(check_edge_flush_cards_dom(&d).is_empty());
+
+        // observations-35 row 15 (paseo.sh 217737): the cells of a table
+        // that scrolls sideways are parts of the table, not cards.
+        d.set_rect(card, 24.0, 110.0, 574.0, 150.0);
+        assert_eq!(check_edge_flush_cards_dom(&d).len(), 1);
+        d.set_style(card, "display", "table-cell");
+        d.set_style(next, "display", "table-cell");
+        assert!(check_edge_flush_cards_dom(&d).is_empty());
+        d.set_style(card, "display", "block");
+        d.set_style(next, "display", "block");
+        let table = d.add(Some(body), "table");
+        d.set_styles(table, &[("overflowX", "auto"), ("overflow", "auto"), ("display", "block")]);
+        d.set_rect(table, 24.0, 400.0, 342.0, 300.0);
+        {
+            let e = d.el_mut(table);
+            e.client_width = 342.0;
+            e.scroll_width = 700.0;
+        }
+        for (i, x) in [25.0, 225.0, 425.0].into_iter().enumerate() {
+            let th = d.add(Some(table), "th");
+            d.set_styles(th, &[("backgroundColor", "rgb(240, 240, 240)")]);
+            d.set_rect(th, x, 400.0, 200.0, 48.0);
+            d.add_text(th, &format!("Column {i}"));
+        }
+        assert!(check_edge_flush_cards_dom(&d).iter().all(|f| f.el != Some(table)), "table headers");
     }
 
     #[test]
@@ -3814,6 +4374,130 @@ mod tests {
         assert_eq!(run(None, "16px").len(), 1);
         // A label at font-size 0 draws nothing.
         assert!(run(None, "0px").is_empty());
+    }
+
+    /// observations-35 row 15 (freenet.de 218507): a 40px price on a 40px
+    /// line carries a 57px text rect that starts 9px above its box and laps
+    /// the 12px label over it, while its digits sit clear of the label.
+    #[test]
+    fn text_occlusion_reads_latin_text_by_its_ink_band() {
+        let run = |price: &str, price_rect_top: f64| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let panel = d.add(Some(body), "div");
+            d.set_styles(panel, PROBE_BASE);
+            d.set_style(panel, "position", "absolute");
+            d.set_rect(panel, 700.0, 400.0, 400.0, 120.0);
+            let label = d.add(Some(panel), "div");
+            d.set_styles(label, PROBE_BASE);
+            d.set_style(label, "fontSize", "12px");
+            d.set_rect(label, 774.0, 437.0, 90.0, 17.0);
+            d.set_text_rect(label, 774.0, 436.0, 55.0, 17.0);
+            d.add_text(label, "Monatlich");
+            let amount = d.add(Some(panel), "div");
+            d.set_styles(amount, PROBE_BASE);
+            d.set_style(amount, "fontSize", "40px");
+            d.set_rect(amount, 774.0, 454.0, 47.0, 40.0);
+            d.set_text_rect(amount, 774.0, price_rect_top, 47.0, 57.0);
+            d.add_text(amount, price);
+            // The page answers the label's probe row with the price, whose
+            // inline box holds the points.
+            for (x, y) in occlusion_probe_points(&d.rect(label), 1280.0, 800.0) {
+                d.set_point(x, y, vec![amount, panel, body]);
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d).len()
+        };
+        assert_eq!(run("19", 445.0), 0, "the digits start under the label's ink");
+        // Pulled up until the digits themselves cross the label, it reports.
+        assert_eq!(run("19", 425.0), 1);
+        // Text that reaches past the Latin band keeps its content area.
+        assert_eq!(run("É9", 445.0), 1);
+    }
+
+    #[test]
+    fn glyph_ink_band_insets_one_line_of_latin_text() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let el = d.add(Some(body), "div");
+        d.set_style(el, "fontSize", "40px");
+        d.add_text(el, "19,99 €");
+        // 57px of content area at 40px: 0.75 * 57 - 0.8 * 40 = 10.75 off the
+        // top, and 0.18 * 57 - 0.25 * 40 = 0.26 off the bottom.
+        let band = glyph_ink_band(&d, el, &Rect::from_xywh(10.0, 445.0, 47.0, 57.0)).expect("band");
+        assert!((band.top - 455.75).abs() < 1e-9, "{band:?}");
+        assert!((band.bottom - 501.74).abs() < 1e-9, "{band:?}");
+        // An ordinary 1.2em content area keeps all but a hair of its height.
+        d.set_style(el, "fontSize", "16px");
+        let band = glyph_ink_band(&d, el, &Rect::from_xywh(0.0, 0.0, 60.0, 19.0)).expect("band");
+        assert!(band.top < 1.5 && band.bottom == 19.0, "{band:?}");
+        // Several lines with no line rects, an unknown font size and
+        // non-Latin text keep the rect.
+        assert!(glyph_ink_band(&d, el, &Rect::from_xywh(0.0, 0.0, 60.0, 60.0)).is_none());
+        d.set_text_lines(el, &[(0.0, 0.0, 60.0, 19.0), (0.0, 22.0, 40.0, 19.0), (0.0, 44.0, 50.0, 19.0)]);
+        assert!(glyph_ink_band(&d, el, &Rect::from_xywh(0.0, 0.0, 60.0, 63.0)).is_some());
+        d.set_style(el, "fontSize", "");
+        assert!(glyph_ink_band(&d, el, &Rect::from_xywh(0.0, 0.0, 60.0, 19.0)).is_none());
+        let cjk = d.add(Some(body), "div");
+        d.set_style(cjk, "fontSize", "40px");
+        d.add_text(cjk, "月額");
+        assert!(glyph_ink_band(&d, cjk, &Rect::from_xywh(0.0, 0.0, 80.0, 57.0)).is_none());
+    }
+
+    /// observations-35 row 15 (bankofamerica.com 219458): a collapsed sign-in
+    /// form parked at `z-index: -1` under the hero photo. The headline on the
+    /// photo answers the label's points, and the stack shows the photo
+    /// between the two.
+    #[test]
+    fn text_occlusion_skips_a_victim_buried_under_the_layer_the_answer_lies_on() {
+        let run = |between: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let hero = d.add(Some(body), "div");
+            d.set_styles(hero, PROBE_BASE);
+            d.set_style(hero, "position", "relative");
+            d.set_rect(hero, 0.0, 135.0, 390.0, 600.0);
+            let form = d.add(Some(hero), "div");
+            d.set_styles(form, PROBE_BASE);
+            d.set_style(form, "position", "absolute");
+            d.set_rect(form, 10.0, 135.0, 96.0, 600.0);
+            let label = d.add(Some(form), "label");
+            d.set_styles(label, PROBE_BASE);
+            d.set_rect(label, 26.0, 167.0, 64.0, 20.0);
+            d.set_text_rect(label, 26.0, 169.0, 45.0, 16.0);
+            d.add_text(label, "User ID");
+            let photo = d.add(Some(hero), "img");
+            d.set_styles(photo, PROBE_BASE);
+            d.set_rect(photo, 0.0, 135.0, 390.0, 600.0);
+            let headline = d.add(Some(hero), "h2");
+            d.set_styles(headline, PROBE_BASE);
+            d.set_style(headline, "fontSize", "32px");
+            d.set_rect(headline, 13.0, 149.0, 339.0, 75.0);
+            d.set_text_rect(headline, 13.0, 148.0, 282.0, 75.0);
+            d.add_text(headline, "Bank on your terms");
+            let stack = match between {
+                "photo" => vec![headline, photo, hero, label, form, body],
+                "ancestor" => {
+                    d.set_style(hero, "backgroundColor", "rgb(255, 255, 255)");
+                    vec![headline, hero, label, form, body]
+                }
+                "none" => vec![headline, label, form, hero, body],
+                _ => Vec::new(),
+            };
+            for (x, y) in occlusion_probe_points(&d.rect(label), 1280.0, 800.0) {
+                if stack.is_empty() {
+                    d.set_point(x, y, vec![headline]);
+                } else {
+                    d.set_point(x, y, stack.clone());
+                }
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d).len()
+        };
+        assert_eq!(run("photo"), 0, "a picture between the headline and the label");
+        assert_eq!(run("ancestor"), 0, "the label's own container paints over it");
+        assert_eq!(run("none"), 1, "the headline lies on the label itself");
+        assert_eq!(run("unlisted"), 1, "a stack that does not place the label");
     }
 
     /// v0-dashboard-ui-redesign-nine.vercel.app capture 3762: a mobile
@@ -4238,6 +4922,42 @@ mod tests {
         assert!(check_first_viewport_column_overflow_dom(&d).is_empty(), "clipped at 700px");
         d.set_styles(a, &[("overflowY", "visible")]);
         assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "unclipped");
+    }
+
+    /// observations-35 row 15 (submitmap.com 216883): `flex-col lg:flex-row`
+    /// at a phone width stacks a short header block over a long list. Boxes
+    /// that share an x range are not columns.
+    #[test]
+    fn first_viewport_column_overflow_needs_columns_side_by_side() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 390.0;
+        let stack = d.add(Some(body), "div");
+        d.set_styles(stack, &[("display", "flex")]);
+        d.set_rect(stack, 0.0, 65.0, 390.0, 4600.0);
+        let block = |d: &mut FakeDom, rect: (f64, f64, f64, f64), content_h: f64| {
+            let col = d.add(Some(stack), "div");
+            d.set_styles(col, &[("display", "block"), ("position", "static")]);
+            d.set_rect(col, rect.0, rect.1, rect.2, rect.3);
+            let inner = d.add(Some(col), "p");
+            d.set_styles(inner, &[("display", "block"), ("position", "static"), ("visibility", "visible")]);
+            d.set_rect(inner, rect.0, rect.1, rect.2, content_h);
+            col
+        };
+        let intro = block(&mut d, (20.0, 100.0, 350.0, 44.0), 40.0);
+        let list = block(&mut d, (20.0, 176.0, 350.0, 4200.0), 4160.0);
+        mark_body_descendants(&mut d);
+        assert!(check_first_viewport_column_overflow_dom(&d).is_empty(), "stacked");
+        // The same two boxes side by side are columns.
+        d.inner_width = 1280.0;
+        d.set_rect(stack, 0.0, 65.0, 1280.0, 4600.0);
+        d.set_rect(intro, 20.0, 100.0, 400.0, 44.0);
+        d.set_rect(list, 440.0, 100.0, 800.0, 4200.0);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "side by side");
+        // A short block stacked under the tall column, in its track, does
+        // not hide the column beside it.
+        let _extra = block(&mut d, (440.0, 120.0, 800.0, 30.0), 24.0);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "a short block in the tall track");
     }
 
     /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline

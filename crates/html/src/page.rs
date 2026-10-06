@@ -568,10 +568,15 @@ pub fn check_repeated_container_text_from_doc(doc: &StaticDocument) -> Vec<RuleH
                     break;
                 }
                 let raw_cls = js::trim(c.get_attribute("class").unwrap_or(""));
+                // A class that carries an id names one instance, not a spot,
+                // as in the browser engine.
                 let mut cls: Vec<&str> = if raw_cls.is_empty() {
                     Vec::new()
                 } else {
-                    WS_RE.split(raw_cls).filter(|s| !s.is_empty()).collect()
+                    WS_RE
+                        .split(raw_cls)
+                        .filter(|s| !s.is_empty() && !impeccable_core::checks::text_rules::is_id_like_class(s))
+                        .collect()
                 };
                 cls.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
                 let cls = cls.join(".");

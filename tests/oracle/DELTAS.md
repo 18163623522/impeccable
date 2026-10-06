@@ -6239,6 +6239,406 @@ Known limits, stated so the ratchet does not read them as misses:
    pair** (r3-04), so demoting a mock's text can surface one new
    `low-contrast` finding on the same page (bitroad.ai, 2 in run 31).
 
+
+## Recorded 2026-10-02: images and text that are not at rest (corpus/round8-not-at-rest)
+
+Four changes from `reports/observations-35.md` (rows 1, 5, the `dark-glow`
+part of row 15, and the mechanical part of `content-hidden-at-rest`), all in
+the URL engine's checks under `crates/core/src/browser`, so no existing
+finding moved in any golden. Two goldens are new, for the fixture added here,
+and eight directory goldens gained that fixture's static findings.
+
+- `buried-raster` skips two more state layers. An animation or transition the
+  capture saw running on the raster that moves its `opacity` is a fade in
+  progress. An `<img>` at rest at 0 is waiting for a class swap when at least
+  two other images on the page are shown (own opacity 0.5 or more, painted
+  through their ancestors), declare an opacity transition or an opacity
+  animation, share a class token with it, and carry its class list with one
+  token swapped or one token added (tagDiv Newspaper's
+  `td-animation-stack-type0-1` to `-type0-2`).
+- `cramped-padding`, wrapper form: text lands on a side only within 4px of it
+  on either side of the edge (it used to count at any distance past it), and
+  text is the wrapper's only when no box from it up to the wrapper is at
+  opacity 0.02 or less, is `position: absolute` or `fixed`, or is a
+  non-inline box painting a fill that differs from what is behind it.
+- `dark-glow`, page form with no selector: when the style text declares
+  `@keyframes` whose readable frames set the shadow property to that colour,
+  the form stands only if an element painted at capture carries one of those
+  names in its `animation-name`.
+- `content-hidden-at-rest`: a box that starts an invisible subtree leaves
+  both counts when it is `position: absolute`, has area and lies wholly
+  outside an ancestor that clips it, every clipping ancestor having area on
+  the axis it clips. It counts as shown when its opacity is held by a scroll
+  or view timeline: a running animation moves its `opacity`, a named
+  animation's keyframes set `opacity`, and a rule matching it declares
+  `animation-timeline: scroll()`, `view()` or a named timeline.
+
+New fixture `not-at-rest.html`, a failing and a passing column, pinned on the
+URL engine by `crates/browser/tests/not_at_rest.rs`: the base engine
+(3b1dced5) reports every should-pass case there, and in a browser the hidden
+share reads `687 of 1654 chars`, which leaves out the 267 characters a view
+timeline holds and the 177 parked under closed rows. Every re-recorded golden
+was diffed finding by finding against its predecessor.
+
+- `detect-fixture-json-not-at-rest-html`, `detect-fixture-text-not-at-rest-html`: new cases. The static engine measures no boxes and reads no running animations, so it reports both columns: 5 `buried-raster`, 2 `cramped-padding`, 1 `dark-glow` and 1 advisory `flat-type-hierarchy`.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`, `detect-no-advisory-text`, `detect-scope-type`, `detect-scope-layout-text`, `detect-scope-both`: the new fixture's findings and nothing else (835 to 843 counted, 165 to 166 advisory notes). No other finding moved and no snippet changed.
+
+`crates/live/assets/detect-antipatterns-browser.js` was rebuilt, since the
+checks are compiled into the in-page bundle.
+
+**Known limits.**
+
+1. **The class-swap test needs two revealed peers and a shared class.** An
+   image with no class, a page where no image of that kind has been revealed
+   yet, and a reveal that swaps a class on a wrapper instead of on the image
+   keep reporting. In the other direction, an image deliberately held at 0
+   whose class list is one token away from two shown, fading images is
+   skipped.
+2. **A fade in progress is read from the capture's running animations.** A
+   snapshot recorded before animations were read keeps base behaviour, and an
+   image a script tweens through inline opacity with no class marker is
+   covered only by the round 7 lazy tests.
+3. **Text more than 4px past a wrapper's edge is no longer `cramped-padding`.**
+   It overflows the box, which is another defect, and no rule here names it.
+   An existing unit test that pinned the old reading
+   (`cramped_padding_reads_the_edges_a_reader_sees`, the unclipped run 38px
+   past its band) was changed with it.
+4. **Out-of-flow and self-painted text is left to its own box.** A caption
+   positioned absolutely at a card's corner with no inset, and text in a
+   filled child that touches the wrapper's edge, are not reported on the
+   wrapper; the filled child is still measured as an element of its own.
+5. **The wrapper form's insulation loop still reads direct children only**,
+   and its paint gate is still asked of the wrapper, not of each text. Only
+   the opacity of the boxes between a text and the wrapper is read.
+6. **The keyframe test reads the names the style text declares** and the
+   frames the probe can read. Keyframes in an unreadable (cross-origin)
+   sheet, and a glow in an inline `style` attribute no element computes, keep
+   base behaviour. An element that runs the animation at capture hands the
+   decision back to the existing logic.
+7. **Scroll timelines are recognised from CSS only.** A timeline attached by
+   script (`new ScrollTimeline()`), a reveal a script scrubs by writing
+   styles (antropi.world), a slider that never initialised (letour.fr,
+   epcco.com.sa) and a reveal that never ran (asakana.co) all keep reporting:
+   those wait on taste call T6. `animation-timeline` is not in the snapshot's
+   style properties, so the rule is found in the style text and matched to
+   the box by its selector; a rule the selector engine cannot match keeps
+   base behaviour.
+8. **A panel parked under a clip collapsed to no height or width still
+   counts** (epcco.com.sa's 0px slider), as does a parked panel that is in
+   flow or `position: fixed`.
+## Recorded 2026-10-02: measuring the right box (corpus/round8-right-box)
+
+Round 8, branch 3 of observations-35 section 5, plus the `side-tab` recall
+bug of walkthroughs-35. Every change reads a box the engine already
+measured and stops reading the wrong one; none adds a rule or changes a
+severity. Fail-safe throughout: where the fact a change needs was not
+recorded (a text rect, a hit-test stack, a scroll width), the base reading
+stands.
+
+- **`side-tab`, a thin stripe on a card rounded away from it**
+  (walkthroughs-35, submitmap.com 7678, 7682). The computed
+  `border-radius` of `0px 12px 12px 0px` leads with 0, so a 2px left stripe
+  on that card took the square stripe's 3px floor. When the leading value is
+  0, the stripe is under 3px and the far corners are known, the radius is the
+  smaller far corner, and the stripe reports as
+  `border-left: 2px + border-radius: 12px`. A stripe of 3px or more keeps its
+  old wording. Top and bottom bands are untouched (taste call T2).
+- **`clipped-overflow-container`, row 7's implementation half.** (a) A
+  positioned child that paints nothing of its own (no fill, background
+  image, border, shadow, outline, own text or generated content) is cut only
+  where its descendants paint: text by its text rect, replaced elements and
+  painted boxes by their border boxes, a descendant that clips both axes by
+  its box. More than 200 descendants, text with no rect, or generated
+  content leave the wrapper's own box standing, and a popover layer keeps
+  reporting whatever it measures. mk.co.kr's `div.more_btn` and
+  bankofamerica.com's `div.spa-icon-wrapper`. (b) An absolutely positioned
+  child whose containing block sits inside a scroll container between it and
+  the clipping box belongs to that scroller (gamer.com.tw's captions in a row
+  at `overflow: auto hidden`). A fixed child is not read this way.
+- **`heading-rhythm`, row 12.** (a) A spacer is now any empty box whose
+  rendered children are all spacers, four levels deep: no text, no picture,
+  no painted bottom edge (kinghost.com.br's `div` around a
+  `wp-block-spacer`). (b) The walk below a heading stops at the end of
+  `main` (or `role="main"`), and once it has left the heading's own box it
+  does not measure to a `footer`, `nav`, `aside` or `header` (or their
+  roles): improved-rotary-phone-two.vercel.app measured 86px to the page
+  footer.
+- **`body-text-viewport-edge`, row 15.** (a) A line its own box truncates
+  by design (an ellipsis or a line clamp on a box that generates one, the
+  test `text-overflow` already uses) is measured to that box's padding edge
+  (keydris.com, leilonozap.vercel.app). (b) Text on a track a running,
+  infinitely repeating CSS animation transforms inside a box that hides x
+  overflow is not measured (paseo.sh). A track a script parks with a
+  transform is measured as before.
+- **`text-occlusion`, row 15.** (a) Where the answer to a probe is text, and
+  the hit-test stack places a picture (`img`, `picture`, `video`, `canvas`)
+  between that answer and the victim, or an ancestor of the victim painting
+  an opaque fill over it, the point is not counted: the answer lies on what
+  buries the victim (bankofamerica.com's sign-in form at `z-index: -1`). (b)
+  Both texts are read as the band their glyphs ink instead of their content
+  area, for text of ASCII, spaces and the four common currency signs with a
+  known font size and one line (or recorded line rects): the band drops
+  `max(0, 0.75 * H - 0.8em)` above the first line and
+  `max(0, 0.18 * H - 0.25em)` below the last, `H` being that line's rect
+  height. freenet.de's 40px price on a 40px line has a 57px rect that laps
+  the 12px label above it; its digits do not.
+- **`edge-flush-cards`, row 15.** A table cell, row, row group, caption or
+  column (by tag or computed `display`) is not a card (paseo.sh's `th`).
+- **`repeated-container-text`, row 15.** In the URL engine an element must
+  also pass the Text paint gate (a container, its box gate), so slides parked
+  past their window repeat nothing. In both engines, a class token with a
+  `-` or `_` part of four or more hex digits that holds a decimal digit is
+  dropped from the spot signature: it names an instance
+  (`jet-listing-dynamic-post-43268`), not a spot (kinghost.com.br).
+- **`first-viewport-column-overflow`, row 15.** The tall column and the
+  short one must have disjoint x ranges (submitmap.com's
+  `flex-col lg:flex-row` stack).
+- **`nested-cards`, row 8's control.** `role="tablist"`, `"radiogroup"` and
+  `"toolbar"` join `"menu"` and `"listbox"` as boxes that are not cards
+  (easyveo.com's Video / Image switch).
+- **`undersized-ui-text`, row 6.** (a) `[tabindex]` no longer makes a box a
+  control by itself: a box with a `tabindex` counts as one only when the value
+  is not negative and its text is 80 UTF-16 units or fewer. Every other
+  control selector is unchanged. (b) In the URL engine, a run in a monospace
+  face with `white-space: pre*` whose text holds one of
+  `{ } [ ] < > = ; " \` \ _` is code and is exempt (directus.io's JSON
+  sample). The character test is what keeps monospace pricing labels on the
+  same site reporting. (a) is mirrored in the static engine; (b) is not,
+  since its cascade carries no `white-space`.
+
+**Not built: `flat-type-hierarchy`** (row 15, kinghost.com.br 218888, 218909).
+"Decline when a rendered heading stands 1.25 times above the ladder top"
+removed the should-flag column of `flat-type-hierarchy.html` (one 48px h1
+on the page) and contradicts round 7's otto.de note. The narrower "a heading
+size a full step above the top, used twice" removed, on run 28, four
+findings both judges called the pattern present (inven.co.kr 141932, 142191,
+joongang.co.kr 138137, walla.co.il 142983). How much a role's secondary
+size counts against its modal one is a taste call.
+
+New fixtures, each with a should-flag and a should-pass column, pinned on
+the URL engine by `crates/browser/tests/right_box.rs` (every test there
+fails on the base engine):
+`side-tab-far-corners.html`, `clipped-overflow-painted-box.html`,
+`heading-rhythm-spacers.html`, `body-text-viewport-edge-truncated.html`,
+`text-occlusion-buried.html`, `edge-flush-cards-table.html`,
+`repeated-container-text-carousel.html`,
+`first-viewport-column-overflow-stacked.html`, `nested-cards-controls.html`,
+`undersized-ui-text-focus-and-code.html`.
+
+- `detect-fixture-json-side-tab-far-corners-html`, `detect-fixture-text-side-tab-far-corners-html`, `detect-fixture-json-clipped-overflow-painted-box-html`, `detect-fixture-text-clipped-overflow-painted-box-html`, `detect-fixture-json-heading-rhythm-spacers-html`, `detect-fixture-text-heading-rhythm-spacers-html`, `detect-fixture-json-body-text-viewport-edge-truncated-html`, `detect-fixture-text-body-text-viewport-edge-truncated-html`, `detect-fixture-json-text-occlusion-buried-html`, `detect-fixture-text-text-occlusion-buried-html`, `detect-fixture-json-edge-flush-cards-table-html`, `detect-fixture-text-edge-flush-cards-table-html`, `detect-fixture-json-repeated-container-text-carousel-html`, `detect-fixture-text-repeated-container-text-carousel-html`, `detect-fixture-json-first-viewport-column-overflow-stacked-html`, `detect-fixture-text-first-viewport-column-overflow-stacked-html`, `detect-fixture-json-nested-cards-controls-html`, `detect-fixture-text-nested-cards-controls-html`, `detect-fixture-json-undersized-ui-text-focus-and-code-html`, `detect-fixture-text-undersized-ui-text-focus-and-code-html`: new cases. On the static engine only three report: the four side-tab rows; the flag panel and the parked-slides panel of the carousel fixture; and on the code fixture the three flag rows plus the JSON lines (one of them also as `tiny-text`), which the static engine cannot exempt.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the new fixtures' findings only (835 to 848 counted). No existing finding moved; every pre-existing fixture golden replays byte for byte.
+
+Corpus ratchet (same replay, `reports/ratchet/round8-right-box-ratchet-*.json`):
+run 35 removes 52 and adds 6 (4 of the adds are the `heading-rhythm` page
+count changing from 3 to 2 headings on improved-rotary-phone-two), with one
+violation, 216097 (vexoai.com, "© 2026 VexoAI, Inc." at 10px in a
+`footer tabindex="-1"`: with the footer no longer a control it takes the
+decided 10px small-print floor). Run 34 removes 20 unjudged findings and
+adds 10. Run 28 matches the base engine except clipped-overflow (-8),
+undersized-ui-text (-7) and heading-rhythm (+10), with no new violation.
+
+### Known limits
+
+1. **The static engine reads none of the layout changes**: wrappers, scrollers,
+   spacers, landmarks, truncation, tracks, the hit-test stack, table cells
+   in scrollers, column positions. It shares the side-tab, id-like class and
+   `tabindex` changes, and the nested-cards role list does not apply to its
+   own nested-cards code, which flags neither column of that fixture.
+2. **The ink band is a font-agnostic estimate.** It assumes an ascent of 75
+   to 82% of the content area and ascenders and descenders of at most 0.8
+   and 0.25em; a face with a smaller ascent share and a large size could
+   have a few pixels of ink above the band. Accented capitals, emoji and
+   non-Latin text keep the content area.
+3. **The `heading-rhythm` spacer change also adds findings**: an empty
+   subtitle slot under a heading (tchibo.de's `span.ds-text-75` holding an
+   empty `p`) is now space, and five card titles 8px under a banner and
+   32px over their link report on each tchibo.de capture (10 on run 34, 10
+   on run 28, unjudged). That is what the page shows.
+4. **`tabindex` regions**: a focusable box over 80 characters is read as a
+   region, so a long label inside a custom control written as a big
+   focusable `div` with no role loses the control floor. `undersized-ui-text`
+   then reports it only up to 20 characters, and `tiny-text` takes longer
+   runs.
+5. **Text an ancestor clips** is still measured against the viewport, as the
+   review of observations-20 row 31 decided (simplybudget.framer.ai): only an
+   element's own truncation ends its line.
+## Recorded 2026-10-02: own-box surfaces, repainted ink, and pixels that replace a verdict (corpus/round8-pixels-and-surfaces)
+
+Engine defects from the cohort 4 judge observations (corpus observations-35,
+section 5 branch 1: rows 2, 4, 11, 17, 18 and the contrast parts of row 15).
+No taste decision is involved. All of it is in the browser engines'
+`low-contrast` (and `gray-on-color`) path; the static HTML engine is
+unchanged.
+
+1. **A gradient over the same box's opaque fill is the surface.** `background:
+   #8b5cf6 linear-gradient(135deg, #6d28d9, #9061f9)` was scored against the
+   fill, a colour no pixel of the box shows. The gradient is now sampled
+   under the text and flattened over the fill. The fill stays the surface
+   where no layer paints under the text, where the geometry cannot be read,
+   and where the gradient moves it by less than 12 on every channel at every
+   point under the text (a sheen).
+2. **An upper gradient layer lies over the layers below it.** With several
+   gradient layers on one box, a translucent stop of an upper layer is
+   composited over each colour the lower layers can show, not over the page
+   behind the box.
+3. **SVG text is scored only where its fill is its colour.** SVG text paints
+   `fill`, which the capture does not record. It is scored as `color` only
+   where the nearest `fill` the markup states (attribute or inline style, on
+   the element or an SVG ancestor) is `currentColor`.
+4. **A filter that repaints the ink leaves no verdict.** A `filter` on the
+   element or an ancestor that moves the ink, or the surface of a box inside
+   the filtered one, by more than 2 on a channel (the Filter Effects matrices
+   over the flat colour), or that the engine cannot model (`url()`,
+   `opacity()` under 1), drops `low-contrast` and `gray-on-color`.
+5. **A colour reveal's word may set its own display.** The inline style of a
+   reveal word may declare `display`, and a word that computes to `block` as
+   an item of a flex or grid run is still a word.
+6. **Handed-over text inside an `aria-hidden` box reaches the pixels.** The
+   visual pass took no candidate under `aria-hidden="true"`, while the
+   element pass scores that text, so a verdict handed to the pixels was never
+   read. Painted text there now takes a slot of the second (routed) budget.
+   The first budget is unchanged.
+7. **The sampled pass stops where it cannot place an image.** A
+   `background-attachment: fixed` image, an image that did not load, and a
+   point the image does not reach end the walk unresolved (the pixel pass
+   takes the candidate) instead of scoring the text against the boxes
+   beneath.
+8. **Sample points that disagree go to the pixels.** Where the 10th
+   percentile fails, the median passes and the two differ by the divergence
+   factor, the sampled pass gives no verdict.
+9. **Paint the sampled pass cannot see goes to the pixels.** A first-budget
+   candidate the element pass hands over for unread paint, where that paint
+   is a pseudo-element over the text or a layer that ignores pointer events
+   (neither is in a hit-test stack), gets no sampled verdict.
+
+New fixture `own-box-surface-and-ink-contrast.html` (7 should-flag and 9
+should-pass rows), pinned on the URL engine by
+`crates/browser/tests/own_box_surface_and_ink.rs`. Every should-pass row
+reports on the base engine in a URL scan.
+
+- `detect-fixture-json-own-box-surface-and-ink-contrast-html`,
+  `detect-fixture-text-own-box-surface-and-ink-contrast-html`: new cases,
+  recorded from the binary (10 counted, 2 advisory, the static engine's
+  reading, see limit 1).
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: the new fixture's findings only (1000 to 1012
+  findings, 835 to 845 counted, 165 to 167 advisory notes). No finding on an
+  existing fixture moved and no snippet changed.
+
+### Known limits
+
+1. **The static HTML engine is unchanged.** A file scan still scores a box
+   with a fill and a gradient against the fill, pools layered stops, reads
+   SVG text as `color` and models no filter or reveal: it misses the
+   fixture's first should-flag row and reports six of its should-pass rows.
+2. **The fill is kept where the gradient cannot be placed** (a
+   `conic-gradient`, a size in units the geometry does not read, a capture
+   with no `background` shorthand), as before.
+3. **A fill given to SVG text by a stylesheet is not seen.** Text styled
+   `fill: currentColor` from a class (Tailwind `fill-current`) is unscored,
+   and so is text whose `fill` is a colour of its own, whatever its contrast.
+4. **A filter is modelled on flat colours only.** A filter that moves either
+   colour silences the verdict rather than rescoring it, including where the
+   filtered result would still fail. A page filtered at its root
+   (`html { filter: invert(1) }`) reports no contrast finding.
+5. **The routed budget is unchanged.** `aria-hidden` text competes for the
+   same 12 routed slots in document order, so a handed-over verdict past the
+   twelfth still prints unread (nvidia.com's carousel credit line). What to
+   do with an unread handed-over verdict is taste call T5.
+6. **In-page scans have no pixel pass.** The live overlay and the extension
+   run the sampled pass alone, so the candidates items 7 and 8 leave
+   unresolved report nothing there.
+7. **`point outside image` on an `<img>`** still lets the walk go on; only
+   CSS `url()` layers end it.
+## Recorded 2026-10-02: text and CSS-text forms (corpus/round8-text-forms)
+
+Five engine defects from the judged findings of corpus run 35
+(`reports/observations-35.md` rows 13, 14, 3 and 15 in the corpus repo). No
+decision of taste is in here: each is a measurement that counted the wrong
+thing, or a stylesheet form that never asked what its selector resolves to.
+
+- **`line-length` counted characters that are on no line.** The rule divides
+  an element's characters among its rendered line rects, and took the count
+  from the UTF-16 length of trimmed `textContent`. It now counts the
+  characters that rendered: the text of a `style`, `script`, `noscript` or
+  `template` descendant and of a `display: none` one is cut out, collapsible
+  white space counts once unless the element computes `white-space: pre`,
+  `pre-wrap` or `break-spaces`, and combining marks and format characters are
+  left out. This is a fix to code that came from main (#840) and is its own
+  commit, with `line-length-text-count.html` and
+  `crates/browser/tests/line_length_text_count.rs` standing alone.
+- **`overused-font` could name a face that sets next to no text.** The
+  element count still decides which face is primary, and the snippet is
+  unchanged. In the URL engine the finding now stands down when that face
+  sets under 5% of the characters in text that has a box (`hidden`,
+  `display: none`, `visibility: hidden` or `collapse` and
+  `content-visibility: hidden` are not weighed; opacity is not read).
+  walla.co.il's Arial at "40% of text" sets 2%. The bar sits under the
+  lowest share among findings both judges called harmful (mrtarget.de's
+  Montserrat, 6.6%): a full by-character share was tried first and lost five
+  of those (sellerassistant.io, v0-gigi, mrtarget.de), where a display or
+  label face that judges call the pattern sets a minority of the characters.
+- **`side-tab` reported one pseudo-element stripe twice,** once off the
+  element and once off the stylesheet. The stylesheet form now defers to the
+  element form on a host it resolves to. And the stylesheet scan no longer
+  reports a stripe whose background is a `url()` with no colour beside it.
+- **`marquee` never asked what the loop moves.** In the URL engine the
+  stylesheet form stands only when an element it resolves to carries text,
+  media, an SVG inside it, a `url()` background or generated content.
+- **`bounce-easing` read a name as the motion.** A bounce-named animation
+  whose keyframes are readable and only scale between 0 and 1 or fade does
+  not report, in either engine.
+
+New fixtures `line-length-text-count.html`, `overused-font-share-pass.html`,
+`overused-font-share-flag.html`, `side-tab-stylesheet-forms.html`,
+`marquee-ornament.html` and `bounce-easing-pulse.html`, pinned on the URL
+engine by `crates/browser/tests/line_length_text_count.rs` and
+`crates/browser/tests/text_forms.rs`. Every re-recorded golden was diffed
+finding by finding against its predecessor.
+
+- `detect-fixture-json-line-length-text-count-html`, `detect-fixture-text-line-length-text-count-html`: new cases, no findings (`line-length` needs layout).
+- `detect-fixture-json-overused-font-share-pass-html`, `detect-fixture-text-overused-font-share-pass-html`, `detect-fixture-json-overused-font-share-flag-html`, `detect-fixture-text-overused-font-share-flag-html`: new cases. Both report `Primary font: inter` on the static engine, see limit 1.
+- `detect-fixture-json-side-tab-stylesheet-forms-html`, `detect-fixture-text-side-tab-stylesheet-forms-html`: new cases, three stripes; the image-only stripe is absent.
+- `detect-fixture-json-marquee-ornament-html`, `detect-fixture-text-marquee-ornament-html`: new cases, four loops on the static engine, see limit 2.
+- `detect-fixture-json-bounce-easing-pulse-html`, `detect-fixture-text-bounce-easing-pulse-html`: new cases, the two bounces as advisory notes; the loader dots are absent.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-type`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the findings of the new fixtures and nothing else (835 to 844 counted, 165 to 167 advisory notes: two `overused-font`, three `side-tab`, four `marquee`, two advisory `bounce-easing`). No existing finding moved and no snippet changed.
+
+### Known limits
+
+1. **The static engine's `overused-font` is unchanged.** It reads declared
+   families with no layout, so it names Inter on
+   `overused-font-share-pass.html`, where Inter sets thirty step numbers.
+   In the URL engine, a face that sets a minority of the characters but
+   more than 5% is still named by its element count: yedric.ai's Geist Mono
+   labels (11%) keep reporting, as judges split on them, and so does any
+   label face the 5% bar does not reach.
+2. **The static engine reports every marquee loop.** It cannot resolve a
+   selector to an element, so the wave and the sweep on
+   `marquee-ornament.html` report there. The same holds for the double
+   report of a pseudo-element stripe: the static engine has one form and
+   never doubled.
+3. **`line-length` on text ended by `<br>`** still divides the count by
+   width, so short lines ended by breaks share characters in proportion to
+   their ink. odishatreasury.gov.in's footer keeps its finding at the right
+   number (`~125 chars on 2 of 3`, was `~171 chars on 3 of 3`).
+4. **Combining marks are dropped by general category,** not by grapheme
+   cluster, so a conjunct of two consonants counts as two and a spacing
+   vowel sign as none.
+5. **Characters hidden other than by `display: none`** (a `visibility:
+   hidden` child, a 1px visually hidden label) are still counted by
+   `line-length`: their rects are in the lines too, or negligible.
+6. **A bounce name whose keyframes move the element still reports,**
+   including a plain up-and-down loop with no overshoot (Tailwind's `bounce`),
+   which judges call the pattern. Only a pulse in place is dropped, and only
+   when its keyframes can be read: keyframes in a stylesheet the engine could
+   not read keep the finding.
+7. **A square top or bottom band still reports as `side-tab`.** Whether the
+   rounded-card requirement extends to them is an open decision (T2); this
+   change only stops the same band from reporting twice.
+8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
+   `url()` background still reports from the stylesheet scan, as before.
+
 ## Recorded 2026-10-01: MODE RULES printed by concept-seed
 
 Mode-specific rules for directions and comps moved out of the shared reference files into `skill/reference/mode-persuade.md` (persuade and experience), `mode-operate.md` and `mode-read.md`. With `--mode`, `concept-seed` now prints the bodies of the mode file's `## Directions` and `## Comps` sections inside a `MODE RULES (<mode>, from <path>). ...` block, so the agent gets them in output it already reads instead of a file it can skip. The block sits right after the richness instruction on a full roll and after the authority instruction on a degraded one, and prints on every round, re-rolls and both registers included. An unreadable file or a missing section prints one `MODE RULES unavailable: read <path> before writing directions or comps.` line and the roll still succeeds. The richness instruction lost its Persuade/Experience versus Operate/Read sentence, which now lives in the mode files, and reads `Keep a literal carrier only when it becomes functional.` where it read `Otherwise keep ...`.
@@ -6323,6 +6723,11 @@ New case, recorded from the binary and reviewed by hand:
 
 - `question-wait-render-check-once`: `k1.render-check` already holds the hand's id `h1`, so a poll with a landed, sidecar-carrying decision comp prints only the WAITING line and leaves the marker as it was.
 
+## Recorded 2026-10-05: main's near-black floor reaches the own-box fixture
+
+Merging main brought #935's `GRAY_INK_MIN_LIGHTNESS` = 0.3 floor (see "near-black ink is not gray" above). On this branch it also clears one static finding main has no fixture for:
+
+- `detect-fixture-json-own-box-surface-and-ink-contrast-html`, `detect-fixture-text-own-box-surface-and-ink-contrast-html`: `gray-on-color` on `#363637` (lightness 0.21) on `#066bed`, the `pass-label-repainted-by-filter` row, is gone; the `low-contrast` 2.5:1 finding on the same pair stays. The directory sweeps lose the same finding.
 ## Recorded 2026-10-05: the chosen decision comp is option one of the comp round
 
 The skill says the direction round's chosen decision comp enters the comp round as compositional option one and is never regenerated, but the comps gate counted only files directly in `.impeccable/mocks/`, while decision comps live in `.impeccable/mocks/decision/`. `build-phase start --direction <key> --decision-comp <png>` now records that comp as `decisionComp` in the state; the comps gate counts it first where it stands, never any other decision comp, and an approval on it closes the gate with the decision path as the approved comp (record, kept copy and `restore-comp` bind to it). `serve-question --wait` treats a pick of that recorded comp during the open comps phase as the approval (`APPROVED COMP`), and the `CHOSEN COMP` line names the flag.

@@ -1355,7 +1355,7 @@ fn dark_claim_stands(root_dark: Option<bool>, surfaces: &[Option<crate::color::R
 }
 
 /// The page-level forms of gradient-text, bounce-easing, dark-glow,
-/// radial-halo, layout-transition and marquee, reconciled with the element
+/// radial-halo, layout-transition, marquee and side-tab, reconciled with the element
 /// findings already on the page. Other rules pass through unchanged.
 fn reconcile_page_level_forms(
     dom: &dyn Dom,
@@ -1388,7 +1388,7 @@ fn reconcile_page_level_forms(
                 })
             }
             "dark-glow" => {
-                dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, root_dark)
+                dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, style_text, root_dark)
             }
             "radial-halo" => radial_halo_page_form_stands(dom, &item, root_dark),
             "layout-transition" => {
@@ -1396,6 +1396,7 @@ fn reconcile_page_level_forms(
                     && layout_transition_page_form_stands(dom, style_text)
             }
             "marquee" => marquee_page_form_stands(dom, &item, &mut marquees),
+            "side-tab" => side_tab_page_form_stands(groups, &item),
             _ => true,
         };
         if stands {
@@ -1518,11 +1519,14 @@ fn glow_declaration(detail: &str) -> Option<(String, String)> {
 /// so that form stands, and where it claims a dark page the hosts' surfaces
 /// and the painted root decide ([`dark_claim_stands`]). A form with no
 /// selector (a keyframe step, an inline `style` attribute) stands as before,
-/// unless it claims a dark page and the painted root is light.
+/// unless it claims a dark page and the painted root is light, or it is a
+/// step of `@keyframes` that no painted element runs
+/// ([`glow_keyframes_run_nowhere`]).
 fn dark_glow_page_form_stands(
     dom: &dyn Dom,
     element_findings: &[&BrowserFinding],
     item: &PatternItem,
+    style_text: &str,
     root_dark: Option<bool>,
 ) -> bool {
     if let Some(page) = glow_declaration(&item.finding.detail) {
@@ -1547,6 +1551,11 @@ fn dark_glow_page_form_stands(
             .unwrap_or_default();
         if !casters.is_empty() {
             return false;
+        }
+        if let Some((prop, hex)) = glow_declaration(&item.finding.detail) {
+            if glow_keyframes_run_nowhere(dom, style_text, &prop, &hex) {
+                return false;
+            }
         }
         if !claims_dark {
             return true;
@@ -1638,6 +1647,51 @@ fn elements_casting_glow(dom: &dyn Dom, prop: &str, hex: &str) -> Vec<ElId> {
         .collect()
 }
 
+static KEYFRAMES_NAME_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r#"@(?:-webkit-|-moz-)?keyframes\s+["']?([^\s{"']+)"#).expect("KEYFRAMES_NAME_RE")
+});
+
+/// Whether a glow no element computes is a step of `@keyframes` that nothing
+/// on the page runs: the style text declares at least one `@keyframes` whose
+/// frames set `prop` to a shadow of colour `hex`, and no element painted at
+/// capture carries one of those names in its `animation-name`. A stylesheet
+/// that ships an animation for a class the page does not use (a cart button
+/// that is not rendered) puts no glow in front of a visitor.
+///
+/// Keyframes the probe cannot read, and a declaration no readable keyframes
+/// carry (an inline `style` attribute), answer no: the form stands as before.
+fn glow_keyframes_run_nowhere(dom: &dyn Dom, style_text: &str, prop: &str, hex: &str) -> bool {
+    let mut names: Vec<String> = Vec::new();
+    for m in KEYFRAMES_NAME_RE.captures_iter(style_text) {
+        let name = m[1].to_string();
+        if names.contains(&name) {
+            continue;
+        }
+        let casts = dom.keyframes(&name).is_some_and(|frames| {
+            frames.iter().flat_map(|f| f.decls.iter()).any(|(p, value)| {
+                p == prop
+                    && crate::js_ext_a::split_commas_outside_parens(value).into_iter().any(|layer| {
+                        crate::checks::rules::find_shadow_color(layer)
+                            .and_then(|info| info.color)
+                            .is_some_and(|c| crate::color::color_to_hex(Some(&c)) == hex)
+                    })
+            })
+        });
+        if casts {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return false;
+    }
+    !dom.query_all(None, "*").unwrap_or_default().into_iter().any(|el| {
+        let running = dom.style(el, "animationName");
+        running != "none"
+            && running.split(',').map(crate::js::trim).any(|n| names.iter().any(|k| k == n))
+            && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none()
+    })
+}
+
 /// The layout-transition page form carries no selector of its own, and the
 /// element form reads every element's computed `transition-property`. The
 /// form stands only where the declaration it names matches an element that
@@ -1684,6 +1738,12 @@ fn marquee_page_form_stands(
     let Some(elements) = item.matches.as_ref().filter(|m| !m.is_empty()) else {
         return true;
     };
+    // A marquee is content crawling past: words, logos, pictures. A loop that
+    // moves nothing a visitor reads or looks at (a wave drawn as one SVG
+    // path, a highlight sweeping across a pill) is an ornament in motion.
+    if !elements.iter().any(|&el| marquee_carries_content(dom, el)) {
+        return false;
+    }
     let root_like = |el: ElId| Some(el) == dom.body() || Some(el) == dom.document_element();
     let parents: Vec<ElId> = elements
         .iter()
@@ -1699,6 +1759,95 @@ fn marquee_page_form_stands(
     }
     seen.push((elements.clone(), parents));
     true
+}
+
+/// Whether an element a marquee animation moves carries anything to read or
+/// look at: text, an image, video, canvas or frame, an SVG inside it (a logo
+/// in a strip; the element being one bare SVG drawing is not content), a
+/// `url()` background on it or under it, or generated content.
+/// Whether `el` holds text a visitor sees: text outside the elements that
+/// never paint theirs (an SVG's `title`, `desc` or `metadata`, a `style`
+/// or `script`), which a decorative drawing carries for its label, and
+/// outside boxes that render none (`display: none`, a `content-visibility:
+/// hidden` box's contents, a transparent descendant). A `visibility:
+/// hidden` box hides its own text; a child that sets `visible` again shows.
+fn shows_text(dom: &dyn Dom, el: ElId) -> bool {
+    shows_text_at(dom, el, true)
+}
+
+fn shows_text_at(dom: &dyn Dom, el: ElId, root: bool) -> bool {
+    if matches!(tag_lower(dom, el).as_str(), "title" | "desc" | "metadata" | "style" | "script" | "template")
+        || super::dom::renders_no_text(dom, el)
+        || (!root && crate::js::parse_float(&dom.style(el, "opacity")) == 0.0)
+    {
+        return false;
+    }
+    let visible = !matches!(dom.style(el, "visibility").as_str(), "hidden" | "collapse");
+    (visible && dom.direct_text_nodes(el).iter().any(|t| !crate::js::trim(t).is_empty()))
+        || dom.children(el).into_iter().any(|k| shows_text_at(dom, k, false))
+}
+
+fn marquee_carries_content(dom: &dyn Dom, el: ElId) -> bool {
+    const MEDIA: &str = "img, picture, video, canvas, iframe, object, embed, svg, image, use";
+    const MEDIA_TAGS: [&str; 8] = ["img", "picture", "video", "canvas", "iframe", "object", "embed", "marquee"];
+    if shows_text(dom, el) {
+        return true;
+    }
+    if MEDIA_TAGS.contains(&tag_lower(dom, el).as_str()) {
+        return true;
+    }
+    // Inside one bare SVG drawing, its `use` copies and nested `svg`
+    // viewports are parts of the drawing (a wave tiled with `use`); only a
+    // raster `image` in it is a picture.
+    let media = if tag_lower(dom, el) == "svg" { "image" } else { MEDIA };
+    if dom.query_all(Some(el), media).map_or(true, |m| !m.is_empty()) {
+        return true;
+    }
+    let paints_image = |e: ElId| dom.style(e, "backgroundImage").contains("url(");
+    if paints_image(el) || dom.query_all(Some(el), "*").unwrap_or_default().into_iter().any(paints_image) {
+        return true;
+    }
+    ["::before", "::after"].iter().any(|which| {
+        dom.pseudo_style(el, which, "content").map_or(false, |c| {
+            let c = crate::js::trim(&c).to_string();
+            !(c.is_empty() || c == "none" || c == "normal" || c == "\"\"" || c == "''")
+                || dom.pseudo_style(el, which, "backgroundImage").map_or(false, |b| b.contains("url("))
+        })
+    })
+}
+
+/// The pseudo-element a stripe snippet names, `::before` or `::after`.
+fn stripe_pseudo(detail: &str) -> Option<&'static str> {
+    let head = detail.split(" — ").next().unwrap_or("");
+    if head.ends_with(":before") {
+        Some("::before")
+    } else if head.ends_with(":after") {
+        Some("::after")
+    } else {
+        None
+    }
+}
+
+/// The stylesheet form of a pseudo-element stripe stands unless a host it
+/// resolves to already carries the element form for the same pseudo-element:
+/// that finding read the stripe off the rendered box and names the element,
+/// and the two describe one stripe.
+fn side_tab_page_form_stands(groups: &[FindingGroup], item: &PatternItem) -> bool {
+    const STRIPE: &str = "pseudo-element stripe";
+    if !item.finding.detail.contains(STRIPE) {
+        return true;
+    }
+    let Some(hosts) = item.matches.as_ref().filter(|m| !m.is_empty()) else {
+        return true;
+    };
+    let Some(pseudo) = stripe_pseudo(&item.finding.detail) else {
+        return true;
+    };
+    !groups.iter().filter(|g| hosts.contains(&g.el)).any(|g| {
+        g.findings.iter().any(|f| {
+            f.type_ == "side-tab" && f.detail.contains(STRIPE) && stripe_pseudo(&f.detail) == Some(pseudo)
+        })
+    })
 }
 
 /// JS: index.mjs#serializeFindings(allFindings)
@@ -3943,6 +4092,57 @@ mod page_level_form_tests {
         assert!(details(&scan(&d), "dark-glow").is_empty());
     }
 
+    /// leilonozap.vercel.app (findings 213409, 213477): the stylesheet ships
+    /// `cart-breathe` for a cart button the page does not render.
+    #[test]
+    fn a_glow_in_keyframes_nothing_runs_is_not_on_the_page() {
+        let style = ".cart-glass{animation:cart-breathe 3s infinite}\
+@keyframes cart-breathe{0%,100%{box-shadow:0 0 0 rgba(153,193,152,0)}50%{box-shadow:0 0 14px rgba(153,193,152,.35)}}";
+        let reported = "Zero-offset box-shadow glow (#99c198)".to_string();
+        let frames = || {
+            vec![
+                crate::browser::dom::KeyframeFrame {
+                    decls: vec![("box-shadow".to_string(), "rgba(153, 193, 152, 0) 0px 0px 0px".to_string())],
+                },
+                crate::browser::dom::KeyframeFrame {
+                    decls: vec![("box-shadow".to_string(), "rgba(153, 193, 152, 0.35) 0px 0px 14px".to_string())],
+                },
+            ]
+        };
+
+        // Keyframes the probe cannot read: the text decides, as before.
+        let (d, body) = page(style);
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported.clone())]);
+
+        // Readable keyframes that no element runs.
+        let (mut d, _body) = page(style);
+        d.keyframes.insert("cart-breathe".to_string(), frames());
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // An element that runs them but is not painted.
+        let button = d.add(d.body, "a");
+        d.set_style(button, "animationName", "cart-breathe");
+        d.set_style(button, "display", "none");
+        d.set_rect(button, 0.0, 0.0, 0.0, 0.0);
+        assert!(details(&scan(&d), "dark-glow").is_empty());
+
+        // A painted element running them, caught between glow frames.
+        let (mut d, body) = page(style);
+        d.keyframes.insert("cart-breathe".to_string(), frames());
+        let button = d.add(Some(body), "a");
+        d.set_style(button, "animationName", "spin, cart-breathe");
+        d.set_rect(button, 0.0, 0.0, 40.0, 40.0);
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported.clone())]);
+
+        // Another animation's keyframes do not carry the glow.
+        let (mut d, body) = page(style);
+        d.keyframes.insert(
+            "cart-breathe".to_string(),
+            vec![crate::browser::dom::KeyframeFrame { decls: vec![("opacity".to_string(), "0.5".to_string())] }],
+        );
+        assert_eq!(details(&scan(&d), "dark-glow"), vec![(body, reported)]);
+    }
+
     #[test]
     fn dark_page_is_read_off_the_painted_root() {
         // A glow in a keyframe step names no rule, so only the page decides.
@@ -4118,11 +4318,14 @@ mod page_level_form_tests {
         let original = d.add(Some(strip), "div");
         d.add_selector(original, ".t--original");
         d.add_selector(original, ".page .t--original");
+        d.add_text(original, "Breaking: the strip carries words");
         let clone = d.add(Some(strip), "div");
         d.add_selector(clone, ".t--clone");
+        d.add_text(clone, "Breaking: the strip carries words");
         let band = d.add(Some(body), "div");
         let logos = d.add(Some(band), "div");
         d.add_selector(logos, ".logos");
+        d.add_text(logos, "Acme Globex Initech");
         let snippets: Vec<String> = details(&scan(&d), "marquee").into_iter().map(|(_, s)| s).collect();
         assert_eq!(
             snippets,
@@ -4130,6 +4333,113 @@ mod page_level_form_tests {
                 ".t--original — infinite horizontal loop animation \"m\"".to_string(),
                 ".logos — infinite horizontal loop animation \"scroll\"".to_string(),
             ]
+        );
+    }
+    /// asakana.co's wave divider (one SVG path sliding sideways) and
+    /// quickrefs.com's highlight sweep (a gradient crossing a pill) loop
+    /// forever and carry nothing to read or look at. A strip of logos does.
+    #[test]
+    fn a_marquee_needs_something_to_read_or_look_at() {
+        let style = "@keyframes wave{0%{transform:translate(0)}100%{transform:translate(-50%)}}\
+@keyframes sweep{0%{transform:translate(-120%)}100%{transform:translate(220%)}}\
+.wave{animation:wave 12s linear infinite}\
+.sweep{animation:sweep 3.6s ease-in-out infinite}";
+        let (mut d, body) = page(style);
+        let cta = d.add(Some(body), "section");
+        d.add_text(cta, "Let us talk about your operation.");
+        let wave = d.add(Some(cta), "svg");
+        d.add_selector(wave, ".wave");
+        let _path = d.add(Some(wave), "path");
+        let pill = d.add(Some(body), "span");
+        d.add_text(pill, "Human curation");
+        let sweep = d.add(Some(pill), "span");
+        d.add_selector(sweep, ".sweep");
+        d.set_style(sweep, "backgroundImage", "linear-gradient(100deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 50%, rgba(255, 255, 255, 0) 100%)");
+        // A title on the looping drawing labels it; it paints nothing.
+        let label = d.add(Some(wave), "title");
+        d.add_text(label, "Decorative wave");
+        // The usual seamless loop draws the path once and tiles it with `use`.
+        let _tile = d.add(Some(wave), "use");
+        // Labels the drawing carries hidden paint nothing either.
+        for (prop, value) in [("display", "none"), ("visibility", "hidden"), ("opacity", "0")] {
+            let hidden = d.add(Some(wave), "text");
+            d.set_style(hidden, prop, value);
+            d.add_text(hidden, "Hidden label");
+        }
+        assert!(details(&scan(&d), "marquee").is_empty());
+
+        // What makes each one content: words in the track, an inline SVG
+        // logo inside it, a picture painted as a background under it.
+        for content in ["text", "svg", "background"] {
+            let (mut d, body) = page(style);
+            let band = d.add(Some(body), "div");
+            let track = d.add(Some(band), "div");
+            d.add_selector(track, ".wave");
+            match content {
+                "text" => {
+                    d.add_text(track, "Trusted by teams at Acme and Globex");
+                }
+                "svg" => {
+                    let logo = d.add(Some(track), "svg");
+                    d.add_selector(logo, "img, picture, video, canvas, iframe, object, embed, svg, image, use");
+                }
+                _ => {
+                    let tile = d.add(Some(track), "div");
+                    d.add_selector(tile, "*");
+                    d.set_style(tile, "backgroundImage", "url(\"logo.png\")");
+                }
+            }
+            let snippets: Vec<String> = details(&scan(&d), "marquee").into_iter().map(|(_, s)| s).collect();
+            assert_eq!(
+                snippets,
+                vec![".wave — infinite horizontal loop animation \"wave\"".to_string()],
+                "{content}"
+            );
+        }
+    }
+
+    /// freenet.de: `.md-header::after` drew one 3px stripe and it reported
+    /// twice, once read off the element and once off the stylesheet.
+    #[test]
+    fn a_pseudo_stripe_its_host_already_reports_is_not_reported_from_the_stylesheet() {
+        let style = ".md-header::after{content:\"\";position:absolute;left:0;bottom:0;width:100%;height:3px;background-color:#84bc34}";
+        let build = |host_reports: bool| {
+            let (mut d, body) = page(style);
+            let header = d.add(Some(body), "div");
+            d.add_selector(header, ".md-header");
+            d.set_attr(header, "class", "md-header");
+            d.set_rect(header, 0.0, 0.0, 1280.0, 90.0);
+            if host_reports {
+                for (p, v) in [
+                    ("content", "\"\""),
+                    ("position", "absolute"),
+                    ("opacity", "1"),
+                    ("display", "block"),
+                    ("width", "1280px"),
+                    ("height", "3px"),
+                    ("top", "87px"),
+                    ("right", "0px"),
+                    ("bottom", "0px"),
+                    ("left", "0px"),
+                    ("backgroundColor", "rgb(132, 188, 52)"),
+                ] {
+                    d.set_pseudo_style(header, "::after", p, v);
+                }
+            }
+            let out = scan(&d);
+            let mut all: Vec<String> = details(&out, "side-tab").into_iter().map(|(_, s)| s).collect();
+            all.sort();
+            all
+        };
+        assert_eq!(
+            build(true),
+            vec!["div.md-header::after — absolute 3px pseudo-element stripe (bottom)".to_string()]
+        );
+        // With no element form on the host (the pseudo-element was not
+        // readable there), the stylesheet form is the only report and stays.
+        assert_eq!(
+            build(false),
+            vec![".md-header::after — absolute 3px pseudo-element stripe (bottom: 0)".to_string()]
         );
     }
 }

@@ -345,6 +345,22 @@ pub fn check_borders(
                 ));
             } else if w >= 3.0 {
                 findings.push(RuleHit::new("side-tab", format!("border-{sn}: {w_s}px")));
+            } else if let Some((a, b)) = opts.corners.as_ref().map(|c| c.away_from(i)) {
+                // `radius` is the leading value of the computed shorthand,
+                // the top-left corner. A card rounded only on the side away
+                // from the stripe (`0px 12px 12px 0px` under a left rule)
+                // leads with 0 and so took the square stripe's 3px floor,
+                // which dropped a 2px stripe on a rounded card. Its radius
+                // is that of the two corners the gate above passed, the
+                // smaller of the far pair. A stripe of 3px or more keeps the
+                // wording it reported under.
+                let far = a.min(b);
+                if far > 0.0 {
+                    findings.push(RuleHit::new(
+                        "side-tab",
+                        format!("border-{sn}: {w_s}px + border-radius: {}px", number_to_string(far)),
+                    ));
+                }
             }
         } else if radius > 0.0 && w >= 2.0 {
             findings.push(RuleHit::new(

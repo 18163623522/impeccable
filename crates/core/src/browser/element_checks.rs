@@ -224,9 +224,22 @@ pub fn class_selector(dom: &dyn Dom, el: ElId) -> String {
 
 /// JS: checks.mjs#isRenderedForBrowserRule(el)
 pub fn is_rendered_for_browser_rule(dom: &dyn Dom, el: ElId) -> bool {
+    rendered_for_browser_rule(dom, el, true)
+}
+
+/// [`is_rendered_for_browser_rule`] without its `aria-hidden` test: whether
+/// the element is painted, whatever it is to assistive technology. A theme
+/// that marks its whole page wrapper `aria-hidden="true"` (fischundfang.de's
+/// `div.td-theme-wrap`), or a carousel that marks its slides, still paints
+/// every word in it.
+pub fn is_painted_for_browser_rule(dom: &dyn Dom, el: ElId) -> bool {
+    rendered_for_browser_rule(dom, el, false)
+}
+
+fn rendered_for_browser_rule(dom: &dyn Dom, el: ElId, aria: bool) -> bool {
     let mut cur = Some(el);
     while let Some(c) = cur {
-        if dom.attr(c, "aria-hidden").as_deref() == Some("true") {
+        if aria && dom.attr(c, "aria-hidden").as_deref() == Some("true") {
             return false;
         }
         let visibility = js::to_lower_case(&dom.style(c, "visibility"));
@@ -797,6 +810,262 @@ fn has_active_blur(filter: &str) -> bool {
     false
 }
 
+/// The functions of a computed `filter` list as `(name, argument)` pairs,
+/// lower-cased. `None` where the list does not parse as functions.
+fn filter_functions(filter: &str) -> Option<Vec<(String, String)>> {
+    let lower = js::to_lower_case(js::trim(filter));
+    let mut out = Vec::new();
+    if lower.is_empty() || lower == "none" {
+        return Some(out);
+    }
+    let mut rest = lower.as_str();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return Some(out);
+        }
+        let open = rest.find('(')?;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close?;
+        out.push((rest[..open].trim().to_string(), rest[open + 1..close].trim().to_string()));
+        rest = &rest[close + 1..];
+    }
+}
+
+/// A filter amount: a number, or a percentage as a fraction. `default`
+/// where the function was written with no argument.
+fn filter_amount(arg: &str, default: f64) -> Option<f64> {
+    if arg.is_empty() {
+        return Some(default);
+    }
+    let v = parse_float(arg);
+    if !v.is_finite() {
+        return None;
+    }
+    Some(if arg.ends_with('%') { v / 100.0 } else { v })
+}
+
+/// A `hue-rotate()` angle in radians.
+fn filter_angle(arg: &str) -> Option<f64> {
+    if arg.is_empty() {
+        return Some(0.0);
+    }
+    let v = parse_float(arg);
+    if !v.is_finite() {
+        return None;
+    }
+    Some(if arg.ends_with("grad") {
+        v * std::f64::consts::PI / 200.0
+    } else if arg.ends_with("rad") {
+        v
+    } else if arg.ends_with("turn") {
+        v * std::f64::consts::TAU
+    } else {
+        v.to_radians()
+    })
+}
+
+/// The colour a computed `filter` list paints where the page paints `c`,
+/// per the Filter Effects matrices over sRGB channels, rounded to bytes.
+/// `blur()` and `drop-shadow()` leave a flat colour as it is. `None` where
+/// the list holds a function this does not model (`url(#duotone)`, an
+/// `opacity()` under 1, an argument it cannot read).
+pub(crate) fn filtered_colour(filter: &str, c: &Rgba) -> Option<Rgba> {
+    let mut rgb = [c.r / 255.0, c.g / 255.0, c.b / 255.0];
+    let matrix = |m: [[f64; 3]; 3], v: [f64; 3]| {
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    };
+    for (name, arg) in filter_functions(filter)? {
+        rgb = match name.as_str() {
+            "blur" | "drop-shadow" => rgb,
+            "opacity" => {
+                if filter_amount(&arg, 1.0)? < 1.0 {
+                    return None;
+                }
+                rgb
+            }
+            "brightness" => {
+                let k = filter_amount(&arg, 1.0)?.max(0.0);
+                rgb.map(|v| v * k)
+            }
+            "contrast" => {
+                let k = filter_amount(&arg, 1.0)?.max(0.0);
+                rgb.map(|v| (v - 0.5) * k + 0.5)
+            }
+            "invert" => {
+                let a = filter_amount(&arg, 1.0)?.clamp(0.0, 1.0);
+                rgb.map(|v| v * (1.0 - 2.0 * a) + a)
+            }
+            "grayscale" => {
+                let t = 1.0 - filter_amount(&arg, 1.0)?.clamp(0.0, 1.0);
+                matrix(
+                    [
+                        [0.2126 + 0.7874 * t, 0.7152 - 0.7152 * t, 0.0722 - 0.0722 * t],
+                        [0.2126 - 0.2126 * t, 0.7152 + 0.2848 * t, 0.0722 - 0.0722 * t],
+                        [0.2126 - 0.2126 * t, 0.7152 - 0.7152 * t, 0.0722 + 0.9278 * t],
+                    ],
+                    rgb,
+                )
+            }
+            "sepia" => {
+                let t = 1.0 - filter_amount(&arg, 1.0)?.clamp(0.0, 1.0);
+                matrix(
+                    [
+                        [0.393 + 0.607 * t, 0.769 - 0.769 * t, 0.189 - 0.189 * t],
+                        [0.349 - 0.349 * t, 0.686 + 0.314 * t, 0.168 - 0.168 * t],
+                        [0.272 - 0.272 * t, 0.534 - 0.534 * t, 0.131 + 0.869 * t],
+                    ],
+                    rgb,
+                )
+            }
+            "saturate" => {
+                let s = filter_amount(&arg, 1.0)?.max(0.0);
+                matrix(
+                    [
+                        [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
+                        [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
+                        [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
+                    ],
+                    rgb,
+                )
+            }
+            "hue-rotate" => {
+                let (sin, cos) = filter_angle(&arg)?.sin_cos();
+                matrix(
+                    [
+                        [0.213 + cos * 0.787 - sin * 0.213, 0.715 - cos * 0.715 - sin * 0.715, 0.072 - cos * 0.072 + sin * 0.928],
+                        [0.213 - cos * 0.213 + sin * 0.143, 0.715 + cos * 0.285 + sin * 0.140, 0.072 - cos * 0.072 - sin * 0.283],
+                        [0.213 - cos * 0.213 - sin * 0.787, 0.715 - cos * 0.715 + sin * 0.715, 0.072 + cos * 0.928 + sin * 0.072],
+                    ],
+                    rgb,
+                )
+            }
+            _ => return None,
+        };
+        rgb = rgb.map(|v| v.clamp(0.0, 1.0));
+    }
+    Some(Rgba {
+        r: math_round(rgb[0] * 255.0),
+        g: math_round(rgb[1] * 255.0),
+        b: math_round(rgb[2] * 255.0),
+        a: c.a,
+    })
+}
+
+/// How far a filter may move a channel of a colour before the colour a
+/// reader sees is no longer the one the contrast check scored: rounding, and
+/// the last step of a hover fade.
+const FILTER_MAX_CHANNEL_DRIFT: f64 = 2.0;
+
+/// Whether the glyphs of `el`, or the surface under them, paint in colours
+/// other than the ones the contrast checks read (`ink`, and `surface`: the
+/// colour or the gradient samples of the box `surface_host`), so that no
+/// verdict about those is about what a reader sees:
+///
+/// - SVG text paints its `fill`, which the capture does not record, and with
+///   no `fill` it paints black whatever `color` it inherits
+///   (improved-rotary-phone-two.vercel.app's plan labels, black on cream,
+///   scored as the cream `color` of the card around them). It is read as
+///   `color` only where the markup says so ([`svg_fill_is_current_colour`]).
+/// - A `filter` on the element or on a box around it repaints them where it
+///   moves the ink, or the surface of a box inside the filtered one
+///   ([`filtered_colour`]), or cannot be modelled:
+///   walla.co.il's `.filter-light` is `grayscale(1) brightness(0) invert(1)`,
+///   which paints `#363636` text white. A filter that leaves both where
+///   they are (`grayscale(1)` over grey text on a grey band, `brightness(1)`
+///   waiting for a hover) changes nothing and the verdict stands.
+///
+/// The pixel pass refuses a filtered box as well, so nothing reports there.
+pub(crate) fn ink_is_not_computed_colour(
+    dom: &dyn Dom,
+    el: ElId,
+    ink: Option<Rgba>,
+    surface: &[Rgba],
+    surface_host: Option<ElId>,
+) -> bool {
+    const MAX_ANCESTORS: usize = 64;
+    if dom.namespace_uri(el) == SVG_NS && !svg_fill_is_current_colour(dom, el) {
+        return true;
+    }
+    let moves = |filter: &str, colour: &Rgba| match filtered_colour(filter, colour) {
+        None => true,
+        Some(painted) => {
+            (painted.r - colour.r).abs() > FILTER_MAX_CHANNEL_DRIFT
+                || (painted.g - colour.g).abs() > FILTER_MAX_CHANNEL_DRIFT
+                || (painted.b - colour.b).abs() > FILTER_MAX_CHANNEL_DRIFT
+        }
+    };
+    // Past the box that paints the surface, a filter holds the surface too.
+    let mut holds_surface = false;
+    let mut cur = Some(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        holds_surface = holds_surface || Some(c) == surface_host;
+        let filter = dom.style(c, "filter");
+        let filter = js::trim(&filter);
+        if !filter.is_empty() && filter != "none" {
+            if filter_functions(filter).is_none() || ink.is_some_and(|ink| moves(filter, &ink)) {
+                return true;
+            }
+            if holds_surface && surface.iter().any(|colour| moves(filter, colour)) {
+                return true;
+            }
+        }
+        cur = dom.flat_parent(c);
+    }
+    false
+}
+
+/// Whether SVG text is filled with its own `color`: the nearest `fill` the
+/// markup states, on the element or on an SVG ancestor (a `fill` attribute,
+/// or a `fill` declaration in a `style` attribute, which wins on the same
+/// element), is `currentColor`, and that ancestor's `color` is the element's
+/// (keydris.com's diagram labels, `<text fill="currentColor">`). A fill
+/// given by a stylesheet is not in the capture, so text with no stated fill
+/// is not read as `color`.
+fn svg_fill_is_current_colour(dom: &dyn Dom, el: ElId) -> bool {
+    const MAX_ANCESTORS: usize = 64;
+    let mut cur = Some(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if dom.namespace_uri(c) != SVG_NS {
+            return false;
+        }
+        let inline = dom.attr(c, "style").and_then(|style| {
+            style
+                .split(';')
+                .filter_map(|decl| decl.split_once(':'))
+                .filter(|(name, _)| js::to_lower_case(js::trim(name)) == "fill")
+                .map(|(_, value)| js::to_lower_case(js::trim(value)))
+                .next_back()
+        });
+        let stated = inline.or_else(|| dom.attr(c, "fill").map(|v| js::to_lower_case(js::trim(&v))));
+        if let Some(fill) = stated {
+            return fill == "currentcolor" && dom.style(c, "color") == dom.style(el, "color");
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
 /// A box that is moved, or declared about to be: a `transform` other than
 /// `none` or the identity matrix, `translate`, `scale` or `rotate` other
 /// than `none`, or a `will-change` naming one of them, `opacity` or `filter`.
@@ -1255,20 +1524,39 @@ pub fn check_element_colors_dom(
         (h.id != "low-contrast" && h.id != "gray-on-color")
             || !*mid_reveal.get_or_init(|| crate::browser::painted::colour_mid_reveal(dom, el))
     };
+    // The verdicts that score the computed `color` say nothing where the
+    // glyphs paint another one (SVG text, a colour filter). Asked once, only
+    // of an element that failed.
+    let other_ink = std::cell::OnceCell::new();
+    let ink_read = |h: &RuleHit| {
+        (h.id != "low-contrast" && h.id != "gray-on-color")
+            || !*other_ink.get_or_init(|| {
+                let mut surface_colours: Vec<Rgba> = color_opts.effective_bg.into_iter().collect();
+                surface_colours.extend(color_opts.effective_bg_stops.iter().flatten().copied());
+                ink_is_not_computed_colour(
+                    dom,
+                    el,
+                    color_opts.visible_text.or(text_color),
+                    &surface_colours,
+                    surface_host,
+                )
+            })
+    };
     let mut findings = crate::checks::rules::check_colors_deduped_shaped(
         &color_opts,
         seen,
         Some(claim),
         &is_decorative,
         &mut |h: &RuleHit| {
-            safe_tag_text_hit_stands(dom, el, h, resolved, under().0, &|| {
-                unread() == crate::browser::visual::UnreadVerdict::Fails
-            })
+            ink_read(h)
+                && safe_tag_text_hit_stands(dom, el, h, resolved, under().0, &|| {
+                    unread() == crate::browser::visual::UnreadVerdict::Fails
+                })
                 && verdict_stands(h)
                 && at_rest(h)
         },
     );
-    findings.retain(|h| verdict_stands(h) && at_rest(h));
+    findings.retain(|h| ink_read(h) && verdict_stands(h) && at_rest(h));
     // A failing verdict that stands over unread paint far from the walk's
     // surface (dim copy on a dark panel laid beside it, where the walk read
     // the white page) is printed against that paint: the ratio the text
@@ -1319,7 +1607,7 @@ pub fn check_element_colors_dom(
                         let mut hits: Vec<RuleHit> =
                             check_placeholder_colors(&color_opts, placeholder, ph_color)
                                 .into_iter()
-                                .filter(|h| verdict_stands(h))
+                                .filter(|h| ink_read(h) && verdict_stands(h))
                                 .collect();
                         // A placeholder under a visible label is a hint, not
                         // the field's name (r5-p30).
@@ -1609,12 +1897,35 @@ pub fn check_element_motion_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
-    check_motion(&MotionOpts {
+    let animation_name = dom.style(el, "animationName");
+    let mut hits = check_motion(&MotionOpts {
         tag,
         transition_property: Some(dom.style(el, "transitionProperty")),
-        animation_name: Some(dom.style(el, "animationName")),
+        animation_name: Some(animation_name.clone()),
         timing_functions: Some(timing.join(" ")),
         class_list: Some(class_attr(dom, el)),
+    });
+    // A bounce by name is a bounce unless the page's keyframes for every
+    // name in the list are readable and only pulse (a loader dot scaling
+    // from nothing to its size and back): nothing moves and nothing passes
+    // its end value. Keyframes the DOM cannot hand over keep the finding.
+    if hits.iter().any(|h| h.id == "bounce-easing" && h.snippet.starts_with("animation: "))
+        && animation_names_only_pulse(dom, &animation_name)
+    {
+        hits.retain(|h| !(h.id == "bounce-easing" && h.snippet.starts_with("animation: ")));
+    }
+    hits
+}
+
+/// Whether every bounce-named animation in a computed `animation-name` list
+/// has keyframes the DOM can read and that only pulse
+/// ([`crate::checks::css_scan::keyframes_only_pulse`]).
+fn animation_names_only_pulse(dom: &dyn Dom, animation_name: &str) -> bool {
+    crate::checks::css_scan::bounce_names_only_pulse(animation_name, |name| {
+        let frames = dom.keyframes(name)?;
+        Some(crate::checks::css_scan::keyframes_only_pulse(
+            frames.iter().flat_map(|f| f.decls.iter().map(|(p, v)| (p.as_str(), v.as_str()))),
+        ))
     })
 }
 
@@ -2926,6 +3237,175 @@ fn clipped_axes(dom: &dyn Dom, el: ElId) -> Option<(bool, bool)> {
     Some((clip_x, clip_y))
 }
 
+/// Whether `el` paints anything of its own: a box ([`paints_own_box`]), a
+/// shadow or an outline.
+fn paints_own_surface(dom: &dyn Dom, el: ElId) -> bool {
+    if paints_own_box(dom, el) {
+        return true;
+    }
+    let shadow = dom.style(el, "boxShadow");
+    if !shadow.is_empty() && shadow != "none" {
+        return true;
+    }
+    let outline = dom.style(el, "outlineStyle");
+    !outline.is_empty() && outline != "none" && style_px(dom, el, "outlineWidth") > 0.0
+}
+
+/// How many descendants [`painted_bounds_of_wrapper`] reads before it gives
+/// up and leaves the wrapper's own box standing.
+const WRAPPER_PAINT_SCAN_LIMIT: usize = 200;
+
+/// The rects of what the subtree under `el` paints, in both axes: text by its
+/// text rect, replaced elements and painted boxes by their border boxes. A
+/// descendant that clips or scrolls keeps its content inside its own box, so
+/// its box stands for everything under it. `false` when the paint cannot be
+/// measured: generated content no rect covers, text with no text rect, or
+/// more descendants than the budget.
+fn wrapper_painted_rects(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, budget: &mut usize) -> bool {
+    for child in dom.children(el) {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        if dom.style(child, "display") == "none" {
+            continue;
+        }
+        // A subtree at opacity 0 paints nothing, and a box hidden by
+        // `visibility` paints nothing of its own (a child can still show).
+        let opacity = js::parse_float(&dom.style(child, "opacity"));
+        if opacity.is_finite() && opacity <= 0.01 {
+            continue;
+        }
+        if matches!(dom.style(child, "visibility").as_str(), "hidden" | "collapse") {
+            if !wrapper_painted_rects(dom, child, out, budget) {
+                return false;
+            }
+            continue;
+        }
+        if generated_content_unmeasured(dom, child) {
+            return false;
+        }
+        let r = dom.rect(child);
+        let has_area = r.all_finite() && r.width > 0.0 && r.height > 0.0;
+        if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str()) {
+            if has_area {
+                out.push(r);
+            }
+            continue;
+        }
+        let clips = |v: String| matches!(v.as_str(), "hidden" | "clip" | "auto" | "scroll");
+        if generates_box(dom, child)
+            && has_area
+            && clips(crate::browser::text_geometry::overflow_x(dom, child))
+            && clips(dom.style(child, "overflowY"))
+        {
+            out.push(r);
+            continue;
+        }
+        if has_area && paints_own_surface(dom, child) {
+            out.push(r);
+        }
+        if has_direct_text_longer_than(dom, child, 0) {
+            match dom.direct_text_rect(child) {
+                Some(t) if t.all_finite() => {
+                    if t.width > 0.0 && t.height > 0.0 {
+                        out.push(t);
+                    }
+                }
+                _ => return false,
+            }
+        }
+        if !wrapper_painted_rects(dom, child, out, budget) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The box a positioned child shows a visitor when it paints nothing of its
+/// own: the union of what its descendants paint. mk.co.kr's `div.more_btn` is
+/// a transparent 40px wrapper around a 30px button, and bankofamerica.com's
+/// `div.spa-icon-wrapper` a transparent 38px one around a 30px button; each
+/// reaches 3 to 4px past its clipping container while everything it paints
+/// sits inside. `None` leaves the wrapper's own border box standing: it
+/// paints a box, a shadow, an outline or text of its own, it is a replaced
+/// element, it carries generated content, its descendants cannot all be
+/// measured, or nothing under it paints.
+fn painted_bounds_of_wrapper(dom: &dyn Dom, child: ElId) -> Option<Rect> {
+    if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str())
+        || paints_own_surface(dom, child)
+        || has_direct_text_longer_than(dom, child, 0)
+        || generated_content_unmeasured(dom, child)
+    {
+        return None;
+    }
+    let mut rects = Vec::new();
+    let mut budget = WRAPPER_PAINT_SCAN_LIMIT;
+    if !wrapper_painted_rects(dom, child, &mut rects, &mut budget) || rects.is_empty() {
+        return None;
+    }
+    let left = rects.iter().map(|r| r.left).fold(f64::INFINITY, js::math_min);
+    let top = rects.iter().map(|r| r.top).fold(f64::INFINITY, js::math_min);
+    let right = rects.iter().map(|r| r.right).fold(f64::NEG_INFINITY, js::math_max);
+    let bottom = rects.iter().map(|r| r.bottom).fold(f64::NEG_INFINITY, js::math_max);
+    Some(Rect::from_xywh(left, top, right - left, bottom - top))
+}
+
+/// Whether what a transparent wrapper paints stays inside `el`'s clip on the
+/// clipped axes, by the same 2px threshold as
+/// [`positioned_child_escapes_clip`]. `false` when the wrapper's paint cannot
+/// be told from its box.
+fn wrapper_paints_inside_clip(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: bool) -> bool {
+    let (Some(parent_rect), Some(painted)) = (element_rect(dom, el), painted_bounds_of_wrapper(dom, child)) else {
+        return false;
+    };
+    let threshold = 2.0;
+    let out_x = painted.left < parent_rect.left - threshold || painted.right > parent_rect.right + threshold;
+    let out_y = painted.top < parent_rect.top - threshold || painted.bottom > parent_rect.bottom + threshold;
+    !(clip_x && out_x) && !(clip_y && out_y)
+}
+
+/// Whether a scroll container between `child` and `el` holds `child` as its
+/// own content: a box that scrolls on either axis (so clips on both) and that
+/// the child's containing block sits inside. gamer.com.tw's captions are
+/// absolutely positioned inside cards in a row at `overflow: auto hidden`
+/// that overhangs its column by 8px (`margin: 0 -8px`); the row cuts and
+/// scrolls its cards, and the column's clip cuts the row, not a layer. A
+/// scroller never owns a finding, as before.
+///
+/// Only an absolutely positioned child is read: a fixed one is placed against
+/// the viewport. The scroller holds the child when it, or a box between it
+/// and the child, is positioned or transformed, which makes that box the
+/// child's containing block. Where neither is, the child is laid out against
+/// a box outside the scroller, which does not clip it.
+fn scroller_between_owns_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
+    if dom.style(child, "position") != "absolute" {
+        return false;
+    }
+    let scrolls = |v: String| v == "auto" || v == "scroll";
+    let contains_block = |e: ElId| {
+        let position = dom.style(e, "position");
+        let transform = dom.style(e, "transform");
+        (!position.is_empty() && position != "static") || (!transform.is_empty() && transform != "none")
+    };
+    let mut contained = false;
+    let mut current = dom.parent(child);
+    while let Some(inner) = current {
+        if inner == el {
+            return false;
+        }
+        contained = contained || contains_block(inner);
+        if contained
+            && generates_box(dom, inner)
+            && (scrolls(crate::browser::text_geometry::overflow_x(dom, inner)) || scrolls(dom.style(inner, "overflowY")))
+        {
+            return true;
+        }
+        current = dom.parent(inner);
+    }
+    false
+}
+
 /// Whether `child` is cut by `el`'s clip in a way worth reporting. The
 /// container-level exemptions are the caller's; this is the per-child half,
 /// so an ancestor can ask the same question about the same child.
@@ -2937,6 +3417,15 @@ fn clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId, clip_x: bool, clip_y: 
     }
     let escapes = positioned_child_escapes_clip(dom, el, child, clip_x, clip_y);
     if escapes == Some(false) {
+        return false;
+    }
+    // The border box leaves the clip. A wrapper that paints nothing of its
+    // own is cut only where its contents are, and a layer that really opens
+    // keeps reporting whatever it measures.
+    if escapes == Some(true)
+        && !positioned_child_is_popover_layer(dom, child)
+        && wrapper_paints_inside_clip(dom, el, child, clip_x, clip_y)
+    {
         return false;
     }
     if escapes.is_none()
@@ -3018,6 +3507,9 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             continue;
         }
         if nearer_clip_traps_child(dom, el, child) {
+            continue;
+        }
+        if scroller_between_owns_child(dom, el, child) {
             continue;
         }
         // A layer that never renders (a player's menu under a control bar at
@@ -3459,6 +3951,13 @@ fn truncates_by_design(dom: &dyn Dom, el: ElId) -> bool {
     }
     let clamp = dom.style(el, "webkitLineClamp");
     !clamp.is_empty() && clamp != "none"
+}
+
+/// Whether `el` truncates its own line by design: a box of its own that
+/// marks or clamps what it cuts ([`truncates_by_design`]). An inline span
+/// with the same styles clips nothing.
+pub(crate) fn truncates_its_own_line(dom: &dyn Dom, el: ElId) -> bool {
+    generates_box(dom, el) && truncates_by_design(dom, el)
 }
 
 /// Whether the element generates a box of its own, the only kind `overflow`
@@ -3969,6 +4468,26 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "side-tab");
         assert_eq!(hits[0].snippet, "border-left: 4px");
+
+        // walkthroughs-35 (submitmap.com 7678, 7682): a 2px stripe on a card
+        // rounded only away from it. The leading radius value is 0, and the
+        // far corners are what the stripe is read against.
+        d.set_style(card, "borderLeftWidth", "2px");
+        with_radius(&mut d, "0px 12px 12px 0px");
+        d.set_style(card, "borderLeftWidth", "2px");
+        let hits = check_element_borders_dom(&d, card);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "border-left: 2px + border-radius: 12px");
+        // The smaller far corner is the radius, and one under the rounded
+        // card floor is square.
+        d.set_style(card, "borderRadius", "0px 12px 6px 0px");
+        assert_eq!(check_element_borders_dom(&d, card)[0].snippet, "border-left: 2px + border-radius: 6px");
+        d.set_style(card, "borderRadius", "0px 12px 2px 0px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+        // A 2px stripe on a square box stays out, as before.
+        d.set_style(card, "borderRadius", "0px");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+        d.set_style(card, "borderLeftWidth", "4px");
 
         // A radius the engine cannot read is unknown, not square: a snapshot
         // missing the column, or a value no parser resolves, keeps the find.
@@ -6957,6 +7476,98 @@ mod tests {
         assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
     }
 
+    /// observations-35 row 7 (mk.co.kr 217919, bankofamerica.com 219440): a
+    /// transparent wrapper a few pixels larger than what it holds leaves the
+    /// clip with its border box only. What it paints is measured instead.
+    #[test]
+    fn clipped_overflow_measures_a_transparent_wrapper_by_what_it_paints() {
+        let (mut d, body) = page();
+        // mk.co.kr: a 358px card, a 40px wrapper at x 322 around a 30px button.
+        let card = clipping_box(&mut d, body, 16.0, 0.0, 358.0, 165.0);
+        let wrap = positioned_child(&mut d, card, 338.0, 60.0, 40.0, 40.0);
+        let button = d.add(Some(wrap), "button");
+        d.set_styles(button, &[("display", "block"), ("backgroundColor", "rgb(240, 240, 240)")]);
+        d.set_rect(button, 343.0, 65.0, 30.0, 30.0);
+        d.add_selector(button, POSITIONED_CHILD_INTERACTIVE_SELECTOR);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "the button sits inside");
+        // The button itself past the edge is cut, and reports.
+        d.set_rect(button, 349.0, 65.0, 30.0, 30.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_rect(button, 343.0, 65.0, 30.0, 30.0);
+        // A wrapper that paints its own box is cut where its box is.
+        d.set_style(wrap, "backgroundColor", "rgb(255, 255, 255)");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_style(wrap, "backgroundColor", "rgba(0, 0, 0, 0)");
+        // So is one with a shadow, or with generated content no rect covers.
+        d.set_style(wrap, "boxShadow", "rgba(0, 0, 0, 0.4) 0px 2px 8px 0px");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_style(wrap, "boxShadow", "none");
+        d.set_pseudo_style(wrap, "::after", "content", "\"new\"");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1);
+        d.set_pseudo_style(wrap, "::after", "content", "none");
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty());
+        // Text under it that the capture could not measure leaves the box.
+        let label = d.add(Some(wrap), "span");
+        d.add_text(label, "More");
+        d.set_rect(label, 343.0, 65.0, 30.0, 30.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "unmeasured text");
+        d.set_text_rect(label, 345.0, 70.0, 26.0, 14.0);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "measured text inside");
+        d.set_text_rect(label, 345.0, 70.0, 46.0, 14.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "text past the edge");
+        d.set_text_rect(label, 345.0, 70.0, 26.0, 14.0);
+        // A closed tooltip past the clip, hidden or transparent, paints
+        // nothing a visitor sees.
+        let tip = d.add(Some(wrap), "div");
+        d.set_styles(tip, &[("display", "block"), ("backgroundColor", "rgb(20, 20, 20)"), ("visibility", "hidden")]);
+        d.set_rect(tip, 343.0, 100.0, 120.0, 40.0);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "a hidden tooltip");
+        d.set_styles(tip, &[("visibility", "visible"), ("opacity", "0")]);
+        assert!(check_element_clipped_overflow_dom(&d, card).is_empty(), "a transparent tooltip");
+        d.set_style(tip, "opacity", "1");
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "a shown tooltip");
+        d.set_style(tip, "display", "none");
+        // A menu keeps reporting whatever it measures.
+        d.set_attr(wrap, "role", "menu");
+        d.add_selector(wrap, "[role=\"menu\"]");
+        d.add_selector(wrap, POPOVER_LAYER_SELECTOR);
+        assert_eq!(check_element_clipped_overflow_dom(&d, card).len(), 1, "a popover layer");
+    }
+
+    /// observations-35 row 7 (gamer.com.tw 217951, 218190): a caption inside
+    /// a card in a row that scrolls sideways and overhangs its column by 8px.
+    /// The scroller holds the caption; the column's clip cuts the row.
+    #[test]
+    fn clipped_overflow_leaves_a_layer_to_the_scroller_that_holds_it() {
+        let (mut d, body) = page();
+        let column = clipping_box(&mut d, body, 8.0, 0.0, 374.0, 600.0);
+        let row = d.add(Some(column), "ul");
+        d.set_styles(
+            row,
+            &[("display", "flex"), ("position", "relative"), ("overflow", "auto hidden"), ("overflowX", "auto"), ("overflowY", "hidden")],
+        );
+        d.set_rect(row, 0.0, 100.0, 390.0, 250.0);
+        let card = d.add(Some(row), "a");
+        d.set_styles(card, &[("display", "flex"), ("position", "relative")]);
+        d.set_rect(card, 203.0, 100.0, 187.0, 122.0);
+        let caption = positioned_child(&mut d, card, 203.0, 194.0, 187.0, 28.0);
+        d.add_text(caption, "A caption on the card");
+        assert!(check_element_clipped_overflow_dom(&d, column).is_empty());
+        // A row that only shows its overflow holds nothing: the column cuts
+        // the caption itself.
+        d.set_styles(row, &[("overflow", "visible"), ("overflowX", "visible"), ("overflowY", "visible")]);
+        assert_eq!(check_element_clipped_overflow_dom(&d, column).len(), 1);
+        // A scroller the caption is not laid out against (nothing positioned
+        // from it down to the caption) does not hold it either.
+        d.set_styles(row, &[("overflow", "auto hidden"), ("overflowX", "auto"), ("overflowY", "hidden"), ("position", "static")]);
+        d.set_style(card, "position", "static");
+        assert_eq!(check_element_clipped_overflow_dom(&d, column).len(), 1);
+        // Positioned again, the card is the caption's containing block
+        // inside the scroller.
+        d.set_style(card, "position", "relative");
+        assert!(check_element_clipped_overflow_dom(&d, column).is_empty());
+    }
+
     #[test]
     fn clipped_overflow_skips_boxless_page_and_nested_containers() {
         let mut d = FakeDom::new();
@@ -7752,10 +8363,17 @@ mod tests {
                 ("fontWeight", "400"),
             ],
         );
-        assert!(reports_contrast(&colors(&d, text)), "no photo: pale on white");
+        // SVG text paints its `fill`, not the `color` the walk reads, so it
+        // is unscored with or without the photo; the same initial set in
+        // HTML is scored until the photo covers it.
+        assert!(!reports_contrast(&colors(&d, text)), "svg text: the ink is not `color`");
+        let initial = faint_copy(&mut d, avatar, "rgb(250, 250, 250)", (764.0, 405.0, 12.0, 15.0));
+        d.set_style(initial, "fontSize", "25px");
+        assert!(reports_contrast(&colors(&d, initial)), "no photo: pale on white");
         let img = bare_box(&mut d, avatar, "img", (758.0, 400.0, 25.0, 25.0));
         d.set_style(img, "zIndex", "10");
         assert!(!reports_contrast(&colors(&d, text)), "{:?}", colors(&d, text));
+        assert!(!reports_contrast(&colors(&d, initial)), "{:?}", colors(&d, initial));
     }
 
     #[test]
@@ -8185,6 +8803,86 @@ mod tests {
     }
 
     #[test]
+    fn svg_text_is_scored_only_where_its_fill_is_its_colour() {
+        // improved-rotary-phone-two.vercel.app: labels with no `fill` paint
+        // black on the cream card whose `color` they inherit.
+        let run = |fill: Option<(&str, &str)>, on_group: bool| {
+            let (mut d, body) = page();
+            let svg = bare_box(&mut d, body, "svg", (100.0, 100.0, 300.0, 40.0));
+            let g = bare_box(&mut d, svg, "g", (100.0, 100.0, 300.0, 40.0));
+            let text = d.add(Some(g), "text");
+            visible(&mut d, text);
+            d.add_text(text, "First Floor Plan");
+            d.set_rect(text, 110.0, 108.0, 200.0, 24.0);
+            d.set_styles(
+                text,
+                &[("backgroundColor", "rgba(0, 0, 0, 0)"), ("color", "rgb(242, 244, 239)"), ("fontSize", "20px")],
+            );
+            d.set_style(g, "color", "rgb(242, 244, 239)");
+            if let Some((name, value)) = fill {
+                d.set_attr(if on_group { g } else { text }, name, value);
+            }
+            reports_contrast(&colors(&d, text))
+        };
+        assert!(!run(None, false), "no fill stated: the ink is not `color`");
+        assert!(!run(Some(("fill", "#111111")), false), "a fill of its own");
+        assert!(!run(Some(("style", "fill: url(#ramp)")), false));
+        // keydris.com: `<text fill="currentColor">` paints `color`.
+        assert!(run(Some(("fill", "currentColor")), false));
+        assert!(run(Some(("fill", "currentColor")), true), "inherited from the group");
+        assert!(run(Some(("style", "fill: currentcolor")), false));
+    }
+
+    #[test]
+    fn filters_are_modelled_on_flat_colours() {
+        let c = |r: f64, g: f64, b: f64| Rgba::new(r, g, b, 1.0);
+        // walla.co.il's `.filter-light` paints any ink white.
+        assert_eq!(
+            filtered_colour("grayscale(1) brightness(0) invert(1)", &c(54.0, 54.0, 54.0)),
+            Some(c(255.0, 255.0, 255.0))
+        );
+        // Grey stays grey under grayscale, and a hover's resting values
+        // change nothing.
+        assert_eq!(filtered_colour("grayscale(1)", &c(138.0, 138.0, 138.0)), Some(c(138.0, 138.0, 138.0)));
+        let blue = c(33.0, 150.0, 243.0);
+        assert_eq!(filtered_colour("brightness(1) saturate(100%) hue-rotate(0deg) blur(0px)", &blue), Some(blue));
+        assert_eq!(filtered_colour("drop-shadow(rgba(0, 0, 0, 0.5) 0px 2px 4px)", &blue), Some(blue));
+        assert_eq!(filtered_colour("none", &blue), Some(blue));
+        assert_eq!(filtered_colour("invert(1)", &blue), Some(c(222.0, 105.0, 12.0)));
+        assert_eq!(filtered_colour("grayscale(1)", &blue), Some(c(132.0, 132.0, 132.0)));
+        assert_eq!(filtered_colour("brightness(0.5)", &c(200.0, 100.0, 50.0)), Some(c(100.0, 50.0, 25.0)));
+        // What cannot be modelled is not guessed.
+        assert_eq!(filtered_colour("url(\"#duotone\")", &blue), None);
+        assert_eq!(filtered_colour("opacity(0.5)", &blue), None);
+        assert_eq!(filtered_colour("brightness(calc(1 + 0.2))", &blue), None);
+    }
+
+    #[test]
+    fn a_filter_that_repaints_the_ink_leaves_no_verdict() {
+        let run = |on: &str, filter: &str, ink: &str| {
+            let (mut d, body) = page();
+            let band = bare_box(&mut d, body, "div", (0.0, 0.0, 1280.0, 60.0));
+            d.set_style(band, "backgroundColor", "rgb(240, 240, 240)");
+            let p = faint_copy(&mut d, band, ink, (16.0, 16.0, 300.0, 28.0));
+            d.set_style(if on == "band" { band } else { p }, "filter", filter);
+            reports_contrast(&colors(&d, p))
+        };
+        let grey = "rgb(170, 170, 170)";
+        assert!(run("p", "none", grey));
+        // The filter paints the grey ink white, or something unknown.
+        assert!(!run("p", "grayscale(1) brightness(0) invert(1)", grey));
+        assert!(!run("p", "url(\"#duotone\")", grey));
+        assert!(!run("band", "invert(1)", grey), "the band's fill and the ink both move");
+        // inven.co.kr: `grayscale(1)` over grey text on a grey band moves
+        // neither, and a resting hover filter is the identity.
+        assert!(run("p", "grayscale(1)", grey));
+        assert!(run("band", "grayscale(1)", grey));
+        assert!(run("p", "brightness(1)", grey));
+        // A tinted ink that grayscale repaints is no longer the ink scored.
+        assert!(!run("p", "grayscale(1)", "rgb(120, 190, 250)"));
+    }
+
+    #[test]
     fn a_shape_under_svg_text_is_a_surface_the_walk_never_read() {
         let run = |with_circle: bool| {
             let (mut d, body) = page();
@@ -8204,7 +8902,10 @@ mod tests {
             );
             colors(&d, text)
         };
-        assert!(reports_contrast(&run(false)));
+        // The shape is unread paint under the text. The text is SVG text,
+        // whose ink is its `fill` and not the `color` the walk reads, so it
+        // is unscored either way.
+        assert!(!reports_contrast(&run(false)));
         assert!(!reports_contrast(&run(true)));
     }
 
@@ -8249,5 +8950,35 @@ mod tests {
         assert!(check_element_colors_dom(&d, covered, &mut seen).is_empty());
         let hits = check_element_colors_dom(&d, visible_link, &mut seen);
         assert!(reports_contrast(&hits), "{hits:?}");
+    }
+    /// The element form reads the same keyframes off the page.
+    #[test]
+    fn a_bounce_name_is_dropped_only_when_its_keyframes_only_pulse() {
+        use crate::browser::dom::KeyframeFrame;
+        let frames = |steps: &[&[(&str, &str)]]| -> Vec<KeyframeFrame> {
+            steps
+                .iter()
+                .map(|s| KeyframeFrame { decls: s.iter().map(|(p, v)| (p.to_string(), v.to_string())).collect() })
+                .collect()
+        };
+        let (mut d, body) = page();
+        let dot = d.add(Some(body), "div");
+        d.set_style(dot, "animationName", "sk-bounceDelay");
+        let bounce = |d: &FakeDom| -> Vec<String> {
+            check_element_motion_dom(d, dot).into_iter().filter(|h| h.id == "bounce-easing").map(|h| h.snippet).collect()
+        };
+        // No keyframes to read: the name decides, as before.
+        assert_eq!(bounce(&d), vec!["animation: sk-bounceDelay".to_string()]);
+        d.keyframes.insert(
+            "sk-bounceDelay".to_string(),
+            frames(&[&[("transform", "scale(0)")], &[("transform", "scale(1)")]]),
+        );
+        assert!(bounce(&d).is_empty());
+        // Keyframes that move the element are a bounce.
+        d.keyframes.insert(
+            "sk-bounceDelay".to_string(),
+            frames(&[&[("transform", "translateY(-25%)")], &[("transform", "none")]]),
+        );
+        assert_eq!(bounce(&d), vec!["animation: sk-bounceDelay".to_string()]);
     }
 }

@@ -185,50 +185,170 @@ fn declared_comps(payload: &Value) -> Vec<String> {
     out
 }
 
+/// Whether a card declares a decision comp: a truthy `comp`, or the legacy
+/// `sketch` (a URL counts).
+fn card_has_comp(card: &Value) -> bool {
+    let comp = card.get("comp").filter(|v| !v.is_null()).or_else(|| card.get("sketch").filter(|v| !v.is_null()));
+    comp.map(crate::staleness::js_truthy).unwrap_or(false)
+}
+
+/// The options that owe a comp and declare none, declined challengers
+/// excepted, by id (`options[<n>]` for a card with no id), in card order.
+fn options_missing_comps(payload: &Value) -> Vec<String> {
+    let options = payload.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.get("verdict").and_then(Value::as_str) != Some("declined") && !card_has_comp(o))
+        .map(|(i, o)| o.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("options[{}]", i)))
+        .collect()
+}
+
+/// A full comp-led hand with image generation: `buildPath` `{"value":
+/// "comp", "toggle": true}` (a code-led round's slots are a flip reserve,
+/// and no toggle means no image generation) and at least two options (a
+/// degraded roll's single card is text-only).
+fn comp_led_full_hand(payload: &Value) -> bool {
+    let comp_led = payload.pointer("/buildPath/value").and_then(Value::as_str) == Some("comp");
+    let toggle = payload.pointer("/buildPath/toggle") == Some(&Value::Bool(true));
+    let options = payload.get("options").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    comp_led && toggle && options >= 2
+}
+
+/// Whether a payload carries the canon exit, a truthy `canon` or an object
+/// `canonCard`: direction rounds only; surface rounds and the comp round
+/// never carry it.
+fn has_canon_exit(payload: &Value) -> bool {
+    payload.get("canonCard").is_some_and(Value::is_object) || payload.get("canon").map(crate::staleness::js_truthy).unwrap_or(false)
+}
+
 /// The cards a comp-led direction round leaves without a decision comp, by
 /// id (`canonCard` for the canon card, `options[<n>]` for a card with no
 /// id). The round owes a comp on every card, canon included and declined
-/// challengers excepted, only when all three hold: it is a direction round
-/// (it carries the canon exit, `canon` or `canonCard`, which surface rounds
-/// and the comp round never do), it has image generation and a comp-led
-/// default (`buildPath` `{"value": "comp", "toggle": true}`; a code-led
-/// round's slots are a flip reserve, and no toggle means no image
-/// generation), and it is a full hand (a degraded roll's single card is
-/// text-only). Empty when the round owes nothing or every card declares one.
+/// challengers excepted, only when it is a direction round (it carries the
+/// canon exit) and a comp-led full hand with image generation
+/// (`comp_led_full_hand`). Empty when the round owes nothing or every card
+/// declares one.
 fn missing_direction_comps(payload: &Value) -> Vec<String> {
-    let comp_led = payload.pointer("/buildPath/value").and_then(Value::as_str) == Some("comp");
-    let toggle = payload.pointer("/buildPath/toggle") == Some(&Value::Bool(true));
-    let canon_card = payload.get("canonCard").filter(|c| c.is_object());
-    let direction = canon_card.is_some() || payload.get("canon").map(crate::staleness::js_truthy).unwrap_or(false);
-    let options = payload.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
-    if !comp_led || !toggle || !direction || options.len() < 2 {
+    if !has_canon_exit(payload) || !comp_led_full_hand(payload) {
         return Vec::new();
     }
-    let has_comp = |card: &Value| {
-        let comp = card.get("comp").filter(|v| !v.is_null()).or_else(|| card.get("sketch").filter(|v| !v.is_null()));
-        comp.map(crate::staleness::js_truthy).unwrap_or(false)
-    };
-    let mut missing: Vec<String> = options
-        .iter()
-        .enumerate()
-        .filter(|(_, o)| o.get("verdict").and_then(Value::as_str) != Some("declined") && !has_comp(o))
-        .map(|(i, o)| o.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("options[{}]", i)))
-        .collect();
-    if canon_card.is_some_and(|c| !has_comp(c)) {
+    let mut missing = options_missing_comps(payload);
+    if payload.get("canonCard").filter(|c| c.is_object()).is_some_and(|c| !card_has_comp(c)) {
         missing.push("canonCard".into());
     }
     missing
 }
 
-/// The refusal `--start` and `--update` print for a comp-led direction round
-/// that declares no comp on some card. `rerun` names the command to repeat.
-fn missing_comps_message(missing: &[String], rerun: &str, outcome: &str) -> String {
+/// The cards a comp-led surface round leaves without a decision comp. The
+/// payload alone cannot tell a surface round from the comp round, so the
+/// caller decides that from concept-seed's roll record
+/// (`surface_roll_pending`); given that, the round owes a comp on every
+/// dealt card when it carries no canon exit and is a comp-led full hand with
+/// image generation.
+fn missing_surface_comps(payload: &Value) -> Vec<String> {
+    if has_canon_exit(payload) || !comp_led_full_hand(payload) {
+        return Vec::new();
+    }
+    options_missing_comps(payload)
+}
+
+/// Which round a missing-comp refusal names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CompRound {
+    Direction,
+    Surface,
+}
+
+/// The missing-comp gate `--start` and `--update` share: a direction round
+/// (known by its canon exit), else a surface round when concept-seed's
+/// latest roll in this project is a surface roll no decision page has taken
+/// yet (`roll` is the record as `read_roll` returned it). `None` when the
+/// payload owes nothing or declares every comp it owes.
+fn missing_comps(roll: Option<&str>, payload: &Value) -> Option<(CompRound, Vec<String>)> {
+    let direction = missing_direction_comps(payload);
+    if !direction.is_empty() {
+        return Some((CompRound::Direction, direction));
+    }
+    if !surface_roll_pending(roll) {
+        return None;
+    }
+    let surface = missing_surface_comps(payload);
+    (!surface.is_empty()).then_some((CompRound::Surface, surface))
+}
+
+/// The refusal `--start` and `--update` print for a comp-led direction or
+/// surface round that declares no comp on some card. `rerun` names the
+/// command to repeat.
+fn missing_comps_message(round: CompRound, missing: &[String], rerun: &str, outcome: &str) -> String {
+    let (owed, canon_note) = match round {
+        CompRound::Direction => (
+            "this direction round is comp-led with image generation (buildPath value \"comp\", toggle true), so every card declares a decision comp, canon included, declined challengers excepted",
+            " (the canon card's goes inside canonCard)",
+        ),
+        CompRound::Surface => (
+            "this surface round (concept-seed's latest roll here was --scope surface) is comp-led with image generation (buildPath value \"comp\", toggle true), so every dealt card declares a decision comp",
+            "",
+        ),
+    };
     format!(
-        "serve-question: this direction round is comp-led with image generation (buildPath value \"comp\", toggle true), so every card declares a decision comp, canon included, declined challengers excepted; {}. Missing a \"comp\": {}. Give each of those cards \"comp\": \".impeccable/mocks/decision/<card id>.png\" (the canon card's goes inside canonCard), then {}; the comps are generated after the page serves, as its NEXT line says.\n",
+        "serve-question: {}; {}. Missing a \"comp\": {}. Give each of those cards \"comp\": \".impeccable/mocks/decision/<card id>.png\"{}, then {}; the comps are generated after the page serves, as its NEXT line says.\n",
+        owed,
         outcome,
         missing.join(", "),
+        canon_note,
         rerun
     )
+}
+
+/// How long a roll stays bound to the next decision page. A roll is
+/// presented within minutes; an older record belongs to work long gone.
+const ROLL_WINDOW_MS: f64 = 60.0 * 60.0 * 1000.0;
+
+/// `.impeccable/questions/roll.json`: concept-seed's latest roll in this
+/// project, `{"scope", "key", "reroll", "at"}` (`at` in epoch ms). Every
+/// roll replaces it; a decision page (a payload carrying `buildPath`) that
+/// `--start` serves or `--update` delivers removes it, so a roll binds to
+/// the one page that presents it.
+fn roll_file(qdir: &str) -> String {
+    jsp::join(&[qdir, "roll.json"])
+}
+
+/// Records a concept-seed roll for the next decision page. Best effort: a
+/// roll never fails because its record could not be written.
+pub fn record_roll(cwd: &str, scope: &str, key: &str, reroll: usize) {
+    let qdir = jsp::join(&[cwd, ".impeccable", "questions"]);
+    let record = json!({ "scope": scope, "key": key, "reroll": reroll, "at": now_ms() as u64 });
+    let _ = std::fs::create_dir_all(&qdir).and_then(|_| write_atomic(&roll_file(&qdir), &json_compact(&record)));
+}
+
+/// The roll record as `--start` / `--update` read it once, before the gate:
+/// the same text decides the gate and names the record `take_roll` may
+/// remove.
+fn read_roll(qdir: &str) -> Option<String> {
+    safe_read(&roll_file(qdir))
+}
+
+/// Whether a roll record (as `read_roll` returned it) is a surface roll made
+/// within `ROLL_WINDOW_MS` that no decision page has taken yet.
+fn surface_roll_pending(roll: Option<&str>) -> bool {
+    let Some(record) = roll.and_then(|t| serde_json::from_str::<Value>(t).ok()) else {
+        return false;
+    };
+    let fresh = record.get("at").and_then(Value::as_f64).is_some_and(|at| now_ms() - at < ROLL_WINDOW_MS);
+    fresh && record.get("scope").and_then(Value::as_str) == Some("surface")
+}
+
+/// A decision page took the roll it was gated against: the payload carries
+/// `buildPath`, which only direction and surface rounds do. Removes the
+/// record only while it still holds that roll (`read` is the text read
+/// before the gate), so a newer roll another session recorded in between
+/// stays bound to its own page.
+fn take_roll(qdir: &str, read: Option<&str>, payload: &Value) {
+    let Some(read) = read else { return };
+    if payload.get("buildPath").is_some_and(|b| !b.is_null()) && read_roll(qdir).as_deref() == Some(read) {
+        let _ = std::fs::remove_file(roll_file(qdir));
+    }
 }
 
 /// Provenance of a hand lives in `<key>.hand.json`, written atomically by
@@ -786,9 +906,9 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
             io.err("serve-question: --update payload needs an options array; nothing was delivered. Fix the payload and rerun --update on the same key.\n");
             return 1;
         }
-        let missing = missing_direction_comps(&next_round);
-        if !missing.is_empty() {
-            io.err(&missing_comps_message(&missing, "rerun --update on the same key", "nothing was delivered"));
+        let roll = read_roll(&qdir);
+        if let Some((round, missing)) = missing_comps(roll.as_deref(), &next_round) {
+            io.err(&missing_comps_message(round, &missing, "rerun --update on the same key", "nothing was delivered"));
             return 1;
         }
         if !is_alive(&qdir, &key) {
@@ -803,6 +923,7 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
             io.err(&format!("serve-question: could not record the hand ({}); nothing was delivered. Make .impeccable/questions/ writable and rerun --update on the same key.\n", e));
             return 1;
         }
+        take_roll(&qdir, roll.as_deref(), &next_round);
         let delivered = next_file(&qdir, &key);
         let _ = std::fs::copy(jsp::resolve(&cwd, &[&pp]), &delivered);
         touch_now(&delivered);
@@ -825,9 +946,9 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
                 return 1;
             }
         };
-        let missing = missing_direction_comps(&start_payload);
-        if !missing.is_empty() {
-            io.err(&missing_comps_message(&missing, "rerun --start", "the page was not served"));
+        let roll = read_roll(&qdir);
+        if let Some((round, missing)) = missing_comps(roll.as_deref(), &start_payload) {
+            io.err(&missing_comps_message(round, &missing, "rerun --start", "the page was not served"));
             return 1;
         }
         let _ = std::fs::create_dir_all(&qdir);
@@ -839,6 +960,7 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
                 return 1;
             }
         };
+        take_roll(&qdir, roll.as_deref(), &start_payload);
         // The old state goes either way, so the wait below sees the new
         // server's state, not the dead one's; its pid is never signalled,
         // since a dead server's pid may have been reused.
@@ -2175,6 +2297,154 @@ mod tests {
         let (code, out, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
         assert_eq!(code, 0, "{err}");
         assert!(out.contains("next round delivered") && out.contains("NEXT read "), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A comp-led surface round: three dealt structures as full cards, no
+    /// canon, no pick card.
+    fn surface_round(comps: bool) -> Value {
+        let mut p = json!({
+            "title": "Choose the structure",
+            "options": [
+                { "id": "ledger", "kicker": "THE ROLL", "thesis": "One." },
+                { "id": "rail", "thesis": "Two." },
+                { "id": "field", "thesis": "Three." }
+            ],
+            "reroll": true,
+            "buildPath": { "value": "comp", "toggle": true }
+        });
+        if comps {
+            for (i, id) in ["ledger", "rail", "field"].iter().enumerate() {
+                p["options"][i]["comp"] = json!(format!(".impeccable/mocks/decision/{id}.png"));
+            }
+        }
+        p
+    }
+
+    fn write_roll(dir: &std::path::Path, scope: &str, at: f64) {
+        std::fs::write(dir.join(".impeccable/questions/roll.json"), json!({ "scope": scope, "key": "k", "reroll": 0, "at": at as u64 }).to_string()).unwrap();
+    }
+
+    #[test]
+    fn missing_surface_comps_names_dealt_cards_and_leaves_other_rounds_alone() {
+        assert_eq!(missing_surface_comps(&surface_round(false)), vec!["ledger", "rail", "field"]);
+        assert!(missing_surface_comps(&surface_round(true)).is_empty());
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut p = surface_round(false);
+            f(&mut p);
+            missing_surface_comps(&p)
+        };
+        // One card short, and a card with no id named by its index.
+        assert_eq!(
+            with(&|p| {
+                *p = surface_round(true);
+                p["options"][1].as_object_mut().unwrap().remove("comp");
+                p["options"][2].as_object_mut().unwrap().remove("id");
+                p["options"][2].as_object_mut().unwrap().remove("comp");
+            }),
+            vec!["rail", "options[2]"]
+        );
+        // Code-led, no toggle, no buildPath: nothing owed.
+        assert!(with(&|p| p["buildPath"]["value"] = json!("code")).is_empty());
+        assert!(with(&|p| p["buildPath"]["toggle"] = json!(false)).is_empty());
+        assert!(with(&|p| { p.as_object_mut().unwrap().remove("buildPath"); }).is_empty());
+        // A single card owes nothing; a payload with the canon exit is a
+        // direction round, which the direction gate owns.
+        assert!(with(&|p| { p["options"] = json!([{ "id": "ledger", "thesis": "One." }]); }).is_empty());
+        assert!(with(&|p| p["canon"] = json!(true)).is_empty());
+    }
+
+    #[test]
+    fn surface_gate_applies_only_while_a_fresh_surface_roll_is_pending() {
+        let dir = temp_project("surface-roll");
+        let qdir = jsp::join(&[&dir.to_string_lossy(), ".impeccable", "questions"]);
+        let bare = surface_round(false);
+        let gate = |p: &Value| missing_comps(read_roll(&qdir).as_deref(), p);
+        let pending = || surface_roll_pending(read_roll(&qdir).as_deref());
+        // No roll recorded: the payload cannot be told from the comp round.
+        assert_eq!(gate(&bare), None);
+        // A fresh surface roll binds the next decision page.
+        write_roll(&dir, "surface", now_ms());
+        assert_eq!(gate(&bare), Some((CompRound::Surface, vec!["ledger".into(), "rail".into(), "field".into()])));
+        assert_eq!(gate(&surface_round(true)), None);
+        // A later direction roll replaces it; a stale one has expired.
+        write_roll(&dir, "direction", now_ms());
+        assert_eq!(gate(&bare), None);
+        write_roll(&dir, "surface", now_ms() - ROLL_WINDOW_MS - 1000.0);
+        assert_eq!(gate(&bare), None);
+        // An unreadable record gates nothing.
+        std::fs::write(dir.join(".impeccable/questions/roll.json"), "{not json").unwrap();
+        assert_eq!(gate(&bare), None);
+        // A direction round is still the direction gate's, roll or not.
+        write_roll(&dir, "surface", now_ms());
+        assert_eq!(gate(&direction_round(false)).map(|(r, _)| r), Some(CompRound::Direction));
+        // Only a decision page (a payload with buildPath) takes the roll.
+        let read = read_roll(&qdir);
+        take_roll(&qdir, read.as_deref(), &json!({ "options": [{ "id": "a" }, { "id": "b" }] }));
+        assert!(pending());
+        // A newer roll recorded after this page read the record (another
+        // session's) is not this page's to take.
+        write_roll(&dir, "surface", now_ms() + 1.0);
+        take_roll(&qdir, read.as_deref(), &surface_round(true));
+        assert!(pending());
+        // The roll the page was gated against is.
+        let read = read_roll(&qdir);
+        take_roll(&qdir, read.as_deref(), &surface_round(true));
+        assert!(!pending());
+        // No record read, nothing to take.
+        take_roll(&qdir, None, &surface_round(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_and_update_refuse_a_comp_led_surface_round_after_a_surface_roll() {
+        let dir = temp_project("surface-missing-comps");
+        let qdir = jsp::join(&[&dir.to_string_lossy(), ".impeccable", "questions"]);
+        let roll = dir.join(".impeccable/questions/roll.json");
+        // Recorded the way concept-seed records a roll.
+        record_roll(&dir.to_string_lossy(), "surface", "seed-1", 0);
+        assert!(surface_roll_pending(read_roll(&qdir).as_deref()));
+        std::fs::write(dir.join("p.json"), surface_round(false).to_string()).unwrap();
+        let run_err = |args: &[&str]| {
+            let env = Env::from([("IMPECCABLE_SKILL_DIR".into(), "/skill".into())]);
+            let (mut io, cap) = Io::captured("", dir.clone(), env);
+            let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let code = run(&argv, &mut io);
+            let out = String::from_utf8(cap.stdout.borrow().clone()).unwrap();
+            let err = String::from_utf8(cap.stderr.borrow().clone()).unwrap();
+            (code, out, err)
+        };
+        let (code, out, err) = run_err(&["--start", "--no-open", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.starts_with("serve-question: this surface round (concept-seed's latest roll here was --scope surface) is comp-led with image generation"), "{err}");
+        assert!(err.contains("so every dealt card declares a decision comp; the page was not served."), "{err}");
+        assert!(err.contains("Missing a \"comp\": ledger, rail, field."), "{err}");
+        assert!(err.contains("\".impeccable/mocks/decision/<card id>.png\", then rerun --start;") && !err.contains("canonCard"), "{err}");
+        // Refused before anything was recorded or spawned; the roll stays bound.
+        assert!(!std::path::Path::new(&hand_file(&qdir, "k1")).exists());
+        assert!(!std::path::Path::new(&state_file(&qdir, "k1")).exists());
+        assert!(roll.exists());
+
+        // A surface re-roll delivered by --update is gated the same way.
+        write_state(&dir, &json!({ "pid": std::process::id(), "port": 1, "url": "http://127.0.0.1:1/" }));
+        let (code, out, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("nothing was delivered") && err.contains("then rerun --update on the same key;"), "{err}");
+        assert!(!std::path::Path::new(&next_file(&qdir, "k1")).exists());
+        assert!(roll.exists());
+
+        // With every comp declared, --update delivers and takes the roll, so
+        // a later page on this project (the comp round) is not gated by it.
+        std::fs::write(dir.join("p.json"), surface_round(true).to_string()).unwrap();
+        let (code, out, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("next round delivered") && out.contains("NEXT read "), "{out}");
+        assert!(!roll.exists());
+        std::fs::write(dir.join("p.json"), surface_round(false).to_string()).unwrap();
+        let (code, _, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 0, "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

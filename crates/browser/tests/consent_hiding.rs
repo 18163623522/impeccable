@@ -271,6 +271,17 @@ fn a_wall_rendered_in_a_shadow_root_is_refused() {
 }
 
 #[test]
+fn a_wall_under_a_contents_wrapper_in_a_shadow_root_is_refused() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/shadow-contents-wall.html");
+    let err = engine
+        .detect_url(&url, &ScanOptions::default())
+        .expect_err("a consent wall under a display: contents wrapper must not scan");
+    assert!(err.message.starts_with("the page is a consent wall, not the site (consent manager Usercentrics, "), "{}", err.message);
+}
+
+#[test]
 fn a_lock_the_sites_own_modal_holds_stays() {
     let Some(engine) = engine() else { return };
     let port = serve();

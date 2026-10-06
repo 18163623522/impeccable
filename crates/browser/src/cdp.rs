@@ -244,7 +244,7 @@ impl Browser {
                 )));
             }
         };
-        let conn = match Connection::connect(&ws_url) {
+        let mut conn = match Connection::connect(&ws_url) {
             Ok(c) => c,
             Err(e) => {
                 let _ = child.kill();
@@ -253,6 +253,14 @@ impl Browser {
                 return Err(e);
             }
         };
+        // A fresh profile loads its cookie store on the first request that
+        // needs it, and every page request waits for that load. On Windows the
+        // load (an encrypted SQLite store) takes 1 to 5 s and has taken over
+        // 15 s with several browsers starting at once, which the first
+        // navigation then spent out of its own timeout. Asking for the cookies
+        // here makes the launch wait for the load instead, under the protocol
+        // timeout, so a navigation deadline measures only the navigation.
+        let _ = conn.send(None, "Storage.getCookies", json!({}), PROTOCOL_TIMEOUT);
         Ok(Browser {
             child,
             user_data_dir,

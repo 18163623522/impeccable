@@ -72,11 +72,13 @@ fn fixture_flag_and_pass_cases() {
     // engines; the bold titles in a clamp, one of which the text fills
     // exactly, pass in both. The two bold titles of two lines, on a div and
     // in an inline link, pass in the browser only: the static engine cannot
-    // count lines.
+    // count lines. The flex row whose long first run wraps (1.17) flags in
+    // both; the flex row of short runs wrapped as whole items (1.25) passes
+    // in the browser only, since the static engine cannot see the items.
     assert_eq!(
         snippets.len(),
-        13,
-        "expected nine flags plus the four documented static hits, got {snippets:?}"
+        15,
+        "expected ten flags plus the five documented static hits, got {snippets:?}"
     );
 }
 

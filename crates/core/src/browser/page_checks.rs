@@ -21,7 +21,7 @@ use crate::checks::embedded_content::{
 };
 use crate::checks::measures::{
     cream_from_class_list, is_cream_color, is_opaque_decorated_box,
-    is_screen_reader_only_text_style, SrOnlyMetrics, StyleMap,
+    is_screen_reader_only_text_style, resolve_length_px, SrOnlyMetrics, StyleMap,
 };
 use crate::checks::rules::{
     check_flat_type_hierarchy_samples, flat_type_hierarchy_severity, is_card_like_from_props,
@@ -812,7 +812,8 @@ fn rhythm_overlaps_x(sr: &Rect, rect: &Rect) -> bool {
     math_min(sr.right, rect.right) - math_max(sr.left, rect.left) >= 8.0
 }
 
-/// A box that paints an edge on `side` ("Top" or "Bottom"): a background,
+/// A box that paints an edge on `side` ("Top" or "Bottom"): a background
+/// colour, a background image that covers the box ([`rhythm_image_band`]),
 /// a border on that side, or a shadow.
 fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
     if rhythm_is_contents(dom, el) {
@@ -823,10 +824,85 @@ fn rhythm_paints_edge(dom: &dyn Dom, el: ElId, side: &str) -> bool {
             return true;
         }
     }
+    if rhythm_image_band(dom, el) {
+        return true;
+    }
     if style_px(dom, el, &format!("border{side}Width")) > 0.0 {
         return true;
     }
     crate::checks::measures::box_shadow_paints(&dom.style(el, "boxShadow"))
+}
+
+/// A box whose `background-image` paints a band across all of it, with an
+/// edge a reader sees as plainly as one painted with a colour: jyes.com.tw's
+/// grey news band is a `url()` texture tiled over the section. A layer bands
+/// the box when it tiles on both axes, is sized to `cover`, or is a gradient
+/// drawn at the box's own size. An icon placed once beside a heading's text,
+/// a short accent bar drawn with a gradient under it, and text filled with a
+/// gradient (`background-clip: text`) decorate the box without painting it,
+/// and a layer whose tiling the capture did not record (no `background`
+/// shorthand) is not counted, as before.
+fn rhythm_image_band(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    if image.is_empty() || image == "none" {
+        return false;
+    }
+    if [dom.style(el, "backgroundClip"), dom.style(el, "webkitBackgroundClip")]
+        .iter()
+        .any(|clip| clip.contains("text"))
+    {
+        return false;
+    }
+    let images = crate::color::split_top_level_commas(&image);
+    let sizes = crate::color::split_top_level_commas(&dom.style(el, "backgroundSize"));
+    let layers = crate::color::split_top_level_commas(&dom.style(el, "background"));
+    images.iter().enumerate().any(|(i, img)| {
+        if img == "none" {
+            return false;
+        }
+        let size = sizes.get(i).or(sizes.last()).map(|s| js::trim(s).to_string()).unwrap_or_default();
+        if size == "cover" {
+            return true;
+        }
+        let gradient = img.contains("gradient(");
+        if gradient && matches!(size.as_str(), "auto" | "auto auto" | "100% 100%") {
+            return true;
+        }
+        // The shorthand spells each layer's tiling; the image's own
+        // parentheses are dropped so a `url()` holding "repeat" cannot match.
+        let Some(layer) = layers.get(i) else { return false };
+        let mut words = Vec::new();
+        let mut depth = 0i32;
+        let mut word = String::new();
+        for c in layer.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = (depth - 1).max(0),
+                c if depth == 0 && c.is_whitespace() => {
+                    if !word.is_empty() {
+                        words.push(std::mem::take(&mut word));
+                    }
+                }
+                c if depth == 0 => word.push(c),
+                _ => {}
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+        let tiling: Vec<&str> = words
+            .iter()
+            .map(String::as_str)
+            .filter(|w| matches!(*w, "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round"))
+            .collect();
+        match tiling.as_slice() {
+            [one] => matches!(*one, "repeat" | "space" | "round"),
+            [x, y] => {
+                matches!(*x, "repeat" | "space" | "round") && matches!(*y, "repeat" | "space" | "round")
+            }
+            _ => false,
+        }
+    })
 }
 
 /// The flow box `s` presents to a walk: `s` itself, or for a
@@ -1034,7 +1110,16 @@ fn rhythm_text_size(dom: &dyn Dom, el: ElId) -> f64 {
 /// smaller than the body text (`text_size`), in capitals, tracked out, or
 /// as a chip that paints its own small box. A line set like the body copy is
 /// content of its own (a date, a byline, a closing sentence), not a label.
-fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: f64) -> bool {
+/// `opens_group` says the line is the first box its parent lays out, which
+/// lets colour, italics or weight alone mark it as a label
+/// ([`rhythm_set_apart`]).
+fn rhythm_reads_as_eyebrow(
+    dom: &dyn Dom,
+    line: ElId,
+    heading: ElId,
+    text_size: f64,
+    opens_group: bool,
+) -> bool {
     let heading_size = rhythm_font_size(dom, heading);
     let span = math_max(dom.rect(heading).width, dom.rect(line).width);
     for e in rhythm_subtree(dom, line, 40) {
@@ -1068,8 +1153,84 @@ fn rhythm_reads_as_eyebrow(dom: &dyn Dom, line: ElId, heading: ElId, text_size: 
         if cased.len() >= 3 && cased.iter().all(|c| c.is_uppercase()) {
             return true;
         }
+        if opens_group && rhythm_set_apart(dom, line, heading, e) {
+            return true;
+        }
     }
     false
+}
+
+/// The longest line, in UTF-16 units, that reads as a label on colour,
+/// italics or weight alone. cnnbrasil.com.br's section links ("Política",
+/// "Eleições") and outreign.io's italic eyebrows ("Five screens", "Compare
+/// plans") are a word or two; a sentence closing the block above is longer.
+const RHYTHM_SET_APART_MAX_CHARS: usize = 40;
+
+/// How far apart, on any channel, two text colours must be to read as two
+/// colours: grey-400 on a black card, purple on off-white.
+const RHYTHM_COLOUR_STEP: f64 = 32.0;
+
+/// How much lighter than the text around it a line must be set to stand
+/// apart on weight alone: a hairline 100 or 200 italic against 400 body copy.
+const RHYTHM_LIGHTER_WEIGHT_STEP: f64 = 300.0;
+
+fn rhythm_colours_differ(dom: &dyn Dom, a: ElId, b: ElId) -> bool {
+    let (Some(ca), Some(cb)) = (
+        parse_any_color(Some(&dom.style(a, "color"))),
+        parse_any_color(Some(&dom.style(b, "color"))),
+    ) else {
+        return false;
+    };
+    (ca.r - cb.r).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.g - cb.g).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.b - cb.b).abs() >= RHYTHM_COLOUR_STEP
+        || (ca.alpha_or_one() - cb.alpha_or_one()).abs() >= 0.25
+}
+
+fn rhythm_is_italic(dom: &dyn Dom, el: ElId) -> bool {
+    let style = dom.style(el, "fontStyle");
+    style.starts_with("italic") || style.starts_with("oblique")
+}
+
+/// A short line at body size that a reader still sees as a label: one
+/// rendered line of a few words whose colour, italics or much lighter weight
+/// sets it apart both from the text it sits in (its container's own type)
+/// and from the heading under it. A grey category link over a black
+/// headline, a purple italic eyebrow over a white title. A date or a closing
+/// sentence set like the copy around it stays content of its own.
+///
+/// Colour and italics also mark the line that closes the block above: a blue
+/// "View all essays" link under a grid, a grey date under an excerpt, with
+/// the next heading a few pixels below. What tells the two apart is the
+/// markup, so the caller asks this only of a line that opens its parent
+/// (cnnbrasil.com.br's category link starts the box that holds the headline;
+/// outreign.io's eyebrow starts the box that holds the title). A line with
+/// the block above laid out before it in the same parent stays a block of its
+/// own, and the gap is measured to it, as before.
+fn rhythm_set_apart(dom: &dyn Dom, line: ElId, heading: ElId, words: ElId) -> bool {
+    let Some(container) = dom.parent(line) else { return false };
+    if utf16_len(js::trim(&collapse_ws(&dom.text_content(line)))) > RHYTHM_SET_APART_MAX_CHARS {
+        return false;
+    }
+    let size = rhythm_font_size(dom, words);
+    let pitch = resolve_length_px(Some(&dom.style(words, "lineHeight")), size)
+        .filter(|lh| lh.is_finite() && *lh > 0.0)
+        .unwrap_or(size * 1.2);
+    let one_line = dom
+        .direct_text_rect(words)
+        .map_or(false, |t| t.height > 0.0 && t.height < math_max(pitch, size * 1.2) * 1.5);
+    if !one_line {
+        return false;
+    }
+    if rhythm_colours_differ(dom, words, container) && rhythm_colours_differ(dom, words, heading) {
+        return true;
+    }
+    if rhythm_is_italic(dom, words) && !rhythm_is_italic(dom, container) && !rhythm_is_italic(dom, heading) {
+        return true;
+    }
+    let weight = parse_font_weight(&dom.style(words, "fontWeight"));
+    let around = parse_font_weight(&dom.style(container, "fontWeight"));
+    weight.is_finite() && around.is_finite() && weight <= around - RHYTHM_LIGHTER_WEIGHT_STEP
 }
 
 fn rhythm_painted_background(dom: &dyn Dom, el: ElId) -> Option<crate::color::Rgba> {
@@ -1089,7 +1250,9 @@ fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
         return true;
     }
     let Some(band) = rhythm_painted_background(dom, el) else { return false };
-    let mut backdrop = crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0);
+    // With no fill above it, the band sits on the canvas: white, or the
+    // browser's dark canvas on a page that asks for a dark scheme only.
+    let mut backdrop = rhythm_canvas(dom);
     let mut cur = dom.parent(el);
     while let Some(c) = cur {
         if let Some(bg) = rhythm_painted_background(dom, c) {
@@ -1102,6 +1265,22 @@ fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
         || (band.g - backdrop.g).abs() > 2.0
         || (band.b - backdrop.b).abs() > 2.0
         || (band.alpha_or_one() - backdrop.alpha_or_one()).abs() > 0.02
+}
+
+/// The canvas colour a page paints under everything: Chrome's dark canvas
+/// (`#121212`) when the root's `color-scheme` names dark and not light,
+/// white otherwise.
+fn rhythm_canvas(dom: &dyn Dom) -> crate::color::Rgba {
+    let scheme = dom
+        .document_element()
+        .map(|root| js::to_lower_case(&dom.style(root, "colorScheme")))
+        .unwrap_or_default();
+    let words: Vec<&str> = scheme.split_whitespace().collect();
+    if words.contains(&"dark") && !words.contains(&"light") {
+        crate::color::Rgba::new(18.0, 18.0, 18.0, 1.0)
+    } else {
+        crate::color::Rgba::new(255.0, 255.0, 255.0, 1.0)
+    }
 }
 
 /// The outline of a box's rendered structure: tags only, a few levels deep.
@@ -1332,7 +1511,8 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(tag_lower(dom, sib).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
                 break;
             }
-            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size) {
+            let opens_group = previous_box(sib).is_none();
+            if text_len > 80 || !rhythm_reads_as_eyebrow(dom, sib, h, text_size, opens_group) {
                 break;
             }
             top_el = sib;
@@ -1819,6 +1999,11 @@ pub fn is_layered_element(dom: &dyn Dom, el: ElId) -> bool {
     false
 }
 
+/// `pointer-events: none`, computed (so inherited).
+fn ignores_pointer_events(dom: &dyn Dom, el: ElId) -> bool {
+    dom.style(el, "pointerEvents") == "none"
+}
+
 /// JS: checks.mjs#elementDirectText(el)
 pub fn element_direct_text(dom: &dyn Dom, el: ElId) -> String {
     js::trim(&direct_text(dom, el)).to_string()
@@ -2043,6 +2228,32 @@ pub fn rect_holds_point(rect: &Rect, x: f64, y: f64) -> bool {
         && y <= rect.bottom + SLACK
 }
 
+/// Whether text answering a probe point may draw over the victim there. Its
+/// glyphs hold the point, or they meet the victim's glyphs somewhere: the
+/// grid is coarse (one row through a single line's middle), so a word lying
+/// under a heading's descenders, or a block label far wider than its words,
+/// is met at points off the other word's glyphs, and the grid cannot say
+/// where the two collide. Only glyphs clear of the victim's (a stretched
+/// link's title below the topic its overlay answers over) cover nothing. A
+/// text rect the capture did not record, on either side, keeps the answer.
+fn glyphs_may_cover(answer: Option<Rect>, victim: Option<&Rect>, x: f64, y: f64) -> bool {
+    let Some(answer) = answer.filter(|r| r.all_finite()) else {
+        return true;
+    };
+    let Some(victim) = victim else {
+        return true;
+    };
+    rect_holds_point(&answer, x, y)
+        || (answer.left < victim.right
+            && victim.left < answer.right
+            && answer.top < victim.bottom
+            && victim.top < answer.bottom)
+}
+
+/// How many ancestors of a hit-test answer text-occlusion asks whether they
+/// are a moving ticker track.
+const MARQUEE_TRACK_MAX_DEPTH: usize = 4;
+
 /// JS: checks.mjs#checkTextOcclusionDOM()
 pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -2067,7 +2278,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         let f = js::to_lower_case(&f);
         f == "left" || f == "right"
     };
-    let is_marqueeish = |el: ElId| -> bool {
+    let names_marquee = |el: ElId| -> bool {
         if dom.tag_name(el) == "MARQUEE" {
             return true;
         }
@@ -2081,6 +2292,34 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         }
         let anim = js::to_lower_case(&dom.style(el, "animationName"));
         MARQUEE_ANIM_RE.is_match(&anim)
+    };
+    // A ticker moves between the capture and the probes, so what a point
+    // answers inside it is a neighbour that slid under the point. The track
+    // that moves is often an ancestor of the span the probe returns
+    // (react-fast-marquee animates `.rfm-marquee`, two levels up), so a few
+    // ancestors are asked too. An ancestor counts only while it moves: an
+    // animation named for a ticker, or a marquee name on a box running an
+    // animation. A page wrapper named `.page-scroller`, or iScroll's
+    // `#scroller`, names a scroller without ticking, and the text under it
+    // collides like any other.
+    let is_marqueeish = |el: ElId| -> bool {
+        if names_marquee(el) {
+            return true;
+        }
+        let mut cur = dom.parent(el);
+        for _ in 0..MARQUEE_TRACK_MAX_DEPTH {
+            let Some(c) = cur else { break };
+            if Some(c) == body {
+                break;
+            }
+            let anim = js::to_lower_case(&dom.style(c, "animationName"));
+            let animated = !anim.is_empty() && anim.split(',').any(|n| js::trim(n) != "none");
+            if animated && (MARQUEE_ANIM_RE.is_match(&anim) || names_marquee(c)) {
+                return true;
+            }
+            cur = dom.parent(c);
+        }
+        false
     };
     let is_pinned_overlay = |el: ElId| -> bool {
         let mut cur = Some(el);
@@ -2191,6 +2430,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             continue;
         }
 
+        // The probe is `elementFromPoint`, which passes through anything that
+        // ignores pointer events. Over such text (a floating label laid on its
+        // input) the answer is whatever lies under it, so a box it names may
+        // sit below the text rather than over it, and cannot be counted. Text
+        // it names overlaps the victim whichever of the two is on top.
+        let passes_through = ignores_pointer_events(dom, el);
+        let victim_glyphs = dom.direct_text_rect(el).filter(|r| r.all_finite());
         let mut total = 0usize;
         let mut occluded = 0usize;
         let mut occluder_el: Option<ElId> = None;
@@ -2204,7 +2450,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if is_floated(top) || is_marqueeish(top) || is_pinned_overlay(top) {
                 continue;
             }
-            if effective_opacity_dom(dom, top) <= 0.02 {
+            if effective_opacity_dom(dom, top) <= 0.02 || ignores_pointer_events(dom, top) {
                 continue;
             }
             // An answer naming an element the capture says is not painted
@@ -2217,7 +2463,13 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if matches!(top_tag.as_str(), "img" | "video" | "canvas" | "picture") {
                 continue;
             }
-            let top_own_text = !element_direct_text(dom, top).is_empty();
+            // A label at `font-size: 0` (a hidden link's) draws nothing, and
+            // text covers the point only where its glyphs could: a stretched
+            // link's transparent `::after` answers for the whole card while
+            // its title sits elsewhere.
+            let top_own_text = !element_direct_text(dom, top).is_empty()
+                && !super::painted::under_1px(&dom.style(top, "fontSize"))
+                && glyphs_may_cover(dom.direct_text_rect(top), victim_glyphs.as_ref(), x, y);
             let top_in_svg = closest_or_none(dom, top, "svg").is_some();
             let top_has_text = top_own_text || top_in_svg;
             let top_style = ElStyle { dom, el: top };
@@ -2229,7 +2481,7 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             // never measured, so it counts for nothing. A box that carries text
             // of its own can still overflow its rect and is kept as text.
             let box_here = rect_holds_point(&dom.rect(top), x, y);
-            if box_here && is_opaque_decorated_box(Some(&top_style)) {
+            if box_here && !passes_through && is_opaque_decorated_box(Some(&top_style)) {
                 occluded += 1;
                 if occluder_el.is_none() {
                     occluder_el = Some(top);
@@ -2476,6 +2728,34 @@ pub fn check_text_occlusion_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     findings
 }
 
+/// How far down `d` (laid out at `dr`) shows: its bottom, or the bottom of
+/// the nearest box between it and the row `row` (both ends included) that
+/// clips or scrolls on y, when that ends sooner. cuisineactuelle.fr's tile
+/// column runs eleven tiles into a 610px box that scrolls them, inside a
+/// section that hides the rest; the column a reader sees ends at 610px.
+fn column_visible_bottom(dom: &dyn Dom, d: ElId, dr: &Rect, row: ElId) -> f64 {
+    let mut bottom = dr.bottom;
+    let mut cur = dom.parent(d);
+    while let Some(p) = cur {
+        let y = {
+            let v = dom.style(p, "overflowY");
+            if v.is_empty() {
+                dom.style(p, "overflow").split_whitespace().last().unwrap_or("").to_string()
+            } else {
+                v
+            }
+        };
+        if matches!(y.as_str(), "hidden" | "clip" | "auto" | "scroll") && dom.style(p, "display") != "inline" {
+            bottom = math_min(bottom, dom.rect(p).bottom);
+        }
+        if p == row {
+            break;
+        }
+        cur = dom.parent(p);
+    }
+    bottom
+}
+
 /// JS: checks.mjs#checkFirstViewportColumnOverflowDOM()
 pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     let mut findings = Vec::new();
@@ -2569,7 +2849,7 @@ pub fn check_first_viewport_column_overflow_dom(dom: &dyn Dom) -> Vec<ElFinding>
                 }
                 let dr = dom.rect(d);
                 if dr.width > 0.0 && dr.height > 0.0 {
-                    content_bottom = math_max(content_bottom, dr.bottom);
+                    content_bottom = math_max(content_bottom, column_visible_bottom(dom, d, &dr, el));
                 }
             }
             // A column with nothing painted in its own flow (a collapsed
@@ -2815,6 +3095,46 @@ mod tests {
         );
     }
 
+    /// observations-28 row 4: a background image paints a band a heading walk
+    /// stops at only when it covers the box. jyes.com.tw tiles a texture over
+    /// its news band; an icon placed once beside a heading, a 3px accent bar
+    /// drawn with a gradient, and gradient-filled text decorate the box.
+    #[test]
+    fn heading_rhythm_image_band_needs_a_layer_that_covers_the_box() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let el = d.add(Some(body), "section");
+        let band = |d: &mut FakeDom, styles: &[(&str, &str)]| {
+            for p in ["backgroundImage", "backgroundSize", "background", "backgroundClip", "webkitBackgroundClip"] {
+                d.set_style(el, p, "");
+            }
+            d.set_styles(el, styles);
+            rhythm_image_band(d, el)
+        };
+        let tile = r#"url("https://www.jyes.com.tw/index-news-bg.jpg")"#;
+        let shorthand = |repeat: &str| {
+            format!(r#"rgba(0, 0, 0, 0) {tile} {repeat} scroll 0% 0% / auto padding-box border-box"#)
+        };
+        let tiled = shorthand("repeat");
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &tiled)]));
+        assert!(band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "cover")]));
+        let grad = "linear-gradient(rgb(255, 255, 255), rgb(250, 250, 250))";
+        assert!(band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto")]));
+        // An icon placed once, one axis of tiling, a tiling not recorded.
+        let once = shorthand("no-repeat");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &once)]));
+        let strip = shorthand("repeat-x");
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto"), ("background", &strip)]));
+        assert!(!band(&mut d, &[("backgroundImage", tile), ("backgroundSize", "auto")]));
+        // A 48px accent bar drawn 3px tall under a title.
+        let bar = "linear-gradient(90deg, rgb(17, 17, 17) 0px, rgb(17, 17, 17) 48px, rgba(0, 0, 0, 0) 48px)";
+        let bar_layer = format!("rgba(0, 0, 0, 0) {bar} no-repeat scroll 0% 100% / 100% 3px padding-box border-box");
+        assert!(!band(&mut d, &[("backgroundImage", bar), ("backgroundSize", "100% 3px"), ("background", &bar_layer)]));
+        // Gradient-filled text paints the glyphs, not the box.
+        assert!(!band(&mut d, &[("backgroundImage", grad), ("backgroundSize", "auto"), ("webkitBackgroundClip", "text")]));
+        assert!(!band(&mut d, &[("backgroundImage", "none")]));
+    }
+
     /// observations-25 issue 20: joongang.co.kr's tab slide parked past its
     /// track holds the crowded heading's twin, which met the two-heading
     /// minimum on its own.
@@ -2913,6 +3233,22 @@ mod tests {
         // draws its placeholder, which is not DOM text.
         let f = check_heading_rhythm_dom(&build("input"));
         assert!(f.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_band_on_a_dark_canvas_is_measured_against_it() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        let section = d.add(Some(body), "section");
+        d.set_styles(section, &[("display", "block"), ("backgroundColor", "rgb(18, 18, 18)")]);
+        d.set_rect(section, 0.0, 0.0, 800.0, 400.0);
+        // On the default white canvas the dark section is a band with an edge.
+        assert!(rhythm_draws_bottom_edge(&d, section));
+        // On a page that asks for a dark scheme the canvas is that dark.
+        d.set_style(html, "colorScheme", "dark");
+        assert!(!rhythm_draws_bottom_edge(&d, section));
+        d.set_style(html, "colorScheme", "light dark");
+        assert!(rhythm_draws_bottom_edge(&d, section));
     }
 
     #[test]
@@ -3082,6 +3418,235 @@ mod tests {
                 class_selector(&d, sib)
             )
         );
+    }
+
+    const PROBE_BASE: &[(&str, &str)] = &[
+        ("display", "block"),
+        ("visibility", "visible"),
+        ("opacity", "1"),
+        ("contentVisibility", "visible"),
+        ("position", "static"),
+        ("cssFloat", "none"),
+        ("animationName", "none"),
+        ("pointerEvents", "auto"),
+        ("fontSize", "16px"),
+    ];
+
+    /// airsoft-verzeichnis.de's Bootstrap `form-floating` label: the hit test
+    /// passes through it and answers with the input under it.
+    #[test]
+    fn text_occlusion_cannot_rank_a_box_under_text_that_ignores_pointer_events() {
+        let run = |pointer_events: &str, input_text: Option<&str>| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let field = d.add(Some(body), "div");
+            d.set_styles(field, PROBE_BASE);
+            d.set_style(field, "position", "relative");
+            d.set_rect(field, 12.0, 104.0, 228.0, 58.0);
+            let label = d.add(Some(field), "label");
+            d.set_styles(label, PROBE_BASE);
+            d.set_styles(label, &[("position", "absolute"), ("pointerEvents", pointer_events)]);
+            d.set_rect(label, 24.0, 112.0, 120.0, 20.0);
+            d.add_text(label, "Emailadresse");
+            let input = d.add(Some(field), if input_text.is_some() { "div" } else { "input" });
+            d.set_styles(input, PROBE_BASE);
+            d.set_styles(input, &[("position", "absolute"), ("backgroundColor", "rgb(255, 255, 255)")]);
+            d.set_rect(input, 12.0, 104.0, 228.0, 58.0);
+            if let Some(t) = input_text {
+                d.add_text(input, t);
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        assert_eq!(run("auto", None).len(), 1);
+        assert!(run("none", None).is_empty());
+        // Text it names overlaps the label whichever of the two is on top.
+        let f = run("none", Some("Emailadresse eingeben"));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("overlapping text"), "{f:?}");
+    }
+
+    /// ladepeche.fr's stretched link: its transparent `::after` answers for
+    /// the whole card while its title sits below the topic. drom.ru's hidden
+    /// link carries its label at `font-size: 0`.
+    #[test]
+    fn text_occlusion_counts_text_only_where_its_glyphs_are() {
+        let run = |text_rect: Option<(f64, f64)>, font_size: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let overlay = d.add(Some(body), "div");
+            d.set_styles(overlay, PROBE_BASE);
+            d.set_style(overlay, "position", "absolute");
+            d.set_rect(overlay, 85.0, 700.0, 665.0, 280.0);
+            let topic = d.add(Some(overlay), "div");
+            d.set_styles(topic, PROBE_BASE);
+            d.set_rect(topic, 95.0, 710.0, 120.0, 20.0);
+            d.set_text_rect(topic, 95.0, 711.0, 80.0, 18.0);
+            d.add_text(topic, "Faits divers");
+            let link = d.add(Some(overlay), "a");
+            d.set_styles(link, PROBE_BASE);
+            d.set_styles(link, &[("position", "absolute"), ("fontSize", font_size)]);
+            // The rect the hit test answers for: the overlay's whole card.
+            d.set_rect(link, 85.0, 700.0, 665.0, 280.0);
+            d.add_text(link, "Messe polémique à Carcassonne");
+            if let Some((x, y)) = text_rect {
+                d.set_text_rect(link, x, y, 400.0, 40.0);
+            }
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        // The title's glyphs sit at y 800; the topic at y 710 is not under them.
+        assert!(run(Some((95.0, 800.0)), "16px").is_empty());
+        // Glyphs over the topic, and a text rect the capture did not record,
+        // count as before.
+        assert_eq!(run(Some((95.0, 705.0)), "16px").len(), 1);
+        assert_eq!(run(None, "16px").len(), 1);
+        // A label at font-size 0 draws nothing.
+        assert!(run(None, "0px").is_empty());
+    }
+
+    /// v0-dashboard-ui-redesign-nine.vercel.app capture 3762: a mobile
+    /// sidebar leaks under the page header, and its block label "Menu" lies
+    /// wholly under the heading "Team". Both boxes are far wider than their
+    /// words, and the grid spans the label's box; where the two words' glyphs
+    /// meet, the heading counts at every point it answers, or the label would
+    /// score only the share of its box the heading's glyphs cross.
+    #[test]
+    fn text_occlusion_counts_a_heading_over_a_wide_label_where_their_glyphs_meet() {
+        let run = |menu_glyphs: Option<(f64, f64)>| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let aside = d.add(Some(body), "aside");
+            d.set_styles(aside, PROBE_BASE);
+            d.set_style(aside, "position", "absolute");
+            d.set_rect(aside, 0.0, 0.0, 240.0, 400.0);
+            let menu = d.add(Some(aside), "p");
+            d.set_styles(menu, PROBE_BASE);
+            d.set_rect(menu, 16.0, 72.0, 223.0, 15.0);
+            d.add_text(menu, "Menu");
+            if let Some((x, w)) = menu_glyphs {
+                d.set_text_rect(menu, x, 73.0, w, 12.0);
+            }
+            let main = d.add(Some(body), "main");
+            d.set_styles(main, PROBE_BASE);
+            d.set_style(main, "position", "relative");
+            d.set_rect(main, 0.0, 0.0, 390.0, 400.0);
+            let h1 = d.add(Some(main), "h1");
+            d.set_styles(h1, PROBE_BASE);
+            d.set_rect(h1, 16.0, 64.0, 358.0, 28.0);
+            d.add_text(h1, "Team");
+            d.set_text_rect(h1, 16.0, 66.0, 51.0, 23.0);
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        // The label's glyphs lie under the heading's.
+        let f = run(Some((16.0, 32.0)));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("100% covered by overlapping text"), "{f:?}");
+        // Glyphs clear of the heading's are not covered, however wide the box.
+        assert!(run(Some((200.0, 32.0))).is_empty());
+        // A label whose glyphs the capture did not record keeps every answer.
+        assert_eq!(run(None).len(), 1);
+    }
+
+    /// The same capture's "Settings" under a card's h3: the grid's one row
+    /// runs through the label's middle, just below the h3's glyph rect, while
+    /// the two glyph rects overlap by 6px.
+    #[test]
+    fn text_occlusion_counts_a_heading_whose_glyphs_meet_the_label_off_the_grid_row() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let nav = d.add(Some(body), "nav");
+        d.set_styles(nav, PROBE_BASE);
+        d.set_style(nav, "position", "absolute");
+        d.set_rect(nav, 0.0, 300.0, 240.0, 100.0);
+        let label = d.add(Some(nav), "span");
+        d.set_styles(label, PROBE_BASE);
+        d.set_rect(label, 52.0, 330.0, 54.9, 20.0);
+        d.set_text_rect(label, 52.0, 331.0, 54.9, 17.0);
+        d.add_text(label, "Settings");
+        let card = d.add(Some(body), "div");
+        d.set_styles(card, PROBE_BASE);
+        d.set_rect(card, 0.0, 280.0, 390.0, 300.0);
+        let h3 = d.add(Some(card), "h3");
+        d.set_styles(h3, PROBE_BASE);
+        d.set_rect(h3, 41.0, 313.0, 308.0, 28.0);
+        d.set_text_rect(h3, 41.0, 316.0, 125.0, 21.0);
+        d.add_text(h3, "Alexandra Deff");
+        mark_body_descendants(&mut d);
+        let f = check_text_occlusion_dom(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].finding.detail.contains("100% covered by overlapping text"), "{f:?}");
+    }
+
+    /// cnnbrasil.com.br's react-fast-marquee: the track that moves is the
+    /// grandparent of the spans the probes answer with.
+    #[test]
+    fn text_occlusion_skips_answers_inside_a_moving_track() {
+        let run = |animation: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let track = d.add(Some(body), "div");
+            d.set_styles(track, PROBE_BASE);
+            d.set_styles(track, &[("position", "absolute"), ("animationName", animation)]);
+            d.set_rect(track, -100.0, 75.0, 2417.0, 16.0);
+            let child = d.add(Some(track), "div");
+            d.set_styles(child, PROBE_BASE);
+            d.set_rect(child, 117.0, 75.0, 167.0, 16.0);
+            let under = d.add(Some(child), "span");
+            d.set_styles(under, PROBE_BASE);
+            d.set_rect(under, 125.0, 75.0, 40.0, 16.0);
+            d.add_text(under, "VALE3:");
+            let over = d.add(Some(child), "span");
+            d.set_styles(over, PROBE_BASE);
+            d.set_rect(over, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(over, "R$ 73,20");
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d)
+        };
+        assert!(!run("none").is_empty());
+        assert!(run("scroll").is_empty());
+        assert!(run("rfm-scroll").is_empty());
+    }
+
+    /// A page wrapper that names a scroller without moving (`.page-scroller`,
+    /// iScroll's `#scroller`) silences nothing under it, and neither does a
+    /// ticker track further up than a track sits.
+    #[test]
+    fn text_occlusion_asks_only_nearby_moving_ancestors() {
+        let run = |class: &str, animation: &str, depth: usize| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let wrapper = d.add(Some(body), "div");
+            d.set_styles(wrapper, PROBE_BASE);
+            d.set_styles(wrapper, &[("position", "relative"), ("animationName", animation)]);
+            d.set_attr(wrapper, "class", class);
+            d.set_rect(wrapper, 0.0, 0.0, 1280.0, 800.0);
+            let mut parent = wrapper;
+            for _ in 0..depth {
+                let level = d.add(Some(parent), "div");
+                d.set_styles(level, PROBE_BASE);
+                d.set_rect(level, 0.0, 0.0, 1280.0, 800.0);
+                parent = level;
+            }
+            let under = d.add(Some(parent), "span");
+            d.set_styles(under, PROBE_BASE);
+            d.set_style(under, "position", "absolute");
+            d.set_rect(under, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(under, "Opening hours");
+            let over = d.add(Some(parent), "span");
+            d.set_styles(over, PROBE_BASE);
+            d.set_style(over, "position", "absolute");
+            d.set_rect(over, 125.0, 75.0, 60.0, 16.0);
+            d.add_text(over, "Closed today");
+            mark_body_descendants(&mut d);
+            check_text_occlusion_dom(&d).len()
+        };
+        assert_eq!(run("page-scroller", "none", 1), 1);
+        assert_eq!(run("marquee", "none", 1), 1);
+        assert_eq!(run("marquee", "slide", 1), 0);
+        assert_eq!(run("track", "ticker-run", 1), 0);
+        assert_eq!(run("track", "ticker-run", 6), 1);
     }
 
     /// A carousel that advances between the capture and the hit-test answer
@@ -3352,6 +3917,16 @@ mod tests {
         );
         d.set_rect(b_in, 640.0, 0.0, 600.0, 900.0);
         assert!(check_first_viewport_column_overflow_dom(&d).is_empty());
+
+        // observations-28 row 27: the tall column's box scrolls its content
+        // at 700px (cuisineactuelle.fr's tile list), so it ends where it is
+        // clipped, and the short column is short again.
+        d.set_rect(b_in, 640.0, 0.0, 600.0, 300.0);
+        d.set_styles(a, &[("overflowY", "auto")]);
+        d.set_rect(a, 0.0, 0.0, 640.0, 700.0);
+        assert!(check_first_viewport_column_overflow_dom(&d).is_empty(), "clipped at 700px");
+        d.set_styles(a, &[("overflowY", "visible")]);
+        assert_eq!(check_first_viewport_column_overflow_dom(&d).len(), 1, "unclipped");
     }
 
     /// cisco.com and picomq.com: a tab list, a collapsed panel and an outline

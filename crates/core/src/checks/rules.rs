@@ -1040,11 +1040,10 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
         }
     };
     let mut findings = Vec::new();
-    // Gray is low chroma at whatever lightness the ink sits at, and the
-    // surface is a colour when it has chroma of its own. The old pair of
-    // tests read relative luminance as if it were lightness, which made every
-    // off-white under 0.85 gray and charged an off-white nav on a teal
-    // masthead three times over (REN-404).
+    // Gray is low chroma at whatever lightness the ink sits at (relative
+    // luminance read as lightness made every off-white under 0.85 gray,
+    // REN-404), and the surface is a colour when its spread clears the bar,
+    // which rises as the surface nears black.
     if is_gray_ink(text_color) && bgs.iter().all(background_reads_as_colour) {
         let bg_label = match opts.effective_bg {
             Some(bg) => color_to_hex(Some(&bg)),
@@ -1122,6 +1121,12 @@ pub fn check_placeholder_colors(
     placeholder_text: &str,
     mut text_color: Rgba,
 ) -> Vec<RuleHit> {
+    // A placeholder inked at (nearly) zero alpha paints nothing: Bootstrap's
+    // floating labels and `placeholder:text-transparent` hide it so a label
+    // can take its place.
+    if text_color.alpha_or_one() <= TRANSPARENT_INK_FLOOR {
+        return Vec::new();
+    }
     // `visible_text` is the host's own ink; the placeholder paints its own.
     let host_ink_cleared;
     let opts = if opts.visible_text.is_some() {
@@ -1217,7 +1222,7 @@ pub const ICON_TILE_MIN_BG_ALPHA: f64 = 0.05;
 
 /// JS: checks.mjs#checkIconTile
 pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
-    if !is_heading_tag(&opts.heading_tag) {
+    if !is_heading_tag(&opts.heading_tag) && !opts.heading_is_card_title {
         return Vec::new();
     }
     let sibling_tag = match opts.sibling_tag.as_deref() {
@@ -1498,7 +1503,20 @@ pub fn check_hero_eyebrow(opts: &HeroEyebrowOpts) -> Vec<RuleHit> {
     let is_uppercased = opts.sibling_text_transform.as_deref() == Some("uppercase")
         || (text.bytes().any(|b| b.is_ascii_uppercase())
             && !text.bytes().any(|b| b.is_ascii_lowercase()));
-    let is_classic_tracked = is_uppercased && opts.sibling_letter_spacing >= 1.6;
+    // The em floor reaches the common tracked setting of a blog's date line
+    // (Tailwind's tracking-widest at 12px is 1.2px), so under the fixed
+    // floor a dated line is the post's meta, not an eyebrow: a `<time>`, or
+    // text naming a year. At the fixed floor and above nothing changes.
+    let em_floor_only = opts.sibling_letter_spacing < HERO_EYEBROW_TRACKING_PX;
+    let dated_meta = em_floor_only
+        && (opts.sibling_holds_time || crate::checks::text_rules::KICKER_META_YEAR_RE.is_match(text));
+    let is_classic_tracked = is_uppercased
+        && !dated_meta
+        && hero_eyebrow_tracked(
+            opts.sibling_letter_spacing,
+            opts.sibling_font_size,
+            opts.sibling_tracking_floor_em,
+        );
 
     let weight = {
         let n = match opts.sibling_font_weight.as_deref() {
@@ -1733,12 +1751,22 @@ pub(crate) fn glow_is_perceptible(
 
 /// How far the chromatic layers of one shadow value lift `surface` at the
 /// edge of the box (see [`GLOW_MIN_LIFT`]). Neutral layers are elevation, not
-/// glow light, and do not count.
+/// glow light, and do not count, and neither does a layer carrying under half
+/// the light a glow needs ([`GLOW_MIN_STRENGTH_PX`]): Tailwind's `shadow-lg`
+/// in a 0.2 purple adds a 6px layer at 1.2px of light to its 15px one, and
+/// the pair lit nothing on gameghost.manus.space's black page. The layers of
+/// an elevation ramp that each carry some of the light still add up.
 fn glow_surface_lift(value: &str, surface: &Rgba, element_opacity: Option<f64>) -> f64 {
     let opacity = element_opacity.unwrap_or(1.0);
     split_commas_outside_parens(value)
         .into_iter()
-        .filter_map(|layer| find_shadow_color(layer).and_then(|info| info.color))
+        .filter_map(|layer| {
+            let info = find_shadow_color(layer)?;
+            let color = info.color?;
+            let vals = extract_shadow_lengths(layer, Some((info.start, info.end)));
+            let blur = vals.get(2).copied().unwrap_or(0.0);
+            (blur * color.alpha_or_one() * opacity >= GLOW_MIN_STRENGTH_PX / 2.0).then_some(color)
+        })
         .filter(|color| has_chroma(Some(color), Some(30.0)))
         .map(|color| {
             let difference = (color.r - surface.r)
@@ -2003,13 +2031,42 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
         }
     }
 
-    let mut roles: Vec<(String, f64)> = by_role
-        .into_iter()
-        .filter_map(|(role, sizes)| dominant_type_role_size(&role, &sizes).map(|size| (role, size)))
-        .collect();
+    // The ladder is read from the roles whose size the samples settle. A
+    // heading level with no dominant size drops out, and which of its sizes
+    // stands for it is not something the samples say.
+    let (mut settled_headings, mut dropped_headings) = (0usize, 0usize);
+    let mut dropped_sizes: Vec<f64> = Vec::new();
+    let mut roles: Vec<(String, f64)> = Vec::new();
+    for (role, sizes) in by_role {
+        let heading = role != "body";
+        match dominant_type_role_size(&role, &sizes) {
+            Some(size) => {
+                if heading {
+                    settled_headings += sizes.len();
+                }
+                roles.push((role, size));
+            }
+            None if heading => {
+                dropped_headings += sizes.len();
+                dropped_sizes.extend(sizes);
+            }
+            None => {}
+        }
+    }
 
     if roles.len() < TYPE_HIERARCHY_MIN_ROLES {
         return Vec::new();
+    }
+
+    // An h1 set smaller than the body text is not the page's title but a
+    // label wearing the tag (phillips66.com's 14px "FIND FBOS:" form label
+    // over 16px copy); the page's real headline sits in some other element,
+    // and a ladder topped by the label measures nothing a reader sees.
+    let size_of = |name: &str| roles.iter().find(|(r, _)| r == name).map(|(_, size)| *size);
+    if let (Some(h1), Some(body)) = (size_of("h1"), size_of("body")) {
+        if h1 < body {
+            return Vec::new();
+        }
     }
 
     roles.sort_by(|a, b| {
@@ -2020,11 +2077,35 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
             // root collation and byte order agree.
             .then_with(|| a.0.cmp(&b.0))
     });
-    let mut largest_step = 1.0f64;
-    for i in 1..roles.len() {
-        largest_step = math_max(largest_step, roles[i].1 / roles[i - 1].1);
-    }
+    let largest_step_of = |sizes: &[f64]| -> f64 {
+        let mut step = 1.0f64;
+        for i in 1..sizes.len() {
+            step = math_max(step, sizes[i] / sizes[i - 1]);
+        }
+        step
+    };
+    let ladder: Vec<f64> = roles.iter().map(|(_, size)| *size).collect();
+    let largest_step = largest_step_of(&ladder);
     if largest_step >= TYPE_HIERARCHY_MIN_STEP_RATIO {
+        return Vec::new();
+    }
+
+    // When the dropped heading levels hold most of the page's headings, the
+    // ladder leaves out the headings a reader sees, and the verdict rests on
+    // what they would add. cnnbrasil.com.br sets its thirty h3s at 14, 16 and
+    // 20px, ten each, against twelve h1 and h2 on a 14/16/16 ladder; any of
+    // those h3s at 20px stands a 1.25 step above the 16px h2, so the page is
+    // not shown flat, and it does not report. When no dropped size would
+    // break the flatness (h2s tied at 17 and 18px on a 16/16/18 ladder), the
+    // ramp is flat whichever size stands for them, and it reports as before.
+    if dropped_headings > settled_headings
+        && dropped_sizes.iter().any(|&extra| {
+            let mut with = ladder.clone();
+            with.push(extra);
+            with.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            largest_step_of(&with) >= TYPE_HIERARCHY_MIN_STEP_RATIO
+        })
+    {
         return Vec::new();
     }
 
@@ -2054,6 +2135,44 @@ mod tests {
 
     fn rgb(r: f64, g: f64, b: f64) -> Rgba {
         Rgba::new(r, g, b, 1.0)
+    }
+
+    fn hero_opts(text: &str, tag: &str, spacing: f64) -> HeroEyebrowOpts {
+        HeroEyebrowOpts {
+            heading_tag: "h1".to_string(),
+            heading_text: Some("How we rebuilt the scheduler".to_string()),
+            heading_font_size: 60.0,
+            heading_in_application_context: false,
+            sibling_tag: Some(tag.to_string()),
+            sibling_text: Some(text.to_string()),
+            sibling_text_transform: Some("uppercase".to_string()),
+            sibling_font_size: 12.0,
+            sibling_letter_spacing: spacing,
+            sibling_font_weight: Some("500".to_string()),
+            sibling_color: Some("rgb(85, 85, 85)".to_string()),
+            sibling_has_accent_dash_pseudo: false,
+            sibling_tracking_floor_em: Some(HERO_EYEBROW_TRACKING_EM),
+            sibling_holds_time: tag == "time",
+        }
+    }
+
+    /// copperhead.sh: "Engineering/2 September 2026" at 0.1em over a post's
+    /// h1 is the post's meta. Under the fixed floor a year or a `<time>`
+    /// keeps the em floor from calling it tracked caps; at 1.6px and up the
+    /// rule reads as it always did.
+    #[test]
+    fn hero_eyebrow_em_floor_passes_over_a_dated_meta_line() {
+        assert!(check_hero_eyebrow(&hero_opts("Engineering · 2 September 2026", "p", 1.2)).is_empty());
+        assert!(check_hero_eyebrow(&hero_opts("Sep 2, 2026", "time", 1.2)).is_empty());
+        assert!(check_hero_eyebrow(&hero_opts("Sep 2", "time", 1.2)).is_empty());
+        assert_eq!(check_hero_eyebrow(&hero_opts("Now in public beta", "p", 1.2)).len(), 1);
+        // Not a year: a version or a count stays an eyebrow.
+        assert_eq!(check_hero_eyebrow(&hero_opts("Version 3000 is here", "p", 1.2)).len(), 1);
+        // At the fixed floor the date line reports, as it did before.
+        assert_eq!(
+            check_hero_eyebrow(&hero_opts("Engineering · 2 September 2026", "p", 1.8)).len(),
+            1
+        );
     }
 
     /// swipeloan.in: light gray on #04002d, a navy that reads as black.
@@ -2128,6 +2247,7 @@ mod tests {
             sibling_border_radius: 8.0,
             has_icon_child: true,
             icon_child_width: 20.0,
+            heading_is_card_title: false,
         };
         assert_eq!(check_icon_tile(&opts(0.1)).len(), 1);
         assert_eq!(check_icon_tile(&opts(0.05)).len(), 1);
@@ -2226,6 +2346,63 @@ mod tests {
         h3_tie.extend([("h3", 15.0), ("h3", 22.0)]);
         let hits = check_flat_type_hierarchy_samples(&samples(&h3_tie));
         assert!(hits.is_empty() || !hits[0].snippet.contains("h3"), "{hits:?}");
+    }
+
+    /// observations-28 row 23: the ladder leaves out the headings a reader
+    /// sees. cnnbrasil.com.br sets its thirty h3 headlines at 14, 16 and 20px,
+    /// ten each, so the h3 role drops out and a 14/16/16 ladder of body, h1
+    /// and h2 reports; phillips66.com's h1 is a 14px form label over 16px
+    /// copy. Neither ladder describes the page, and neither reports. A
+    /// dropped level declines only when one of its sizes would break the
+    /// flatness, and only when it holds more headings than the ladder does:
+    /// a tied role holding fewer stays out as before (otto.de's two h2s at 16
+    /// and 26px beside an h1, an h3 and an h4).
+    #[test]
+    fn flat_type_hierarchy_declines_a_ladder_without_the_page_headings() {
+        let mut news = vec![("h1", 16.0)];
+        news.extend([("body", 14.0); 99]);
+        news.extend([("body", 16.0); 44]);
+        news.extend([("h2", 16.0); 6]);
+        news.extend([("h2", 30.0); 3]);
+        news.extend([("h3", 14.0); 10]);
+        news.extend([("h3", 16.0); 10]);
+        news.extend([("h3", 20.0); 10]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&news)).is_empty(), "the h3 role drops out");
+        // With one h3 size settled, the ladder holds what a reader sees.
+        news.push(("h3", 16.0));
+        let hits = check_flat_type_hierarchy_samples(&samples(&news));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("h3 16px"), "{hits:?}");
+
+        let mut label = vec![("h1", 14.0)];
+        label.extend([("body", 16.0); 26]);
+        label.extend([("body", 15.0); 15]);
+        label.extend([("h2", 15.0); 3]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&label)).is_empty(), "h1 under body size");
+        // An h1 at the body size still counts.
+        label[0] = ("h1", 16.0);
+        assert_eq!(check_flat_type_hierarchy_samples(&samples(&label)).len(), 1);
+
+        // A dropped level whose sizes would all keep the ramp flat changes
+        // nothing: h2s tied at 17 and 18px, most of the headings, on a
+        // body 16px, h3 16px, h1 18px ladder.
+        let mut tie = vec![("h1", 18.0), ("h2", 17.0), ("h2", 18.0), ("h2", 17.0), ("h2", 18.0), ("h3", 16.0)];
+        tie.extend([("body", 16.0); 12]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&tie));
+        assert_eq!(hits.len(), 1, "the tied h2s keep it flat: {hits:?}");
+        assert!(hits[0].snippet.starts_with("Role sizes: body 16px, h3 16px, h1 18px"), "{hits:?}");
+        // Tied h2s at 17 and 23px: 23px stands a 1.28 step above the 18px
+        // h1, so the ladder does not show the page flat, and it declines.
+        tie[2] = ("h2", 23.0);
+        tie[4] = ("h2", 23.0);
+        assert!(check_flat_type_hierarchy_samples(&samples(&tie)).is_empty(), "a 23px h2 breaks the flatness");
+
+        let mut otto = vec![("h1", 16.0), ("h2", 16.0), ("h2", 26.0), ("h3", 16.0), ("h4", 12.0)];
+        otto.extend([("body", 14.0); 357]);
+        otto.extend([("body", 12.0); 46]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&otto));
+        assert_eq!(hits.len(), 1, "a tied minority role stays out: {hits:?}");
+        assert!(hits[0].snippet.starts_with("Role sizes: h4 12px, body 14px, h1 16px, h3 16px"), "{hits:?}");
     }
 
     #[test]
@@ -2544,6 +2721,22 @@ mod tests {
         };
         assert!(avatar(0.15).is_empty());
         assert_eq!(avatar(0.4).len(), 1);
+        // Tailwind's `shadow-lg shadow-purple-900/20` on a black page: the 6px
+        // layer carries 1.2px of light and lights nothing, and the 15px layer
+        // alone lifts the page by 14 (gameghost.manus.space).
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+        let shadow_lg = check_glow(&GlowOpts {
+            box_shadow: Some(
+                "oklab(0.381 0.100917 -0.144194 / 0.2) 0px 10px 15px -3px, oklab(0.381 0.100917 -0.144194 / 0.2) 0px 4px 6px -4px"
+                    .to_string(),
+            ),
+            text_shadow: None,
+            effective_bg: Some(black),
+            element_opacity: Some(1.0),
+            element_size: Some((208.0, 36.0)),
+            surface: Some(black),
+        });
+        assert!(shadow_lg.is_empty(), "{shadow_lg:?}");
         // With no resolved fill behind it (a gradient, an image) the lift is
         // not measured, and the strength floor decides as before.
         let unresolved = check_glow(&GlowOpts {

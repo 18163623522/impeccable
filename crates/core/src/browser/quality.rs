@@ -121,6 +121,77 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
     !colors_nearly_match(Some(&bg), Some(CANVAS_BACKGROUND))
 }
 
+/// Whether the fill `el` paints lies on a layer painting the same colour: a
+/// sibling laid earlier (so painted under it) that covers it, of `el` or of
+/// an ancestor below the first one that paints a background of its own.
+/// hp.com's grey grid sits in a section whose grey is an absolutely
+/// positioned media layer beside the content, not an ancestor, so the
+/// background walk reads the white page behind both and sees an edge no
+/// reader sees.
+fn backdrop_layer_matches(dom: &dyn Dom, el: ElId) -> bool {
+    let bg = dom.style(el, "backgroundColor");
+    if css_color_is_transparent(Some(&bg)) {
+        return false;
+    }
+    let r = dom.rect(el);
+    let mut node = el;
+    for _ in 0..12 {
+        let mut prev = dom.previous_element_sibling(node);
+        while let Some(s) = prev {
+            prev = dom.previous_element_sibling(s);
+            if dom.style(s, "display") == "none" {
+                continue;
+            }
+            let sr = dom.rect(s);
+            let covers = sr.left <= r.left + 1.0
+                && sr.right >= r.right - 1.0
+                && sr.top <= r.top + 1.0
+                && sr.bottom >= r.bottom - 1.0;
+            let fill = dom.style(s, "backgroundColor");
+            if covers && !css_color_is_transparent(Some(&fill)) {
+                return colors_nearly_match(Some(&bg), Some(&fill));
+            }
+        }
+        let Some(parent) = dom.parent(node) else { return false };
+        if !css_color_is_transparent(Some(&dom.style(parent, "backgroundColor"))) {
+            return false;
+        }
+        node = parent;
+    }
+    false
+}
+
+/// Whether the band `el` paints continues past `side` (0 top, 1 right, 2
+/// bottom, 3 left) into a sibling that abuts it there with the same fill:
+/// cencora.com stacks grey bands, and the edge between two of them is no
+/// edge at all.
+fn side_meets_same_fill(dom: &dyn Dom, el: ElId, rect: &Rect, side: usize) -> bool {
+    let bg = dom.style(el, "backgroundColor");
+    if css_color_is_transparent(Some(&bg)) {
+        return false;
+    }
+    let Some(parent) = dom.parent(el) else { return false };
+    dom.children(parent).into_iter().any(|s| {
+        if s == el || dom.style(s, "display") == "none" {
+            return false;
+        }
+        let sr = dom.rect(s);
+        if !(sr.width > 0.0 && sr.height > 0.0) {
+            return false;
+        }
+        let across = |a0: f64, a1: f64, b0: f64, b1: f64| {
+            js::math_min(a1, b1) - js::math_max(a0, b0) >= (a1 - a0) * 0.9
+        };
+        let abuts = match side {
+            0 => (sr.bottom - rect.top).abs() <= 1.5 && across(rect.left, rect.right, sr.left, sr.right),
+            2 => (sr.top - rect.bottom).abs() <= 1.5 && across(rect.left, rect.right, sr.left, sr.right),
+            1 => (sr.left - rect.right).abs() <= 1.5 && across(rect.top, rect.bottom, sr.top, sr.bottom),
+            _ => (sr.right - rect.left).abs() <= 1.5 && across(rect.top, rect.bottom, sr.top, sr.bottom),
+        };
+        abuts && colors_nearly_match(Some(&bg), Some(&dom.style(s, "backgroundColor")))
+    })
+}
+
 /// The part of `inner` that falls inside `outer`, or `None` when the two miss
 /// each other.
 ///
@@ -211,14 +282,22 @@ pub const SMALL_CHIP_HEIGHT_UNDER_PX: f64 = 27.5;
 /// the edge. Only the vertical edges move; a rect already no taller than its
 /// em boxes is returned as it is.
 pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
-    let font_size = parse_float(&dom.style(node, "fontSize"));
+    glyph_band_at(dom, node, t, 1.0)
+}
+
+/// [`glyph_band`] for text drawn at `scale` times its layout size: a
+/// transform that shrinks a whole column (people.com.cn lays its desktop
+/// page into a phone at about 0.3) shrinks the rects but not the computed
+/// font size and line height, which are layout pixels.
+fn glyph_band_at(dom: &dyn Dom, node: ElId, t: &Rect, scale: f64) -> Rect {
+    let font_size = parse_float(&dom.style(node, "fontSize")) * scale;
     if !(font_size.is_finite() && font_size > 0.0) {
         return *t;
     }
-    let own = resolve_length_px(Some(&dom.style(node, "lineHeight")), font_size)
+    let own = resolve_length_px(Some(&dom.style(node, "lineHeight")), font_size / scale)
         .filter(|lh| lh.is_finite() && *lh > 0.0)
-        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
-    let pitch = line_pitch_px(dom, node, own);
+        .unwrap_or(font_size / scale * NORMAL_LINE_HEIGHT_EM);
+    let pitch = line_pitch_px(dom, node, own) * scale;
     let lines = text_line_count(t.height, pitch, font_size);
     let content = t.height - (lines - 1.0) * pitch;
     let inset = (content - font_size) / 2.0;
@@ -226,6 +305,125 @@ pub fn glyph_band(dom: &dyn Dom, node: ElId, t: &Rect) -> Rect {
         return *t;
     }
     Rect::from_xywh(t.left, t.top + inset, t.width, t.height - inset * 2.0)
+}
+
+/// The widest a glyph of `c` sets, in ems, as an upper bound: a full-width
+/// CJK, kana or Hangul glyph is an em, a capital runs to about three
+/// quarters, and every other glyph of a proportional face stays under 0.7em.
+fn glyph_advance_bound_em(c: char) -> f64 {
+    let cp = c as u32;
+    let wide = matches!(cp,
+        0x1100..=0x115F | 0x2E80..=0x303F | 0x3040..=0x33FF | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF | 0xA960..=0xA97F | 0xAC00..=0xD7FF | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x20000..=0x3FFFF);
+    if wide {
+        1.05
+    } else if c.is_uppercase() {
+        0.8
+    } else {
+        0.7
+    }
+}
+
+/// Whether `el` is a wrapping flex container whose own text is split into
+/// several runs, each an anonymous item too short to wrap in the box. Each
+/// run then sets one line and moves to a row of its own when it does not
+/// fit: the union of their rects is two or more rows of items (outreign.io's
+/// wrapped row of "100 free lead searches", "14-day trial", ... on a phone),
+/// not two line boxes of one run, and there is no leading between lines to
+/// crowd. Only `flex-wrap: wrap` moves an item whole. Under the default
+/// `nowrap` the items shrink to share one row and each run wraps inside its
+/// item (outreign.io's same row at desktop width, where `sm:flex-nowrap`
+/// applies), and a grid cell is narrower than the container; neither is
+/// measured by the container's width. A container whose wrapping the capture
+/// did not record, a single run, or any run long enough that it could wrap by
+/// the widest advance a face sets, is measured as before.
+fn items_each_fit_one_line(dom: &dyn Dom, el: ElId, font_size: f64) -> bool {
+    let display = dom.style(el, "display");
+    if !matches!(display.as_str(), "flex" | "inline-flex") {
+        return false;
+    }
+    if !dom.style(el, "flexWrap").starts_with("wrap") {
+        return false;
+    }
+    let runs: Vec<String> = dom
+        .direct_text_nodes(el)
+        .into_iter()
+        .map(|t| collapse_ws(js::trim(&t)))
+        .filter(|t| !t.is_empty())
+        .collect();
+    if runs.len() < 2 {
+        return false;
+    }
+    let content_width = dom.client_width(el)
+        - js::math_max(0.0, style_px(dom, el, "paddingLeft"))
+        - js::math_max(0.0, style_px(dom, el, "paddingRight"));
+    if !(content_width.is_finite() && content_width > 0.0 && font_size > 0.0) {
+        return false;
+    }
+    runs.iter().all(|run| {
+        let width: f64 = run.chars().map(glyph_advance_bound_em).sum::<f64>() * font_size;
+        width < content_width
+    })
+}
+
+/// The scale `el` is drawn at: its on-screen width over its layout width.
+/// 1 unless a transform shrinks it by more than a twentieth, or when the
+/// layout width was not recorded.
+fn drawn_scale(dom: &dyn Dom, el: ElId, rect: &Rect) -> f64 {
+    let layout = dom.offset_width(el);
+    if !(layout.is_finite() && layout > 0.0 && rect.width > 0.0) {
+        return 1.0;
+    }
+    let scale = rect.width / layout;
+    if scale > 0.05 && scale < 0.95 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// How much of `tr`, a text rect of `node`, shows on the x axis once each box
+/// between `node` and `el` (both ends included) that clips x has cut it:
+/// `(left, right, cut_left, cut_right)`, the cut flags saying a clip took off
+/// that end by more than `tolerance` (a line that overshoots a padding-less
+/// box by a pixel or two is text touching its edge, not a line cut off).
+/// `None` when nothing is left. A clip is the box's padding box; an inline
+/// box clips nothing.
+fn visible_x_extent(
+    dom: &dyn Dom,
+    el: ElId,
+    node: ElId,
+    tr: &Rect,
+    tolerance: f64,
+) -> Option<(f64, f64, bool, bool)> {
+    let (mut left, mut right) = (tr.left, tr.right);
+    let (mut cut_left, mut cut_right) = (false, false);
+    let mut cur = dom.parent(node);
+    while let Some(p) = cur {
+        if dom.style(p, "display") != "inline" && crate::browser::text_geometry::clips_x(dom, p) {
+            let pr = dom.rect(p);
+            let inner_left = pr.left + dom.client_left(p).max(0.0);
+            let cw = dom.client_width(p);
+            let inner_right = if cw.is_finite() && cw > 0.0 { inner_left + cw } else { pr.right };
+            if left < inner_left {
+                cut_left |= inner_left - left > tolerance;
+                left = inner_left;
+            }
+            if right > inner_right {
+                cut_right |= right - inner_right > tolerance;
+                right = inner_right;
+            }
+            if right - left < 1.0 {
+                return None;
+            }
+        }
+        if p == el {
+            break;
+        }
+        cur = dom.parent(p);
+    }
+    Some((left, right, cut_left, cut_right))
 }
 
 /// The width of every line the element's text rendered on, or `None` when
@@ -387,10 +585,13 @@ fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
 ///
-/// Each candidate is measured by its own text rect, not by its border box: a
-/// padded button, a centred heading and a table cell all fill the box they sit
-/// in while their glyphs stay well inside it, and it is the glyphs a reader
-/// sees crowding the boundary.
+/// The side is flush when the *text* lands on it, not when a text-bearing box
+/// does. Each candidate is measured by its own text rect, not by its border
+/// box: a padded button, a centred heading and a table cell all fill the box
+/// they sit in while their glyphs stay well inside it, and it is the glyphs a
+/// reader sees crowding the boundary. A `<td>` fills its table edge to edge
+/// and insets its own text by the cell padding; reading the cell's border box
+/// called that flush and charged a framed table for having no inset (REN-403).
 ///
 /// In a chip under [`SMALL_CHIP_HEIGHT_UNDER_PX`] tall the text is measured by
 /// its glyphs ([`glyph_band`]) rather than by the content area its rect spans:
@@ -398,8 +599,11 @@ fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
 /// of declared padding read as enough. Taste call r3-20 (2026-09-18).
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
-    const TEXT_EDGE_THRESHOLD: f64 = 4.0;
-    let small_chip = rect.height > 0.0 && rect.height < SMALL_CHIP_HEIGHT_UNDER_PX;
+    // Rects are screen pixels and the thresholds layout pixels: a box drawn
+    // at a transform's scale is measured at that scale.
+    let scale = drawn_scale(dom, el, rect);
+    let edge_threshold = 4.0 * scale;
+    let small_chip = rect.height > 0.0 && rect.height / scale < SMALL_CHIP_HEIGHT_UNDER_PX;
     let candidates = dom.query_all(Some(el), TEXT_EDGE_QUERY).unwrap_or_default();
     for node in candidates {
         let tag_name = dom.tag_name(node);
@@ -418,10 +622,10 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         // the box first keeps the text measurement, a range walk in the page,
         // off the many candidates that sit well inside.
         let box_sides = [
-            br.top - rect.top <= TEXT_EDGE_THRESHOLD,
-            rect.right - br.right <= TEXT_EDGE_THRESHOLD,
-            rect.bottom - br.bottom <= TEXT_EDGE_THRESHOLD,
-            br.left - rect.left <= TEXT_EDGE_THRESHOLD,
+            br.top - rect.top <= edge_threshold,
+            rect.right - br.right <= edge_threshold,
+            rect.bottom - br.bottom <= edge_threshold,
+            br.left - rect.left <= edge_threshold,
         ];
         if !box_sides.iter().any(|s| *s) {
             continue;
@@ -431,7 +635,7 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         // glyphs are measured rather than the font's content area.
         let nr = match dom.direct_text_rect(node) {
             Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(
-                &if small_chip { glyph_band(dom, node, &t) } else { t },
+                &if small_chip { glyph_band_at(dom, node, &t, scale) } else { t },
                 &br,
             ) {
                 Some(c) => c,
@@ -439,11 +643,19 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
             },
             _ => br,
         };
+        // Only what the clipping boxes on the way leave of the line reaches
+        // an edge. A side where a clip cuts the text is where the line is cut
+        // off (a table scrolled sideways inside the box, a tab strip that
+        // scrolls, a title an ellipsis ends), not where glyphs crowd a
+        // boundary.
+        let Some((left, right, cut_left, cut_right)) = visible_x_extent(dom, el, node, &nr, edge_threshold) else {
+            continue;
+        };
         let sides = [
-            nr.top - rect.top <= TEXT_EDGE_THRESHOLD,
-            rect.right - nr.right <= TEXT_EDGE_THRESHOLD,
-            rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD,
-            nr.left - rect.left <= TEXT_EDGE_THRESHOLD,
+            nr.top - rect.top <= edge_threshold,
+            !cut_right && rect.right - right <= edge_threshold,
+            rect.bottom - nr.bottom <= edge_threshold,
+            !cut_left && left - rect.left <= edge_threshold,
         ];
         // The two remaining tests run only for text that reached an edge.
         if !sides.iter().any(|s| *s) {
@@ -568,6 +780,30 @@ fn rendered_lines(dom: &dyn Dom, el: ElId, t: &Rect) -> (bool, f64) {
 /// wholly in inline children (`<p><i>…</i></p>`).
 const LINE_PROSE_TAGS: &[&str] = &["p", "li", "dd", "blockquote"];
 
+/// Generic block boxes a CMS or a builder writes prose straight into, with no
+/// `<p>` around it: cencora.com's `div.module__body`, aina-tech.io's
+/// `div.mt-10.text-base` between two measured paragraphs.
+const PROSE_BLOCK_TAGS: &[&str] = &["div", "section", "article", "aside", "main"];
+
+/// Where prose written straight into a generic block is not prose: inside a
+/// control, a link, or an editable field.
+const PROSE_BLOCK_SKIP_SELECTOR: &str = "a, button, label, summary, select, textarea, [role=\"button\"], [role=\"link\"], [role=\"tab\"], [role=\"menuitem\"], [role=\"option\"], [contenteditable=\"true\"], [contenteditable=\"\"]";
+
+/// Whether `el` is prose written straight into a generic block box: a
+/// [`PROSE_BLOCK_TAGS`] element laid out as a block, holding text of its own
+/// and nothing but phrasing under it, outside any control, and not set as
+/// preformatted text. `line-length` and `body-text-viewport-edge` measure it
+/// the way they measure a `<p>`, from its text runs only: where those cannot
+/// be measured, a generic box is not taken for a paragraph.
+fn is_prose_block(dom: &dyn Dom, el: ElId, tag: &str, has_direct_text: bool) -> bool {
+    has_direct_text
+        && PROSE_BLOCK_TAGS.contains(&tag)
+        && matches!(dom.style(el, "display").as_str(), "block" | "flow-root")
+        && !dom.style(el, "whiteSpace").starts_with("pre")
+        && holds_only_phrasing(dom, el)
+        && closest_or_none(dom, el, PROSE_BLOCK_SKIP_SELECTOR).is_none()
+}
+
 /// The line-height `normal` stands for when counting line boxes: a text rect
 /// one line tall is at most about 1.5em, two lines at least about 2.3em.
 const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
@@ -577,6 +813,40 @@ const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
 /// paragraph's ragged right is under a word short of its column, and the box
 /// is what an author sets.
 const TEXT_FILLS_MEASURE: f64 = 0.9;
+
+/// The controls whose labels wide tracking may set: links and buttons.
+const TRACKED_CONTROL_LABEL: &str = "a[href], button, [role=\"button\"], [role=\"link\"], [role=\"tab\"]";
+
+/// The letters in `text`: what a reader takes in as a label's length. The
+/// spaces, digits and dots between words of a caps label
+/// ("SCHEDULE AND CREATE 100 SOCIAL VIDEOS IN 20 MINS") are not.
+fn letter_count(text: &str) -> usize {
+    text.chars().filter(|c| c.is_alphabetic()).count()
+}
+
+/// Whether `el`'s text is a label-length run on one line: at most
+/// [`TRACKED_LABEL_MAX_CHARS`] letters, and a text box that does not wrap.
+fn short_one_line_label(dom: &dyn Dom, el: ElId, line_height_px: Option<f64>) -> bool {
+    letter_count(js::trim(&dom.text_content(el))) <= TRACKED_LABEL_MAX_CHARS
+        && !text_wraps_to_multiple_lines(
+            dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
+            line_height_px,
+        )
+}
+
+/// Whether `el` is a label typed in capitals: its text is a capitalized run
+/// ([`is_capitalized_run`]) and a label-length run on one line
+/// ([`short_one_line_label`]). `text-transform` does not say so, the markup
+/// does. With `every_letter`, each letter has to be a capital: a line of
+/// Hangul or kana with one Latin brand name in capitals ("인벤(INVEN)") is
+/// running text, and letters with no case do not make it a label.
+fn typed_caps_label(dom: &dyn Dom, el: ElId, line_height_px: Option<f64>, every_letter: bool) -> bool {
+    let text = dom.text_content(el);
+    let text = js::trim(&text);
+    is_capitalized_run(text)
+        && (!every_letter || text.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase()))
+        && short_one_line_label(dom, el, line_height_px)
+}
 
 /// The height of one line box of an element's own box. An inline box that
 /// wraps reports the union of its fragments, two 21px highlight lines as one
@@ -743,7 +1013,8 @@ pub fn body_text_gutter_floor(viewport_width: f64) -> f64 {
 
 /// Where a paragraph's body text starts and ends on the x axis, as
 /// `body-text-viewport-edge` reads it, or `None` when the rule does not
-/// measure it: not a `<p>` or `<li>` of more than 40 characters, inside a
+/// measure it: not a `<p>` or `<li>` (or prose written straight into a
+/// generic block, [`is_prose_block`]) of more than 40 characters, inside a
 /// `<nav>` or `<header>`, on its own fill, positioned, half the viewport wide
 /// or less, cut by a scroller or a moving track rather than the page, or
 /// wholly past either side of the viewport.
@@ -754,7 +1025,8 @@ pub fn body_text_gutter_floor(viewport_width: f64) -> f64 {
 /// that track's clip rather than the page edge. A box that only hides its
 /// overflow proves no track, so text it cuts at the screen edge counts.
 /// Prose whose words sit wholly in inline children is measured the same
-/// way. Where the text cannot be measured the box stands in, as before.
+/// way. Where the text cannot be measured the box stands in, as before,
+/// except for a generic block, which is measured on its text or not at all.
 fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     let el = q.el;
     let tag = q.tag.as_str();
@@ -765,7 +1037,8 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
     let spx = |k: &str| style_px(dom, el, k);
     let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
     let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
-    if !((has_direct_text || edge_prose) && q.text_len > 40 && is_edge_tag && viewport_width > 0.0) {
+    let prose_block = !is_edge_tag && is_prose_block(dom, el, tag, has_direct_text);
+    if !((has_direct_text || edge_prose) && q.text_len > 40 && (is_edge_tag || prose_block) && viewport_width > 0.0) {
         return None;
     }
     let in_nav_header = closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
@@ -805,7 +1078,7 @@ fn body_text_edge_span(dom: &dyn Dom, q: &QualityInput) -> Option<(f64, f64)> {
                 (t.left, t.right)
             }
         }
-        None if has_direct_text => (rect.left, rect.right),
+        None if has_direct_text && !prose_block => (rect.left, rect.right),
         None => return None,
     };
     // Text wholly past either side of the viewport meets no edge a reader
@@ -880,7 +1153,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     // 142 characters a line it never rendered (REN-402). What the reader sees
     // is `text_line_rects`, one rect per line box with the fragments of a
     // line merged back together, and the characters divide between the lines
-    // in proportion to the ink each carries — one element's text is one font
+    // in proportion to the ink each carries: one element's text is one font
     // at one size, so the average advance is the same on every line of it.
     //
     // The rects cover the element's whole rendered text, descendants and all,
@@ -901,13 +1174,17 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     // of the next line, so it takes a column of long lines to do the damage;
     // one long line and a short tail is a sentence that wrapped once.
     //
-    // Prose whose words sit wholly in inline children is read the same way:
-    // the rects cover every text node under the element, so the block that
-    // sets the lines is the one measured.
+    // Prose whose words sit wholly in inline children, and prose written
+    // straight into a generic block, is read the same way: the rects cover
+    // every text node under the element, so the block that sets the lines is
+    // the one measured.
     let prose_in_phrasing =
         !has_direct_text && LINE_PROSE_TAGS.contains(&tag) && holds_only_phrasing(dom, el);
+    let prose_block = !QUALITY_TEXT_TAGS.contains(&tag)
+        && (text_len as f64) > line_max
+        && is_prose_block(dom, el, tag, has_direct_text);
     if (has_direct_text || prose_in_phrasing)
-        && QUALITY_TEXT_TAGS.contains(&tag)
+        && (QUALITY_TEXT_TAGS.contains(&tag) || prose_block)
         && rect.width > 0.0
         && (text_len as f64) > line_max
     {
@@ -1083,7 +1360,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 && !css_color_is_transparent(Some(&outline_color_val))
                 && !outline_style_val.is_empty()
                 && outline_style_val != "none";
-            let bg_visible = has_visible_background_boundary(dom, el);
+            let bg_visible = has_visible_background_boundary(dom, el) && !backdrop_layer_matches(dom, el);
             let any_visible = border_visible.iter().any(|b| *b) || outline_visible || bg_visible;
             if any_visible {
                 let len = |e: ElId, k: &str| {
@@ -1162,7 +1439,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 let side_names = ["top", "right", "bottom", "left"];
                 let mut flush_sides: Vec<&str> = Vec::new();
                 for s in 0..4 {
-                    let bg_bounds_side = bg_visible && !(full_bleed_bg_band && (s == 1 || s == 3));
+                    let bg_bounds_side = bg_visible
+                        && !(full_bleed_bg_band && (s == 1 || s == 3))
+                        && !side_meets_same_fill(dom, el, rect, s);
                     let side_bounded = border_visible[s] || outline_visible || bg_bounds_side;
                     if side_bounded
                         && pad[s] <= PAD_THRESHOLD
@@ -1297,7 +1576,8 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             let shown = js::math_round(ratio * 100.0) / 100.0;
             if ratio > 0.0 && shown < 1.3 {
                 let text_rect = dom.direct_text_rect(el).unwrap_or(*rect);
-                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES;
+                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES
+                    && !items_each_fit_one_line(dom, el, font_size);
                 // A bold run of two rendered lines or fewer, or one in a line
                 // clamp, is a title set on a div or span: it gets the heading
                 // exemption. Lines a clipping box cuts off do not render.
@@ -1349,13 +1629,22 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Tiny body text ---
+    // Body text is running prose. A label set in capitals is not, whether
+    // `text-transform` says so or the capitals are typed into the markup
+    // (adant.ai's "ANIMATION · CINEMATIC 3D" card meta), and neither is a
+    // command set in a monospace face with its whitespace kept (stroq.dev's
+    // terminal mock), which is code whatever its class names.
     if has_direct_text && text_len > 20 && font_size < 12.0 {
         let skip_tags = ["sub", "sup", "code", "kbd", "samp", "var", "caption", "figcaption"];
         let in_ui_context = closest_or_none(dom, el, TINY_TEXT_UI_CONTEXT).is_some();
-        let is_uppercase = st("textTransform") == "uppercase";
+        let is_uppercase = st("textTransform") == "uppercase"
+            || typed_caps_label(dom, el, q.line_height_px, true);
+        let is_code_run = crate::checks::text_rules::is_monospace_family(&st("fontFamily"))
+            && st("whiteSpace").starts_with("pre");
         if !skip_tags.contains(&tag)
             && !in_ui_context
             && !is_uppercase
+            && !is_code_run
             && !is_non_rendered_text(dom, el, tag)
         {
             findings.push(RuleHit::new(
@@ -1438,14 +1727,14 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                     // says so outright; capitals typed into the markup do
                     // not, so that reading is held to label size on one
                     // line and running text keeps the rule.
+                    // A link or button label is read at a glance too
+                    // (lpga.or.jp's bold CJK "Instagram" link), held to the
+                    // same size on one line.
+                    let control_label = closest_or_none(dom, el, TRACKED_CONTROL_LABEL).is_some()
+                        && short_one_line_label(dom, el, q.line_height_px);
                     let caps_label = st("textTransform") == "uppercase"
-                        || (text_len <= TRACKED_LABEL_MAX_CHARS
-                            && is_capitalized_run(js::trim(&dom.text_content(el)))
-                            && !text_wraps_to_multiple_lines(
-                                dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
-                                q.line_height_px,
-                            ));
-                    if !caps_label {
+                        || typed_caps_label(dom, el, q.line_height_px, false);
+                    if !caps_label && !control_label {
                         findings.push(RuleHit::new(
                             "wide-tracking",
                             format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
@@ -1820,7 +2109,10 @@ pub fn check_page_overflow_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
     }
     // (element, side, how far its text reaches past that side)
     let mut past: Vec<(ElId, Side, f64)> = Vec::new();
-    for el in dom.query_all(None, "p, li").unwrap_or_default() {
+    for el in dom
+        .query_all(None, "p, li, div, section, article, aside, main")
+        .unwrap_or_default()
+    {
         if !super::driver::element_is_scanned(dom, el) {
             continue;
         }
@@ -2218,14 +2510,86 @@ mod tests {
                 ("paddingRight", "12px"),
             ],
         );
-        // The text lands 2px under the top edge, which is what the reader sees
-        // and what the declared padding happens to say here.
-        d.set_text_lines(p, &[(52.0, 102.0, 276.0, 19.0)]);
+        // The glyphs sit 2px under the top edge, as the padding says.
+        d.set_text_rect(p, 52.0, 102.0, 200.0, 40.0);
         let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(
             hits[0].snippet,
             "2px of space above and below the text (need ≥4.8px for 16px text)"
+        );
+    }
+
+
+    /// REN-403, the wrapper half of the same rule. Crewline's framed table:
+    /// the `<table>` fills the frame edge to edge, and every cell insets its
+    /// own text by the padding the stylesheet gives it. Reading the cell's
+    /// border box called all four sides flush.
+    #[test]
+    fn flush_reads_the_text_not_the_cell_that_holds_it() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let frame = d.add(Some(body), "div");
+        d.set_attr(frame, "class", "table-frame");
+        d.set_rect(frame, 0.0, 0.0, 860.0, 300.0);
+        d.set_styles(
+            frame,
+            &[
+                ("position", "static"),
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(220, 220, 220)"),
+                ("borderRightColor", "rgb(220, 220, 220)"),
+                ("borderBottomColor", "rgb(220, 220, 220)"),
+                ("borderLeftColor", "rgb(220, 220, 220)"),
+                ("outlineWidth", "0px"),
+                ("backgroundColor", "rgb(250, 250, 250)"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "15px"),
+            ],
+        );
+        let table = d.add(Some(frame), "table");
+        d.set_rect(table, 0.0, 0.0, 860.0, 300.0);
+        for (i, (x, y, w)) in [(0.0, 0.0, 430.0), (430.0, 0.0, 430.0), (0.0, 260.0, 430.0)]
+            .into_iter()
+            .enumerate()
+        {
+            let cell = d.add(Some(table), "td");
+            d.add_text(cell, "Wednesday afternoon");
+            d.set_rect(cell, x, y, w, 20.0);
+            // Cell padding: 10px down, 16px across, which is where the text is.
+            d.set_text_lines(cell, &[(x + 16.0, y + 10.0, w - 32.0, 17.0)]);
+            let _ = i;
+        }
+        assert_eq!(check_element_quality_dom(&d, frame, &BrowserConfig::default()), vec![]);
+
+        // A cell that really does put its text on the frame line is charged.
+        let tight = d.add(Some(table), "td");
+        d.add_text(tight, "Wednesday afternoon");
+        d.set_rect(tight, 0.0, 140.0, 860.0, 20.0);
+        d.set_text_lines(tight, &[(1.0, 140.0, 858.0, 17.0)]);
+        let hits = check_element_quality_dom(&d, frame, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"table-frame\": children flush against border+bg on right/left (no inset)"
+        );
+
+        // The same frame at 390px, where the table keeps its min-width and the
+        // frame hides what does not fit: the right side is clipped, not snug,
+        // and that is `clipped-overflow-container`'s business (REN-403).
+        d.set_rect(table, 0.0, 0.0, 1400.0, 300.0);
+        let hits = check_element_quality_dom(&d, frame, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"table-frame\": children flush against border+bg on left (no inset)"
         );
     }
 
@@ -2635,6 +2999,71 @@ mod tests {
         );
     }
 
+    /// observations-28 row 13: sides a reader sees no edge on. A band that
+    /// runs on into a sibling of the same fill (cencora.com), a fill laid on
+    /// a positioned layer of the same colour (hp.com), and a line a clipping
+    /// box cuts (a table scrolled sideways, a title an ellipsis ends) do not
+    /// crowd a boundary.
+    #[test]
+    fn cramped_padding_reads_the_edges_a_reader_sees() {
+        let band_page = |layer: bool| -> (FakeDom, ElId, ElId, ElId) {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+            let host = d.add(Some(body), "div");
+            d.set_rect(host, 0.0, 100.0, 390.0, 200.0);
+            if layer {
+                let l = d.add(Some(host), "div");
+                d.set_styles(l, &[("position", "absolute"), ("backgroundColor", "rgb(245, 245, 245)")]);
+                d.set_rect(l, 0.0, 100.0, 390.0, 200.0);
+            }
+            let wrap = d.add(Some(host), "div");
+            d.set_rect(wrap, 16.0, 100.0, 358.0, 200.0);
+            let band = d.add(Some(wrap), "div");
+            d.set_attr(band, "class", "band");
+            d.set_rect(band, 16.0, 100.0, 358.0, 48.0);
+            d.set_styles(band, &[("display", "block"), ("position", "static"), ("backgroundColor", "rgb(245, 245, 245)")]);
+            let copy = text_el(&mut d, band, "p", "Copy that runs to the bottom edge", "14px");
+            d.set_styles(copy, &[("paddingTop", "12px"), ("paddingLeft", "16px"), ("paddingRight", "16px")]);
+            d.set_rect(copy, 16.0, 100.0, 358.0, 48.0);
+            d.set_text_rect(copy, 32.0, 127.0, 300.0, 20.0);
+            (d, wrap, band, copy)
+        };
+        let bottom = vec!["<div> \"band\": children flush against bg on bottom (no inset)"];
+        let (mut d, wrap, band, _) = band_page(false);
+        assert_eq!(cramped(&d, band), bottom);
+        // The next band, abutting, is the same grey.
+        let next = d.add(Some(wrap), "div");
+        d.set_rect(next, 16.0, 148.0, 358.0, 40.0);
+        d.set_style(next, "backgroundColor", "rgb(245, 245, 245)");
+        assert!(cramped(&d, band).is_empty(), "same fill below");
+        d.set_style(next, "backgroundColor", "rgb(224, 231, 255)");
+        assert_eq!(cramped(&d, band), bottom, "another fill below");
+        // The grey around the band is a positioned layer under the content.
+        let (d, _, band, _) = band_page(true);
+        assert!(cramped(&d, band).is_empty(), "same fill on a layer");
+
+        // A line cut by a box that clips x (an ellipsis inside the band's
+        // inset) reaches no side of the band.
+        let (mut d, _, band, copy) = band_page(false);
+        d.set_styles(copy, &[("paddingBottom", "12px"), ("paddingRight", "0px")]);
+        d.set_text_rect(copy, 32.0, 112.0, 300.0, 20.0);
+        let name = d.add(Some(copy), "span");
+        d.add_text(name, "A post title an ellipsis ends inside the inset");
+        d.set_styles(name, &[("display", "block"), ("overflowX", "hidden"), ("position", "static")]);
+        d.set_rect(name, 32.0, 112.0, 326.0, 20.0);
+        d.el_mut(name).client_width = 326.0;
+        let run = d.add(Some(name), "span");
+        d.add_text(run, "A post title an ellipsis ends inside the inset");
+        d.set_styles(run, &[("display", "inline"), ("position", "static")]);
+        d.set_rect(run, 32.0, 112.0, 380.0, 20.0);
+        d.set_text_rect(run, 32.0, 112.0, 380.0, 20.0);
+        assert!(cramped(&d, band).is_empty(), "cut by the ellipsis box: {:?}", cramped(&d, band));
+        // Unclipped, the run reaches past the band's right side.
+        d.set_style(name, "overflowX", "visible");
+        assert_eq!(cramped(&d, band), vec!["<div> \"band\": children flush against bg on right (no inset)"]);
+    }
+
     #[test]
     fn glyph_band_centres_the_em_box_on_each_line() {
         let mut d = FakeDom::new();
@@ -2721,78 +3150,6 @@ mod tests {
         assert_eq!(
             hits[0].snippet,
             "<div> \"story-body\": children flush against border-bottom on bottom (no inset)"
-        );
-    }
-
-    /// REN-403, the wrapper half of the same rule. Crewline's framed table:
-    /// the `<table>` fills the frame edge to edge, and every cell insets its
-    /// own text by the padding the stylesheet gives it. Reading the cell's
-    /// border box called all four sides flush.
-    #[test]
-    fn flush_reads_the_text_not_the_cell_that_holds_it() {
-        let mut d = FakeDom::new();
-        let (_h, body) = d.with_page();
-        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
-        let frame = d.add(Some(body), "div");
-        d.set_attr(frame, "class", "table-frame");
-        d.set_rect(frame, 0.0, 0.0, 860.0, 300.0);
-        d.set_styles(
-            frame,
-            &[
-                ("position", "static"),
-                ("borderTopWidth", "1px"),
-                ("borderRightWidth", "1px"),
-                ("borderBottomWidth", "1px"),
-                ("borderLeftWidth", "1px"),
-                ("borderTopColor", "rgb(220, 220, 220)"),
-                ("borderRightColor", "rgb(220, 220, 220)"),
-                ("borderBottomColor", "rgb(220, 220, 220)"),
-                ("borderLeftColor", "rgb(220, 220, 220)"),
-                ("outlineWidth", "0px"),
-                ("backgroundColor", "rgb(250, 250, 250)"),
-                ("paddingTop", "0px"),
-                ("paddingRight", "0px"),
-                ("paddingBottom", "0px"),
-                ("paddingLeft", "0px"),
-                ("fontSize", "15px"),
-            ],
-        );
-        let table = d.add(Some(frame), "table");
-        d.set_rect(table, 0.0, 0.0, 860.0, 300.0);
-        for (i, (x, y, w)) in [(0.0, 0.0, 430.0), (430.0, 0.0, 430.0), (0.0, 260.0, 430.0)]
-            .into_iter()
-            .enumerate()
-        {
-            let cell = d.add(Some(table), "td");
-            d.add_text(cell, "Wednesday afternoon");
-            d.set_rect(cell, x, y, w, 20.0);
-            // Cell padding: 10px down, 16px across, which is where the text is.
-            d.set_text_lines(cell, &[(x + 16.0, y + 10.0, w - 32.0, 17.0)]);
-            let _ = i;
-        }
-        assert_eq!(check_element_quality_dom(&d, frame, &BrowserConfig::default()), vec![]);
-
-        // A cell that really does put its text on the frame line is charged.
-        let tight = d.add(Some(table), "td");
-        d.add_text(tight, "Wednesday afternoon");
-        d.set_rect(tight, 0.0, 140.0, 860.0, 20.0);
-        d.set_text_lines(tight, &[(1.0, 140.0, 858.0, 17.0)]);
-        let hits = check_element_quality_dom(&d, frame, &BrowserConfig::default());
-        assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(
-            hits[0].snippet,
-            "<div> \"table-frame\": children flush against border+bg on right/left (no inset)"
-        );
-
-        // The same frame at 390px, where the table keeps its min-width and the
-        // frame hides what does not fit: the right side is clipped, not snug,
-        // and that is `clipped-overflow-container`'s business (REN-403).
-        d.set_rect(table, 0.0, 0.0, 1400.0, 300.0);
-        let hits = check_element_quality_dom(&d, frame, &BrowserConfig::default());
-        assert_eq!(hits.len(), 1, "{hits:?}");
-        assert_eq!(
-            hits[0].snippet,
-            "<div> \"table-frame\": children flush against border+bg on left (no inset)"
         );
     }
 
@@ -2952,9 +3309,9 @@ mod tests {
             .collect()
     }
 
-    /// observations-20 row 8: the estimate read the box, so a one-line note
-    /// in a wide box, a centred footer line and a block that never fills its
-    /// column reported. Where the text is measured, the text decides.
+    /// observations-20 row 8: a one-line note in a wide box, a centred footer
+    /// line and a block that never fills its column reported while the
+    /// estimate read the box. The rendered lines decide.
     #[test]
     fn line_length_measures_the_rendered_text() {
         let long = "word ".repeat(40);
@@ -2994,8 +3351,9 @@ mod tests {
         assert!(snippets(&d, broken, "line-length").is_empty(), "one long line and a tail");
     }
 
-    /// observations-20 row 29: a full-width CJK glyph is an em wide, so the
-    /// half-em estimate doubled so-net.ne.jp's count.
+    /// observations-20 row 29: a full-width CJK glyph is an em wide. The
+    /// characters divide between the rendered lines, whatever their advance,
+    /// so a CJK column is charged at its own count.
     #[test]
     fn line_length_counts_cjk_glyphs_at_an_em() {
         let copy = "戸建/マンションは、NTTから送付される「開通のご案内」に記載の「ご利用サービス名」など、回線事業者からの案内をご確認のうえタイプに合ったコースをお選びください。".repeat(2);
@@ -3607,6 +3965,58 @@ mod tests {
         // A block strut that cannot be resolved leaves the run's own value.
         d.set_style(block, "lineHeight", "normal");
         assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.00x (need >=1.3)"]);
+    }
+
+    /// observations-28 row 25: outreign.io's hero meta row is a flex
+    /// container whose three short text runs wrap as whole items onto two
+    /// rows. The union of their rects is two rows tall, but no run has a
+    /// second line box. A run long enough to wrap in the box is measured as
+    /// before, and so is a single run.
+    #[test]
+    fn tight_leading_reads_flex_text_runs_as_items() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let row = d.add(Some(body), "p");
+        d.add_text(row, "100 free lead searches");
+        let sep = d.add(Some(row), "span");
+        d.set_rect(sep, 182.0, 674.0, 1.0, 12.0);
+        d.add_text(row, "14-day trial on paid plans");
+        d.add(Some(row), "span");
+        d.add_text(row, "Built with you on a call");
+        d.set_styles(
+            row,
+            &[
+                ("display", "flex"),
+                ("flexWrap", "wrap"),
+                ("fontSize", "12px"),
+                ("lineHeight", "15px"),
+                ("position", "static"),
+            ],
+        );
+        d.set_rect(row, 27.0, 673.0, 336.0, 34.0);
+        d.set_text_rect(row, 43.3, 673.0, 292.4, 34.0);
+        d.el_mut(row).client_width = 336.0;
+        assert!(snippets(&d, row, "tight-leading").is_empty(), "short runs, whole items");
+        let flag = vec!["line-height 1.25x (need >=1.3)"];
+        // Under `nowrap` the items shrink into one row and each run wraps in
+        // its own item; a row whose wrapping was not recorded, and a grid
+        // whose cells are narrower than the box, are measured as before.
+        for wrap in ["nowrap", ""] {
+            d.set_style(row, "flexWrap", wrap);
+            assert_eq!(snippets(&d, row, "tight-leading"), flag, "flex-wrap {wrap:?}");
+        }
+        d.set_style(row, "flexWrap", "wrap-reverse");
+        assert!(snippets(&d, row, "tight-leading").is_empty(), "wrap-reverse moves items whole");
+        d.set_style(row, "display", "grid");
+        assert_eq!(snippets(&d, row, "tight-leading"), flag, "grid");
+        // A block that sets the same text as one run wraps its lines.
+        d.set_style(row, "display", "block");
+        assert_eq!(snippets(&d, row, "tight-leading"), flag);
+        // A run wider than the box wraps inside its own item.
+        d.set_style(row, "display", "flex");
+        d.set_style(row, "flexWrap", "wrap");
+        d.el_mut(row).client_width = 150.0;
+        assert_eq!(snippets(&d, row, "tight-leading"), flag);
     }
 
     /// walkthroughs-20 note 13: tchibo.de sets its teaser headlines as

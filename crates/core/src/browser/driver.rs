@@ -1136,10 +1136,45 @@ fn drop_covered_class_forms(findings: &mut Vec<BrowserFinding>) {
         })
         .map(|f| f.type_.clone())
         .collect();
-    if computed.is_empty() {
+    if !computed.is_empty() {
+        findings.retain(|f| !(f.detail.ends_with(CLASS_FORM_SUFFIX) && computed.contains(&f.type_)));
+    }
+    drop_covered_palette_forms(findings);
+}
+
+/// ai-color-palette reports one finding per element and concern. Its class
+/// forms (`Purple/violet gradient (Tailwind)`, `text-purple-600 on heading`)
+/// name what its computed forms read off the same element, so a computed
+/// form speaks for them. And a gradient clipped to the text is what
+/// gradient-text reports: the palette's gradient forms on that element are a
+/// second report of one fill (observations-28, round 7 branch 5).
+fn drop_covered_palette_forms(findings: &mut Vec<BrowserFinding>) {
+    let palette = |f: &BrowserFinding| f.type_ == "ai-color-palette";
+    let is_gradient_form = |f: &BrowserFinding| {
+        palette(f) && (f.detail.ends_with(" gradient background") || f.detail == "Purple/violet gradient (Tailwind)")
+    };
+    let is_class_text_form = |f: &BrowserFinding| {
+        palette(f) && f.detail.starts_with("text-") && f.detail.ends_with(" on heading")
+    };
+    let computed_gradient = findings
+        .iter()
+        .any(|f| palette(f) && f.detail.ends_with(" gradient background"));
+    let computed_text = findings
+        .iter()
+        .any(|f| palette(f) && f.detail.starts_with("Purple/violet text (") && f.detail.ends_with(" on heading"));
+    let clipped_gradient = findings.iter().any(|f| f.type_ == "gradient-text");
+    if !(computed_gradient || computed_text || clipped_gradient) {
         return;
     }
-    findings.retain(|f| !(f.detail.ends_with(CLASS_FORM_SUFFIX) && computed.contains(&f.type_)));
+    findings.retain(|f| {
+        if clipped_gradient && is_gradient_form(f) {
+            return false;
+        }
+        if computed_gradient && palette(f) && f.detail == "Purple/violet gradient (Tailwind)" {
+            return false;
+        }
+        !(computed_text && is_class_text_form(f))
+    });
 }
 
 /// Whether the page's painted root background is dark: the first of `html`
@@ -1214,7 +1249,9 @@ fn reconcile_page_level_forms(
         let stands = match item.finding.type_.as_str() {
             // Both page forms describe one treatment, text clipped to a
             // gradient, and the element forms read it off every element.
-            "gradient-text" => element_findings("gradient-text").is_empty(),
+            "gradient-text" => {
+                element_findings("gradient-text").is_empty() && !gradient_declaration_silent(dom, &item)
+            }
             "bounce-easing" => {
                 let page = bounce_declarations(&item.finding.detail);
                 !element_findings("bounce-easing").iter().any(|f| {
@@ -1238,6 +1275,48 @@ fn reconcile_page_level_forms(
         }
     }
     out
+}
+
+/// Whether every element on the page that computes a gradient clipped to its
+/// text was measured silent by the element form: not painted at capture, or
+/// painting no ramp on its glyphs (a watermark, one colour over the text).
+/// Then the stylesheet's declaration shows nothing either. With no such
+/// element (the clip sits on a pseudo-element), or one the element form did
+/// not read (a wrapper of per-word spans), the text form stands as before.
+fn clipped_gradients_all_silent(dom: &dyn Dom) -> bool {
+    let clipped: Vec<ElId> = dom
+        .query_all(None, "*")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&el| computes_clipped_gradient(dom, el))
+        .collect();
+    !clipped.is_empty() && clipped.into_iter().all(|el| clipped_gradient_silent(dom, el))
+}
+
+fn computes_clipped_gradient(dom: &dyn Dom, el: ElId) -> bool {
+    let clip = dom.style(el, "webkitBackgroundClip");
+    let clip = if clip.is_empty() { dom.style(el, "backgroundClip") } else { clip };
+    clip == "text" && dom.style(el, "backgroundImage").contains("gradient")
+}
+
+fn clipped_gradient_silent(dom: &dyn Dom, el: ElId) -> bool {
+    super::painted::unpainted_for(dom, el, super::painted::PaintGate::Text).is_some()
+        || !super::element_checks::gradient_text_paints_a_ramp(dom, el)
+}
+
+/// Whether the declaration a stylesheet gradient-text form names is silent:
+/// every element its selector resolves to computes the clipped gradient and
+/// was measured silent. A selector whose elements do not compute it (the
+/// hosts of a pseudo-element, which carries the gradient itself) is not
+/// silent, whatever other elements on the page do. A form with no resolved
+/// selector falls back to [`clipped_gradients_all_silent`].
+fn gradient_declaration_silent(dom: &dyn Dom, item: &PatternItem) -> bool {
+    match item.matches.as_deref() {
+        Some(matches) if !matches.is_empty() => matches
+            .iter()
+            .all(|&el| computes_clipped_gradient(dom, el) && clipped_gradient_silent(dom, el)),
+        _ => clipped_gradients_all_silent(dom),
+    }
 }
 
 /// One bounce declaration as a finding names it.
@@ -1328,6 +1407,19 @@ fn dark_glow_page_form_stands(
     }
     let claims_dark = item.finding.detail.ends_with("on dark page");
     let (Some(selector), Some(hosts)) = (item.selector.as_deref(), item.matches.as_ref()) else {
+        // No rule to name (an inline `style` attribute, a keyframe step):
+        // the declaration reaches the page through the elements whose
+        // computed shadow carries it, and the element form read each of
+        // those, its size, opacity, surface and paint at capture, and
+        // reported it or measured no glow (liquid-log-glow.lovable.app's
+        // progress fill at width 0, jyes.com.tw's loading toast). Only a
+        // declaration no element computes is left to the text.
+        let casters = glow_declaration(&item.finding.detail)
+            .map(|(prop, hex)| elements_casting_glow(dom, &prop, &hex))
+            .unwrap_or_default();
+        if !casters.is_empty() {
+            return false;
+        }
         if !claims_dark {
             return true;
         }
@@ -2107,16 +2199,24 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         findings.extend(hits(ec::check_element_motion_dom(dom, el)));
         findings.extend(hits(ec::check_element_glow_dom(dom, el)));
         let palette = ec::check_element_ai_palette_dom(dom, el, design_system.as_ref());
+        // The palette is a rule about what is painted: an element that is not
+        // painted at capture neither reports nor votes. Its gradient hits go
+        // through `retain_painted` below with the rest; the held ink and the
+        // tells are gated here by the same predicate.
+        let palette_painted = (!palette.tells.is_empty() || palette.ink.is_some())
+            && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none();
         // An ignored subtree gets no vote in the page-wide reading. A cyan
         // tell inside `data-impeccable-ignore="ai-color-palette"` would
         // otherwise open the two-hue gate and charge neon ink somewhere else
         // on the page that nobody waived: ignored content changing the
         // result for content that was not ignored.
-        if !scoped_ignore_active(dom, el, "ai-color-palette") {
+        if palette_painted && !scoped_ignore_active(dom, el, "ai-color-palette") {
             palette_tells.extend(palette.tells.iter().copied());
         }
-        if let Some(ink) = palette.ink {
-            palette_ink.push((el, BrowserFinding::new(ink.id, ink.snippet)));
+        if palette_painted {
+            if let Some(ink) = palette.ink {
+                palette_ink.push((el, BrowserFinding::new(ink.id, ink.snippet)));
+            }
         }
         findings.extend(hits(palette.hits));
         findings.extend(hits(ec::check_element_radial_spotlight_dom_with(
@@ -3500,6 +3600,36 @@ mod page_level_form_tests {
         let logo = d.add(Some(body), "div");
         d.add_selector(logo, ".logo");
         d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        assert_eq!(
+            details(&scan(&d), "gradient-text"),
+            vec![(body, "background-clip: text + gradient".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_silent_element_elsewhere_does_not_silence_a_pseudo_elements_gradient_text() {
+        // The logo's ::after draws gradient text; an unrelated `.ghost`
+        // computes a clipped gradient but is not painted, so it is silent.
+        let (mut d, body) = page(
+            ".logo::after{content:'AI';background:linear-gradient(90deg,#f0f,#0ff);-webkit-background-clip:text;color:transparent}\
+             .ghost{background-image:linear-gradient(90deg,#000,#000);-webkit-background-clip:text;color:transparent}",
+        );
+        let logo = d.add(Some(body), "div");
+        d.add_selector(logo, ".logo");
+        d.set_rect(logo, 0.0, 0.0, 120.0, 40.0);
+        let ghost = d.add(Some(body), "p");
+        d.add_selector(ghost, ".ghost");
+        d.add_text(ghost, "Watermark");
+        d.set_rect(ghost, 0.0, 100.0, 400.0, 40.0);
+        d.set_styles(
+            ghost,
+            &[
+                ("backgroundImage", "linear-gradient(90deg, rgb(0, 0, 0), rgb(0, 0, 0))"),
+                ("webkitBackgroundClip", "text"),
+                ("backgroundClip", "text"),
+                ("opacity", "0"),
+            ],
+        );
         assert_eq!(
             details(&scan(&d), "gradient-text"),
             vec![(body, "background-clip: text + gradient".to_string())]

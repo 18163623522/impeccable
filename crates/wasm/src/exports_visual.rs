@@ -109,6 +109,14 @@ pub fn vc_raster_finish(node: u32, sample_json: &str) -> String {
     out(&with_dom(|dom| vc::raster_finish(dom, node, parse(sample_json))))
 }
 
+/// A picture's sample finished for the stack walk: faded by its own box's
+/// opacity, or ending the walk where it could not be read
+/// (`visual::media_sample`). `node` is the picture, `el` the text.
+#[wasm_bindgen]
+pub fn vc_media_sample(node: u32, el: u32, sample_json: &str) -> String {
+    out(&with_dom(|dom| vc::media_sample(dom, node, el, parse(sample_json))))
+}
+
 /// `sampleDrawablePixel` canvas sizing: `{ width, height, scaleX, scaleY }`.
 #[wasm_bindgen]
 pub fn vc_raster_plan(intrinsic_w: f64, intrinsic_h: f64) -> String {

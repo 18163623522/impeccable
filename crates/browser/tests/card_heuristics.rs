@@ -213,7 +213,7 @@ fn gray_on_color_scales_its_bar_with_luminance() {
         &findings,
         "gray-on-color",
         &["#flag-gray-on-navy", "#flag-gray-on-teal", "#flag-gray-on-dark-navy", "#flag-tailwind-classes"],
-        &["#pass-gray-on-near-black-navy", "#pass-hover-variant"],
+        &["#pass-gray-on-near-black-navy", "#pass-off-white-on-navy", "#pass-off-white-on-teal", "#pass-hover-variant"],
     );
 }
 
@@ -234,9 +234,12 @@ fn undersized_ui_text_skips_links_inside_markers() {
 fn page_level_misreads_stay_silent() {
     for (fixture, rule) in [
         ("flat-type-hierarchy-h1-tie.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-dropped-role.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-h1-label.html", "flat-type-hierarchy"),
         ("oversized-h1-rendered.html", "oversized-h1"),
         ("first-viewport-column-overflow-outline.html", "first-viewport-column-overflow"),
         ("first-viewport-column-overflow-tabs.html", "first-viewport-column-overflow"),
+        ("first-viewport-column-overflow-clipped.html", "first-viewport-column-overflow"),
         ("em-dash-pricing-matrix.html", "em-dash-overuse"),
     ] {
         let Some(findings) = scan(fixture) else {
@@ -248,6 +251,7 @@ fn page_level_misreads_stay_silent() {
     // The twins still report.
     for (fixture, rule) in [
         ("flat-type-hierarchy.html", "flat-type-hierarchy"),
+        ("flat-type-hierarchy-dropped-flat.html", "flat-type-hierarchy"),
         ("oversized-h1-browser.html", "oversized-h1"),
         ("first-viewport-column-overflow.html", "first-viewport-column-overflow"),
         ("em-dash-prose-with-matrix.html", "em-dash-overuse"),
@@ -309,8 +313,10 @@ fn label_collectors_climb_and_scale() {
             "A Single Kicker Still Flags",
             "Relative Kicker Ceiling",
             "Eyebrow In A Framer Wrapper",
+            "Section Title In A Panel",
+            "Display Title In A Band",
         ],
-        &["Label Too Large For Its Heading", "Untracked Caps Label"],
+        &["Label Too Large For Its Heading", "Untracked Caps Label", "Press Card Source"],
     );
 
     let Some(findings) = scan("numbered-section-labels.html") else {

@@ -21,19 +21,19 @@
 // lists agree).
 const __SNAP_STYLE_PROPS = [
   "animationIterationCount", "animationName", "animationTimingFunction",
-  "aspectRatio", "backdropFilter", "background", "backgroundClip",
+  "aspectRatio", "backdropFilter", "backfaceVisibility", "background", "backgroundClip",
   "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundSize",
   "blockSize", "borderBottomColor", "borderBottomWidth", "borderBottomStyle",
   "borderLeftColor", "borderLeftWidth", "borderLeftStyle", "borderRadius",
   "borderRightColor", "borderRightWidth", "borderRightStyle",
   "borderTopColor", "borderTopWidth", "borderTopStyle", "bottom", "boxShadow",
   "clip", "clip-path", "clipPath", "color", "colorScheme", "contain", "content",
-  "contentVisibility", "cssFloat", "direction", "display", "filter", "float",
+  "contentVisibility", "cssFloat", "direction", "display", "filter", "flexWrap", "float",
   "fontFamily", "fontSize",
   "fontStyle", "fontVariant", "fontVariantCaps", "fontWeight", "height",
   "hyphens", "inlineSize", "inset", "insetBlock", "insetBlockEnd",
   "insetBlockStart", "insetInline", "insetInlineEnd", "insetInlineStart",
-  "left", "letterSpacing", "lineHeight", "marginBottom", "marginLeft",
+  "isolation", "left", "letterSpacing", "lineHeight", "marginBottom", "marginLeft",
   "marginRight", "marginTop", "maskImage", "maxHeight", "maxWidth", "minHeight", "minWidth",
   "mixBlendMode", "objectFit", "objectPosition", "opacity", "outline",
   "outlineColor", "outlineOffset", "outlineStyle", "outlineWidth", "overflow",
@@ -45,14 +45,16 @@ const __SNAP_STYLE_PROPS = [
   "transitionProperty", "transitionTimingFunction", "translate", "unicodeBidi",
   "verticalAlign",
   "visibility", "webkitBackgroundClip", "webkitClipPath", "webkitHyphens",
-  "webkitLineClamp", "webkitMaskImage", "webkitTextFillColor", "whiteSpace", "width", "willChange", "wordBreak",
+  "webkitLineClamp", "webkitMaskImage", "webkitTextFillColor",
+  "webkitTextStrokeColor", "webkitTextStrokeWidth", "whiteSpace", "width", "willChange", "wordBreak",
   "zIndex",
 ];
 // `::before` / `::after` properties, recorded where `content` is set.
 const __SNAP_PSEUDO_PROPS = [
   "content", "position", "opacity", "display", "width", "height", "top",
   "right", "bottom", "left", "backgroundColor", "backgroundImage",
-  "background", "borderRadius", "transform", "visibility",
+  "background", "borderRadius", "transform", "visibility", "zIndex",
+  "translate",
 ];
 // Pseudo-class states recorded per element (`el.matches(':name')`), so the
 // snapshot selector engine can answer `:checked` / `:disabled` / ... the way

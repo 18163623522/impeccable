@@ -215,6 +215,12 @@
       font-size: 24px;
       line-height: 30px;
     }
+    /* Round 7: a kicker inside a card drawn by its computed box, not its tag */
+    .press-panel { padding: 24px; background: #14161b; border-radius: 16px; }
+    .press-card { min-height: 180px; padding: 24px; background: #ffffff; border-radius: 16px; color: #14161b; }
+    .press-card h3 { font-size: 20px; line-height: 25px; font-weight: 500; }
+    .side-panel { min-height: 300px; padding: 24px; background: #ffffff; border-radius: 16px; }
+    .side-panel h3 { font-size: 40px; line-height: 44px; }
   </style>
 </head>
 <body>
@@ -274,6 +280,22 @@
         <div class="eyebrow-wrap"><p class="framer-eyebrow">Hear from our client</p></div>
         <div class="heading-wrap"><h2>"Eyebrow In A Framer Wrapper"</h2></div>
         <p>The label's type lives on a p inside a bare div, and the heading leads its own wrapper.</p>
+      </section>
+
+      <section class="case">
+        <div class="side-panel">
+          <span class="kicker">Practical agency support</span>
+          <h2>"Section Title In A Panel"</h2>
+          <p>A section's own h2 in a painted side panel is no card title, and its eyebrow still flags.</p>
+        </div>
+      </section>
+
+      <section class="case">
+        <div class="side-panel">
+          <span class="kicker">Beyond plans</span>
+          <h3>"Display Title In A Band"</h3>
+          <p>An h3 set at display size across a feature band is a section title too, and its eyebrow still flags.</p>
+        </div>
       </section>
     </section>
 
@@ -401,6 +423,18 @@
           <p>Step indicators in ordered flows are sequence markers.</p>
         </li>
       </ol>
+
+      <section class="case">
+        <!-- Browser engine only: the card is read from its computed box. The
+             static engine, which has no layout, still reports it. -->
+        <div class="press-panel">
+          <div class="press-card">
+            <span class="kicker">The Future Media</span>
+            <h3>"Press Card Source"</h3>
+            <p>A white press card names its source over the headline; the label is the card's metadata, as it is in an article card.</p>
+          </div>
+        </div>
+      </section>
 
       <div class="hidden-mockup" aria-hidden="true">
         <div class="mockup-hero">

@@ -533,7 +533,7 @@ fn sample_background_impl(
     let mut pending: Vec<Value> = Vec::new();
     for StackNode { el: node, kind } in nodes {
         let sample = match kind.as_str() {
-            "img" => sample_image_element(page, dom, node, px, py)?,
+            "img" => visual::media_sample(dom, node, el, sample_image_element(page, dom, node, px, py)?),
             "raster" => {
                 let intrinsic = intrinsic_raster(dom, node);
                 match visual::raster_source_point(dom, node, intrinsic.0, intrinsic.1, px, py) {
@@ -541,7 +541,7 @@ fn sample_background_impl(
                         let node_ref = json!(node);
                         let pixel =
                             sample_drawable_pixel(page, &node_ref, intrinsic, source.0, source.1)?;
-                        visual::raster_finish(dom, node, pixel)
+                        visual::media_sample(dom, node, el, visual::raster_finish(dom, node, pixel))
                     }
                     // Outside the drawable: nothing sampled, nothing to say.
                     None => continue,
@@ -574,9 +574,10 @@ pub fn analyze_visual_contrast(
     page: &mut Page<'_>,
     base: &SnapshotDom,
     max_candidates: f64,
+    max_routed: f64,
     scroll_offscreen: bool,
 ) -> CdpResult<Vec<Value>> {
-    let options = json!({ "maxCandidates": max_candidates });
+    let options = json!({ "maxCandidates": max_candidates, "maxRoutedCandidates": max_routed });
     let candidates = resolve_needs(base, page, |d| {
         visual::collect_visual_contrast_candidates(d, &options)
     })?;

@@ -8,7 +8,9 @@ use super::background::{
     read_own_background_color, resolve_background_info, resolve_text_gradient_stops, resolve_text_surface,
     surface_label, BackgroundInfo, TextSurface,
 };
-use crate::checks::gradient_geometry::{self as geo, Box2};
+use crate::checks::gradient_geometry::{
+    self as geo, gradient_paint_under_text, BackgroundLayers, Box2, PaintBox, UnderText,
+};
 use super::dom::{
     class_attr, class_attr_or_prop, closest_or_none, direct_text, has_direct_text_longer_than,
     matches_or_false, pf0, safe_id, style_px, tag_lower, Dom, ElId, ElStyle, Rect,
@@ -138,7 +140,7 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     } else {
         None
     };
-    check_borders(
+    let mut hits = check_borders(
         &tag,
         &Sides {
             top: widths[0],
@@ -159,7 +161,14 @@ pub fn check_element_borders_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             tab_context: is_tab_context_element(dom, el),
             corners,
         },
-    )
+    );
+    // A side-tab is a card of text with a coloured edge; a card a visitor
+    // cannot see (in a tab pane at opacity 0, a slide parked off its track)
+    // shows no edge. Asked only once the border path has reported.
+    if hits.iter().any(|h| h.id == "side-tab") && crate::browser::painted::unpainted_text_box(dom, el).is_some() {
+        hits.retain(|h| h.id != "side-tab");
+    }
+    hits
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────
@@ -609,11 +618,22 @@ fn inherits_scored_text_color(dom: &dyn Dom, el: ElId, text_color: Option<Rgba>)
 /// off-screen slides and an off-canvas drawer are parked beside the page,
 /// and the copy of the same label a visitor can actually read is scored
 /// where it stands.
+///
+/// The page's width is the document's, not the window's: a page laid out
+/// wider than a phone (inven.co.kr's 1,090px mobile page at 390px) scrolls
+/// sideways, and its right column is read where the visitor scrolls to it.
+/// The root's scroll width already leaves out what the page clips.
 fn overlaps_page_width(dom: &dyn Dom, rect: &Rect) -> bool {
-    let width = dom.inner_width();
-    if !num_truthy(width) {
+    let window = dom.inner_width();
+    if !num_truthy(window) {
         return true;
     }
+    let document = dom
+        .document_element()
+        .map(|root| dom.scroll_width(root))
+        .filter(|w| w.is_finite())
+        .unwrap_or(0.0);
+    let width = math_max(window, document);
     rect.left < width && rect.left + rect.width > 0.0
 }
 
@@ -664,14 +684,13 @@ fn text_clipped_by_an_ancestor(dom: &dyn Dom, el: ElId) -> bool {
 /// actually behind it. Against a picture, or a surface the walk never read
 /// and did not name, the verdict is a guess, and a wrong verdict on a real
 /// element costs more than a missed one, so this path stays quiet there
-/// (`resolved_surface_is_under_text`).
+/// (`layer_matches_surface`), unless that paint fails the ink whatever it
+/// shows (`certain`: a pale link over a faint grain tile).
 ///
-/// Those elements are not handed to the visual-contrast pass as candidates
-/// either. Its collector takes the first twelve it finds in document order,
-/// and a page's links and spans outnumber its headings by an order of
-/// magnitude, so admitting them would spend a pixel-reading budget on the
-/// smallest text on the page. Widening that pass is its own change, with
-/// its own measurement.
+/// The URL engine's visual-contrast pass takes those elements in a budget
+/// of their own (`visual::routed_reason`, after the first budget's twelve
+/// candidates, which stay what they were), so the rendered pixels score a
+/// link over a photo the walk cannot read.
 ///
 /// The third is an element not painted at capture (`painted.rs`): a link in
 /// a collapsed submenu, an off-screen carousel slide. The driver's paint gate
@@ -683,9 +702,11 @@ fn safe_tag_text_hit_stands(
     el: ElId,
     hit: &RuleHit,
     resolved: Option<Rgba>,
+    under: crate::browser::visual::LayerUnder,
+    certain: &dyn Fn() -> bool,
 ) -> bool {
     !crate::browser::driver::scoped_ignore_active(dom, el, &hit.id)
-        && crate::browser::visual::resolved_surface_is_under_text(dom, el, resolved)
+        && (crate::browser::visual::layer_matches_surface(under, resolved) || certain())
         && crate::browser::painted::paint_gate(&hit.id).map_or(true, |gate| {
             crate::browser::painted::unpainted_for(dom, el, gate).is_none()
         })
@@ -868,6 +889,87 @@ fn fold_surface_opacity(
     Some(fg)
 }
 
+/// The largest stop alpha, times the element's opacity, under which a
+/// gradient clipped to text is a watermark rather than coloured type:
+/// vestra.ai's `span.lp-wm` paints its ramp at 6 to 8%.
+const GRADIENT_TEXT_MIN_STOP_ALPHA: f64 = 0.15;
+
+/// How far apart, on any channel, two painted colours are before a reader
+/// sees two colours rather than one. A box whose samples all sit within it
+/// shows one fill.
+const RAMP_MIN_CHANNEL_DELTA: f64 = 12.0;
+
+/// What `node`'s own gradient layers paint inside `text`, from its computed
+/// background geometry ([`geo::gradient_paint_under_text`]).
+pub(crate) fn own_gradient_under(dom: &dyn Dom, node: ElId, text: &Rect) -> UnderText {
+    let rect = dom.rect(node);
+    let px = |prop: &str| style_px(dom, node, prop);
+    let paint = PaintBox {
+        border_box: Box2::new(rect.left, rect.top, rect.width, rect.height),
+        border: [
+            px("borderTopWidth"),
+            px("borderRightWidth"),
+            px("borderBottomWidth"),
+            px("borderLeftWidth"),
+        ],
+        padding: [px("paddingTop"), px("paddingRight"), px("paddingBottom"), px("paddingLeft")],
+    };
+    let image = dom.style(node, "backgroundImage");
+    let size = dom.style(node, "backgroundSize");
+    let position = dom.style(node, "backgroundPosition");
+    let shorthand = dom.style(node, "background");
+    let layers = BackgroundLayers { image: &image, size: &size, position: &position, shorthand: &shorthand };
+    gradient_paint_under_text(&layers, &paint, &Box2::new(text.left, text.top, text.width, text.height))
+}
+
+/// Whether the painted samples show one colour: every sample within
+/// [`RAMP_MIN_CHANNEL_DELTA`] of the first on every channel, alpha included.
+fn samples_are_one_colour(samples: &[Rgba]) -> bool {
+    let Some(first) = samples.first() else {
+        return false;
+    };
+    samples.iter().all(|c| {
+        (c.r - first.r).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.g - first.g).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.b - first.b).abs() < RAMP_MIN_CHANNEL_DELTA
+            && (c.alpha_or_one() - first.alpha_or_one()).abs() * 255.0 < RAMP_MIN_CHANNEL_DELTA
+    })
+}
+
+/// Whether a gradient clipped to `el`'s text paints type a reader sees: its
+/// strongest stop is at least [`GRADIENT_TEXT_MIN_STOP_ALPHA`] once the
+/// element's own opacity is applied (an ancestor's is left to the Text gate,
+/// as [`ai_palette_is_visible`] explains). Where the stops
+/// cannot be read the finding stands, as before.
+///
+/// How much of the ramp the glyphs show is not read. uncoverroads.com's
+/// single digit in the corner of a 266px ramp box sees about a third of the
+/// ramp, 28 levels on the green channel, and coachcall.ai's centred short
+/// headings see a quarter of theirs: geometry cannot tell the judged misfire
+/// from the tell.
+pub(crate) fn gradient_text_paints_a_ramp(dom: &dyn Dom, el: ElId) -> bool {
+    let image = dom.style(el, "backgroundImage");
+    let stops = parse_gradient_colors(Some(&image));
+    if stops.is_empty() {
+        return true;
+    }
+    let strongest = stops.iter().map(|c| c.alpha_or_one()).fold(0.0, f64::max);
+    strongest * own_opacity(dom, el) >= GRADIENT_TEXT_MIN_STOP_ALPHA
+}
+
+/// The smallest type [`box_holds_a_text_line`] reads as a line of text.
+const SHORT_LINE_MIN_FONT_PX: f64 = 8.0;
+
+/// Whether a box under 10px tall is one line of the text it holds: its type
+/// is at least [`SHORT_LINE_MIN_FONT_PX`], and the box is at least nine
+/// tenths of the font size tall, so the glyphs fit in it.
+fn box_holds_a_text_line(dom: &dyn Dom, el: ElId, rect: &Rect) -> bool {
+    let font_size = parse_float(&dom.style(el, "fontSize"));
+    font_size.is_finite()
+        && font_size >= SHORT_LINE_MIN_FONT_PX
+        && rect.height >= font_size * 0.9
+}
+
 /// JS: checks.mjs#checkElementColorsDOM(el)
 pub fn check_element_colors_dom(
     dom: &dyn Dom,
@@ -889,7 +991,12 @@ pub fn check_element_colors_dom(
         && dom
             .parent(el)
             .is_some_and(|p| !js::trim(&direct_text(dom, p)).is_empty());
-    if rect.height < 10.0 || (rect.width < 10.0 && !narrow_run) {
+    // The same holds on the other axis: a whole line of 9px text set tight
+    // (coachcall.ai's 148 x 9.45px chat timestamps) is under 10px tall and
+    // still read. A box as tall as the glyphs it holds is a line of text, not
+    // a mark.
+    let short_line = has_direct_text && rect.width >= 10.0 && box_holds_a_text_line(dom, el, &rect);
+    if (rect.height < 10.0 && !short_line) || (rect.width < 10.0 && !narrow_run) {
         return Vec::new();
     }
     if dom.style(el, "visibility") == "hidden" || effective_opacity_dom(dom, el) <= 0.02 {
@@ -1013,11 +1120,14 @@ pub fn check_element_colors_dom(
             _ => false,
         }
     });
+    // What the structural climb finds under the text, read once and only for
+    // an element some verdict needs it for.
+    let under_cell = std::cell::OnceCell::new();
+    let under = || *under_cell.get_or_init(|| crate::browser::visual::layer_under_text_found(dom, el));
     let same_color_surface_is_unread = same_hex
         && layers_at() != crate::browser::text_layers::TextLayers::Consistent
         && (on_page_ground(dom, surface_host)
-            || crate::browser::visual::layer_under_text(dom, el)
-                != crate::browser::visual::LayerUnder::Ancestor);
+            || under().0 != crate::browser::visual::LayerUnder::Ancestor);
     let color_opts = ColorOpts {
         tag: tag.clone(),
         text_color,
@@ -1053,11 +1163,71 @@ pub fn check_element_colors_dom(
     // per element, late, and only for an element the rule failed; the
     // SAFE_TAGS path asks before the page claims the colour pair, so the
     // first uncovered link wearing it reports instead.
+    //
+    // The stacks answer only in the viewport and never list a layer that
+    // ignores pointer events, so the structural climb is asked too, on every
+    // path (`visual::surface_unread`): a sibling photo, gradient or panel
+    // under text below the fold, or an `absolute inset-0 pointer-events-none`
+    // hero photo, is paint the walk never read. The walk's own surface on the
+    // element (its fill, its pseudo) is never second-guessed. That paint is
+    // read for what it can make of the surface (`visual::unread_verdict`): a
+    // dark hero gradient beside the content, a grain tile, a faded painting
+    // or a cream scrim over the page the walk read decide the verdict either
+    // way, and a verdict that passes over every surface the paint can make is
+    // dropped. One that depends on what the paint shows (a photo, a video)
+    // stands outside the SAFE_TAGS path, as it did: the engine cannot say
+    // otherwise here, and the URL engine's pixel pass, which takes such text
+    // as a candidate (`visual::routed_reason`, as it takes outlined text),
+    // replaces it where it reads the pixels. Asked only for an element the
+    // rule failed.
+    let threshold = crate::browser::visual::contrast_threshold(font_size, font_weight);
+    // Outlined text is read against its outline, which no surface span
+    // describes: its unread paint decides nothing here, and the pixel pass
+    // reads it.
+    let reading_cell = std::cell::OnceCell::new();
+    let reading = || {
+        *reading_cell.get_or_init(|| {
+            if crate::browser::visual::text_outlined(dom, ink_el) {
+                return crate::browser::visual::UnreadReading {
+                    verdict: crate::browser::visual::UnreadVerdict::Unknown,
+                    rescore: None,
+                };
+            }
+            crate::browser::visual::unread_reading(
+                dom,
+                el,
+                under(),
+                &surface,
+                visible_text.or(text_color),
+                threshold,
+            )
+        })
+    };
+    let unread = || reading().verdict;
+    //
+    // Where the stacks see unread paint (`TextLayers::UnreadSurface`) the
+    // verdict is set aside, as it always was, unless that paint decides it:
+    // dim copy over a dark gradient laid beside it fails whatever the walk
+    // read.
+    let own_surface = pseudo_surface_read || surface_host == Some(el);
     let verdict_stands = |h: &RuleHit| {
-        h.id != "low-contrast"
-            || (!(!pseudo_surface_read
-                && surface_hidden_in_unrecorded_shadow_tree(dom, el, surface_host))
-                && layers_at().verdict_stands())
+        use crate::browser::text_layers::TextLayers;
+        use crate::browser::visual::UnreadVerdict;
+        if h.id != "low-contrast" {
+            return true;
+        }
+        if !pseudo_surface_read && surface_hidden_in_unrecorded_shadow_tree(dom, el, surface_host) {
+            return false;
+        }
+        match layers_at() {
+            TextLayers::Covered => false,
+            TextLayers::UnreadSurface => !own_surface && unread() == UnreadVerdict::Fails,
+            layers => {
+                own_surface
+                    || !crate::browser::visual::surface_unread(dom, under(), resolved_surface, layers)
+                    || unread() != UnreadVerdict::Passes
+            }
+        }
     };
     // The page's one report of a colour pair goes to a readable copy: an
     // element cut by the page's edge, or whose text a clipping ancestor cuts
@@ -1073,14 +1243,59 @@ pub fn check_element_colors_dom(
     let decorative = std::cell::OnceCell::new();
     let is_decorative =
         || *decorative.get_or_init(|| super::decorative_text::is_decorative_text_dom(dom, el));
+    // A word caught part way through a scripted colour reveal is not at the
+    // colour it rests at, so no contrast verdict is about what a reader
+    // reads, and it claims no colour pair. Asked once, only of an element
+    // that failed.
+    let mid_reveal = std::cell::OnceCell::new();
+    let at_rest = |h: &RuleHit| {
+        (h.id != "low-contrast" && h.id != "gray-on-color")
+            || !*mid_reveal.get_or_init(|| crate::browser::painted::colour_mid_reveal(dom, el))
+    };
     let mut findings = crate::checks::rules::check_colors_deduped_shaped(
         &color_opts,
         seen,
         Some(claim),
         &is_decorative,
-        &mut |h: &RuleHit| safe_tag_text_hit_stands(dom, el, h, resolved) && verdict_stands(h),
+        &mut |h: &RuleHit| {
+            safe_tag_text_hit_stands(dom, el, h, resolved, under().0, &|| {
+                unread() == crate::browser::visual::UnreadVerdict::Fails
+            })
+                && verdict_stands(h)
+                && at_rest(h)
+        },
     );
-    findings.retain(|h| verdict_stands(h));
+    findings.retain(|h| verdict_stands(h) && at_rest(h));
+    // A failing verdict that stands over unread paint far from the walk's
+    // surface (dim copy on a dark panel laid beside it, where the walk read
+    // the white page) is printed against that paint: the ratio the text
+    // reaches at best over every surface the paint can make, and the box it
+    // was found on. A grain or a wash over the surface the walk read keeps
+    // the walk's numbers.
+    if findings.iter().any(|h| h.id == "low-contrast")
+        && !own_surface
+        && (layers_at() == crate::browser::text_layers::TextLayers::UnreadSurface
+            || crate::browser::visual::surface_unread(dom, under(), resolved_surface, layers_at()))
+    {
+        if let Some(rescore) = reading().rescore {
+            for h in findings.iter_mut().filter(|h| h.id == "low-contrast") {
+                h.snippet = format!(
+                    "{}:1 (need {}:1) — text {} on {} (layer on {})",
+                    crate::color::ratio_label(rescore.ratio, threshold),
+                    number_to_string(threshold),
+                    color_to_hex(Some(&rescore.ink)),
+                    color_to_hex(Some(&rescore.surface)),
+                    surface_label(dom, rescore.layer)
+                );
+                h.severity = crate::checks::rules::contrast_severity(rescore.ratio, threshold).or_else(|| {
+                    is_decorative().then(|| crate::checks::rules::ADVISORY_SEVERITY.to_string())
+                });
+            }
+        }
+    }
+    if findings.iter().any(|h| h.id == "gradient-text") && !gradient_text_paints_a_ramp(dom, el) {
+        findings.retain(|h| h.id != "gradient-text");
+    }
     if tag == "input" || tag == "textarea" {
         let placeholder = dom.attr(el, "placeholder").unwrap_or_default();
         let placeholder = js::trim(&placeholder);
@@ -1120,7 +1335,8 @@ pub fn check_element_colors_dom(
 /// JS: checks.mjs#checkElementIconTileDOM(el)
 pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let tag = tag_lower(dom, el);
-    if !HEADING_TAGS.contains(&tag.as_str()) {
+    let card_title = !HEADING_TAGS.contains(&tag.as_str()) && is_card_title(dom, el, &tag);
+    if !HEADING_TAGS.contains(&tag.as_str()) && !card_title {
         return Vec::new();
     }
     let Some(found) = super::text_collectors::label_before_heading(dom, el) else {
@@ -1151,7 +1367,8 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         sibling_width: sib_rect.width,
         sibling_height: sib_rect.height,
         sibling_bottom: sib_rect.bottom,
-        sibling_bg_color: parse_rgb(Some(&dom.style(sibling, "backgroundColor"))),
+        // Tailwind 4 computes `bg-primary/10` to an `oklab(... / 0.1)` fill.
+        sibling_bg_color: parse_rgb_or_any(&dom.style(sibling, "backgroundColor")),
         sibling_bg_image: Some(dom.style(sibling, "backgroundImage")),
         sibling_border_width: math_max(
             style_px(dom, sibling, "borderTopWidth"),
@@ -1164,7 +1381,40 @@ pub fn check_element_icon_tile_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
             .map(|r| r.width)
             .filter(|w| num_truthy(*w))
             .unwrap_or(0.0),
+        heading_is_card_title: card_title,
     })
+}
+
+/// The weight and size a card title set on a `div` carries: shadcn's
+/// `CardTitle` is `div.font-semibold` at `text-lg` or `text-2xl`.
+const CARD_TITLE_MIN_WEIGHT: f64 = 600.0;
+const CARD_TITLE_MIN_PX: f64 = 16.0;
+/// The longest text a card title holds.
+const CARD_TITLE_MAX_CHARS: usize = 80;
+
+/// Whether `el` is a card title set on a non-heading tag: a `div` or `span`
+/// laid out as a block, outside any heading, whose own text is one short
+/// bold line (kin-ai.replit.app's shadcn feature cards). The tile rule
+/// anchors on it as on a heading. A `p` is copy, not a title: a dropzone's
+/// bold prompt under its upload icon stays silent.
+fn is_card_title(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+    if !matches!(tag, "div" | "span") {
+        return false;
+    }
+    if !matches!(dom.style(el, "display").as_str(), "block" | "flow-root") {
+        return false;
+    }
+    let text = js::trim(&direct_text(dom, el)).to_string();
+    let len = utf16_len(&text);
+    if !(2..=CARD_TITLE_MAX_CHARS).contains(&len) || !dom.children(el).is_empty() {
+        return false;
+    }
+    let weight = parse_float(&dom.style(el, "fontWeight"));
+    let size = parse_float(&dom.style(el, "fontSize"));
+    if !(weight >= CARD_TITLE_MIN_WEIGHT && size >= CARD_TITLE_MIN_PX) {
+        return false;
+    }
+    closest_or_none(dom, el, "h1, h2, h3, h4, h5, h6, [role=\"heading\"], a, button, label").is_none()
 }
 
 /// The box a tile is drawn on. A `display: contents` wrapper generates no box,
@@ -1307,6 +1557,9 @@ pub fn check_element_hero_eyebrow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let Some(sibling) = dom.previous_element_sibling(el) else {
         return Vec::new();
     };
+    // A chip wraps its text in a span beside an icon or inside a bare box:
+    // the element holding the text sets its size, case and tracking.
+    let ty = super::text_collectors::label_type_element(dom, sibling);
     check_hero_eyebrow(&HeroEyebrowOpts {
         heading_tag: tag,
         heading_text: Some(dom.text_content(el)),
@@ -1319,12 +1572,18 @@ pub fn check_element_hero_eyebrow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         .is_some(),
         sibling_tag: Some(tag_lower(dom, sibling)),
         sibling_text: Some(dom.text_content(sibling)),
-        sibling_text_transform: Some(dom.style(sibling, "textTransform")),
-        sibling_font_size: style_px(dom, sibling, "fontSize"),
-        sibling_letter_spacing: style_px(dom, sibling, "letterSpacing"),
-        sibling_font_weight: Some(dom.style(sibling, "fontWeight")),
-        sibling_color: Some(dom.style(sibling, "color")),
+        sibling_text_transform: Some(dom.style(ty, "textTransform")),
+        sibling_font_size: style_px(dom, ty, "fontSize"),
+        sibling_letter_spacing: style_px(dom, ty, "letterSpacing"),
+        sibling_font_weight: Some(dom.style(ty, "fontWeight")),
+        sibling_color: Some(dom.style(ty, "color")),
         sibling_has_accent_dash_pseudo: dom_accent_dash_pseudo(dom, sibling),
+        sibling_tracking_floor_em: Some(crate::checks::rules::HERO_EYEBROW_TRACKING_EM),
+        sibling_holds_time: tag_lower(dom, sibling) == "time"
+            || dom
+                .query_all(Some(sibling), "time")
+                .map(|t| !t.is_empty())
+                .unwrap_or(false),
     })
 }
 
@@ -1418,14 +1677,39 @@ pub fn check_element_glow_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         parent_bg = gradient_ancestor_average(dom, parent);
     }
     let rect = dom.rect(el);
-    check_glow(&GlowOpts {
+    let mut opts = GlowOpts {
         box_shadow: Some(box_shadow),
         text_shadow: Some(text_shadow),
         effective_bg: parent_bg,
         element_opacity: Some(element_opacity(dom, el)),
         element_size: Some((rect.width, rect.height)),
         surface,
-    })
+    };
+    let hits = check_glow(&opts);
+    // "On dark background" is a claim about the surface the glow is drawn on,
+    // and the ancestor walk reads only ancestors' fills: a light panel or
+    // gradient laid beside the content over a dark section is never read, and
+    // the dark fill under it is. Asked only where that form fired: the
+    // structural climb from the parent over the element's box says what
+    // paints there. An opaque detached fill or gradient is the surface, and
+    // decides the claim; a picture, a translucent layer, or paint that
+    // cannot be read leaves it as the walk made it (a cream photo over a dark
+    // section is a known limit: the capture has no pixels).
+    let Some(parent) = parent else { return hits };
+    if !hits.iter().any(|h| h.snippet.ends_with("on dark background")) {
+        return hits;
+    }
+    let under = crate::browser::visual::layer_under_rect(dom, parent, &rect);
+    let Some((lo, hi)) = crate::browser::visual::opaque_detached_span(dom, el, under) else {
+        return hits;
+    };
+    opts.effective_bg = Some(Rgba {
+        r: (lo.r + hi.r) / 2.0,
+        g: (lo.g + hi.g) / 2.0,
+        b: (lo.b + hi.b) / 2.0,
+        a: Some(1.0),
+    });
+    check_glow(&opts)
 }
 
 /// A stop painting under this much alpha is a tint over whatever sits behind
@@ -1639,6 +1923,21 @@ fn ai_palette_gradient_hit(
     }
     if gradient_occluded_by_media_child(dom, el, &rect) {
         return None;
+    }
+    // What the box shows at rest: a hover wipe drawn as two hard stops on a
+    // tile twice the box's width (jpmorganchase.com's buttons) shows one of
+    // its colours, a flat fill. The samples read every layer over the whole
+    // border box, so a layer clipped to the padding or content box (a white
+    // fill over a gradient border ring, joongang.co.kr) is not measured.
+    // Where the geometry cannot be read, the stops decide as before.
+    let clip = dom.style(el, "backgroundClip");
+    let clipped_to_border_box = clip.is_empty() || clip.split(',').all(|c| js::trim(c) == "border-box");
+    if clipped_to_border_box {
+        if let UnderText::Paint(samples) = own_gradient_under(dom, el, &rect) {
+            if samples_are_one_colour(&samples) {
+                return None;
+            }
+        }
     }
     let opacity = own_opacity(dom, el);
     let mut painted = 0usize;
@@ -2101,6 +2400,21 @@ fn gpt_border_shadow_pair_dom(dom: &dyn Dom, el: ElId) -> Option<(f64, f64)> {
     // edge only where it shows against the fill it rims (the surface, when the
     // element paints none). Where a surface cannot be read, as before.
     let surface = painted_surface_under(dom, el);
+    // Under a gradient ancestor there is no one surface, but there are its
+    // stops: a halo that shows over at most half of them lands on a surface
+    // it does not change (uncoverroads.com's near-black halo on an aurora band
+    // that is near-black but for 6 to 8% tints).
+    if surface.is_none() {
+        if let Some(surfaces) = gradient_surfaces_under(dom, el) {
+            let shows = surfaces
+                .iter()
+                .filter(|s| gpt_border_shadow_halo_blur_px_over(Some(&box_shadow), Some(s)).is_some())
+                .count();
+            if shows * 2 <= surfaces.len() {
+                return None;
+            }
+        }
+    }
     let blur = gpt_border_shadow_halo_blur_px_over(Some(&box_shadow), surface.as_ref())?;
     let fill = surface.map(|s| own_fill_over(dom, el, &s));
     let style = ElStyle { dom, el };
@@ -2159,6 +2473,63 @@ pub(crate) fn painted_surface_under(dom: &dyn Dom, el: ElId) -> Option<Rgba> {
         surface = composite_color_over(layer, &surface);
     }
     Some(surface)
+}
+
+/// The colours a box is painted onto when one ancestor between it and the
+/// first opaque fill paints a gradient: each of the gradient's stops,
+/// composited with the translucent fills above and below it, over that fill
+/// (or the light canvas). `None` where [`painted_surface_under`] reads one
+/// surface, or where the walk meets a picture, a second gradient, or a
+/// colour that does not parse.
+pub(crate) fn gradient_surfaces_under(dom: &dyn Dom, el: ElId) -> Option<Vec<Rgba>> {
+    // Top first; each layer is the colours it may paint.
+    let mut layers: Vec<Vec<Rgba>> = Vec::new();
+    let mut gradients = 0usize;
+    let mut current = dom.parent(el);
+    let mut base: Option<Rgba> = None;
+    while let Some(p) = current {
+        let image = dom.style(p, "backgroundImage");
+        if !image.is_empty() && image != "none" {
+            let lower = image.to_ascii_lowercase();
+            if lower.contains("url(") || !lower.contains("gradient") {
+                return None;
+            }
+            let stops = parse_gradient_colors(Some(&image));
+            if stops.is_empty() {
+                return None;
+            }
+            gradients += 1;
+            layers.push(stops);
+        }
+        let raw = dom.style(p, "backgroundColor");
+        if !measures::css_color_is_transparent(Some(&raw)) {
+            let color = parse_any_color(Some(&raw))?;
+            if color.alpha_or_one() >= 0.999 {
+                base = Some(color);
+                break;
+            }
+            layers.push(vec![color]);
+        }
+        current = dom.parent(p);
+    }
+    if gradients != 1 {
+        return None;
+    }
+    let base = match base {
+        Some(b) => b,
+        None if super::quality::canvas_is_light(&dom.style(el, "colorScheme")) => {
+            parse_any_color(Some(super::quality::CANVAS_BACKGROUND))?
+        }
+        None => return None,
+    };
+    let mut surfaces = vec![base];
+    for layer in layers.iter().rev() {
+        surfaces = surfaces
+            .iter()
+            .flat_map(|s| layer.iter().map(move |c| composite_color_over(c, s)))
+            .collect();
+    }
+    Some(surfaces)
 }
 
 /// `el`'s own background colour composited over `surface`, or `surface` when
@@ -2281,8 +2652,9 @@ re!(CAROUSEL_ROLE_RE, r"(?-u:\b)(carousel|slider)(?-u:\b)");
 /// marquee, a comparison frame. Read as whole words of a class list or an id
 /// ([`measures::ident_words`]), so a BEM element name and a camelCase id count.
 pub const VIEWPORT_IDENT_WORDS: &[&str] = &[
-    "carousel", "comparison", "compare", "fisheye", "flickity", "marquee", "owl", "preview",
-    "scroller", "slider", "slideshow", "splide", "split", "swiper", "ticker", "viewport",
+    "carousel", "comparison", "compare", "fisheye", "flickity", "marquee", "owl", "preview", "reel",
+    "rolling", "scroller", "slick", "slider", "slideshow", "splide", "split", "swiper", "tempwrap",
+    "ticker", "viewport",
 ];
 /// Two-word viewport names (`demo-area`).
 pub const VIEWPORT_IDENT_PAIRS: &[(&str, &str)] =
@@ -2587,7 +2959,9 @@ fn clip_container_can_own_finding(dom: &dyn Dom, el: ElId) -> bool {
 /// Nested clips repeat one decision about the same layer. The clip nearest
 /// the child is the one that cuts it first and the one whose component the
 /// layer belongs to, so an outer container defers to any clipping container
-/// between it and the child that traps the same layer.
+/// between it and the child that traps the same layer. A nearer carousel or
+/// ticker window counts too: it cuts the layer on purpose, and the outer clip
+/// cuts nothing that window has not already hidden.
 fn nearer_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
     let mut current = dom.parent(child);
     while let Some(inner) = current {
@@ -2595,7 +2969,8 @@ fn nearer_clip_traps_child(dom: &dyn Dom, el: ElId, child: ElId) -> bool {
             return false;
         }
         if let Some((clip_x, clip_y)) = clipped_axes(dom, inner) {
-            if clip_container_can_own_finding(dom, inner)
+            if super::driver::element_is_scanned(dom, inner)
+                && !clipping_container_is_page_shell(dom, inner)
                 && clip_traps_child(dom, inner, child, clip_x, clip_y)
             {
                 return true;
@@ -2644,6 +3019,13 @@ pub fn check_clipped_overflow(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
         // the finding, so only the rest of the predicate is asked.
         if crate::browser::painted::unpainted_inside(dom, child, el).is_some() {
             continue;
+        }
+        // The container itself has to be shown for its clip to cut anything
+        // a visitor sees: a hero slide parked past its carousel, a closed
+        // off-canvas menu at x -360. Asked once, for the first trapped child;
+        // an unpainted container hides every child it traps.
+        if crate::browser::painted::unpainted_text_box(dom, el).is_some() {
+            return Vec::new();
         }
         return vec![RuleHit::new(
             "clipped-overflow-container",
@@ -2749,24 +3131,30 @@ fn generated_content_unmeasured(dom: &dyn Dom, el: ElId) -> bool {
 
 /// The rects of what `el`'s descendants paint, for deciding whether its
 /// overflow is seen: text by its text rect, replaced elements and painted
-/// boxes by their border boxes. A descendant with no text that is absolutely
-/// or fixed positioned (a ripple layer), or that paints nothing (an empty
-/// wrapper, a `min-width` reserve), adds nothing of its own. A descendant that
-/// clips on the x axis keeps its content inside its own box. `unmeasured` is
-/// set when a descendant carries generated content no rect covers.
+/// boxes by their border boxes. A descendant that is absolutely or fixed
+/// positioned is out of the flow `el` lays out: a ripple layer, a hover
+/// tooltip parked above a link (clipto.com's QR card at opacity 0), a badge
+/// pinned past a tab's corner (coachcall.ai's `-right-8` "Popular"). Its
+/// author placed it there, its text is not `el`'s text running out of its
+/// box, and it adds nothing, text or not. So does a descendant that paints
+/// nothing (an empty wrapper, a `min-width` reserve). A descendant that clips
+/// on the x axis keeps its content inside its own box. `unmeasured` is set
+/// when a descendant carries generated content no rect covers.
 fn painted_descendant_extents(dom: &dyn Dom, el: ElId, out: &mut Vec<Rect>, unmeasured: &mut bool) {
     for child in dom.children(el) {
         if dom.style(child, "display") == "none" {
             continue;
         }
+        // Generated content no rect covers leaves the overflow unmeasured,
+        // on a positioned descendant too: what it adds cannot be told apart.
         if generated_content_unmeasured(dom, child) {
             *unmeasured = true;
         }
-        let has_text = !js::trim(&dom.text_content(child)).is_empty();
         let position = dom.style(child, "position");
-        if !has_text && (position == "absolute" || position == "fixed") {
+        if position == "absolute" || position == "fixed" {
             continue;
         }
+        let has_text = !js::trim(&dom.text_content(child)).is_empty();
         let r = dom.rect(child);
         let has_area = r.all_finite() && r.width > 0.0 && r.height > 0.0;
         if REPLACED_TAGS.contains(&tag_lower(dom, child).as_str()) {
@@ -5019,6 +5407,123 @@ mod tests {
         assert_eq!(clip_hits("jswiper-track", "", false), 1);
     }
 
+    /// lpga.or.jp, scol.com.cn, inven.co.kr, aajtak.in: Slick's `slick-list`,
+    /// SuperSlide's `tempWrap`, a rolling notice list and Taboola's reel.
+    #[test]
+    fn clipped_overflow_reads_more_carousel_words() {
+        fn clip_hits(host_class: &str, child_class: Option<&str>) -> usize {
+            let (mut d, body) = page();
+            let host = d.add(Some(body), "div");
+            d.set_attr(host, "class", host_class);
+            d.set_styles(host, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+            d.set_rect(host, 100.0, 100.0, 600.0, 55.0);
+            if let Some(c) = child_class {
+                let track = d.add(Some(host), "div");
+                d.set_attr(track, "class", c);
+                d.set_rect(track, 100.0, 100.0, 600.0, 55.0);
+            }
+            let layer = d.add(Some(host), "div");
+            d.add_text(layer, "Next caption");
+            d.set_style(layer, "position", "absolute");
+            d.set_rect(layer, 720.0, 100.0, 600.0, 55.0);
+            check_element_clipped_overflow_dom(&d, host).len()
+        }
+        assert_eq!(clip_hits("promo-window", None), 1);
+        assert_eq!(clip_hits("slick-list draggable", None), 0);
+        assert_eq!(clip_hits("tempWrap", None), 0);
+        assert_eq!(clip_hits("notice-list notice_rolling", None), 0);
+        assert_eq!(clip_hits("trc_rbox_div", Some("tbl-recommendation-reel")), 0);
+    }
+
+    /// aajtak.in: the Taboola reel's window traps its back arrow, so the ad
+    /// slot around it does not report the same arrow.
+    #[test]
+    fn clipped_overflow_defers_to_a_nearer_carousel_window() {
+        let (mut d, body) = page();
+        let slot = d.add(Some(body), "div");
+        d.set_attr(slot, "class", "ad-slot");
+        d.set_styles(slot, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(slot, 0.0, 100.0, 390.0, 300.0);
+        let reel = d.add(Some(slot), "div");
+        d.set_attr(reel, "class", "reel-window");
+        d.set_styles(reel, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "relative")]);
+        d.set_rect(reel, 0.0, 100.0, 390.0, 300.0);
+        let arrow = d.add(Some(reel), "button");
+        d.set_style(arrow, "position", "absolute");
+        d.set_rect(arrow, -60.0, 200.0, 40.0, 40.0);
+        assert!(check_element_clipped_overflow_dom(&d, slot).is_empty());
+        assert!(check_element_clipped_overflow_dom(&d, reel).is_empty());
+        // A plain nearer clip still owns the finding, as before.
+        d.set_attr(reel, "class", "rbox");
+        assert!(check_element_clipped_overflow_dom(&d, slot).is_empty());
+        assert_eq!(check_element_clipped_overflow_dom(&d, reel).len(), 1);
+    }
+
+    /// hp.com's hero slides parked at x 1290 in their carousel track, and
+    /// cuisineactuelle.fr's closed off-canvas menu at x -360.
+    #[test]
+    fn clipped_overflow_needs_the_container_shown() {
+        let (mut d, body) = page();
+        let menu = d.add(Some(body), "nav");
+        d.set_rect(menu, -360.0, 0.0, 360.0, 800.0);
+        let item = d.add(Some(menu), "li");
+        d.set_styles(item, &[("overflow", "hidden"), ("overflowX", "hidden"), ("overflowY", "hidden"), ("position", "relative")]);
+        d.set_rect(item, -360.0, 100.0, 360.0, 48.0);
+        d.add_text(item, "Recettes");
+        let tip = d.add(Some(item), "div");
+        d.set_style(tip, "position", "absolute");
+        d.set_rect(tip, -60.0, 160.0, 200.0, 40.0);
+        d.add_text(tip, "Voir toutes les recettes");
+        assert!(check_element_clipped_overflow_dom(&d, item).is_empty());
+        d.set_rect(menu, 0.0, 0.0, 360.0, 800.0);
+        d.set_rect(item, 0.0, 100.0, 360.0, 48.0);
+        d.set_rect(tip, 300.0, 160.0, 200.0, 40.0);
+        assert_eq!(check_element_clipped_overflow_dom(&d, item).len(), 1);
+    }
+
+    /// adant.ai's week grid in an inactive tab pane at opacity 0.
+    #[test]
+    fn side_tab_border_path_skips_a_card_nobody_sees() {
+        let (mut d, body) = page();
+        let pane = d.add(Some(body), "div");
+        d.set_rect(pane, 0.0, 0.0, 600.0, 400.0);
+        let card = d.add(Some(pane), "div");
+        d.set_rect(card, 0.0, 0.0, 300.0, 100.0);
+        d.add_text(card, "Week one: publish the first video");
+        d.set_styles(
+            card,
+            &[
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "3px"),
+                ("borderLeftColor", "rgb(225, 29, 72)"),
+                ("borderRadius", "10px"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+            ],
+        );
+        assert_eq!(check_element_borders_dom(&d, card).len(), 1);
+        d.set_style(pane, "opacity", "0");
+        assert!(check_element_borders_dom(&d, card).is_empty());
+    }
+
+    /// Bootstrap's floating labels and `placeholder:text-transparent` hide the
+    /// placeholder so a label can take its place.
+    #[test]
+    fn placeholder_inked_transparent_is_not_scored() {
+        let (mut d, body) = page();
+        let input = d.add(Some(body), "input");
+        visible(&mut d, input);
+        d.set_attr(input, "placeholder", "Emailadresse");
+        d.set_rect(input, 12.0, 104.0, 228.0, 58.0);
+        d.set_styles(input, &[("backgroundColor", "rgb(255, 255, 255)"), ("color", "rgb(33, 48, 12)"), ("fontSize", "16px"), ("fontWeight", "400"), ("webkitBackgroundClip", "border-box")]);
+        d.set_pseudo_style(input, "::placeholder", "color", "rgba(0, 0, 0, 0)");
+        d.add_selector(input, ":placeholder-shown");
+        assert!(!colors(&d, input).iter().any(|h| h.id == "low-contrast"), "{:?}", colors(&d, input));
+        d.set_pseudo_style(input, "::placeholder", "color", "rgba(0, 0, 0, 0.2)");
+        assert!(colors(&d, input).iter().any(|h| h.id == "low-contrast"));
+    }
+
     /// visiby.net's word rotator and dadastudio.framer.website's closing h1.
     #[test]
     fn oversized_h1_counts_painted_text_on_the_first_screen() {
@@ -5862,6 +6367,35 @@ mod tests {
         let hits = check_element_text_overflow_dom(&d, cell);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "div.cell overflows its box by 40px");
+    }
+
+    /// observations-28 row 24: `scrollWidth` counts absolutely positioned
+    /// descendants. coachcall.ai's tab carries a "Popular" badge pinned past
+    /// its corner, into the next tab; the tab's own text fits its box.
+    #[test]
+    fn text_overflow_leaves_out_positioned_descendants() {
+        let (mut d, body) = page();
+        let tab = d.add(Some(body), "button");
+        visible(&mut d, tab);
+        d.set_attr(tab, "class", "tab");
+        d.add_text(tab, "ACCOUNTABILITY");
+        d.set_rect(tab, 16.0, 128.0, 120.0, 40.0);
+        d.set_text_rect(tab, 16.0, 141.0, 120.0, 17.0);
+        d.el_mut(tab).client_width = 120.0;
+        d.el_mut(tab).client_height = 40.0;
+        d.el_mut(tab).scroll_width = 152.0;
+        d.set_styles(tab, &[("display", "block"), ("position", "relative"), ("overflowX", "visible"), ("fontSize", "14px")]);
+        let badge = d.add(Some(tab), "div");
+        visible(&mut d, badge);
+        d.add_text(badge, "Popular");
+        d.set_rect(badge, 109.0, 124.0, 59.0, 16.0);
+        d.set_text_rect(badge, 116.0, 124.0, 45.0, 15.0);
+        d.set_styles(badge, &[("position", "absolute"), ("backgroundColor", "rgb(219, 234, 254)")]);
+        neighbor(&mut d, body, 168.0, 128.0, 60.0, 40.0, "Pricing");
+        assert!(check_element_text_overflow_dom(&d, tab).is_empty(), "positioned badge");
+        // The same badge laid out in flow is the tab's content running out.
+        d.set_style(badge, "position", "static");
+        assert_eq!(check_element_text_overflow_dom(&d, tab).len(), 1, "in-flow badge");
     }
 
     #[test]
@@ -7151,7 +7685,10 @@ mod tests {
         let run = |left: f64| {
             let (mut d, body) = page();
             let hero = bare_box(&mut d, body, "section", (0.0, 0.0, 1600.0, 300.0));
-            let photo = bare_box(&mut d, hero, "img", (left - 20.0, 20.0, 700.0, 100.0));
+            // The photo ends just past the viewport's edge, so it lies under the
+            // visible part of the run only, and the structural climb, which
+            // needs a layer under the whole run, cannot answer: the stacks do.
+            let photo = bare_box(&mut d, hero, "img", (left - 20.0, 20.0, 1320.0 - left, 100.0));
             d.set_style(photo, "position", "absolute");
             let title = faint_copy(&mut d, hero, "rgb(240, 240, 240)", (left, 50.0, 500.0, 28.0));
             reports_contrast(&colors(&d, title))
@@ -7261,13 +7798,292 @@ mod tests {
             )))),
             "a gradient tint at 8% is a wash"
         );
+        // A 40% violet tint is paint the walk never read, but over the white
+        // the walk read under it the near-white ink fails on every surface
+        // the tint can make, so the verdict is about a known fact and stands.
         assert!(
-            !reports_contrast(&run(Some((
+            reports_contrast(&run(Some((
                 "div",
                 &[("backgroundImage", "linear-gradient(rgba(192, 88, 243, 0.4), rgba(255, 255, 255, 0))")]
             )))),
-            "a gradient tint at 40% is paint the walk never read"
+            "a gradient tint at 40% decides nothing the ink does not already fail"
         );
+        // A 90% dark tint over the same white passes the ink everywhere.
+        assert!(
+            !reports_contrast(&run(Some((
+                "div",
+                &[("backgroundImage", "linear-gradient(rgba(10, 10, 20, 0.9), rgba(10, 10, 20, 0.95))")]
+            )))),
+            "a dark scrim passes the ink over every surface it can make"
+        );
+    }
+
+    /// `section > (layer, content > text)`, the text below the fold so no
+    /// hit test answers and only the structural climb reads the layer.
+    fn over_a_layer(tag: &str, ink: &str, layer: Option<(&str, &[(&str, &str)])>) -> Vec<RuleHit> {
+        let (mut d, body) = page();
+        let hero = bare_box(&mut d, body, "section", (0.0, 2000.0, 1280.0, 600.0));
+        d.set_style(hero, "position", "relative");
+        if let Some((layer_tag, styles)) = layer {
+            let el = bare_box(&mut d, hero, layer_tag, (0.0, 2000.0, 1280.0, 600.0));
+            d.set_styles(el, &[("position", "absolute")]);
+            d.set_styles(el, styles);
+        }
+        let content = bare_box(&mut d, hero, "div", (0.0, 2300.0, 1280.0, 100.0));
+        d.set_style(content, "position", "relative");
+        let text = d.add(Some(content), tag);
+        visible(&mut d, text);
+        d.add_text(text, "Team size and setup time");
+        d.set_rect(text, 20.0, 2320.0, 600.0, 28.0);
+        d.set_styles(
+            text,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", ink),
+                ("fontSize", "16px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        colors(&d, text)
+    }
+
+    const DARK_GRADIENT: &str = "linear-gradient(to right, rgb(10, 31, 17), rgb(14, 37, 29))";
+
+    #[test]
+    fn a_gradient_laid_beside_the_content_decides_the_verdict() {
+        // arbiproseller-app.vercel.app: the walk reads the page white under an
+        // `absolute inset-0` dark gradient. Light copy passes on every colour
+        // the gradient paints, and prints nothing.
+        let gradient: &[(&str, &str)] = &[("backgroundImage", DARK_GRADIENT)];
+        assert!(reports_contrast(&over_a_layer("p", "rgb(110, 231, 183)", None)), "on the page white it fails");
+        assert!(!reports_contrast(&over_a_layer("p", "rgb(110, 231, 183)", Some(("div", gradient)))));
+        // Dim copy fails on every colour it paints, and is printed against the
+        // gradient, not the page white.
+        let hits = over_a_layer("p", "rgba(100, 116, 139, 0.9)", Some(("div", gradient)));
+        let hit = hits.iter().find(|h| h.id == "low-contrast").expect("dim copy reports");
+        assert!(hit.snippet.ends_with("(layer on div)"), "{}", hit.snippet);
+        assert!(!hit.snippet.contains("on #ffffff"), "{}", hit.snippet);
+        // The same dim copy with nothing beside it keeps the walk's numbers.
+        let bare = over_a_layer("p", "rgba(100, 116, 139, 0.9)", None);
+        assert!(bare.iter().any(|h| h.id == "low-contrast" && h.snippet.contains("on #ffffff")), "{bare:?}");
+    }
+
+    /// A white card below the fold, its `::before` set to `pseudo`, holding
+    /// a grey note (`tag`), which fails on the card's white.
+    fn note_in_card(tag: &str, pseudo: &[(&str, &str)], card_styles: &[(&str, &str)]) -> Vec<RuleHit> {
+        let (mut d, body) = page();
+        let card = bare_box(&mut d, body, "div", (0.0, 2000.0, 420.0, 200.0));
+        d.set_styles(
+            card,
+            &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)"), ("isolation", "auto")],
+        );
+        d.set_styles(card, card_styles);
+        for (prop, value) in pseudo {
+            d.set_pseudo_style(card, "::before", prop, value);
+        }
+        let text = d.add(Some(card), tag);
+        visible(&mut d, text);
+        d.add_text(text, "Billed yearly");
+        d.set_rect(text, 28.0, 2100.0, 80.0, 21.0);
+        d.set_styles(
+            text,
+            &[
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("color", "rgb(156, 163, 175)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        colors(&d, text)
+    }
+
+    #[test]
+    fn a_pseudo_off_the_text_or_beneath_the_card_leaves_the_verdict() {
+        let badge: &[(&str, &str)] = &[
+            ("content", "\"MOST POPULAR\""),
+            ("position", "absolute"),
+            ("display", "block"),
+            ("width", "104px"),
+            ("height", "21px"),
+            ("top", "-12px"),
+            ("left", "296px"),
+            ("right", "20px"),
+            ("bottom", "191px"),
+            ("backgroundColor", "rgb(194, 65, 12)"),
+            ("backgroundImage", "none"),
+            ("transform", "none"),
+            ("zIndex", "auto"),
+        ];
+        let on_white = |hits: &[RuleHit]| {
+            hits.iter().any(|h| h.id == "low-contrast" && h.snippet.ends_with("text #9ca3af on #ffffff"))
+        };
+        // visiby.net 3806: a corner badge, on a note and a link below the
+        // fold. It neither drops the verdict nor reprints it against itself.
+        for tag in ["p", "a"] {
+            let hits = note_in_card(tag, badge, &[]);
+            assert!(on_white(&hits), "{tag}: {hits:?}");
+        }
+        // A neubrutalist offset shadow and a ring behind the card's white.
+        let mut shadow = badge.to_vec();
+        shadow.extend([
+            ("content", "\"\""),
+            ("top", "0px"),
+            ("left", "0px"),
+            ("width", "420px"),
+            ("height", "200px"),
+            ("backgroundColor", "rgb(0, 0, 0)"),
+            ("transform", "matrix(1, 0, 0, 1, 8, 8)"),
+            ("zIndex", "-1"),
+        ]);
+        for tag in ["p", "a"] {
+            let hits = note_in_card(tag, &shadow, &[]);
+            assert!(on_white(&hits), "{tag}: {hits:?}");
+        }
+        // The same shadow in a capture that did not record the pseudo's
+        // `z-index` cannot be placed: the verdict stands as it did, and a
+        // link is waived as it was.
+        let mut unrecorded = shadow.clone();
+        unrecorded.push(("zIndex", ""));
+        assert!(on_white(&note_in_card("p", &unrecorded, &[])));
+        assert!(!reports_contrast(&note_in_card("a", &unrecorded, &[])));
+        // Over the card's fill (the card opens its own stacking context), the
+        // black panel is the surface, and the grey passes on it.
+        assert!(!reports_contrast(&note_in_card("p", &shadow, &[("zIndex", "0")])));
+    }
+
+    #[test]
+    fn a_negative_layer_under_a_section_fill_leaves_the_verdict() {
+        let section = |tag: &str, isolation: &str, ink: &str| {
+            let (mut d, body) = page();
+            let sec = bare_box(&mut d, body, "section", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_styles(
+                sec,
+                &[("position", "relative"), ("backgroundColor", "rgb(255, 255, 255)"), ("isolation", isolation)],
+            );
+            let layer = bare_box(&mut d, sec, "div", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_styles(
+                layer,
+                &[
+                    ("position", "absolute"),
+                    ("zIndex", "-10"),
+                    ("backgroundImage", "linear-gradient(135deg, rgb(15, 23, 42), rgb(30, 41, 59))"),
+                ],
+            );
+            let content = bare_box(&mut d, sec, "div", (0.0, 2000.0, 1280.0, 400.0));
+            d.set_style(content, "position", "relative");
+            let text = d.add(Some(content), tag);
+            visible(&mut d, text);
+            d.add_text(text, "Every workspace includes guest seats");
+            d.set_rect(text, 20.0, 2100.0, 400.0, 24.0);
+            d.set_styles(
+                text,
+                &[
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("color", ink),
+                    ("fontSize", "16px"),
+                    ("fontWeight", "400"),
+                    ("webkitBackgroundClip", "border-box"),
+                ],
+            );
+            colors(&d, text)
+        };
+        const FAINT: &str = "rgb(209, 213, 219)";
+        for tag in ["p", "a"] {
+            let hits = section(tag, "auto", FAINT);
+            assert!(
+                hits.iter().any(|h| h.id == "low-contrast" && h.snippet.ends_with("on #ffffff")),
+                "{tag}: {hits:?}"
+            );
+        }
+        // In an isolated section the layer shows, and faint copy passes on it.
+        assert!(!reports_contrast(&section("p", "isolate", FAINT)));
+        // A capture that did not record `isolation` keeps the verdict.
+        assert!(reports_contrast(&section("p", "", FAINT)));
+    }
+
+    #[test]
+    fn a_faint_layer_over_the_walked_surface_keeps_the_walk_verdict() {
+        // coldtea.ai's footer grain: a texture tile at 0.085 over the page the
+        // walk read changes no verdict, and a pale link over it is scored, on
+        // the SAFE_TAGS path too.
+        const GRAIN: &str = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3C/svg%3E\")";
+        let grain: &[(&str, &str)] = &[("backgroundImage", GRAIN), ("opacity", "0.085"), ("pointerEvents", "none")];
+        for tag in ["p", "a"] {
+            let hits = over_a_layer(tag, "rgb(163, 163, 163)", Some(("div", grain)));
+            assert!(
+                hits.iter().any(|h| h.id == "low-contrast" && h.snippet.contains("on #ffffff")),
+                "{tag}: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_photo_leaves_the_verdict_to_the_pixels() {
+        // What a photo shows is not in the capture. Outside the SAFE_TAGS path
+        // the verdict stands as it did, for the pixel pass to replace; a link
+        // with no fill of its own is waived as it was, and handed over.
+        assert!(reports_contrast(&over_a_layer("p", "rgb(163, 163, 163)", Some(("img", &[])))));
+        assert!(!reports_contrast(&over_a_layer("a", "rgb(163, 163, 163)", Some(("img", &[])))));
+    }
+
+    #[test]
+    fn a_page_wider_than_the_phone_scores_its_right_column() {
+        // inven.co.kr: a 1,090px page at 390px scrolls sideways, so a label at
+        // x 900 is on the page, not parked beside it.
+        let run = |scroll_width: f64| {
+            let (mut d, body) = page();
+            d.inner_width = 390.0;
+            let html = d.document_element.unwrap();
+            d.el_mut(html).scroll_width = scroll_width;
+            let label = d.add(Some(body), "span");
+            visible(&mut d, label);
+            d.add_text(label, "Right column label");
+            d.set_rect(label, 900.0, 100.0, 140.0, 20.0);
+            d.set_styles(
+                label,
+                &[
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("color", "rgb(169, 169, 169)"),
+                    ("fontSize", "14px"),
+                    ("fontWeight", "400"),
+                ],
+            );
+            reports_contrast(&colors(&d, label))
+        };
+        assert!(run(1100.0), "the document is 1100px wide");
+        assert!(!run(390.0), "past the edge of a page as wide as the window");
+    }
+
+    #[test]
+    fn a_glow_on_a_light_panel_laid_over_a_dark_section_is_not_on_dark() {
+        let run = |layer: &[(&str, &str)]| {
+            let (mut d, body) = page();
+            let night = bare_box(&mut d, body, "section", (0.0, 0.0, 560.0, 120.0));
+            d.set_styles(night, &[("position", "relative"), ("backgroundColor", "rgb(11, 11, 15)")]);
+            let panel = bare_box(&mut d, night, "div", (0.0, 0.0, 560.0, 120.0));
+            d.set_style(panel, "position", "absolute");
+            d.set_styles(panel, layer);
+            let actions = bare_box(&mut d, night, "div", (0.0, 0.0, 560.0, 120.0));
+            d.set_style(actions, "position", "relative");
+            let button = bare_box(&mut d, actions, "button", (24.0, 36.0, 160.0, 44.0));
+            d.set_styles(
+                button,
+                &[
+                    ("boxShadow", "rgba(146, 99, 233, 0.9) 0px 4px 24px 0px"),
+                    ("textShadow", "none"),
+                    ("backgroundColor", "rgb(124, 58, 237)"),
+                ],
+            );
+            check_element_glow_dom(&d, button)
+        };
+        let on_dark = |hits: &[RuleHit]| hits.iter().any(|h| h.snippet.ends_with("on dark background"));
+        assert!(!on_dark(&run(&[("backgroundColor", "rgb(245, 245, 245)")])), "a light panel is the surface");
+        // A vignette lets the dark section through, and a photo's colours are
+        // unknown: the claim stands as the walk made it.
+        assert!(on_dark(&run(&[("backgroundImage", "radial-gradient(rgba(0, 0, 0, 0) 25%, rgba(4, 1, 9, 0.78) 100%)")])));
+        assert!(on_dark(&run(&[("backgroundImage", "url(\"https://example.com/cream.jpg\")"), ("backgroundSize", "cover")])));
     }
 
     #[test]

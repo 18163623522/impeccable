@@ -47,7 +47,14 @@ pub struct WidgetVendor {
 /// The widget vendors, from the corpus evidence: Taboola recommendation cards
 /// on ynet.co.il and climatempo.com.br (findings 110423, 110711, 123649,
 /// 123650, 123679), and a Swiper carousel's vendor CSS on nubank.com.br
-/// (111379, 111514).
+/// (111379, 111514). Run 28 adds four more (observations-28, section 3):
+/// Slick's track and slide wrappers on lpga.or.jp (141946) and the dot
+/// buttons Slick writes on jyes.com.tw (141986, 142493), SuperSlide's
+/// `div.tempWrap` on scol.com.cn (141745, 141937), react-fast-marquee on
+/// cnnbrasil.com.br (143060, 143061), and Kaltura's player on cencora.com
+/// (143584 to 143586, 143613 to 143615). A vendor listed twice has two
+/// scopes: Slick's structural wrappers hold the site's slides, while the dot
+/// list is Slick's own markup down to the button.
 pub const WIDGET_VENDORS: &[WidgetVendor] = &[
     WidgetVendor {
         name: "Taboola",
@@ -64,6 +71,43 @@ pub const WIDGET_VENDORS: &[WidgetVendor] = &[
         id_prefixes: &["swiper-wrapper-"],
         class_prefixes: &[],
         classes: &["swiper", "swiper-container", "swiper-wrapper", "swiper-slide"],
+    },
+    WidgetVendor {
+        name: "Slick",
+        scope: WidgetScope::OwnElement,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["slick-slider", "slick-list", "slick-track", "slick-slide", "slick-arrow"],
+    },
+    WidgetVendor {
+        name: "Slick",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["slick-dots"],
+    },
+    WidgetVendor {
+        name: "SuperSlide",
+        scope: WidgetScope::OwnElement,
+        id_prefixes: &[],
+        class_prefixes: &[],
+        classes: &["tempWrap"],
+    },
+    WidgetVendor {
+        // The marquee clones and moves the site's children; what they collide
+        // with or show at rest is the vendor's motion.
+        name: "react-fast-marquee",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &["rfm-"],
+        classes: &[],
+    },
+    WidgetVendor {
+        name: "Kaltura",
+        scope: WidgetScope::Subtree,
+        id_prefixes: &[],
+        class_prefixes: &["playkit-"],
+        classes: &["kaltura-player", "kaltura-player-container"],
     },
 ];
 
@@ -103,8 +147,10 @@ pub fn widget_vendor(dom: &dyn Dom, el: ElId) -> Option<&'static str> {
 #[derive(Debug)]
 pub struct AdTechVendor {
     pub name: &'static str,
-    /// Hosts of the script URL the error was thrown from: the host itself or
-    /// any subdomain of it.
+    /// Where the script the error was thrown from is served: a host, matching
+    /// the host itself or any subdomain of it, or a host and a path prefix
+    /// (`asset.chase.com/web/library/...`) for a vendor library that shares
+    /// its host with the site.
     pub sources: &'static [&'static str],
     /// Prefixes of the script's file name, for a library a site serves from
     /// its own host: the file is the vendor's, a directory named after it
@@ -119,7 +165,12 @@ pub struct AdTechVendor {
 /// tags back and throws when it patches `document.createElement`. Product
 /// analytics (PostHog) and a site's own bundles and telemetry chunks, ad
 /// code served from the site's own host included, are not on the list and
-/// stay first-party script errors.
+/// stay first-party script errors. Run 28 adds (observations-28, section 3)
+/// the nagich.co.il accessibility overlay on walla.co.il (142928, 142984) and
+/// Chase's shared `Reporting.js` tag library, served from `asset.chase.com`
+/// to jpmorganchase.com (143250); Prisma Media's ad core on
+/// cuisineactuelle.fr throws from its Prebid call (143089, 143154), which
+/// [`AD_TECH_APIS`] names.
 pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
     AdTechVendor { name: "AnyMind", sources: &["anymind360.com"], files: &[] },
     AdTechVendor { name: "Prebid", sources: &[], files: &["prebid"] },
@@ -131,21 +182,38 @@ pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
         sources: &["googlesyndication.com", "doubleclick.net", "googleadservices.com"],
         files: &[],
     },
+    AdTechVendor { name: "Nagich", sources: &["nagich.co.il"], files: &[] },
+    AdTechVendor {
+        name: "Chase Reporting",
+        sources: &["asset.chase.com/web/library/digddsautomation/reportingjs/"],
+        files: &[],
+    },
 ];
 
-/// The lower-cased hosts of the script URLs in a page error's source, with
-/// any user info and port dropped.
-fn script_hosts(source: &str) -> Vec<String> {
+/// The lower-cased host and path of each script URL in a page error's
+/// source, with any user info and port dropped from the host and the query
+/// and fragment from the path (which keeps no leading `/`).
+fn script_hosts(source: &str) -> Vec<(String, String)> {
     source
         .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
         .filter_map(|token| {
             let rest = token.split_once("://")?.1;
-            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let rest = rest.split(['?', '#']).next().unwrap_or("");
+            let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
             let host = authority.rsplit('@').next().unwrap_or("");
             let host = host.split(':').next().unwrap_or("");
-            (!host.is_empty()).then(|| host.to_ascii_lowercase())
+            (!host.is_empty()).then(|| (host.to_ascii_lowercase(), path.to_ascii_lowercase()))
         })
         .collect()
+}
+
+/// Whether a script at `host` and `path` is served from `source`, a host
+/// or a host and a path prefix (see [`AdTechVendor::sources`]).
+fn served_from(host: &str, path: &str, source: &str) -> bool {
+    match source.split_once('/') {
+        Some((domain, prefix)) => host_is_or_under(host, domain) && path.starts_with(prefix),
+        None => host_is_or_under(host, source),
+    }
 }
 
 /// Whether `host` is `domain` or a subdomain of it.
@@ -182,13 +250,15 @@ fn script_file_names(source: &str) -> Vec<String> {
 /// Topics API (`document.browsingTopics() is deprecated and has been
 /// removed`, findings 65354, 65585 on co-trip.jp) and ad scripts still call
 /// it; the Protected Audience calls are the same kind of rejection; AdSense
-/// throws `adsbygoogle.push() error` at slots it cannot fill. Each maps to
+/// throws `adsbygoogle.push() error` at slots it cannot fill, and an ad core
+/// calling a Prebid build that lacks a method names `_prebidjs`. Each maps to
 /// the vendor it names.
 pub const AD_TECH_APIS: &[(&str, &str)] = &[
     ("browsingTopics", "ad tech"),
     ("joinAdInterestGroup", "ad tech"),
     ("runAdAuction", "ad tech"),
     ("adsbygoogle", "Google Ads"),
+    ("_prebidjs", "Prebid"),
 ];
 
 /// The ad-tech vendor behind an uncaught page error, from where it was
@@ -199,7 +269,7 @@ pub fn ad_tech_vendor(message: &str, source: Option<&str>) -> Option<&'static st
         let hosts = script_hosts(source);
         let files = script_file_names(source);
         for vendor in AD_TECH_VENDORS {
-            if vendor.sources.iter().any(|s| hosts.iter().any(|h| host_is_or_under(h, s)))
+            if vendor.sources.iter().any(|s| hosts.iter().any(|(h, p)| served_from(h, p, s)))
                 || vendor.files.iter().any(|p| files.iter().any(|f| f.starts_with(p)))
             {
                 return Some(vendor.name);
@@ -266,6 +336,12 @@ mod tests {
             None
         );
         assert_eq!(ad_tech_vendor(msg, Some("at f, https://notgoogletagmanager.com/app.js:1:2")), None);
+        // A host and path prefix matches only under that path.
+        assert_eq!(
+            ad_tech_vendor(msg, Some("at f, https://asset.chase.com/web/library/digddsautomation/reportingjs/Reporting.js:1:2")),
+            Some("Chase Reporting")
+        );
+        assert_eq!(ad_tech_vendor(msg, Some("at f, https://asset.chase.com/web/app/main.js:1:2")), None);
         assert_eq!(
             ad_tech_vendor(msg, Some("at f, https://securepubads.g.doubleclick.net:443/tag/js/gpt.js:3:4")),
             Some("Google Ads")
@@ -321,6 +397,83 @@ mod tests {
             ad_tech_vendor("Uncaught TypeError: cart is undefined", Some("at https://shop.example/prebid/app.js:1:1")),
             None
         );
+    }
+
+    #[test]
+    fn run_28_ad_tech_hosts_name_their_vendor() {
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught (in promise) TypeError: ze._prebidjs.getAdserverTargetingForAdUnitCode is not a function",
+                Some("at mapConversionRateInAdserverWithPrebidTargeting, https://tra.scds.pmdstatic.net/advertising-core/5/core-ads.js:1:73446")
+            ),
+            Some("Prebid")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught (in promise) TypeError: e.some is not a function",
+                Some("at i, https://js.nagich.co.il/core/4.6.12/accessibility.js:1:3216")
+            ),
+            Some("Nagich")
+        );
+        assert_eq!(
+            ad_tech_vendor(
+                "Uncaught TypeError: Cannot convert undefined or null to object",
+                Some("at o, https://asset.chase.com/web/library/digddsautomation/reportingjs/Reporting.js:1:121552")
+            ),
+            Some("Chase Reporting")
+        );
+        // Chase's own bundles on the same host stay first-party.
+        assert_eq!(
+            ad_tech_vendor("Uncaught TypeError: x is undefined", Some("at a, https://asset.chase.com/web/app/main.js:1:1")),
+            None
+        );
+    }
+
+    #[test]
+    fn run_28_widget_vendors_tag_their_markup() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        // Slick: the list is Slick's, the site's slide content is not; the
+        // dot list is Slick's down to its buttons.
+        let slider = d.add(Some(body), "div");
+        d.set_attr(slider, "class", "banner slick-initialized slick-slider");
+        let list = d.add(Some(slider), "div");
+        d.set_attr(list, "class", "slick-list draggable");
+        let slide = d.add(Some(list), "div");
+        d.set_attr(slide, "class", "slick-slide slick-active");
+        let caption = d.add(Some(slide), "p");
+        let dots = d.add(Some(slider), "ul");
+        d.set_attr(dots, "class", "slick-dots");
+        let dot = d.add(Some(dots), "li");
+        d.set_attr(dot, "id", "slick-slide00");
+        let button = d.add(Some(dot), "button");
+        assert_eq!(widget_vendor(&d, list), Some("Slick"));
+        assert_eq!(widget_vendor(&d, slide), Some("Slick"));
+        assert_eq!(widget_vendor(&d, caption), None);
+        assert_eq!(widget_vendor(&d, button), Some("Slick"));
+        // SuperSlide's wrapper.
+        let wrap = d.add(Some(body), "div");
+        d.set_attr(wrap, "class", "tempWrap");
+        let item = d.add(Some(wrap), "span");
+        assert_eq!(widget_vendor(&d, wrap), Some("SuperSlide"));
+        assert_eq!(widget_vendor(&d, item), None);
+        // react-fast-marquee and Kaltura tag their whole subtree.
+        let marquee = d.add(Some(body), "div");
+        d.set_attr(marquee, "class", "rfm-marquee-container ");
+        let child = d.add(Some(marquee), "div");
+        d.set_attr(child, "class", "rfm-child");
+        let ticker = d.add(Some(child), "span");
+        assert_eq!(widget_vendor(&d, ticker), Some("react-fast-marquee"));
+        let player = d.add(Some(body), "div");
+        d.set_attr(player, "class", "kaltura-player embed-responsive-item");
+        let area = d.add(Some(player), "div");
+        d.set_attr(area, "class", "playkit-video-area");
+        let video = d.add(Some(area), "video");
+        assert_eq!(widget_vendor(&d, video), Some("Kaltura"));
+        // Look-alike classes are not the vendors'.
+        let other = d.add(Some(body), "div");
+        d.set_attr(other, "class", "slick-like rfm tempwrap kaltura");
+        assert_eq!(widget_vendor(&d, other), None);
     }
 
     #[test]

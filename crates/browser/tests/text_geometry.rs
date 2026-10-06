@@ -206,7 +206,9 @@ fn the_text_geometry_rules_measure_the_text() {
     // Bold titles of two lines or fewer, or in a -webkit-box line clamp, are
     // exempt (taste call r3-03), a clamp that hides nothing included; bold
     // body text of four lines, a weight-500 title, regular copy in a clamp and
-    // bold text a max-height clip shows three lines of keep the floor.
+    // bold text a max-height clip shows three lines of keep the floor. A flex
+    // row is measured run by run: short runs a wrapping row moves as whole
+    // items pass, a run long enough to wrap in its item keeps the floor.
     let leading = findings(&engine, port, "tight-leading.html", "tight-leading");
     assert_cases(
         &leading,
@@ -217,8 +219,10 @@ fn the_text_geometry_rules_measure_the_text() {
             "medium-slot-title",
             "clamped-regular-blurb",
             "bold-clipped-summary",
+            "flex-long-run",
         ],
         &[
+            "items-row",
             "teaser-copy",
             "link-run",
             "bold-slot-title",
@@ -228,12 +232,23 @@ fn the_text_geometry_rules_measure_the_text() {
         ],
         "tight-leading",
     );
-    assert_eq!(leading.len(), 9, "the nine flag cases: {leading:?}");
+    assert_eq!(leading.len(), 10, "the ten flag cases: {leading:?}");
+    // The same short runs in a row that does not wrap, and in grid cells,
+    // wrap inside their items and keep the floor.
+    let runs = findings(&engine, port, "tight-leading-runs.html", "tight-leading");
+    assert_cases(&runs, &["nowrap-runs-row", "grid-runs-row"], &[], "tight-leading");
+    assert_eq!(runs.len(), 2, "the two flag cases: {runs:?}");
 
     // A chip under 27.5px tall is measured by its glyphs (taste call r3-20):
     // the step chip's line box holds them 5px off its edges, the 20px chip's
     // glyphs still reach within 2px. The price chip passes at 27px and
     // reports at 28px and 27.6px, where the content area measures it.
+    // A side a reader sees no edge on is not crowded (observations-28 row
+    // 13): text a sideways scroll or an ellipsis cuts, a band that runs on
+    // into a sibling of the same fill, a fill laid on a positioned layer of
+    // the same colour, and a chip a transform draws at 0.3. The start side
+    // of a scrolled table and a band beside another colour still report
+    // (`cramped-padding-edges.html`).
     let cramped = findings(&engine, port, "cramped-padding.html", "cramped-padding");
     assert_cases(
         &cramped,
@@ -241,6 +256,20 @@ fn the_text_geometry_rules_measure_the_text() {
         &["pass-highlight", "pass-step-chip", "pass-price-chip"],
         "cramped-padding",
     );
+    let edges = findings(&engine, port, "cramped-padding-edges.html", "cramped-padding");
+    assert_cases(
+        &edges,
+        &["flag-scroll-start", "flag-band-next-differs"],
+        &[
+            "pass-scroll-table",
+            "pass-ellipsis-panel",
+            "pass-same-band",
+            "pass-layer-grid",
+            "pass-scaled-chip",
+        ],
+        "cramped-padding",
+    );
+    assert_eq!(edges.len(), 2, "only the two flag cases: {edges:?}");
     for chip in ["flag-price-chip", "flag-price-chip-subpixel"] {
         let (snippet, _) = cramped
             .iter()
@@ -275,6 +304,8 @@ fn text_overflow_and_edge_flush_cards_read_the_x_axis() {
             "pass-free-space-pre",
             "pass-free-space-headline",
             "pass-under-hairline",
+            "pass-hover-tooltip",
+            "pass-corner-badge",
         ],
         "text-overflow",
     );

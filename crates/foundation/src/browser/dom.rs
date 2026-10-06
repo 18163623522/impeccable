@@ -201,6 +201,29 @@ pub trait Dom {
     /// of every non-blank direct text node (rects narrower/shorter than 1px
     /// dropped); `None` when there is none.
     fn direct_text_rect(&self, el: ElId) -> Option<Rect>;
+    /// The rows the element's rendered text occupies: one rect per line box,
+    /// top to bottom. `None` when this DOM cannot say where the lines are.
+    ///
+    /// This is how a rule reads a line rather than the box that holds it, and
+    /// a line here is the whole line the reader sees. `getClientRects()` on a
+    /// text node gives a rect per line box, but a line box is routinely split
+    /// across several text nodes — an inline `<strong>` in the middle of a
+    /// sentence, a framework marker, an HTML comment — so the rects are
+    /// collected over the element's whole rendered text (descendants
+    /// included, which is the text `text_content` counts) and the ones that
+    /// share a row are merged back into the one line they came from. Without
+    /// that merge each fragment is a "line" and one wrapped sentence is
+    /// charged as several.
+    ///
+    /// `None` is the honest answer from a DOM that only kept the union of
+    /// those rects (a page snapshot captured before the lines were recorded).
+    /// A caller stands down there; it never divides a union by a line height
+    /// and calls the pieces lines, because the union of a long first line and
+    /// a short tail says nothing about either.
+    fn text_line_rects(&self, _el: ElId) -> Option<Vec<Rect>> {
+        None
+    }
+
     /// The CSS properties (`opacity`, `filter`, hyphenated as the CSSOM
     /// spells them) of every animation and transition running on the element
     /// itself at capture: `document.getAnimations()` entries whose effect
@@ -237,28 +260,6 @@ pub trait Dom {
     /// sees a fill a component paints in its shadow tree.
     fn shadow_trees_recorded(&self) -> bool {
         false
-    }
-    /// The rows the element's rendered text occupies: one rect per line box,
-    /// top to bottom. `None` when this DOM cannot say where the lines are.
-    ///
-    /// This is how a rule reads a line rather than the box that holds it, and
-    /// a line here is the whole line the reader sees. `getClientRects()` on a
-    /// text node gives a rect per line box, but a line box is routinely split
-    /// across several text nodes — an inline `<strong>` in the middle of a
-    /// sentence, a framework marker, an HTML comment — so the rects are
-    /// collected over the element's whole rendered text (descendants
-    /// included, which is the text `text_content` counts) and the ones that
-    /// share a row are merged back into the one line they came from. Without
-    /// that merge each fragment is a "line" and one wrapped sentence is
-    /// charged as several.
-    ///
-    /// `None` is the honest answer from a DOM that only kept the union of
-    /// those rects (a page snapshot captured before the lines were recorded).
-    /// A caller stands down there; it never divides a union by a line height
-    /// and calls the pieces lines, because the union of a long first line and
-    /// a short tail says nothing about either.
-    fn text_line_rects(&self, _el: ElId) -> Option<Vec<Rect>> {
-        None
     }
 }
 

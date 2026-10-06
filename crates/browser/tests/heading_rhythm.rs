@@ -5,7 +5,11 @@
 //! misread once the rule pass ran after the reveal sweep: an eyebrow wrapped
 //! in its own box, a block that ends in a rule, an accordion trigger that ends
 //! its row, a caption under its photo, a title band that draws its own rules,
-//! and a standfirst behind a `display: contents` wrapper.
+//! and a standfirst behind a `display: contents` wrapper. Round 7 adds labels
+//! at body size set apart by colour, italics or a hairline weight when they
+//! open the box that holds the heading, and a band painted with a background
+//! image that covers it; a link or date closing the block above and a
+//! heading's own icon or accent bar keep reporting.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -92,13 +96,34 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         // layout row that shares a class with its neighbour repeats nothing.
         "\"Flag Code Block Above\" has 12px above vs 36px below",
         "\"Flag Title Alone In A Row\" has 16px above vs 48px below",
+        // A grey line too long to read as a label is still content.
+        "\"Flag Grey Sentence Above\" has 10px above vs 48px below",
+        // A coloured link or a grey date that closes the block above, laid
+        // out in that block's box, is the block's own last line. The link's
+        // gap is asserted below, within a pixel.
+        "\"Flag Link Closing Block\" has ",
+        "\"Flag Date Closing Post\" has 12px above vs 40px below",
+        // A heading's own icon or accent bar draws no edge above it.
+        "\"Flag Icon Heading\" has 12px above vs 40px below",
+        "\"Flag Accent Bar Heading\" has 12px above vs 40px below",
     ] {
         assert!(
             snippets.iter().any(|s| s.contains(heading)),
             "expected {heading:?} to flag, got {snippets:?}"
         );
     }
+    // The gap above the link closing the block runs from the bottom of the
+    // link's text box, which is the face's ascent and descent: 15px in
+    // Georgia, 16px in the serif a Linux runner substitutes for it.
+    let link = snippets
+        .iter()
+        .find(|s| s.contains("\"Flag Link Closing Block\" has "))
+        .expect("the link closing the block flags");
+    assert!(
+        ["15px", "16px"].iter().any(|px| link.contains(&format!("has {px} above vs 40px below"))),
+        "{link}"
+    );
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
-    assert_eq!(snippets.len(), 15, "{snippets:?}");
+    assert_eq!(snippets.len(), 20, "{snippets:?}");
 }

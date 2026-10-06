@@ -248,6 +248,24 @@ pub fn capture_visual_contrast_candidate(
     candidate: &Value,
     viewport_width: f64,
 ) -> CdpResult<Option<RawFinding>> {
+    Ok(measure_visual_contrast_candidate(page, candidate, viewport_width)?.finding)
+}
+
+/// What the pixel pass made of one candidate: its finding, if the text
+/// failed, and whether the pixels gave a verdict at all, pass or fail. The
+/// URL engine replaces the element pass's verdict on text it hands over only
+/// where they did.
+#[derive(Default)]
+pub struct PixelMeasure {
+    pub finding: Option<RawFinding>,
+    pub measured: bool,
+}
+
+pub fn measure_visual_contrast_candidate(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    viewport_width: f64,
+) -> CdpResult<PixelMeasure> {
     let reasons: Vec<String> = candidate
         .get("reasons")
         .and_then(Value::as_array)
@@ -256,10 +274,10 @@ pub fn capture_visual_contrast_candidate(
     // Refused before the screenshots: the pixels would not answer for this
     // text, and a clipped capture pair is the expensive part of the pass.
     if visual::pixel_contrast_blocked(&reasons).is_some() {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     }
     let Some(clip) = sanitize_screenshot_clip(candidate.get("clip"), Some(viewport_width)) else {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     };
     // A candidate past the document's content box (text inside an element the
     // page scrolls instead of its document) paints nothing in a beyond-viewport
@@ -383,7 +401,7 @@ fn measure_candidate(
     candidate: &Value,
     reasons: &[String],
     clip: Clip,
-) -> CdpResult<Option<RawFinding>> {
+) -> CdpResult<PixelMeasure> {
     let before = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height)?;
     let token = format!(
         "impeccable-contrast-{}-{}",
@@ -415,6 +433,11 @@ fn measure_candidate(
         '  color: transparent !important;',
         '  -webkit-text-fill-color: transparent !important;',
         '  text-shadow: none !important;',
+        '  -webkit-text-stroke-color: transparent !important;',
+        '}}',
+        'text[data-impeccable-visual-contrast-target], tspan[data-impeccable-visual-contrast-target] {{',
+        '  fill: transparent !important;',
+        '  stroke: transparent !important;',
         '}}',
         '[data-impeccable-visual-contrast-target][data-impeccable-bgclip-text="true"] {{',
         '  background-image: none !important;',
@@ -430,7 +453,7 @@ fn measure_candidate(
     );
     let applied = page.evaluate_value(&apply_expr)?;
     if applied.as_bool() != Some(true) {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     }
     let after = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height);
     // finally: remove the marker attributes (errors swallowed).
@@ -449,20 +472,20 @@ fn measure_candidate(
     let metrics = compare_screenshot_contrast(&before, &after, candidate)
         .map_err(crate::cdp::CdpError::new)?;
     let Some(metrics) = metrics else {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     };
     let PixelContrastOutcome::Verdict {
         measured, median, ..
     } = metrics.outcome
     else {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     };
     if !measured.is_finite() || metrics.glyph_pixels < GLYPH_MIN_PIXELS {
-        return Ok(None);
+        return Ok(PixelMeasure::default());
     }
     let threshold = num(candidate.get("threshold"));
     if measured >= threshold {
-        return Ok(None);
+        return Ok(PixelMeasure { finding: None, measured: true });
     }
     let text_label = match candidate.get("text") {
         Some(Value::String(t)) if !t.is_empty() => format!(" \"{t}\""),
@@ -482,7 +505,7 @@ fn measure_candidate(
     } else {
         joined
     };
-    Ok(Some(RawFinding {
+    Ok(PixelMeasure { measured: true, finding: Some(RawFinding {
         id: "low-contrast",
         severity: impeccable_core::browser::visual::visual_contrast_severity(
             candidate, measured, threshold,
@@ -494,7 +517,7 @@ fn measure_candidate(
             &reason_label,
             &text_label,
         ),
-    }))
+    }) })
 }
 
 /// The pixel pass's snippet. The verdict and the median print against the

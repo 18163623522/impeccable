@@ -2223,6 +2223,29 @@ fn scale_factors_within_unit(list: &str) -> bool {
     any
 }
 
+/// Whether a `transform` value only scales the element (`none`, or a list of
+/// `scale()`, `scaleX()` and kin at any factor): the box swells and shrinks
+/// in place and goes nowhere. A value this cannot read is not.
+pub fn transform_only_scales(value: &str) -> bool {
+    let value = js::trim(value);
+    let value = js::trim(value.strip_suffix("!important").unwrap_or(value));
+    if value.eq_ignore_ascii_case("none") {
+        return true;
+    }
+    let mut rest = value;
+    let mut any = false;
+    while !rest.is_empty() {
+        let Some(m) = SCALE_FN_RE.captures(rest) else { return false };
+        let factors = &m[1];
+        if factors.split(|c: char| c == ',' || is_js_ws(c)).filter(|p| !p.is_empty()).any(|p| p.parse::<f64>().is_err()) {
+            return false;
+        }
+        any = true;
+        rest = js::trim_start(&rest[m.get(0).unwrap().end()..]);
+    }
+    any
+}
+
 /// Whether one keyframe declaration is part of a pulse: it scales the
 /// element between nothing and its full size, fades it, or sets an easing
 /// that stays inside its range. Anything that moves the element (a

@@ -165,6 +165,13 @@ const __impeccableDom = {
   namespace_uri(el) { return __el(el).namespaceURI || ''; },
   parent(el) { return __intern(__el(el).parentElement); },
   children(el) { return __ids_of(__el(el).children); },
+  // The top-level elements of the open shadow tree el hosts; none for a
+  // closed or absent one.
+  shadow_children(el) {
+    let root = null;
+    try { root = __el(el).shadowRoot; } catch { root = null; }
+    return root ? __ids_of(root.children) : [];
+  },
   previous_element_sibling(el) { return __intern(__el(el).previousElementSibling); },
   next_element_sibling(el) { return __intern(__el(el).nextElementSibling); },
   contains(a, b) { return __el(a).contains(__el(b)); },

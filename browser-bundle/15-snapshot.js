@@ -502,32 +502,31 @@ function __snapRunningAnimations(ids, shadowRoots = []) {
   return out;
 }
 
-// Which recorded pseudo-class states each element carries: one document
-// query per state (cheap), instead of N x states `matches` calls.
-function __snapStates(ids) {
+// Which recorded pseudo-class states each element carries: one query per
+// state (cheap), instead of N x states `matches` calls. A document query
+// does not reach into shadow trees, so each captured shadow root is asked
+// too: a disabled or checked control inside a web component has its state.
+function __snapStates(ids, shadowRoots = []) {
   const states = new Map();
-  for (const name of __SNAP_STATE_PSEUDOS) {
-    let list;
-    try { list = document.querySelectorAll(':' + name); } catch { continue; }
-    for (const el of list) {
-      const id = ids.get(el);
-      if (!id) continue;
-      let arr = states.get(id);
-      if (!arr) { arr = []; states.set(id, arr); }
-      arr.push(name);
+  const scopes = [document, ...shadowRoots];
+  const record = (selector, name) => {
+    for (const scope of scopes) {
+      let list;
+      try { list = scope.querySelectorAll(selector); } catch { return; }
+      for (const el of list) {
+        const id = ids.get(el);
+        if (!id) continue;
+        let arr = states.get(id);
+        if (!arr) { arr = []; states.set(id, arr); }
+        arr.push(name);
+      }
     }
-  }
+  };
+  for (const name of __SNAP_STATE_PSEUDOS) record(':' + name, name);
   // Custom elements without a definition (`:defined` is the common case;
-  // record its complement).
-  try {
-    for (const el of document.querySelectorAll(':not(:defined)')) {
-      const id = ids.get(el);
-      if (!id) continue;
-      let arr = states.get(id);
-      if (!arr) { arr = []; states.set(id, arr); }
-      arr.push('undefined');
-    }
-  } catch { /* older engines */ }
+  // record its complement). An engine without `:defined` throws, and the
+  // state is not recorded.
+  record(':not(:defined)', 'undefined');
   return states;
 }
 
@@ -674,7 +673,7 @@ const __impeccableSnapshot = {
       return i;
     };
 
-    const states = __snapStates(ids);
+    const states = __snapStates(ids, shadowRoots);
     const animated = __snapRunningAnimations(ids, shadowRoots);
     const els = new Array(elements.length - 1);
     for (let id = 1; id < elements.length; id++) {

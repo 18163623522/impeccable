@@ -558,18 +558,24 @@ pub fn check_html_patterns_with(
     // loader dot scaling from nothing to its size and back is called
     // `sk-bounceDelay` and neither moves nor overshoots. Then the next
     // declaration is read, so a pulse never hides a bounce declared after it.
+    // Every bounce-named token in a declaration's list is read the same way,
+    // so a pulse listed first never hides a bounce listed after it.
     for bm in BOUNCE_ANIM_RE.captures_iter(style_text) {
         let list = &bm[1];
-        let token = COMMA_WS_SPLIT_RE
+        let mut labels: Vec<String> = COMMA_WS_SPLIT_RE
             .split(list)
-            .find(|part| BOUNCE_WORD_RE.is_match(part));
-        let label = match token {
-            Some(t) if !t.is_empty() => t.to_string(),
-            _ => js::trim(list).to_string(),
-        };
-        if crate::checks::css_scan::css_keyframes_only_pulse(style_text, &label) == Some(true) {
-            continue;
+            .filter(|part| !part.is_empty() && BOUNCE_WORD_RE.is_match(part))
+            .map(str::to_string)
+            .collect();
+        if labels.is_empty() {
+            labels.push(js::trim(list).to_string());
         }
+        let Some(label) = labels
+            .into_iter()
+            .find(|label| crate::checks::css_scan::css_keyframes_only_pulse(style_text, label) != Some(true))
+        else {
+            continue;
+        };
         findings.push(pf(
             "bounce-easing",
             format!("animation: {}", label),
@@ -806,5 +812,16 @@ mod tests {
             bounce(".badge{animation:bounce-in .4s} @keyframes bounce-in{0%{transform:scale(0)}60%{transform:scale(1.15)}100%{transform:scale(1)}}"),
             vec!["animation: bounce-in".to_string()]
         );
+        // review of #947: a pulse listed first in one declaration does not
+        // hide a bounce listed after it in the same list.
+        let listed = ".dot{animation:sk-bounceDelay 1s infinite, bounce-in .4s}\
+@keyframes sk-bounceDelay{0%,100%{transform:scale(0)}50%{transform:scale(1)}}\
+@keyframes bounce-in{0%{transform:scale(0)}60%{transform:scale(1.15)}100%{transform:scale(1)}}";
+        assert_eq!(bounce(listed), vec!["animation: bounce-in".to_string()]);
+        // A list of pulses alone stays quiet.
+        let pulses = ".dot{animation:sk-bounceDelay 1s infinite, sk-bounceDelay2 2s infinite}\
+@keyframes sk-bounceDelay{0%,100%{transform:scale(0)}50%{transform:scale(1)}}\
+@keyframes sk-bounceDelay2{0%,100%{opacity:0}50%{opacity:1}}";
+        assert!(bounce(pulses).is_empty());
     }
 }

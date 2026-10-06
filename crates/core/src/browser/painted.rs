@@ -927,7 +927,7 @@ fn is_viewport_layer(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_w: f64, viewpor
 }
 
 /// Whether the box lies wholly where the document cannot be scrolled to:
-/// before its start, or past its scroll width.
+/// before its start, past its scroll width, or below its scroll height.
 fn outside_document(dom: &dyn Dom, rect: &Rect, vis: &mut Visible, viewport_w: f64) -> Option<Unpainted> {
     let sx = finite_or(dom.scroll_x(), 0.0);
     let sy = finite_or(dom.scroll_y(), 0.0);
@@ -937,6 +937,18 @@ fn outside_document(dom: &dyn Dom, rect: &Rect, vis: &mut Visible, viewport_w: f
         return Some(Unpainted::OutsideDocument);
     }
     let root = dom.document_element()?;
+    // Below the end of the page's scroll range. A page whose body is the
+    // scroller (the root held at the viewport's height) scrolls as far as
+    // the body does, so the taller of the two is the range. Without a
+    // measured height, nothing is known below the fold.
+    let doc_h = [Some(root), dom.body()]
+        .into_iter()
+        .flatten()
+        .map(|e| finite_or(dom.scroll_height(e), 0.0))
+        .fold(0.0, f64::max);
+    if doc_h > 0.0 && rect.height > 0.0 && rect.top + sy >= doc_h {
+        return Some(Unpainted::OutsideDocument);
+    }
     let doc_w = finite_or(dom.scroll_width(root), 0.0);
     let rtl = js::to_lower_case(&dom.style(root, "direction")) == "rtl";
     // Scrollable x range: `[0, doc_w]` left to right, `[vw - doc_w, vw]` right
@@ -2260,6 +2272,42 @@ mod tests {
         let before = d.add(Some(body), "div");
         d.set_rect(before, -800.0, 3200.0, 580.0, 326.0);
         assert_eq!(why(&d, before), None);
+    }
+
+    /// review of #941: a box moved below the document's scroll height can
+    /// never be scrolled to.
+    #[test]
+    fn content_below_the_document_is_not_painted() {
+        let (mut d, body) = page();
+        let root = d.document_element.unwrap();
+        let below = d.add(Some(body), "div");
+        d.set_rect(below, 40.0, 4100.0, 580.0, 326.0);
+        // An unmeasured height knows nothing below the fold.
+        assert_eq!(why(&d, below), None);
+        d.el_mut(root).scroll_height = Some(4000.0);
+        assert_eq!(why(&d, below), Some(Unpainted::OutsideDocument));
+        let last = d.add(Some(body), "div");
+        d.set_rect(last, 40.0, 3900.0, 580.0, 326.0);
+        assert_eq!(why(&d, last), None, "runs past the end but starts on the page");
+
+        // A body that scrolls under a root held at the viewport's height
+        // reaches as far as the body does.
+        d.el_mut(root).scroll_height = Some(800.0);
+        d.el_mut(body).scroll_height = Some(4500.0);
+        assert_eq!(why(&d, below), None);
+
+        // So does a scroller inside the page: its box is what the document
+        // has to reach.
+        d.el_mut(body).scroll_height = Some(4000.0);
+        d.el_mut(root).scroll_height = Some(4000.0);
+        let frame = d.add(Some(body), "div");
+        d.set_styles(frame, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "auto")]);
+        d.set_rect(frame, 0.0, 3600.0, 1280.0, 400.0);
+        d.el_mut(frame).client_height = 400.0;
+        d.el_mut(frame).scroll_height = Some(1200.0);
+        let row = d.add(Some(frame), "p");
+        d.set_rect(row, 40.0, 4300.0, 640.0, 40.0);
+        assert_eq!(why(&d, row), None);
     }
 
     #[test]

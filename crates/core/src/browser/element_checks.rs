@@ -3048,8 +3048,12 @@ pub fn positioned_child_is_decorative(dom: &dyn Dom, child: ElId) -> bool {
     false
 }
 
-/// A layer the clip would really trap, whatever else it looks like.
+/// A layer the clip would really trap, whatever else it looks like. A modal
+/// dialog (`showModal()`) is not: it sits in the top layer, above every clip.
 pub fn positioned_child_is_popover_layer(dom: &dyn Dom, child: ElId) -> bool {
+    if matches_or_false(dom, child, ":modal") {
+        return false;
+    }
     matches_or_false(dom, child, POPOVER_LAYER_SELECTOR)
         || matches!(dom.query_one(Some(child), POPOVER_LAYER_SELECTOR), Ok(Some(_)))
 }
@@ -7298,6 +7302,11 @@ mod tests {
         d.set_style(swap, "transform", "matrix(1, 0, 0, 1, 0, 100)");
         as_popover(&mut d, swap);
         assert_eq!(check_element_clipped_overflow_dom(&d, well).len(), 1);
+        // A modal dialog sits in the top layer, above every clip (review of
+        // #968).
+        d.add_selector(swap, ":modal");
+        assert!(check_element_clipped_overflow_dom(&d, well).is_empty());
+        d.el_mut(swap).selectors.retain(|s| s != ":modal");
 
         // An ornament with text in it is not a popover either.
         let card = clipping_box(&mut d, body, 0.0, 200.0, 200.0, 100.0);

@@ -758,8 +758,15 @@ fn is_stock_violet(c: &crate::color::Rgba) -> bool {
 /// as painted here.
 fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
     use super::element_checks::{ai_palette_is_visible, element_rect};
+    let (root, body) = (dom.document_element(), dom.body());
     for el in dom.query_all(None, "*").unwrap_or_default() {
         if element_rect(dom, el).is_none() || !ai_palette_is_visible(dom, el) {
+            continue;
+        }
+        // The page's own paint: not the overlay, live mode or an extension's
+        // chrome, which the element rules never scan either. The root and
+        // the body are the page, though the element rules skip them.
+        if Some(el) != root && Some(el) != body && !element_is_scanned(dom, el) {
             continue;
         }
         if super::dom::has_direct_text_longer_than(dom, el, 0) {
@@ -2685,6 +2692,29 @@ mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
     use serde_json::json;
+
+    /// review of #941: the overlay's, live mode's and an extension's chrome
+    /// is not the page, so its violet does not count as the page's paint.
+    #[test]
+    fn stock_violet_is_read_off_the_page_not_its_chrome() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let badge = d.add(Some(body), "div");
+        d.set_rect(badge, 0.0, 0.0, 120.0, 32.0);
+        d.set_styles(badge, &[("backgroundColor", "rgb(124, 58, 237)")]);
+        d.add_selector(badge, ".impeccable-overlay");
+        assert!(!page_paints_stock_violet(&d), "overlay chrome");
+        d.el_mut(badge).selectors.clear();
+        d.set_attr(badge, "id", "claude-agent-glow");
+        assert!(!page_paints_stock_violet(&d), "an extension's node");
+        d.set_attr(badge, "id", "pricing-badge");
+        assert!(page_paints_stock_violet(&d), "the page's own badge");
+        // The body is the page.
+        d.set_attr(badge, "id", "claude-agent-glow");
+        d.set_rect(body, 0.0, 0.0, 1280.0, 800.0);
+        d.set_styles(body, &[("backgroundColor", "rgb(124, 58, 237)")]);
+        assert!(page_paints_stock_violet(&d), "a violet body");
+    }
 
     /// The style-text stripe scans run in the browser too; a left or right
     /// stripe reports only on an element rounded away from it.

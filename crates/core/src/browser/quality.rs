@@ -508,6 +508,10 @@ struct RenderedTextCount {
     /// No line break has come since the last counted character, so a kept
     /// trailing space is still on that character's line.
     tail_open: bool,
+    /// An atomic inline has been placed, so the line has begun even when the
+    /// box held no text of its own (an image, an empty inline-block, an
+    /// input): white space after it is between two things, not an edge.
+    boxed: bool,
 }
 
 impl RenderedTextCount {
@@ -533,7 +537,7 @@ impl RenderedTextCount {
             if js::is_js_whitespace(c) && !self.keep_fixed_spaces {
                 // A no-break space under a preserving white-space renders at
                 // the edges like a preserved space does.
-                if preserved && self.count == 0 {
+                if preserved && self.count == 0 && !self.boxed {
                     // Collapsible white space before the first preserved
                     // space starts the line and is removed; after it, it
                     // renders, so it joins the indentation.
@@ -555,7 +559,7 @@ impl RenderedTextCount {
             if COMBINING_OR_FORMAT_RE.is_match(c.encode_utf8(&mut buf)) {
                 continue;
             }
-            if self.count > 0 {
+            if self.count > 0 || self.boxed {
                 self.count += self.pending;
             } else if self.lead > 0 {
                 // Indentation, then any white space that followed it.
@@ -586,12 +590,22 @@ impl RenderedTextCount {
     /// because they are laid out in their own formatting context: their edge
     /// collapsible white space is trimmed there and never joins the outer
     /// run, while preserved and no-break spaces at the edges still render.
+    /// An empty box (an image, an input) holds its place the same way: the
+    /// white space beside it is not at an edge of the text.
+    /// Takes in a hard line break (`<br>`). The new line starts with no box
+    /// on it, so white space after the break is at the line's start again,
+    /// as it was before any box; and white space still held before the
+    /// first character is dropped with the line it was on.
+    fn line_break(&mut self) {
+        self.boxed = false;
+        if self.count == 0 {
+            self.pending = 0;
+        }
+    }
+
     fn add_atomic_inline(&mut self, inner: usize) {
         self.in_collapsible_run = false;
-        if inner == 0 {
-            return;
-        }
-        if self.count > 0 {
+        if self.count > 0 || self.boxed {
             self.count += self.pending;
         } else if self.lead > 0 {
             // Indentation, then any white space that followed it, as before
@@ -602,6 +616,7 @@ impl RenderedTextCount {
         self.lead = 0;
         self.tail = 0;
         self.tail_open = true;
+        self.boxed = true;
         self.count += inner;
     }
 }
@@ -638,6 +653,10 @@ fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
             }
             DomChild::Element(child) => {
                 if renders_no_text(dom, child) {
+                    continue;
+                }
+                if tag_lower(dom, child) == "br" {
+                    out.line_break();
                     continue;
                 }
                 if is_atomic_inline(dom, child) {
@@ -5185,5 +5204,44 @@ mod rendered_text_tests {
         d.add_text(nbsp, "\u{a0}word\u{a0}");
         d.add_text(r, " word");
         assert_eq!(rendered_text_len(&d, r), "word _word_ word".len());
+    }
+
+    /// An empty atomic inline (an image, an input, an empty inline-block)
+    /// still sits on the line, so a collapsible space between it and the
+    /// text renders even where the box starts or ends the text.
+    #[test]
+    fn a_space_beside_an_empty_atomic_inline_at_the_edge_counts() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        for (tag, display) in [("img", "inline"), ("input", "inline-block"), ("span", "inline-block")] {
+            let r = two_line_p(&mut d, body);
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            d.add_text(r, " word");
+            assert_eq!(rendered_text_len(&d, r), " word".len(), "leading {tag}");
+
+            let r = two_line_p(&mut d, body);
+            d.add_text(r, "word ");
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            assert_eq!(rendered_text_len(&d, r), "word ".len(), "trailing {tag}");
+
+            // Only the white space outside every box is an edge.
+            let r = two_line_p(&mut d, body);
+            d.add_text(r, "  ");
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            d.add_text(r, " word ");
+            assert_eq!(rendered_text_len(&d, r), " word".len(), "edges {tag}");
+
+            // A hard break after the box starts a new line, whose leading
+            // space is trimmed (review of #968).
+            let r = two_line_p(&mut d, body);
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            d.add(Some(r), "br");
+            d.add_text(r, " word");
+            assert_eq!(rendered_text_len(&d, r), "word".len(), "break {tag}");
+        }
     }
 }

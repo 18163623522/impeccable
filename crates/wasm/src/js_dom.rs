@@ -35,6 +35,7 @@ extern "C" {
     fn namespace_uri(el: u32) -> String;
     fn parent(el: u32) -> u32;
     fn children(el: u32) -> Vec<u32>;
+    fn shadow_children(el: u32) -> Vec<u32>;
     fn previous_element_sibling(el: u32) -> u32;
     fn next_element_sibling(el: u32) -> u32;
     fn contains(a: u32, b: u32) -> bool;
@@ -211,6 +212,13 @@ impl Dom for JsDom {
                 .or_insert_with(|| children(el))
                 .clone()
         })
+    }
+    /// The open shadow tree's top-level elements, so a web component that
+    /// lays out its content in its shadow tree is not read as empty. The
+    /// flat tree itself is not composed here (`flat_parent` stays the light
+    /// parent and `shadow_trees_recorded` false).
+    fn shadow_children(&self, el: ElId) -> Vec<ElId> {
+        shadow_children(el)
     }
     fn previous_element_sibling(&self, el: ElId) -> Option<ElId> {
         opt(previous_element_sibling(el))

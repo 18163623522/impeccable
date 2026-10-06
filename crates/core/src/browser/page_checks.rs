@@ -2056,12 +2056,16 @@ enum HiddenState {
 const SLIDER_CLASS_WORDS: &[&str] =
     &["slider", "carousel", "swiper", "slick", "splide", "glide", "flickity", "slideshow", "revslider"];
 
+/// The boxes that show a slide's picture, where a slide shows no text.
+const SLIDER_MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas", "svg"];
+
 /// How far above a hidden box the slider that holds it is looked for.
 const SLIDER_MAX_DEPTH: usize = 6;
 
 /// Class words that name one slide of a slider (`swiper-slide`,
-/// `carousel-item`, `splide__slide`): such a box is a slide, not the slider.
-const SLIDE_CLASS_WORDS: &[&str] = &["slide", "item", "cell", "card", "pane"];
+/// `carousel-item`, `splide__slide`) or a part of one (Bootstrap's
+/// `carousel-caption`): such a box is in a slider, not the slider.
+const SLIDE_CLASS_WORDS: &[&str] = &["slide", "item", "cell", "card", "pane", "caption"];
 
 /// Whether `el` is a slider box: a class token names a slider
 /// ([`SLIDER_CLASS_WORDS`]) and not one of its slides
@@ -2079,13 +2083,23 @@ fn slider_class(dom: &dyn Dom, el: ElId) -> bool {
 /// (inclusive) is `display: none`, `aria-hidden="true"` or at opacity 0.02 or
 /// less.
 fn text_shows_within(dom: &dyn Dom, el: ElId, upto: ElId) -> bool {
+    shows_within(dom, el, upto, true)
+}
+
+/// [`text_shows_within`] for a picture: `aria-hidden` hides nothing from
+/// sight, and a decorative slide image often carries it.
+fn picture_shows_within(dom: &dyn Dom, el: ElId, upto: ElId) -> bool {
+    shows_within(dom, el, upto, false)
+}
+
+fn shows_within(dom: &dyn Dom, el: ElId, upto: ElId, aria_hides: bool) -> bool {
     if HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility")) {
         return false;
     }
     let mut cur = Some(el);
     while let Some(e) = cur {
         if dom.style(e, "display") == "none"
-            || dom.attr(e, "aria-hidden").as_deref() == Some("true")
+            || (aria_hides && dom.attr(e, "aria-hidden").as_deref() == Some("true"))
             || pf0(&dom.style(e, "opacity")) <= 0.02
         {
             return false;
@@ -2103,7 +2117,7 @@ fn text_shows_within(dom: &dyn Dom, el: ElId, upto: ElId) -> bool {
 /// r6-t6-hidden-scroll-linked): the box or one of its nearest
 /// [`SLIDER_MAX_DEPTH`] ancestors carries a slider class
 /// ([`SLIDER_CLASS_WORDS`]), and not one element in that slider shows text
-/// ([`text_shows_within`]). A slider that started shows its current slide,
+/// or a picture ([`text_shows_within`]). A slider that started shows its current slide,
 /// so its other slides are not this (they count as before). One that shows
 /// nothing at all is the capture's state (a script that had not run, a
 /// preloader still up), not something to measure the page by.
@@ -2115,8 +2129,24 @@ fn unstarted_slider(dom: &dyn Dom, el: ElId, verdicts: &mut std::collections::Ha
     if let Some(v) = verdicts.get(&slider) {
         return *v;
     }
+    // A slide shows its text, or a picture: an image-only carousel that
+    // started shows its current image while every caption waits hidden. The
+    // picture has to be a slide's, inside the slider and spanning at least
+    // half its width: an arrow icon or a dot beside slides that are all
+    // hidden, or a backdrop on the slider's own box, starts nothing.
+    let slider_width = dom.rect(slider).width;
     let shows = |e: ElId| {
-        dom.direct_text_nodes(e).iter().any(|t| !js::trim(&collapse_ws(t)).is_empty()) && text_shows_within(dom, e, slider)
+        let pictured = || {
+            let r = dom.rect(e);
+            e != slider
+                && r.width >= 1.0
+                && r.height >= 1.0
+                && (!(slider_width.is_finite() && slider_width > 0.0) || r.width >= 0.5 * slider_width)
+                && (SLIDER_MEDIA_TAGS.contains(&tag_lower(dom, e).as_str())
+                    || js::to_lower_case(&dom.style(e, "backgroundImage")).contains("url("))
+        };
+        (dom.direct_text_nodes(e).iter().any(|t| !js::trim(&collapse_ws(t)).is_empty()) && text_shows_within(dom, e, slider))
+            || (pictured() && picture_shows_within(dom, e, slider))
     };
     let started =
         shows(slider) || dom.query_all(Some(slider), "*").unwrap_or_default().into_iter().any(shows);
@@ -2183,6 +2213,33 @@ fn closed_container_class(token: &str) -> bool {
     panel && (has("tab") || has("tabs") || has("accordion"))
 }
 
+/// Whether a trigger marks the tab panel `el` open: an element whose
+/// `aria-controls` names its id says `aria-selected="true"` or
+/// `aria-expanded="true"`, or the tab its `aria-labelledby` names says
+/// `aria-selected="true"`.
+fn tab_panel_marked_open(dom: &dyn Dom, el: ElId) -> bool {
+    let says_true = |e: ElId, name: &str| {
+        dom.attr(e, name).map(|v| js::to_lower_case(js::trim(&v))).as_deref() == Some("true")
+    };
+    if let Some(id) = dom.attr(el, "id").map(|id| js::trim(&id).to_string()).filter(|id| !id.is_empty()) {
+        let opens = dom.query_all(None, "[aria-controls]").unwrap_or_default().into_iter().any(|t| {
+            dom.attr(t, "aria-controls").is_some_and(|ids| ids.split_whitespace().any(|i| i == id))
+                && (says_true(t, "aria-selected") || says_true(t, "aria-expanded"))
+        });
+        if opens {
+            return true;
+        }
+    }
+    let labels = dom.attr(el, "aria-labelledby").unwrap_or_default();
+    if labels.trim().is_empty() {
+        return false;
+    }
+    dom.query_all(None, "[aria-selected]").unwrap_or_default().into_iter().any(|t| {
+        says_true(t, "aria-selected")
+            && dom.attr(t, "id").is_some_and(|tid| labels.split_whitespace().any(|l| l == tid))
+    })
+}
+
 /// The ids whose controlling triggers all say closed: every element whose
 /// `aria-controls` names the id carries `aria-expanded="false"` or
 /// `aria-selected="false"`, and none says `true`.
@@ -2227,19 +2284,27 @@ fn closed_controlled_ids(dom: &dyn Dom) -> std::collections::HashSet<String> {
 /// - the box itself is a drawer parked beside the page: `position: fixed`
 ///   and wholly left or right of the viewport.
 ///
+/// A tab panel (by role or by a tab class) that its tab marks selected
+/// ([`tab_panel_marked_open`]) is not closed by its own role or class: it is
+/// the panel a visitor was meant to see. The other tests still apply.
+///
 /// A box none of these describe is base behaviour: its text counts as hidden.
 fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::HashSet<String>) -> bool {
     let role = |e: ElId| dom.attr(e, "role").map(|r| js::to_lower_case(js::trim(&r))).unwrap_or_default();
     let own_role = role(el);
-    if CLOSED_PANEL_ROLES.contains(&own_role.as_str()) {
+    let class = dom.attr(el, "class").unwrap_or_default();
+    // A tab panel its own tab marks selected is the panel a visitor is meant
+    // to see: hidden, its reveal failed, and it is content like any other,
+    // whether the role or a class (`tab-pane`) names it a panel.
+    let tab_like = own_role == "tabpanel"
+        || class.split_whitespace().any(|t| class_words(t).iter().any(|w| matches!(w.as_str(), "tab" | "tabs" | "tabpanel" | "tabpane")));
+    // Only the panel's own role and class exemptions yield to that: an
+    // inert or collapsed wrapper around it still closes it.
+    let selected = tab_like && tab_panel_marked_open(dom, el);
+    if !selected && CLOSED_PANEL_ROLES.contains(&own_role.as_str()) {
         return true;
     }
-    if dom
-        .attr(el, "class")
-        .unwrap_or_default()
-        .split_whitespace()
-        .any(closed_container_class)
-    {
+    if !selected && class.split_whitespace().any(closed_container_class) {
         return true;
     }
     let collapsed = |e: ElId| {
@@ -4131,6 +4196,11 @@ mod tests {
         assert!(rhythm_is_spacer(&d, ruled));
         d.set_style(ruled, "borderBottomWidth", "1px");
         assert!(!rhythm_is_spacer(&d, ruled));
+        // So is a short divider drawn only along its top (review of #941).
+        let divider = flow(&mut d, body, "div", (0.0, 160.0, 48.0, 2.0), "");
+        assert!(rhythm_is_spacer(&d, divider));
+        d.set_style(divider, "borderTopWidth", "2px");
+        assert!(!rhythm_is_spacer(&d, divider));
         // And one that holds words.
         let worded = flow(&mut d, body, "div", (0.0, 200.0, 800.0, 40.0), "");
         flow(&mut d, worded, "div", (0.0, 200.0, 800.0, 40.0), "Words");
@@ -4251,11 +4321,18 @@ mod tests {
         group(&mut d, sec, 0.0, 0.0, "Heading on screen one");
         group(&mut d, sec, 0.0, 160.0, "Heading on screen two");
         group(&mut d, track, -900.0, 420.0, "Heading on a parked slide");
+        // A heading whose own opacity is 1 inside a wrapper held at 0 (an
+        // inactive tab) is not painted either (review of #941).
+        let faded = d.add(Some(sec), "div");
+        d.set_styles(faded, &flow);
+        d.set_style(faded, "opacity", "0");
+        d.set_rect(faded, 0.0, 700.0, 800.0, 200.0);
+        group(&mut d, faded, 0.0, 720.0, "Heading in a faded tab");
         let f = check_heading_rhythm_dom(&d);
         let details: Vec<&str> = f.iter().map(|x| x.finding.detail.as_str()).collect();
         assert_eq!(details.len(), 2, "{details:?}");
         assert!(details.iter().all(|x| x.ends_with("(2 headings on page)")), "{details:?}");
-        assert!(!details.iter().any(|x| x.contains("parked")), "{details:?}");
+        assert!(!details.iter().any(|x| x.contains("parked") || x.contains("faded")), "{details:?}");
     }
 
     /// A `display: contents` wrapper whose first child is a spacer: the
@@ -4527,6 +4604,104 @@ mod tests {
     /// or never looked at, still counts. A slider with every slide hidden
     /// leaves both counts and is reported apart; a slider showing its current
     /// slide is a page, and its other slides count as before.
+    /// review of #968: a selected panel named by its role and a tab class
+    /// (Bootstrap's `tab-pane`) is content when it stays hidden, by either
+    /// way of marking it selected; an unselected one is closed interface.
+    #[test]
+    fn a_selected_tab_pane_is_content_when_hidden() {
+        let text = |c: &str, n: usize| c.repeat(n);
+        for by_labelledby in [false, true] {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            hidden_box(&mut d, body, "p", &[], &text("v", 100));
+            let tab = hidden_box(&mut d, body, "button", &[], "Plans");
+            d.set_attr(tab, "id", "tab-plans");
+            d.set_attr(tab, "aria-selected", "true");
+            d.add_selector(tab, "[aria-selected]");
+            if !by_labelledby {
+                d.set_attr(tab, "aria-controls", "panel-plans");
+                d.add_selector(tab, "[aria-controls]");
+            }
+            let pane = hidden_box(&mut d, body, "div", VIS_HIDDEN, &text("s", 40));
+            d.set_attr(pane, "role", "tabpanel");
+            d.set_attr(pane, "class", "tab-pane fade");
+            d.set_attr(pane, "id", "panel-plans");
+            if by_labelledby {
+                d.set_attr(pane, "aria-labelledby", "tab-plans");
+            }
+            let other = hidden_box(&mut d, body, "div", VIS_HIDDEN, &text("u", 40));
+            d.set_attr(other, "role", "tabpanel");
+            d.set_attr(other, "class", "tab-pane fade");
+            d.set_attr(other, "id", "panel-other");
+            mark_body_descendants(&mut d);
+            let m = measure_hidden_text_dom(&d);
+            assert_eq!((m.total_chars, m.hidden_chars), (145.0, 40.0), "labelledby: {by_labelledby}");
+            // An inert wrapper still closes the selected panel (review of
+            // #968): only the panel's own role and class yield.
+            let wrap = hidden_box(&mut d, body, "div", &[], "");
+            d.set_attr(wrap, "inert", "");
+            // The trigger now names a panel inside the wrapper; the first
+            // pane, named by nothing, is an unselected panel again.
+            d.set_attr(pane, "id", "panel-gone");
+            let inner = hidden_box(&mut d, wrap, "div", VIS_HIDDEN, &text("i", 40));
+            d.set_attr(inner, "role", "tabpanel");
+            d.set_attr(inner, "class", "tab-pane");
+            d.set_attr(inner, "id", "panel-plans");
+            if by_labelledby {
+                d.set_attr(pane, "aria-labelledby", "");
+                d.set_attr(inner, "aria-labelledby", "tab-plans");
+            }
+            mark_body_descendants(&mut d);
+            let m = measure_hidden_text_dom(&d);
+            assert_eq!((m.total_chars, m.hidden_chars), (105.0, 0.0), "inert, labelledby: {by_labelledby}");
+        }
+    }
+
+    #[test]
+    fn an_image_carousel_that_started_counts_its_hidden_captions() {
+        let text = |c: &str, n: usize| c.repeat(n);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let carousel = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(carousel, "class", "carousel");
+        let current = hidden_box(&mut d, carousel, "div", &[], "");
+        let img = hidden_box(&mut d, current, "img", &[], "");
+        // Bootstrap's caption class names the carousel, and the caption is
+        // part of a slide, not a slider of its own.
+        let caption = hidden_box(&mut d, current, "p", VIS_HIDDEN, &text("a", 20));
+        d.set_attr(caption, "class", "carousel-caption");
+        let waiting = hidden_box(&mut d, carousel, "div", OPACITY_0, "");
+        hidden_box(&mut d, waiting, "p", VIS_HIDDEN, &text("b", 20));
+        mark_body_descendants(&mut d);
+        d.set_rect(img, 0.0, 0.0, 640.0, 120.0);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars, m.unstarted_slider_chars), (140.0, 40.0, 0.0), "started");
+        // With no picture laid out, nothing shows: it never started.
+        d.set_rect(img, 0.0, 0.0, 0.0, 0.0);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars, m.unstarted_slider_chars), (100.0, 0.0, 40.0), "unstarted");
+        // Nor does a 40px arrow icon beside slides that are all hidden.
+        d.set_rect(carousel, 0.0, 0.0, 640.0, 120.0);
+        let arrow = hidden_box(&mut d, carousel, "svg", &[], "");
+        mark_body_descendants(&mut d);
+        d.set_rect(arrow, 600.0, 40.0, 40.0, 40.0);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(m.unstarted_slider_chars, 40.0, "an arrow");
+        // Nor a backdrop on the slider's own box.
+        d.set_style(carousel, "backgroundImage", "url(\"hero.jpg\")");
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(m.unstarted_slider_chars, 40.0, "the slider's backdrop");
+        // A slide's picture across the track does, decorative or not
+        // (review of #968: `aria-hidden` hides nothing from sight).
+        d.set_rect(img, 0.0, 0.0, 640.0, 120.0);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(m.unstarted_slider_chars, 0.0, "a slide's picture");
+        d.set_attr(img, "aria-hidden", "true");
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(m.unstarted_slider_chars, 0.0, "an aria-hidden slide picture");
+    }
+
     #[test]
     fn hidden_text_measure_probes_scroll_linked_reveals_and_sets_aside_unstarted_sliders() {
         let text = |c: &str, n: usize| c.repeat(n);

@@ -264,8 +264,10 @@ pub trait Dom {
     }
     /// The top-level nodes of the open shadow tree `el` hosts, in order:
     /// the elements whose [`Dom::flat_parent`] is `el` without being its
-    /// children. Empty for an element that hosts no shadow tree, and from a
-    /// probe that cannot see shadow trees (the default).
+    /// children, where the probe composes the flat tree. The live page's
+    /// `JsDom` lists them without composing it. Empty for an element that
+    /// hosts no shadow tree, and from a probe that cannot see shadow trees
+    /// (the default).
     fn shadow_children(&self, _el: ElId) -> Vec<ElId> {
         Vec::new()
     }

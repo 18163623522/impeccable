@@ -440,7 +440,9 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
     if c.transform_running() {
         return false;
     }
-    if c.size().is_some_and(|(w, h)| w < FRAME_MIN_WIDTH_PX || h < FRAME_MIN_HEIGHT_PX) {
+    // A frame has to be known to be frame-sized: an unknown size (the static
+    // adapter's, for a box without px dimensions) is no evidence.
+    if !c.size().is_some_and(|(w, h)| w >= FRAME_MIN_WIDTH_PX && h >= FRAME_MIN_HEIGHT_PX) {
         return false;
     }
     let t = read_transform(&c.style("transform"));
@@ -1215,6 +1217,13 @@ mod tests {
             .style("transform", "matrix3d(1, 0, 0, 0, 0, 0.99, 0.15, 0, 0, -0.15, 0.99, 0, 0, 0, 0, 1)");
         let label = tilted.add("div").add("span").text("coldtea.ai");
         assert!(in_framed_demo(&label));
+        // The same tilt on a box of unknown size (the static engine without px
+        // dimensions) is no evidence of a frame.
+        let (_t, body) = Tree::new();
+        let unknown = body
+            .add("div")
+            .style("transform", "matrix3d(1, 0, 0, 0, 0, 0.99, 0.15, 0, 0, -0.15, 0.99, 0, 0, 0, 0, 1)");
+        assert!(!in_framed_demo(&unknown.add("div").add("span").text("coldtea.ai")));
 
         let (_t, body) = Tree::new();
         let scaled = body

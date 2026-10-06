@@ -58,11 +58,21 @@ function __rectArray(r) {
 // rects and the characters line-length divides among them describe the same
 // text. Chrome reports no rects inside a content-visibility: hidden box
 // today; the walk skips it by the shared rule rather than relying on that.
+// content-visibility applies only where layout containment does, so these
+// displays render their text whatever it says (content_visibility_applies).
 const __NO_TEXT_TAGS = new Set(['style', 'script', 'noscript', 'template']);
+const __NO_CONTAINMENT_DISPLAYS = new Set([
+  'inline', 'inline flow', 'contents', 'table-row', 'table-row-group',
+  'table-header-group', 'table-footer-group', 'table-column',
+  'table-column-group', 'ruby', 'ruby-base', 'ruby-text',
+  'ruby-base-container', 'ruby-text-container',
+]);
 function __rendersNoText(el) {
   if (__NO_TEXT_TAGS.has(String(el.localName || '').toLowerCase())) return true;
   const cs = getComputedStyle(el);
-  return cs.display === 'none' || String(cs.contentVisibility || '').toLowerCase() === 'hidden';
+  if (cs.display === 'none') return true;
+  return String(cs.contentVisibility || '').toLowerCase() === 'hidden'
+    && !__NO_CONTAINMENT_DISPLAYS.has(String(cs.display || '').toLowerCase().trim());
 }
 function __collectTextRects(node, deep, out) {
   for (const child of node.childNodes) {

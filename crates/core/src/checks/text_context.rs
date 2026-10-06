@@ -440,12 +440,16 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
     if c.transform_running() {
         return false;
     }
-    if c.size().is_some_and(|(w, h)| w < FRAME_MIN_WIDTH_PX || h < FRAME_MIN_HEIGHT_PX) {
+    // A known size has to be frame-sized. An unknown size (the static
+    // adapter's, for a box without px dimensions) is no evidence, so a tilt
+    // then also needs the box drawn as a frame.
+    let size = c.size();
+    if size.is_some_and(|(w, h)| w < FRAME_MIN_WIDTH_PX || h < FRAME_MIN_HEIGHT_PX) {
         return false;
     }
     let t = read_transform(&c.style("transform"));
     if t.tilt_3d {
-        return true;
+        return size.is_some() || is_frame_box(c);
     }
     let scale = t.uniform_scale.filter(|s| (*s - 1.0).abs() > 0.001).or_else(|| scale_property(&c.style("scale")));
     scale.is_some_and(|s| (FRAME_SCALE_MIN..=FRAME_SCALE_MAX).contains(&s)) && is_frame_box(c)
@@ -1227,6 +1231,20 @@ mod tests {
             .style("transform", "matrix3d(1, 0, 0, 0, 0, 0.99, 0.15, 0, 0, -0.15, 0.99, 0, 0, 0, 0, 1)");
         let label = tilted.add("div").add("span").text("coldtea.ai");
         assert!(in_framed_demo(&label));
+        // The same tilt on a box of unknown size (the static engine without px
+        // dimensions) is no evidence of a frame, unless the box is drawn as one.
+        let (_t, body) = Tree::new();
+        let unknown = body
+            .add("div")
+            .style("transform", "matrix3d(1, 0, 0, 0, 0, 0.99, 0.15, 0, 0, -0.15, 0.99, 0, 0, 0, 0, 1)");
+        assert!(!in_framed_demo(&unknown.add("div").add("span").text("coldtea.ai")));
+        let (_t, body) = Tree::new();
+        let drawn = body
+            .add("div")
+            .style("transform", "matrix3d(1, 0, 0, 0, 0, 0.99, 0.15, 0, 0, -0.15, 0.99, 0, 0, 0, 0, 1)")
+            .style("borderRadius", "12px")
+            .style("boxShadow", "rgba(0, 0, 0, 0.12) 0px 8px 24px");
+        assert!(in_framed_demo(&drawn.add("div").add("span").text("coldtea.ai")));
 
         let (_t, body) = Tree::new();
         let scaled = body

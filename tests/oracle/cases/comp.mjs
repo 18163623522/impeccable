@@ -88,6 +88,39 @@ const cases = [
   },
   { id: 'build-phase-usage', verb: 'build-phase', workspace: WS, args: [], env: env() },
 
+  // The direction round's chosen comp is option one of the comp round: start
+  // records it, the comps gate counts it from .impeccable/mocks/decision/ (an
+  // unrelated decision comp never counts), and an approval on it closes the
+  // gate with the decision path as the approved comp. --decision-comp with
+  // --comp, or naming a missing file, is refused.
+  {
+    id: 'build-phase-decision-comp-option-one', verb: 'build-phase', workspace: WS,
+    files: ['.impeccable/build/state.json', '.impeccable/build/approved-comp.json'], env: env(),
+    setup: (ws) => {
+      fs.mkdirSync(path.join(ws, '.impeccable/mocks/decision'), { recursive: true });
+      fs.copyFileSync(path.join(ws, 'comp.png'), path.join(ws, '.impeccable/mocks/decision/assigned.png'));
+      write(ws, '.impeccable/mocks/decision/assigned.png.json', JSON.stringify({ prompt: 'assigned' }));
+      fs.copyFileSync(path.join(ws, 'build.png'), path.join(ws, '.impeccable/mocks/decision/pick.png'));
+      write(ws, '.impeccable/mocks/decision/pick.png.json', JSON.stringify({ prompt: 'pick', approved: true }));
+    },
+    steps: [
+      { args: ['start', '--comp', 'comp.png', '--decision-comp', '.impeccable/mocks/decision/assigned.png'] },
+      { args: ['start', '--direction', 'seed', '--decision-comp', '.impeccable/mocks/decision/missing.png'] },
+      { args: ['start', '--direction', 'seed', '--decision-comp', '.impeccable/mocks/decision/assigned.png'] },
+      { args: ['advance'] },
+      {
+        setup: (ws) => {
+          for (const n of [2, 3]) {
+            fs.copyFileSync(path.join(ws, 'build.png'), path.join(ws, `.impeccable/mocks/comp-${n}.png`));
+            write(ws, `.impeccable/mocks/comp-${n}.png.json`, JSON.stringify({ prompt: `variation ${n}` }));
+          }
+          write(ws, '.impeccable/mocks/decision/assigned.png.json', JSON.stringify({ prompt: 'assigned', approved: true }));
+        },
+        args: ['advance'],
+      },
+    ],
+  },
+
   // The approved comp is a fixed reference: start keeps a copy, comp-spec binds
   // the same pixels, and once the comp is edited (build.png copied over it, the
   // shape of compositing plates into it) the gate, a re-measure and comp-diff

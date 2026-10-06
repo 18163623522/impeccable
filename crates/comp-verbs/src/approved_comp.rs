@@ -58,8 +58,7 @@ pub fn same_file(io: &Io, a: &str, b: &str) -> bool {
 }
 
 /// The comp as comp-spec, the record and every check see it: decoded from the
-/// file's own bytes, never from the sibling PNG cache `load_raster` keeps for a
-/// WebP or JPEG source (an edit to the source never refreshes it).
+/// file's own bytes, never from a converted copy of a WebP or JPEG source.
 pub fn decode_comp(bytes: &[u8]) -> Option<Image> {
     png_io::decode_source(bytes).ok()
 }

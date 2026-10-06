@@ -1499,7 +1499,9 @@ mod tests {
 
     /// The line walk skips the subtrees the character count skips: a
     /// `content-visibility: hidden` box, a `display: none` box and a
-    /// `<script>`, whatever rects the capture holds for them.
+    /// `<script>`, whatever rects the capture holds for them. The inline `<b>`
+    /// also says `content-visibility: hidden`, which an inline box ignores,
+    /// so its rects are kept.
     #[test]
     fn text_line_rects_skip_subtrees_that_render_no_text() {
         const PAGE: &str = r#"{
@@ -1514,7 +1516,7 @@ mod tests {
             {"t":"SPAN","p":3,"c":["skipped"],"s":[2,3],"dl":[[0,124,900,19]]},
             {"t":"SPAN","p":3,"c":["gone"],"s":[4,1],"dl":[[0,148,900,19]]},
             {"t":"SCRIPT","p":3,"c":["x"],"s":[0,1],"dl":[[0,172,900,19]]},
-            {"t":"B","p":3,"c":["kept"],"s":[5,1],"dl":[[300,100,60,19]]}
+            {"t":"B","p":3,"c":["kept"],"s":[5,3],"dl":[[300,100,60,19]]}
           ]
         }"#;
         let lines = snap(PAGE).text_line_rects(3).expect("lines");

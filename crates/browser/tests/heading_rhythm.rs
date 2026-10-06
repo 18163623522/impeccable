@@ -108,8 +108,9 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
         // A grey line too long to read as a label is still content.
         "\"Flag Grey Sentence Above\" has 10px above vs 48px below",
         // A coloured link or a grey date that closes the block above, laid
-        // out in that block's box, is the block's own last line.
-        "\"Flag Link Closing Block\" has 15px above vs 40px below",
+        // out in that block's box, is the block's own last line. The link's
+        // gap is asserted below, within a pixel.
+        "\"Flag Link Closing Block\" has ",
         "\"Flag Date Closing Post\" has 12px above vs 40px below",
         // A heading's own icon or accent bar draws no edge above it.
         "\"Flag Icon Heading\" has 12px above vs 40px below",
@@ -120,6 +121,17 @@ fn fixture_flags_crowded_headings_and_passes_the_misread_shapes() {
             "expected {heading:?} to flag, got {snippets:?}"
         );
     }
+    // The gap above the link closing the block runs from the bottom of the
+    // link's text box, which is the face's ascent and descent: 15px in
+    // Georgia, 16px in the serif a Linux runner substitutes for it.
+    let link = snippets
+        .iter()
+        .find(|s| s.contains("\"Flag Link Closing Block\" has "))
+        .expect("the link closing the block flags");
+    assert!(
+        ["15px", "16px"].iter().any(|px| link.contains(&format!("has {px} above vs 40px below"))),
+        "{link}"
+    );
     let stray: Vec<&&str> = snippets.iter().filter(|s| s.contains("\"Pass ")).collect();
     assert!(stray.is_empty(), "should-pass headings flagged: {stray:?}");
     assert_eq!(snippets.len(), 24, "{snippets:?}");

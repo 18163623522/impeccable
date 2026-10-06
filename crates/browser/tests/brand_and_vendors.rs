@@ -28,7 +28,7 @@
 //! - `skipped-heading-footer.html`: a skip into the footer does not report; a
 //!   skip in the content and one between two later footer headings do
 //!   (r5-p29-skipped-heading-footer-titles).
-//! - A `file://` page in a project whose DESIGN.md declares a purple reports
+//! - A page scanned with a DESIGN.md that declares a purple reports
 //!   none of ai-color-palette's purple forms.
 
 use std::collections::HashMap;
@@ -275,8 +275,10 @@ fn a_flat_ramp_separated_by_weight_is_advisory() {
 #[test]
 fn a_design_md_purple_switches_the_purple_forms_off() {
     let Some(engine) = engine() else { return };
-    let page = fixtures_dir().join("ai-color-palette-brand-hue-headings-only.html");
-    let url = format!("file://{}", page.canonicalize().expect("fixture").display());
+    // Served over HTTP like the other cases: a `file://` URL built from a
+    // canonicalized Windows path (`\\?\C:\...`) is not a URL Chrome navigates to.
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/ai-color-palette-brand-hue-headings-only.html");
     let scan_with = |primary: &str| {
         let fm: serde_json::Map<String, serde_json::Value> = serde_json::from_value(serde_json::json!({
             "colors": { "primary": primary }

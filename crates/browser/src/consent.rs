@@ -313,9 +313,18 @@ pub fn probe_fragment() -> String {
       const root = host.shadowRoot;
       if (!root) continue;
       // innerText of an unrendered child (a <style>) is its source text.
-      for (const child of root.children) if (boxShows(child)) text += visibleText(child);
+      for (const child of root.children) text += shadowText(child);
     }}
     return text;
+  }};
+  // A `display: contents` wrapper has no box of its own; its children do.
+  const shadowText = el => {{
+    if (boxShows(el)) return visibleText(el);
+    let n = 0;
+    try {{
+      if (getComputedStyle(el).display === 'contents') for (const k of el.children) n += shadowText(k);
+    }} catch (e) {{}}
+    return n;
   }};
   // `consentShadowChars` is the part of that text the page's own
   // `body.innerText` cannot see, so the probe adds it to the page's count and
@@ -354,15 +363,6 @@ pub fn probe_fragment() -> String {
   // shadow roots (a web-component app), which `body.innerText` does not see
   // either: it counts as text outside the managers.
   let consentPageShadowChars = 0;
-  // A `display: contents` wrapper has no box of its own; its children do.
-  const shadowText = el => {{
-    if (boxShows(el)) return visibleText(el);
-    let n = 0;
-    try {{
-      if (getComputedStyle(el).display === 'contents') for (const k of el.children) n += shadowText(k);
-    }} catch (e) {{}}
-    return n;
-  }};
   // The page's open shadow roots, outside the managers: their form
   // controls and media are the page's as much as their text is.
   const pageShadows = [];

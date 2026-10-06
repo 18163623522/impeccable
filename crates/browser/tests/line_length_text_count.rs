@@ -73,110 +73,48 @@ fn engine() -> Option<BrowserEngine> {
     Some(BrowserEngine::new(env))
 }
 
-/// `(snippet, selector)` for each finding of `rule` on the fixture.
-fn findings(engine: &BrowserEngine, port: u16, rule: &str) -> Vec<(String, String)> {
+/// The snippet of each finding of `rule` on the fixture.
+fn findings(engine: &BrowserEngine, port: u16, rule: &str) -> Vec<String> {
     let url = format!("http://127.0.0.1:{port}/{FIXTURE}");
     engine
         .detect_url(&url, &ScanOptions::default())
         .expect("scan")
         .into_iter()
         .filter(|f| f.antipattern == rule)
-        .map(|f| {
-            let selector = f.extras.get("selector").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            (f.snippet, selector)
-        })
+        .map(|f| f.snippet)
         .collect()
-}
-
-/// The `class` attribute of every `<p>` on the fixture page, in order. The
-/// paragraphs are all children of `<body>`, so the n-th is
-/// `p:nth-of-type(n)`.
-fn paragraph_classes() -> Vec<Vec<String>> {
-    let html = std::fs::read_to_string(fixture_path()).expect("fixture");
-    html.split("<p class=\"")
-        .skip(1)
-        .map(|rest| rest.split('"').next().unwrap_or("").split_whitespace().map(str::to_string).collect())
-        .collect()
-}
-
-/// The classes of the paragraph a finding's selector names. The selector's
-/// last segment carries the paragraph's first two classes, and an
-/// `:nth-of-type` index when those two do not pick it out alone.
-fn classes_of(selector: &str, paragraphs: &[Vec<String>]) -> Vec<String> {
-    let segment = selector.rsplit('>').next().unwrap_or("").trim();
-    let (head, nth) = match segment.split_once(":nth-of-type(") {
-        Some((head, rest)) => (head, rest.trim_end_matches(')').parse::<usize>().ok()),
-        None => (segment, None),
-    };
-    if let Some(n) = nth {
-        return paragraphs.get(n.wrapping_sub(1)).cloned().unwrap_or_default();
-    }
-    let named: Vec<&str> = head.split('.').skip(1).collect();
-    let mut matching = paragraphs.iter().filter(|p| named.iter().all(|c| p.iter().any(|pc| pc == c)));
-    let first = matching.next().cloned().unwrap_or_default();
-    assert!(matching.next().is_none(), "{selector} names more than one paragraph");
-    first
-}
-
-/// The snippet of the finding on the paragraph with class `class`, if any.
-fn snippet_for(found: &[(String, String)], class: &str) -> Option<String> {
-    let paragraphs = paragraph_classes();
-    let mut hits = found
-        .iter()
-        .filter(|(_, selector)| classes_of(selector, &paragraphs).iter().any(|c| c == class));
-    let hit = hits.next().map(|(snippet, _)| snippet.clone());
-    assert!(hits.next().is_none(), "more than one finding names .{class}: {found:?}");
-    hit
 }
 
 /// Every case is compared with a plain twin on the same page rather than with
 /// a fixed count: the fixture sets `system-ui`, so where the lines wrap, and
 /// with it the count per line, is the host's font's business. What the rule
-/// owes is that a case reports exactly what its twin reports, and that
-/// nothing else on the page reports at all. Counted from `textContent`, no
-/// case read what its twin reads: the style child's CSS, the hidden children
-/// and the script, and the indentation were charged to the lines, and the
-/// nested `pre-wrap` span's runs of spaces were folded away.
+/// owes is that a case counts exactly what its twin counts.
+///
+/// A URL finding does not name its element, so the twins are matched by
+/// their snippets: each group of twins reports one snippet as many times as
+/// it has members. The wide column and its two cases are a group of three,
+/// the `pre-wrap` paragraph and the normal one with a `pre-wrap` span a group
+/// of two, and the plain measure and its four cases a group of five when a
+/// narrow host font makes a 560px measure long enough to flag at all. Every
+/// finding has to belong to one of those groups: a case that counts
+/// something its twin does not reports a snippet of its own, or flags where
+/// its twin does not, and either one changes the groups. Counted from
+/// `textContent`, no case read what its twin reads (the style child's CSS,
+/// the hidden children and the script, and the indentation were charged to
+/// the lines, and the span's runs of spaces were folded away).
 #[test]
 fn line_length_counts_the_characters_on_the_lines() {
     let Some(engine) = engine() else { return };
     let port = serve();
     let found = findings(&engine, port, "line-length");
-
-    // A 1000px column at 16px is a long column in any font.
-    let wide = snippet_for(&found, "plain-wide");
-    assert!(wide.is_some(), "the plain wide column flags: {found:?}");
-    let wide_cases = ["flag-style-child", "flag-indented"];
-    for case in wide_cases {
-        assert_eq!(snippet_for(&found, case), wide, ".{case} reads as its plain twin: {found:?}");
+    let mut groups: HashMap<&str, usize> = HashMap::new();
+    for snippet in &found {
+        *groups.entry(snippet.as_str()).or_default() += 1;
     }
-
-    // Whether a 560px measure flags depends on the font; that each case
-    // reads the same as the plain one does not.
-    let measure = snippet_for(&found, "plain-measure");
-    let measure_cases = ["pass-style-child", "pass-hidden-child", "pass-cv-hidden", "pass-indented"];
-    for case in measure_cases {
-        assert_eq!(snippet_for(&found, case), measure, ".{case} reads as its plain twin: {found:?}");
-    }
-
-    // The preserved runs of spaces are on the line, whether the paragraph
-    // preserves them or a span inside a normal paragraph does.
-    let preserved = snippet_for(&found, "flag-preserved");
-    assert!(preserved.is_some(), "the pre-wrap column flags: {found:?}");
-    assert_eq!(snippet_for(&found, "flag-preserved-nested"), preserved, "{found:?}");
-
-    // Nothing outside those twins reports.
-    let paragraphs = paragraph_classes();
-    let known: Vec<&str> = ["plain-wide", "plain-measure", "flag-preserved", "flag-preserved-nested"]
-        .into_iter()
-        .chain(wide_cases)
-        .chain(measure_cases)
-        .collect();
-    for (snippet, selector) in &found {
-        let classes = classes_of(selector, &paragraphs);
-        assert!(
-            classes.iter().any(|c| known.contains(&c.as_str())),
-            "a finding outside the twins: {snippet} on {selector}: {found:?}"
-        );
-    }
+    let mut sizes: Vec<usize> = groups.values().copied().collect();
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    assert!(
+        sizes == [3, 2] || sizes == [5, 3, 2],
+        "every finding belongs to a group of twins that read alike: {found:?}"
+    );
 }

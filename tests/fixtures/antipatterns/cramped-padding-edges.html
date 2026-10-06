@@ -37,7 +37,11 @@
     .pass-layer-grid { background: #f5f5f5; }
     .pass-layer-grid p { margin: 0; }
     .scaled { transform: scale(0.3); transform-origin: 0 0; width: 600px; height: 12px; }
-    .pass-scaled-chip { display: inline-block; background: #e8e8ea; padding: 0 6px; font-size: 14px; line-height: 28px; font-style: normal; }
+    /* 40px of line height leaves 3px of drawn room above and below the label
+       whatever face sets it (a CJK fallback on Windows draws a text box near
+       two ems tall), and under the 4px a full-scale edge needs, so only a
+       measure taken at the transform's scale passes it. */
+    .pass-scaled-chip { display: inline-block; background: #e8e8ea; padding: 0 6px; font-size: 14px; line-height: 40px; font-style: normal; }
   </style>
 </head>
 <body>

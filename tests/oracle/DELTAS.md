@@ -6322,3 +6322,27 @@ A Gemini run wrote decision comp prompts that inventoried every region and never
 New case, recorded from the binary and reviewed by hand:
 
 - `question-wait-render-check-once`: `k1.render-check` already holds the hand's id `h1`, so a poll with a landed, sidecar-carrying decision comp prints only the WAITING line and leaves the marker as it was.
+
+## Recorded 2026-10-05: the chosen decision comp is option one of the comp round
+
+The skill says the direction round's chosen decision comp enters the comp round as compositional option one and is never regenerated, but the comps gate counted only files directly in `.impeccable/mocks/`, while decision comps live in `.impeccable/mocks/decision/`. `build-phase start --direction <key> --decision-comp <png>` now records that comp as `decisionComp` in the state; the comps gate counts it first where it stands, never any other decision comp, and an approval on it closes the gate with the decision path as the approved comp (record, kept copy and `restore-comp` bind to it). `serve-question --wait` treats a pick of that recorded comp during the open comps phase as the approval (`APPROVED COMP`), and the `CHOSEN COMP` line names the flag.
+
+- `build-phase-usage`: the usage line now reads `start --comp <png> | --direction <key> [--decision-comp <png>] [--breakpoint WxH] ...`. Nothing else in the case moved.
+- `question-wait-answer-ready`, `question-wait-answer-comp-sidecar-missing`: the `CHOSEN COMP` comp-led clause reads `On a comp-led build pass it to build-phase start as --decision-comp <that path>, and the comp round adds two variations beside it where it stands;`. Exit status, stderr and files are unchanged.
+
+New cases, recorded from the binary and reviewed by hand:
+
+- `build-phase-decision-comp-option-one`: `--decision-comp` with `--comp` and with a missing file exit 1; `start --direction seed --decision-comp` prints the option-one NEXT; the first `advance` fails with `1 comp (the chosen decision comp ... as option one, the others directly under .impeccable/mocks)` and no approval, although an unrelated decision comp carries `"approved": true`; after two comps land in `.impeccable/mocks/` and the decision comp's sidecar is approved, `advance` closes on it (`3 comps, 1 approved`), and the snapshotted state and `approved-comp.json` name the decision path.
+- `question-wait-answer-decision-comp-in-round`: with a build state in the `comps` phase recording `decisionComp` and a page that also serves a comp directly in `.impeccable/mocks/`, a pick of that path prints `APPROVED COMP`, not `CHOSEN COMP`.
+
+## Recorded 2026-10-05: surface rounds owe their decision comps too
+
+`serve-question --start` and `--update` refused only comp-led direction rounds with missing decision comps, because a surface round's payload carries no canon and looks like the comp round. Every successful `concept-seed` roll now writes `.impeccable/questions/roll.json` (`scope`, `key`, `reroll`, `at`), and while the latest roll is a surface roll under an hour old that no decision page has taken, a comp-led surface hand that leaves a dealt card without a comp is refused with the same message helper (exit 1, before any state is written). The degraded roll's approval guidance said `nothing is written`; it now names the record.
+
+- `seed-degraded-direction`, `seed-degraded-surface`, `seed-degraded-bolder`: in the no-network paragraph, `and\nnothing is written.` became `and\nthe only file written is the local roll record .impeccable/questions/roll.json,\nwhich serve-question reads.`. Nothing else moved; exit status and stderr are unchanged, and the cases snapshot no files.
+
+New cases, recorded from the binary and reviewed by hand:
+
+- `question-start-surface-missing-comps`: a degraded surface roll, then `--start` of a comp-led three-card surface hand with no comps exits 1 naming `ledger, rail, field`; no hand is recorded and `roll.json` stays.
+- `question-update-surface-missing-comps`: a surface re-roll, then `--update` of the same hand with only `ledger` declared exits 1 naming `rail, field`; nothing is delivered and `roll.json` stays.
+- `question-update-surface-shape-after-direction-roll`: after a direction roll the same comp-less hand is delivered, and the page takes the roll (`roll.json` is gone).

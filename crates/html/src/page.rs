@@ -126,8 +126,22 @@ static SHADOW_CLASS_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static BOX_SHADOW_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)box-shadow").expect("BOX_SHADOW_RE"));
-static BORDER_CLASS_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?-u:\b)border(?-u:\b)").expect("BORDER_CLASS_RE"));
+/// A utility class that draws a border on every side: `border`, `border-2`,
+/// `border-px`, `border-[3px]`, with any variant prefix (`md:border`) or `!`.
+/// A side utility (`border-t`, `border-b-[4px]`, `border-x`) draws one or two
+/// edges, and a colour or style utility (`border-black`, `border-dashed`)
+/// draws none, so neither makes a card. The ASCII `\b` this replaces matched all of them,
+/// since `-` is a word boundary.
+static BORDER_CLASS_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^border(?:-[0-9]+|-px|-\[[0-9.]+(?:px|rem|em)\])?$").expect("BORDER_CLASS_TOKEN_RE")
+});
+
+fn class_draws_four_sided_border(cls: &str) -> bool {
+    cls.split(|c: char| c.is_ascii_whitespace()).any(|token| {
+        let utility = token.rsplit(':').next().unwrap_or(token);
+        BORDER_CLASS_TOKEN_RE.is_match(utility.trim_start_matches('!'))
+    })
+}
 static ROUNDED_CLASS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?-u:\b)rounded(?:-sm|-md|-lg|-xl|-2xl|-full)?(?-u:\b)").expect("ROUNDED_CLASS_RE")
 });
@@ -194,7 +208,7 @@ pub fn is_card_like(el: &StaticElement<'_>) -> bool {
     let has_shadow = (!box_shadow.is_empty() && box_shadow != "none")
         || SHADOW_CLASS_RE.is_match(cls)
         || BOX_SHADOW_RE.is_match(raw_style);
-    let has_border = BORDER_CLASS_RE.is_match(cls);
+    let has_border = class_draws_four_sided_border(cls);
     let width_px = pf0(sv(style, "width"));
     let has_radius = resolve_border_radius_px(style, width_px) > 0.0
         || ROUNDED_CLASS_RE.is_match(cls)
@@ -419,4 +433,19 @@ pub fn check_cream_palette(doc: &StaticDocument) -> Vec<RuleHit> {
         }
     }
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_draws_four_sided_border;
+
+    #[test]
+    fn only_all_sided_width_utilities_draw_a_card_border() {
+        for cls in ["border", "card border-2", "md:border", "!border", "border-px", "rounded border-[3px]"] {
+            assert!(class_draws_four_sided_border(cls), "{cls}");
+        }
+        for cls in ["border-t", "border-b-[4px]", "border-x", "border-black", "border-dashed", "border-t-px"] {
+            assert!(!class_draws_four_sided_border(cls), "{cls}");
+        }
+    }
 }

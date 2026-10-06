@@ -16,7 +16,7 @@ use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
     is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, SR_ONLY_SELECTOR,
+    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
 };
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
@@ -151,14 +151,32 @@ pub fn is_visually_hidden(el: &StaticElement<'_>, style: &StyleValues) -> bool {
 }
 
 /// Whether this element carries heading text, for the tight-leading floor:
-/// the element is a heading (or takes the ARIA role), or it is one of the
-/// inline tags a heading's text sits in. A block of body copy nested inside a
-/// heading is not heading text and keeps the floor.
-pub fn is_heading_text(el: &StaticElement<'_>, tag: &str) -> bool {
-    match el.closest(LEADING_HEADING_CONTEXT) {
-        None => false,
-        Some(found) => found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag),
+/// the element is a heading (or takes the ARIA role), one of the inline tags
+/// a heading's text sits in, or any other box under a heading (the `div` a
+/// design system wraps heading copy in). A reading block nested inside a
+/// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
+/// keeps the floor.
+pub fn is_heading_text(el: &StaticElement<'_>) -> bool {
+    let Some(found) = el.closest(LEADING_HEADING_CONTEXT) else {
+        return false;
+    };
+    if found.node.id() == el.node.id() {
+        return true;
     }
+    // An inline tag (an anchor, a span) is heading text too, by the same
+    // walk: no reading block sits between it and the heading. One inside a
+    // `p` nested in the heading is that paragraph's body copy.
+    let mut cur = Some(*el);
+    while let Some(c) = cur {
+        if c.node.id() == found.node.id() {
+            break;
+        }
+        if QUALITY_TEXT_TAGS.contains(&c.tag_lower().as_str()) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    true
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -395,7 +413,13 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         let op = parse_float(sv(style, "opacity"));
         if op.is_finite() && op < 0.15 && op >= 0.0 {
             let bg = sv(style, "backgroundImage");
-            if tag == "img" || RASTER_URL_RE.is_match(bg) {
+            if (tag == "img" || RASTER_URL_RE.is_match(bg))
+                && !impeccable_core::checks::measures::raster_source_is_svg(
+                    tag == "img",
+                    el.get_attribute("src"),
+                    bg,
+                )
+            {
                 let label = if tag == "img" {
                     el.get_attribute("alt").unwrap_or("").to_string()
                 } else {
@@ -572,7 +596,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     && shown < 1.3
                     && !is_non_rendered_text(el, tag, Some(style))
                     && !is_visually_hidden(el, style)
-                    && !is_heading_text(el, tag)
+                    && !is_heading_text(el)
                 {
                     findings.push(RuleHit::new(
                         "tight-leading",
@@ -646,6 +670,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 && *fs < 11.0
                 && dt_len >= 2
                 && !ui_skip_tags.contains(&tag)
+                // A footnote marker is set small by convention, and so is the
+                // link inside it (`<sup><a>[7]</a></sup>`).
+                && el.closest("sub, sup").is_none()
                 && !is_non_rendered_text(el, tag, Some(style))
         }) {
             let is_exempt_context = el.closest(EXEMPT_CONTEXT).is_some();

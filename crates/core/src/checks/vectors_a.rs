@@ -198,6 +198,9 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 font_weight: to_number(f(0, "fontWeight")),
                 has_direct_text: truthy(f(0, "hasDirectText")),
                 is_emoji_only: truthy(f(0, "isEmojiOnly")),
+                // The recorded JS scored glyph-only text on every tag but
+                // the SAFE_TAGS ones.
+                is_glyph_only: false,
                 // The recorded JS had no own-text verdict: the SAFE_TAGS
                 // gate it replays was the tag and the surface alone.
                 paints_own_text: false,
@@ -205,6 +208,14 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 bg_image: opt_str(f(0, "bgImage")),
                 class_list: opt_str(f(0, "classList")),
                 detector_is_browser: false,
+                // The recorded JS scored `textColor` as declared, alpha and
+                // all, and named no gradient source.
+                visible_text: None,
+                bg_source: None,
+                bg_source_host: None,
+                // The recorded JS printed a surface in the text's own colour
+                // as `1.0:1` on every tag but the SAFE_TAGS ones.
+                same_color_surface_is_unread: false,
             };
             hits_to_js(&rules::check_colors(&opts))
         }
@@ -328,6 +339,7 @@ pub fn call(module: &str, fn_name: &str, args: &[Value]) -> Option<Value> {
                 effective_bg: rgba(f(0, "effectiveBg")),
                 element_opacity: (!opacity.is_nan()).then_some(opacity),
                 element_size: (!width.is_nan() && !height.is_nan()).then_some((width, height)),
+                surface: None,
             };
             hits_to_js(&rules::check_glow(&opts))
         }

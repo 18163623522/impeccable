@@ -3,7 +3,8 @@
 
 use impeccable_core::checks::css_scan::{
     has_interpolation, is_unseen_declaration_source, names_same_element, scan_css_text_for_glow,
-    scan_css_text_for_marquee, scan_css_text_for_radial_halo, CssHostIndex,
+    scan_css_text_for_marquee, scan_css_text_for_radial_halo, starts_css_property_token,
+    CssHostIndex,
 };
 use impeccable_core::checks::rules::{
     find_solid_chromatic_bg, is_near_black_neutral_class, DeclaredCorners, NOMINAL_CARD_WIDTH_PX,
@@ -1776,13 +1777,17 @@ fn transition_test(m: &MatchCtx, _line: &str) -> bool {
     if ALL_WORD_RE.is_match(&val) {
         return false;
     }
-    LAYOUT_PROP_RE.is_match(&val)
+    // `border-width` and `line-height` are not `width` and `height`.
+    LAYOUT_PROP_RE
+        .find_iter(&val)
+        .any(|x| starts_css_property_token(&val, x.start()))
 }
 
 fn transition_fmt(prefix: &str, m: &MatchCtx) -> String {
     let raw = transition_val(m);
     let found: Vec<&str> = LAYOUT_PROP_FMT_RE
         .find_iter(&raw)
+        .filter(|x| starts_css_property_token(&raw, x.start()))
         .map(|x| x.as_str())
         .collect();
     if found.is_empty() {
@@ -2894,6 +2899,12 @@ mod tests {
             vec!["transition: height"]
         );
         assert!(run("layout-transition", "transition: all 1s").is_empty());
+        // `border-width` and `line-height` are not `width` and `height`.
+        assert!(run("layout-transition", "transition: border-width 0.2s").is_empty());
+        assert_eq!(
+            run("layout-transition", "transition: line-height 0.2s, width 0.3s"),
+            vec!["transition: width"]
+        );
         assert_eq!(run("broken-image", "<img alt=x>"), vec!["<img alt=x>"]);
         assert!(run("broken-image", "<img src=\"a.png\">").is_empty());
         assert_eq!(

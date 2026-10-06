@@ -61,18 +61,12 @@ pub const LEADING_MIN_LINE_BOXES: f64 = 1.5;
 /// leading scale, and their text sits in a child `<a>` or `<span>` as often
 /// as in the heading element, so the exemption is an ancestor test rather
 /// than a tag test, and it honors the ARIA role a card title uses in place of
-/// a heading tag.
+/// a heading tag. Any box under a heading (an anchor, a span, the `div` a
+/// design system wraps heading copy in) is heading text unless it is, or sits
+/// inside, a reading block from [`QUALITY_TEXT_TAGS`]: a page builder that
+/// nests a card's description paragraph inside the card's `h3` is still
+/// setting reading copy, and that block and its inline runs keep the floor.
 pub const LEADING_HEADING_CONTEXT: &str = "h1, h2, h3, h4, h5, h6, [role=\"heading\"]";
-
-/// The tags that carry a heading's own text when it is not in the heading
-/// element itself. The ancestor exemption is limited to these, because a
-/// heading can also contain a block of body copy: a page builder that nests a
-/// card's description paragraph inside the card's `h3` is still setting
-/// reading copy, and that block keeps the floor.
-pub const LEADING_HEADING_TEXT_TAGS: &[&str] = &[
-    "a", "span", "b", "i", "em", "strong", "small", "mark", "u", "abbr", "cite", "q", "time",
-    "label", "font", "bdi", "bdo", "ins", "del",
-];
 
 /// JS: checks.mjs#TEXT_EDGE_TAGS (upper-case tag names, as the JS set).
 pub const TEXT_EDGE_TAGS: &[&str] = &[

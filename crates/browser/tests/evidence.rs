@@ -31,6 +31,15 @@ const REPLAY_FIXTURES: &[&str] = &[
     "typography-should-flag.html",
     "quality.html",
     "layout.html",
+    // Hit tests over covered and layered text, and a page that moves between
+    // the capture and the answers.
+    "covered-text-contrast.html",
+    // Closed disclosures, hidden panels and paused blinks, which the capture
+    // records through checkVisibility and computed style.
+    "painted-gate-coverage.html",
+    // Copies part way past a carousel clip and the page edge, measured on
+    // their text rects.
+    "on-screen.html",
 ];
 
 fn fixtures_dir() -> PathBuf {
@@ -243,8 +252,43 @@ fn the_rule_pass_skips_what_is_not_painted() {
         ("undersized-ui-text", "#flag-cb-rotate-link"),
         ("undersized-ui-text", "#flag-cb-perspective-link"),
         ("undersized-ui-text", "#flag-cb-backdrop-link"),
+        // The visible twins of the leak cases below.
+        ("undersized-ui-text", "#flag-sr-twin-copy"),
+        ("low-contrast", "#flag-sr-twin-copy"),
+        ("tight-leading", "#flag-open-copy"),
+        ("layout-transition", "#flag-open-tray"),
+        ("clipped-overflow-container", "#flag-clip-menu-host"),
+        // A fixed layer is clipped by a host that is its containing block.
+        ("clipped-overflow-container", "#flag-clip-fixed-cb-host"),
+        ("nested-cards", "#flag-nested-card"),
     ] {
         assert!(flagged.contains(&want), "missing {want:?} in {flagged:?}");
+    }
+    for (rule, unwanted) in [
+        // Screen-reader text inside a 1px box its clip removes.
+        ("undersized-ui-text", "#pass-sr-copy"),
+        ("undersized-ui-text", "#pass-sr-percentage"),
+        ("low-contrast", "#pass-sr-copy"),
+        ("low-contrast", "#pass-sr-percentage"),
+        // A paragraph with no height that hides its overflow.
+        ("tight-leading", "#pass-collapsed-copy"),
+        // Motion on boxes that paint nothing.
+        ("layout-transition", "#pass-collapsed-tray"),
+        ("layout-transition", "#pass-hidden-volume"),
+        ("layout-transition", "#pass-parked-seek-bar"),
+        // A menu that never renders, and a fixed layer the host cannot clip.
+        ("clipped-overflow-container", "#pass-clip-hidden-menu-host"),
+        ("clipped-overflow-container", "#pass-clip-fixed-host"),
+        // Popup panels and a closed panel are not nested cards.
+        ("nested-cards", "#pass-bem-dropdown"),
+        ("nested-cards", "#pass-role-menu"),
+        ("nested-cards", "#pass-role-listbox"),
+        ("nested-cards", "#pass-hidden-card"),
+    ] {
+        assert!(
+            !flagged.contains(&(rule, unwanted)),
+            "{rule} on {unwanted} was flagged in {flagged:?}"
+        );
     }
     for unwanted in [
         "#pass-submenu-link",
@@ -338,4 +382,77 @@ fn evidence_matches_the_cli_path_and_replay_matches_live() {
         assert_eq!(replay.unanswered_hit_tests, 0, "{name}: unanswered hit tests");
     }
     browser.close();
+}
+
+#[test]
+fn evidence_measures_the_element_the_scan_flagged_when_an_id_repeats() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let mut browser = engine.launch().expect("launch");
+    let url = format!("http://127.0.0.1:{port}/evidence-duplicate-id.html");
+    let (findings, evidence) = detect_url_evidence(
+        &mut browser,
+        &url,
+        &ScanOptions::default(),
+        "load",
+        100,
+        &EvidenceRequest::default(),
+    )
+    .expect("evidence scan");
+    browser.close();
+    let flagged: Vec<(&str, &str)> = findings
+        .iter()
+        .map(|f| {
+            (
+                f.antipattern.as_str(),
+                f.extras.get("selector").and_then(|v| v.as_str()).unwrap_or(""),
+            )
+        })
+        .collect();
+    for selector in ["#dup-note", "#dup-first-note", "#solo-note"] {
+        assert!(flagged.contains(&("low-contrast", selector)), "{selector} not flagged: {flagged:?}");
+    }
+    let rect = |s: &str| -> Vec<f64> {
+        evidence
+            .element_rects
+            .get(s)
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("no rect for {s}: {:?}", evidence.element_rects.keys()))
+            .iter()
+            .filter_map(|n| n.as_f64())
+            .collect()
+    };
+    let text = |s: &str| evidence.element_details[s]["text"].as_str().unwrap_or("").to_string();
+
+    // Should flag: the copy the scan scored sits below two collapsed copies
+    // and a 320px spacer. `querySelector` would name the first collapsed copy.
+    let dup = rect("#dup-note");
+    assert!(dup[2] > 400.0 && dup[3] > 10.0 && dup[1] > 320.0, "{dup:?}");
+    assert_eq!(text("#dup-note"), "Faint note, the copy a visitor sees.");
+    // Should pass: the visible copy comes first, and a unique id.
+    let first = rect("#dup-first-note");
+    assert!(first[2] > 400.0 && first[1] < 200.0, "{first:?}");
+    assert_eq!(text("#dup-first-note"), "Faint note, visible first copy.");
+    assert!(rect("#solo-note")[2] > 400.0);
+    assert_eq!(text("#solo-note"), "Faint note with an id of its own.");
+
+    // The screenshot shows the flagged copy at its rect.
+    use base64::Engine as _;
+    let shot = evidence.screenshot.as_ref().expect("screenshot");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&shot.jpeg_base64)
+        .expect("base64");
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+        .expect("jpeg")
+        .to_rgb8();
+    let (mut lo, mut hi) = (255u8, 0u8);
+    for y in dup[1] as u32..(dup[1] + dup[3]) as u32 {
+        for x in dup[0] as u32..(dup[0] + dup[2]).min(img.width() as f64) as u32 {
+            let p = img.get_pixel(x, y).0;
+            let l = ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8;
+            lo = lo.min(l);
+            hi = hi.max(l);
+        }
+    }
+    assert!(hi.saturating_sub(lo) > 20, "the flagged copy is blank at its rect");
 }

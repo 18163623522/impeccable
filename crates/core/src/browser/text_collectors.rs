@@ -8,6 +8,7 @@
 use super::dom::{matches_or_false, tag_lower, Dom, ElId, ElStyle};
 use super::driver::DesignSystemConfig;
 use super::element_checks::{class_selector, is_rendered_for_browser_rule};
+use super::painted::{unpainted_for, PaintGate};
 use super::{BrowserFinding, ElFinding};
 use crate::checks::measures::resolve_length_px;
 use crate::checks::rules::{check_kicker_above_heading, KickerCandidate, RuleHit};
@@ -133,9 +134,13 @@ pub fn collect_kicker_candidates_with_elements(dom: &dyn Dom) -> Vec<(ElId, Kick
         {
             continue;
         }
-        let Some(kicker) = dom.previous_element_sibling(heading) else {
+        let Some(found) = label_before_heading(dom, heading) else {
             continue;
         };
+        let kicker = found.label;
+        if found.levels > 0 && !label_near_heading(dom, kicker, heading) {
+            continue;
+        }
         if super::dom::closest_or_none(dom, kicker, KICKER_SKIP_SELECTOR).is_some() {
             continue;
         }
@@ -153,13 +158,14 @@ pub fn collect_kicker_candidates_with_elements(dom: &dyn Dom) -> Vec<(ElId, Kick
             }
         };
         let heading_font_size = font_size_of(dom, heading);
-        let kicker_font_size = font_size_of(dom, kicker);
+        let kicker_type = label_type_element(dom, kicker);
+        let kicker_font_size = font_size_of(dom, kicker_type);
         let kicker_letter_spacing =
-            resolve_len_or_zero(&dom.style(kicker, "letterSpacing"), kicker_font_size);
+            resolve_len_or_zero(&dom.style(kicker_type, "letterSpacing"), kicker_font_size);
         let kicker_font_variant = format!(
             "{} {}",
-            dom.style(kicker, "fontVariant"),
-            dom.style(kicker, "fontVariantCaps")
+            dom.style(kicker_type, "fontVariant"),
+            dom.style(kicker_type, "fontVariantCaps")
         );
         if !is_kicker_candidate(&KickerCandidateInput {
             heading_level,
@@ -167,7 +173,7 @@ pub fn collect_kicker_candidates_with_elements(dom: &dyn Dom) -> Vec<(ElId, Kick
             heading_font_size,
             kicker_tag: &tag_lower(dom, kicker),
             kicker_text: &kicker_text,
-            kicker_text_transform: &dom.style(kicker, "textTransform"),
+            kicker_text_transform: &dom.style(kicker_type, "textTransform"),
             kicker_font_variant: &kicker_font_variant,
             kicker_font_size,
             kicker_letter_spacing,
@@ -175,6 +181,13 @@ pub fn collect_kicker_candidates_with_elements(dom: &dyn Dom) -> Vec<(ElId, Kick
             continue;
         }
         if heading_tag == "h1" && heading_font_size >= 48.0 && kicker_letter_spacing >= 1.6 {
+            continue;
+        }
+        // A pair a visitor cannot see (a section at `hidden`, an inactive
+        // hero slide, a closed panel) puts no label above a heading on screen.
+        if unpainted_for(dom, heading, PaintGate::Text).is_some()
+            || unpainted_for(dom, kicker, PaintGate::Text).is_some()
+        {
             continue;
         }
         candidates.push((
@@ -241,18 +254,15 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
         if super::dom::closest_or_none(dom, heading, KICKER_SKIP_SELECTOR).is_some() {
             continue;
         }
-        let mut label = dom.previous_element_sibling(heading);
-        if label.is_none() {
-            if let Some(parent) = dom.parent(heading) {
-                let first_child = dom.children(parent).into_iter().next();
-                if first_child == Some(heading) {
-                    label = dom.previous_element_sibling(parent);
-                }
-            }
-        }
-        let Some(label) = label else {
+        let Some(found) = label_before_heading(dom, heading) else {
             continue;
         };
+        let label = found.label;
+        // One wrapper up was always read; past that, the label has to sit
+        // beside or above the heading.
+        if found.levels > 1 && !label_near_heading(dom, label, heading) {
+            continue;
+        }
         if seen_labels.contains(&label) {
             continue;
         }
@@ -278,7 +288,8 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
         };
         let heading_text = collapsed_text_content(dom, heading);
         let heading_font_size = font_size_of(dom, heading);
-        let label_font_size = font_size_of(dom, label);
+        let label_type = label_type_element(dom, label);
+        let label_font_size = font_size_of(dom, label_type);
         if !is_numbered_section_label_candidate(&NumberedLabelCandidateInput {
             heading_tag: &tag_lower(dom, heading),
             heading_text: &heading_text,
@@ -288,13 +299,13 @@ pub fn collect_numbered_section_label_candidates(dom: &dyn Dom) -> Vec<NumberedL
             label_text: &parsed.text,
             label_font_size,
             label_letter_spacing: resolve_len_or_zero(
-                &dom.style(label, "letterSpacing"),
+                &dom.style(label_type, "letterSpacing"),
                 label_font_size,
             ),
-            label_font_weight: &dom.style(label, "fontWeight"),
-            label_font_family: &dom.style(label, "fontFamily"),
-            label_text_transform: &dom.style(label, "textTransform"),
-            label_color: &dom.style(label, "color"),
+            label_font_weight: &dom.style(label_type, "fontWeight"),
+            label_font_family: &dom.style(label_type, "fontFamily"),
+            label_text_transform: &dom.style(label_type, "textTransform"),
+            label_color: &dom.style(label_type, "color"),
         }) {
             continue;
         }
@@ -333,10 +344,112 @@ pub fn check_em_dash_overuse_dom(dom: &dyn Dom) -> Vec<RuleHit> {
     };
     // innerText when it is a non-empty string, else textContent.
     let text = match dom.inner_text(body) {
-        Some(t) => t,
+        Some(t) => without_lone_dash_cells(&t),
         None => dom.text_content(body),
     };
     hits(check_em_dash_overuse(Some(&text)))
+}
+
+/// `innerText` without the cells whose whole text is a dash. A pricing matrix
+/// marks every feature a plan lacks with one, and a mark alone in a cell is
+/// not punctuation in prose. `innerText` separates table cells with a tab and
+/// block boxes (grid cells included) with a line break, so a cell is a run
+/// between those.
+fn without_lone_dash_cells(text: &str) -> String {
+    let is_dash_cell = |segment: &str| {
+        let t = js::trim(segment);
+        !t.is_empty() && t.chars().all(|c| matches!(c, '—' | '–' | '-'))
+    };
+    if !text.split(['\n', '\t']).any(is_dash_cell) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut start = 0usize;
+    for (i, c) in text.char_indices() {
+        if c == '\n' || c == '\t' {
+            let segment = &text[start..i];
+            if !is_dash_cell(segment) {
+                out.push_str(segment);
+            }
+            out.push(c);
+            start = i + c.len_utf8();
+        }
+    }
+    let segment = &text[start..];
+    if !is_dash_cell(segment) {
+        out.push_str(segment);
+    }
+    out
+}
+
+/// How many wrappers a label collector climbs when the heading leads its
+/// wrapper. Framer nests a card heading four single-child boxes deep.
+pub const LABEL_CLIMB_LEVELS: usize = 4;
+
+/// The widest gap a label may leave to its heading once the collector has
+/// climbed past a wrapper: the label has to sit just above or just before it.
+pub const LABEL_CLIMBED_MAX_GAP_PX: f64 = 96.0;
+
+/// A label candidate and how many wrappers the collector climbed to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelBefore {
+    pub label: ElId,
+    pub levels: usize,
+}
+
+/// The element a label before `heading` would be: its previous element
+/// sibling, or, while the heading (then each wrapper above it) is the first
+/// element child of its parent, that wrapper's previous element sibling, at
+/// most [`LABEL_CLIMB_LEVELS`] wrappers up. `body` and `html` end the climb.
+pub fn label_before_heading(dom: &dyn Dom, heading: ElId) -> Option<LabelBefore> {
+    let mut current = heading;
+    for levels in 0..=LABEL_CLIMB_LEVELS {
+        if let Some(label) = dom.previous_element_sibling(current) {
+            return Some(LabelBefore { label, levels });
+        }
+        let parent = dom.parent(current)?;
+        if Some(parent) == dom.body() || Some(parent) == dom.document_element() {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Whether `label` sits just above or just before `heading`: it does not start
+/// below the heading, and the gap between the two boxes is at most
+/// [`LABEL_CLIMBED_MAX_GAP_PX`]. A label with no box is not measured and does
+/// not count.
+pub fn label_near_heading(dom: &dyn Dom, label: ElId, heading: ElId) -> bool {
+    let l = dom.rect(label);
+    let h = dom.rect(heading);
+    if l.width <= 0.0 || l.height <= 0.0 || h.width <= 0.0 || h.height <= 0.0 {
+        return false;
+    }
+    if l.top >= h.bottom {
+        return false;
+    }
+    let gap = (h.top - l.bottom).max(h.left - l.right).max(0.0);
+    gap <= LABEL_CLIMBED_MAX_GAP_PX
+}
+
+/// The element that sets a label's type: the label itself when it has text of
+/// its own, else its only element child, at most three levels down. Framer
+/// sets an eyebrow's size, tracking and case on a `p` inside a bare `div`, and
+/// a mono index often sits in a `span` inside a sized column.
+pub fn label_type_element(dom: &dyn Dom, label: ElId) -> ElId {
+    let mut el = label;
+    for _ in 0..3 {
+        if !clean_inline_text(dom, el).is_empty() {
+            return el;
+        }
+        let children = dom.children(el);
+        if children.len() != 1 {
+            return el;
+        }
+        el = children[0];
+    }
+    el
 }
 
 static ICON_CLASS_RE: Lazy<Regex> = Lazy::new(|| {
@@ -499,9 +612,11 @@ mod tests {
                 ("fontVariantCaps", "normal"),
             ],
         );
+        d.set_rect(kicker, 40.0, 100.0, 240.0, 16.0);
         let h = d.add(Some(sec), "h2");
         d.add_text(h, "Everything you need");
         d.set_style(h, "fontSize", "32px");
+        d.set_rect(h, 40.0, 124.0, 600.0, 40.0);
         let hits = check_kicker_above_heading_dom(&d, None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].finding.type_, "kicker-above-heading");
@@ -531,10 +646,58 @@ mod tests {
         let k2 = d.add(Some(art), "p");
         d.add_text(k2, "NEWS");
         d.set_styles(k2, &[("fontSize", "12px"), ("letterSpacing", "1.2px")]);
+        d.set_rect(k2, 40.0, 300.0, 240.0, 16.0);
         let h2 = d.add(Some(art), "h3");
         d.add_text(h2, "Card heading");
         d.set_style(h2, "fontSize", "24px");
+        d.set_rect(h2, 40.0, 324.0, 600.0, 32.0);
         assert_eq!(check_kicker_above_heading_dom(&d, None).len(), 1);
+    }
+
+    /// demotv.lol's hero pair in a section at `hidden`, and exxonmobil.com's
+    /// inactive slide: the same label and heading a visitor cannot see.
+    #[test]
+    fn kicker_above_heading_skips_a_pair_nobody_sees() {
+        let pair = |d: &mut FakeDom, parent: ElId, y: f64, heading: &str| {
+            let kicker = d.add(Some(parent), "span");
+            d.add_text(kicker, "Channel battle");
+            d.set_styles(
+                kicker,
+                &[("fontSize", "12px"), ("letterSpacing", "1.3px"), ("textTransform", "uppercase")],
+            );
+            d.set_rect(kicker, 40.0, y, 240.0, 16.0);
+            let h = d.add(Some(parent), "h2");
+            d.add_text(h, heading);
+            d.set_style(h, "fontSize", "32px");
+            d.set_rect(h, 40.0, y + 24.0, 600.0, 40.0);
+            (kicker, h)
+        };
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let shown = d.add(Some(body), "div");
+        pair(&mut d, shown, 100.0, "Which would you try");
+
+        let hidden = d.add(Some(body), "section");
+        d.set_attr(hidden, "hidden", "");
+        d.set_style(hidden, "display", "none");
+        let (k, h) = pair(&mut d, hidden, 0.0, "Watch both demos");
+        for el in [hidden, k, h] {
+            d.el_mut(el).check_visibility = Some(false);
+            d.set_rect(el, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        let slide = d.add(Some(body), "div");
+        d.set_styles(slide, &[("opacity", "0"), ("visibility", "hidden")]);
+        d.set_rect(slide, 0.0, 300.0, 1280.0, 400.0);
+        let (k, h) = pair(&mut d, slide, 320.0, "Second quarter results");
+        for el in [k, h] {
+            d.set_style(el, "visibility", "hidden");
+            d.el_mut(el).check_visibility = Some(false);
+        }
+
+        let hits = check_kicker_above_heading_dom(&d, None);
+        let snippets: Vec<&str> = hits.iter().map(|h| h.finding.detail.as_str()).collect();
+        assert_eq!(snippets, vec!["kicker \"Channel battle\" above h2 \"Which would you try\""]);
     }
 
     #[test]
@@ -579,6 +742,155 @@ mod tests {
         assert_eq!(hits[0].snippet, "8 em-dashes in body text");
         d.el_mut(body).inner_text = Some("no dashes here".to_string());
         assert!(check_em_dash_overuse_dom(&d).is_empty());
+    }
+
+    /// visiby.net: a pricing matrix marks every missing feature with a lone
+    /// dash in its cell.
+    #[test]
+    fn em_dash_skips_cells_whose_whole_text_is_a_dash() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        d.add_text(body, "placeholder");
+        let matrix = "FEATURES\n25 prompts / month\t✓\t—\t—\t—\nAPI access\t—\t—\t✓\t✓\n".repeat(6);
+        d.el_mut(body).inner_text = Some(format!("Track your brand — and climb.\n{matrix}"));
+        assert!(check_em_dash_overuse_dom(&d).is_empty());
+        let prose = "a — b — c — d — e — f — g — h — i\n";
+        d.el_mut(body).inner_text = Some(format!("{prose}{matrix}"));
+        let hits = check_em_dash_overuse_dom(&d);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "8 em-dashes in body text");
+        assert_eq!(without_lone_dash_cells("x\t—\ty\n -- \n"), "x\t\ty\n\n");
+        assert_eq!(without_lone_dash_cells("no cells — here"), "no cells — here");
+    }
+
+    #[test]
+    fn label_before_heading_climbs_first_children_up_to_the_limit() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        // Framer: the heading four single-child wrappers below the tile's
+        // sibling.
+        let row = d.add(Some(body), "div");
+        let tile = d.add(Some(row), "div");
+        let mut at = d.add(Some(row), "div");
+        for _ in 0..3 {
+            at = d.add(Some(at), "div");
+        }
+        let h6 = d.add(Some(at), "h6");
+        assert_eq!(
+            label_before_heading(&d, h6),
+            Some(LabelBefore { label: tile, levels: 4 })
+        );
+        // One wrapper more is past the limit.
+        let row = d.add(Some(body), "div");
+        let _tile = d.add(Some(row), "div");
+        let mut at = d.add(Some(row), "div");
+        for _ in 0..4 {
+            at = d.add(Some(at), "div");
+        }
+        let deep = d.add(Some(at), "h6");
+        assert_eq!(label_before_heading(&d, deep), None);
+        // A heading with a previous sibling reads it, as before.
+        let wrap = d.add(Some(body), "div");
+        let note = d.add(Some(wrap), "p");
+        let h3 = d.add(Some(wrap), "h3");
+        assert_eq!(
+            label_before_heading(&d, h3),
+            Some(LabelBefore { label: note, levels: 0 })
+        );
+        // The climb ends at body.
+        let top = d.add(Some(body), "h2");
+        let _ = top;
+        let lone_body = {
+            let mut d = FakeDom::new();
+            let (_html, body) = d.with_page();
+            let h = d.add(Some(body), "h2");
+            label_before_heading(&d, h)
+        };
+        assert_eq!(lone_body, None);
+    }
+
+    /// dadastudio.framer.website: the eyebrow's type is set on a p inside a
+    /// bare div, and the heading leads its own wrapper.
+    #[test]
+    fn kicker_collector_climbs_a_wrapper_and_reads_the_text_child() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let sec = d.add(Some(body), "section");
+        let wrap = d.add(Some(sec), "div");
+        d.set_rect(wrap, 48.0, 100.0, 600.0, 14.0);
+        d.set_style(wrap, "fontSize", "12px");
+        let p = d.add(Some(wrap), "p");
+        d.add_text(p, "Hear from our client");
+        d.set_styles(
+            p,
+            &[
+                ("fontSize", "12.375px"),
+                ("letterSpacing", "0.99px"),
+                ("textTransform", "uppercase"),
+                ("fontVariant", "normal"),
+                ("fontVariantCaps", "normal"),
+            ],
+        );
+        let heading_wrap = d.add(Some(sec), "div");
+        d.set_rect(heading_wrap, 48.0, 146.0, 600.0, 90.0);
+        let h = d.add(Some(heading_wrap), "h2");
+        d.add_text(h, "The kind of work");
+        d.set_style(h, "fontSize", "40px");
+        d.set_rect(h, 48.0, 146.0, 600.0, 90.0);
+        let hits = check_kicker_above_heading_dom(&d, None);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].finding.detail,
+            "kicker \"Hear from our client\" above h2 \"The kind of work\""
+        );
+        // A label far above the wrapped heading is not its kicker.
+        d.set_rect(h, 48.0, 400.0, 600.0, 90.0);
+        assert!(check_kicker_above_heading_dom(&d, None).is_empty());
+        // Nor is a label with no box to measure.
+        d.set_rect(h, 48.0, 146.0, 600.0, 90.0);
+        d.set_rect(wrap, 0.0, 0.0, 0.0, 0.0);
+        assert!(check_kicker_above_heading_dom(&d, None).is_empty());
+    }
+
+    /// v0-optimus-delta.vercel.app: a mono index in a column beside the
+    /// heading's grandparent.
+    #[test]
+    fn numbered_labels_climb_to_an_index_column() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        for (i, idx) in ["01", "02"].iter().enumerate() {
+            let y = 100.0 + 320.0 * i as f64;
+            let row = d.add(Some(body), "div");
+            let col = d.add(Some(row), "div");
+            d.set_style(col, "fontSize", "16px");
+            d.set_rect(col, 48.0, y, 17.0, 160.0);
+            let span = d.add(Some(col), "span");
+            d.add_text(span, idx);
+            d.set_styles(
+                span,
+                &[
+                    ("fontSize", "14px"),
+                    ("fontFamily", "\"JetBrains Mono\", monospace"),
+                    ("fontWeight", "400"),
+                    ("letterSpacing", "normal"),
+                    ("textTransform", "none"),
+                    ("color", "rgb(113, 113, 122)"),
+                ],
+            );
+            let body_col = d.add(Some(row), "div");
+            let grid = d.add(Some(body_col), "div");
+            let item = d.add(Some(grid), "div");
+            let h = d.add(Some(item), "h3");
+            d.add_text(h, &format!("Capability {}", i + 1));
+            d.set_style(h, "fontSize", "36px");
+            d.set_rect(h, 128.0, y + 23.0, 535.0, 40.0);
+        }
+        let hits = check_numbered_section_labels_dom(&d);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "tiny numbered label \"01\" beside h3 \"Capability 1\" (2 on page)"
+        );
     }
 
     #[test]

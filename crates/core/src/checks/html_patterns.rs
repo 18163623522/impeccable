@@ -3,10 +3,11 @@
 //! `checkHtmlPatterns` (the browser / static shared pattern pass).
 
 use crate::checks::css_scan::{
-    enclosing_css_selector, scan_css_text_for_buried_raster, scan_css_text_for_glow,
+    enclosing_css_selector, scan_css_text_for_buried_raster, scan_css_text_for_glow_with,
     scan_css_text_for_grid_background, scan_css_text_for_inset_stripe, scan_css_text_for_marquee,
     scan_css_text_for_organic_clip_path, scan_css_text_for_pseudo_stripe,
-    scan_css_text_for_pulsing_dot, scan_css_text_for_radial_halo, PatternFinding,
+    scan_css_text_for_pulsing_dot, scan_css_text_for_radial_halo_with, starts_css_property_token,
+    PatternFinding,
 };
 use crate::checks::rules::{RuleHit, ANY, B, BEZIER_RE, D, DOT, W};
 use crate::js::{self, ci, math_round, number_to_string, parse_float, parse_int, WS, WS_CHARS};
@@ -376,12 +377,67 @@ fn pf(id: &str, snippet: String, selector: Option<String>) -> PatternFinding {
     }
 }
 
+/// What an engine that renders the page knows about it and the pattern pass
+/// cannot read off the text. The default is what the file engines know:
+/// nothing, so every decision comes from the stylesheet text.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PatternContext {
+    /// Whether the page's painted root background is dark. `None` decides
+    /// from dark background declarations in the style text.
+    pub dark_page: Option<bool>,
+}
+
+/// The first `transition` / `transition-property` declaration in the style
+/// text that names a layout property: the one the page-level
+/// `layout-transition` form reports.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutTransitionDeclaration {
+    /// The layout properties it names, lowercased, in declaration order.
+    pub properties: Vec<String>,
+    /// Byte offset of the declaration in the style text.
+    pub index: usize,
+}
+
+/// See [`LayoutTransitionDeclaration`]. A property token has to be a name of
+/// its own: `border-width`, `line-height`, `scroll-margin` and a custom
+/// property such as `--x-transition` are passed over.
+pub fn first_layout_transition(style_text: &str) -> Option<LayoutTransitionDeclaration> {
+    for tm in TRANSITION_RE.captures_iter(style_text) {
+        let start = tm.get(0).unwrap().start();
+        if !starts_css_property_token(style_text, start) {
+            continue;
+        }
+        let val = js::to_lower_case(&tm[1]);
+        if ALL_WORD_RE.is_match(&val) {
+            continue;
+        }
+        let properties: Vec<String> = LAYOUT_PROP_RE
+            .find_iter(&val)
+            .filter(|m| starts_css_property_token(&val, m.start()))
+            .map(|m| m.as_str().to_string())
+            .collect();
+        if !properties.is_empty() {
+            return Some(LayoutTransitionDeclaration { properties, index: start });
+        }
+    }
+    None
+}
+
 /// JS: checks.mjs#checkHtmlPatterns. `corpora` defaults to
 /// `buildHtmlPatternCorpora(html)`. Findings' `index` fields are byte
 /// offsets into `corpora.style_text`.
 pub fn check_html_patterns(
     html: &str,
     corpora: Option<&HtmlPatternCorpora>,
+) -> Vec<PatternFinding> {
+    check_html_patterns_with(html, corpora, &PatternContext::default())
+}
+
+/// [`check_html_patterns`] with what a rendering engine knows about the page.
+pub fn check_html_patterns_with(
+    html: &str,
+    corpora: Option<&HtmlPatternCorpora>,
+    context: &PatternContext,
 ) -> Vec<PatternFinding> {
     let built;
     let corpora = match corpora {
@@ -529,20 +585,12 @@ pub fn check_html_patterns(
         }
     }
 
-    for tm in TRANSITION_RE.captures_iter(style_text) {
-        let val = js::to_lower_case(&tm[1]);
-        if ALL_WORD_RE.is_match(&val) {
-            continue;
-        }
-        let found: Vec<&str> = LAYOUT_PROP_RE.find_iter(&val).map(|m| m.as_str()).collect();
-        if !found.is_empty() {
-            findings.push(pf(
-                "layout-transition",
-                format!("transition: {}", found.join(", ")),
-                None,
-            ));
-            break;
-        }
+    if let Some(declaration) = first_layout_transition(style_text) {
+        findings.push(pf(
+            "layout-transition",
+            format!("transition: {}", declaration.properties.join(", ")),
+            None,
+        ));
     }
 
     findings.extend(scan_css_text_for_pulsing_dot(style_text, Some(html)));
@@ -559,7 +607,7 @@ pub fn check_html_patterns(
     findings.extend(scan_css_text_for_marquee(style_text, Some(html)));
 
     // --- Dark glow / chromatic halo shadows ---
-    let glow_hits = scan_css_text_for_glow(style_text);
+    let glow_hits = scan_css_text_for_glow_with(style_text, context.dark_page);
     if let Some(first) = glow_hits.first() {
         findings.push(pf(
             "dark-glow",
@@ -567,7 +615,7 @@ pub fn check_html_patterns(
             enclosing_css_selector(style_text, first.index),
         ));
     }
-    let halo_hits = scan_css_text_for_radial_halo(style_text);
+    let halo_hits = scan_css_text_for_radial_halo_with(style_text, context.dark_page);
     if let Some(first) = halo_hits.first() {
         findings.push(pf(
             "radial-halo",
@@ -675,6 +723,36 @@ mod tests {
             None,
         );
         assert_eq!(out[0].snippet, "~8px used 11/11 times (100%)");
+    }
+
+    #[test]
+    fn layout_transition_names_only_layout_properties() {
+        let first = |s: &str| first_layout_transition(s).map(|d| d.properties);
+        assert_eq!(first(".a{transition:border-width .2s}"), None);
+        assert_eq!(first(".a{transition:line-height .2s, scroll-margin .2s}"), None);
+        assert_eq!(first(".a{--card-transition:height .2s}"), None);
+        assert_eq!(
+            first(".a{-webkit-transition:max-height .3s}"),
+            Some(vec!["max-height".to_string()])
+        );
+        assert_eq!(
+            first(".a{transition:border-width .2s}.b{transition:padding-top .2s, width .3s}"),
+            Some(vec!["padding-top".to_string(), "width".to_string()])
+        );
+        let css = ".x{color:red}.b{transition:height .3s}";
+        let declaration = first_layout_transition(css).unwrap();
+        assert_eq!(enclosing_css_selector(css, declaration.index).as_deref(), Some(".b"));
+        // The pattern pass reports the first real declaration.
+        let out = check_html_patterns(
+            "<style>.frame{transition:border-width .2s}.tray{transition:height .3s}</style>",
+            None,
+        );
+        let snippets: Vec<&str> = out
+            .iter()
+            .filter(|f| f.id == "layout-transition")
+            .map(|f| f.snippet.as_str())
+            .collect();
+        assert_eq!(snippets, vec!["transition: height"]);
     }
 
     /// Hover zoom on card imagery is a long-standing convention, so none of

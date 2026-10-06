@@ -53,13 +53,23 @@ fn fixture_flag_and_pass_cases() {
             "pass case at {ratio}x should not flag, got {snippets:?}"
         );
     }
-    // The single-line case is the one the static engine cannot judge: it has
-    // no layout, so it still reports the 1.15x label. The browser engine's
-    // wrap test is pinned in crates/core.
+    // Heading copy in a block wrapper (1.26) passes in both engines.
+    assert!(
+        !snippets.iter().any(|s| s.contains("1.26")),
+        "the div inside a heading should not flag, got {snippets:?}"
+    );
+    // Two cases the static engine cannot judge: it has no layout, so it still
+    // reports the 1.15x single-line label, and the 0.95x inline run whose
+    // lines sit on its block's 22px line boxes. The browser engine's wrap and
+    // pitch tests are pinned in crates/core.
+    assert!(
+        snippets.iter().any(|s| s.contains("0.95")),
+        "the documented static-only inline run, got {snippets:?}"
+    );
     assert_eq!(
         snippets.len(),
-        6,
-        "expected five flags plus the documented single-line static hit, got {snippets:?}"
+        7,
+        "expected five flags plus the two documented static hits, got {snippets:?}"
     );
 }
 
@@ -99,6 +109,13 @@ fn heading_exemption_follows_the_ancestor() {
         &format!("<h3><p>{COPY}</p></h3>"),
     ));
     assert_eq!(nested.len(), 1, "paragraph nested in a heading still flags: {nested:?}");
+
+    // So is an inline run inside that paragraph.
+    let run = scan(&page(
+        "h3 { font-size: 16px; } p { width: 300px; } span { font-size: 16px; line-height: 17.6px; }",
+        &format!("<h3><p><span>{COPY}</span></p></h3>"),
+    ));
+    assert_eq!(run.len(), 1, "span in a paragraph nested in a heading still flags: {run:?}");
 }
 
 #[test]

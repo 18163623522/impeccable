@@ -189,7 +189,9 @@ pub fn is_kicker_candidate(o: &KickerCandidateInput) -> bool {
     if !is_uppercased {
         return false;
     }
-    if !(o.kicker_font_size > 0.0 && o.kicker_font_size <= 14.0) {
+    if !(o.kicker_font_size > 0.0
+        && o.kicker_font_size <= label_size_ceiling(o.heading_font_size, KICKER_BASE_MAX_PX))
+    {
         return false;
     }
     let min_tracked_spacing = o.kicker_font_size * 0.06;
@@ -197,6 +199,30 @@ pub fn is_kicker_candidate(o: &KickerCandidateInput) -> bool {
         return false;
     }
     true
+}
+
+/// The size a kicker was always allowed, whatever the heading.
+pub const KICKER_BASE_MAX_PX: f64 = 14.0;
+/// The size a numbered label was always allowed, whatever the heading.
+pub const NUMBERED_LABEL_BASE_MAX_PX: f64 = 13.0;
+/// A label reads as a label beside a heading at most this share of the
+/// heading's size: a 15px eyebrow over a 44px h2 is as small, relative to it,
+/// as a 12px one over a 32px h2.
+pub const LABEL_HEADING_SIZE_RATIO: f64 = 0.45;
+/// The absolute cap on a label's size, whatever the heading: past it the text
+/// is a subheading.
+pub const LABEL_MAX_PX: f64 = 16.0;
+
+/// The largest size a label beside a heading of `heading_font_size` may be:
+/// the old fixed ceiling `base`, raised to [`LABEL_HEADING_SIZE_RATIO`] of the
+/// heading where that is larger, and never past [`LABEL_MAX_PX`].
+pub fn label_size_ceiling(heading_font_size: f64, base: f64) -> f64 {
+    let relative = if heading_font_size.is_finite() && heading_font_size > 0.0 {
+        heading_font_size * LABEL_HEADING_SIZE_RATIO
+    } else {
+        0.0
+    };
+    base.max(relative.min(LABEL_MAX_PX))
 }
 
 /// JS: checks.mjs#isNumberedSectionLabelCandidate.
@@ -214,7 +240,9 @@ pub fn is_numbered_section_label_candidate(o: &NumberedLabelCandidateInput) -> b
     if o.label_index.is_none() || o.label_text.is_empty() {
         return false;
     }
-    if !(o.label_font_size > 0.0 && o.label_font_size <= 13.0) {
+    if !(o.label_font_size > 0.0
+        && o.label_font_size <= label_size_ceiling(o.heading_font_size, NUMBERED_LABEL_BASE_MAX_PX))
+    {
         return false;
     }
     if o.heading_font_size > 0.0 && o.heading_font_size < o.label_font_size * 1.3 {
@@ -336,6 +364,82 @@ pub fn is_cjk_text(text: &str) -> bool {
     cjk > 0 && cjk * 2 >= scripted
 }
 
+/// A glyph set a full em wide: Han, kana and Hangul, the CJK symbols and
+/// punctuation block, and the fullwidth forms. Halfwidth katakana is half.
+fn is_full_width_char(c: char) -> bool {
+    matches!(c as u32, 0x3000..=0x303F | 0xFF01..=0xFF60 | 0xFFE0..=0xFFE6)
+        || (is_cjk_char(c) && !matches!(c as u32, 0xFF66..=0xFF9F))
+}
+
+/// The average advance of a proportional face's Latin glyphs in ems, the
+/// estimate's old constant.
+pub const PROPORTIONAL_ADVANCE_EM: f64 = 0.5;
+
+/// The advance of a monospace face's glyphs in ems: 600 units to the em in
+/// JetBrains Mono, Courier, Menlo and SF Mono.
+pub const MONOSPACE_ADVANCE_EM: f64 = 0.6;
+
+/// The average advance of `text`'s characters in ems, for estimating how many
+/// fit on a line: half an em for Latin and the scripts set like it, a whole em
+/// for full-width CJK glyphs, weighted by how many of each the text holds.
+/// Text with no full-width glyph is exactly 0.5, the estimate's old constant.
+pub fn average_glyph_advance_em(text: &str) -> f64 {
+    average_glyph_advance_em_at(text, PROPORTIONAL_ADVANCE_EM)
+}
+
+/// [`average_glyph_advance_em`] with the advance of the text's Latin glyphs
+/// given: [`MONOSPACE_ADVANCE_EM`] for a monospace face. Full-width glyphs
+/// are a whole em in either.
+pub fn average_glyph_advance_em_at(text: &str, latin_em: f64) -> f64 {
+    let mut total = 0usize;
+    let mut wide = 0usize;
+    for c in text.chars() {
+        total += 1;
+        if is_full_width_char(c) {
+            wide += 1;
+        }
+    }
+    if wide == 0 {
+        return latin_em;
+    }
+    (latin_em * (total - wide) as f64 + wide as f64) / total as f64
+}
+
+/// Faces set on a fixed advance whose names hold no `mono` word.
+const MONOSPACE_FACES: &[&str] = &[
+    "andale mono",
+    "cascadia code",
+    "consolas",
+    "courier",
+    "courier new",
+    "fira code",
+    "hack",
+    "inconsolata",
+    "lucida console",
+    "menlo",
+    "monaco",
+    "source code pro",
+];
+
+/// Whether a computed `font-family` leads with a monospace face: a generic
+/// `monospace` or `ui-monospace`, a name with a `mono` word in it
+/// (`JetBrains Mono`, `SFMono-Regular`, `Roboto Mono`), or a known code face.
+/// Only the first family is read; a display face such as `Monotype Corsiva`
+/// holds no `mono` word.
+pub fn is_monospace_family(font_family: &str) -> bool {
+    let first = font_family
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_ascii_lowercase();
+    MONOSPACE_FACES.contains(&first.as_str())
+        || first
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| matches!(w, "mono" | "monospace" | "monospaced" | "sfmono"))
+}
+
 /// JS `/[—]|--(?=\S)/g` match count over `body`.
 fn count_em_dashes(body: &str) -> usize {
     let chars: Vec<char> = body.chars().collect();
@@ -413,6 +517,57 @@ pub fn is_repeated_text_container(style: Option<&dyn StyleMap>) -> bool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn label_ceilings_follow_the_heading_up_to_a_cap() {
+        assert_eq!(label_size_ceiling(32.0, KICKER_BASE_MAX_PX), 14.4);
+        assert_eq!(label_size_ceiling(24.0, KICKER_BASE_MAX_PX), 14.0);
+        assert_eq!(label_size_ceiling(44.0, KICKER_BASE_MAX_PX), 16.0);
+        assert_eq!(label_size_ceiling(0.0, NUMBERED_LABEL_BASE_MAX_PX), 13.0);
+        assert_eq!(label_size_ceiling(f64::NAN, NUMBERED_LABEL_BASE_MAX_PX), 13.0);
+    }
+
+    /// opentrailpaper.com: 15.04px tracked kickers above 44px h2s.
+    #[test]
+    fn a_fifteen_pixel_kicker_counts_above_a_display_heading() {
+        let input = |heading: f64, kicker: f64| KickerCandidateInput {
+            heading_level: 2.0,
+            heading_text: "Device walkthrough",
+            heading_font_size: heading,
+            kicker_tag: "p",
+            kicker_text: "01 — Device controls",
+            kicker_text_transform: "uppercase",
+            kicker_font_variant: "normal normal",
+            kicker_font_size: kicker,
+            kicker_letter_spacing: kicker * 0.2,
+        };
+        assert!(is_kicker_candidate(&input(44.0, 15.04)));
+        assert!(!is_kicker_candidate(&input(24.0, 15.04)));
+        assert!(!is_kicker_candidate(&input(64.0, 17.0)));
+        assert!(is_kicker_candidate(&input(20.0, 14.0)));
+    }
+
+    /// v0-optimus-delta.vercel.app: 14px mono "01" beside 36px h3s.
+    #[test]
+    fn a_numbered_label_ceiling_follows_the_heading() {
+        let input = |heading: f64, label: f64| NumberedLabelCandidateInput {
+            heading_tag: "h3",
+            heading_text: "Instant Deployment",
+            heading_font_size: heading,
+            label_tag: "div",
+            label_index: Some(1.0),
+            label_text: "01",
+            label_font_size: label,
+            label_letter_spacing: 0.0,
+            label_font_weight: "400",
+            label_font_family: "\"JetBrains Mono\", monospace",
+            label_text_transform: "none",
+            label_color: "rgb(113, 113, 122)",
+        };
+        assert!(is_numbered_section_label_candidate(&input(36.0, 14.0)));
+        assert!(!is_numbered_section_label_candidate(&input(24.0, 14.0)));
+        assert!(is_numbered_section_label_candidate(&input(24.0, 13.0)));
+    }
 
     fn style(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -516,6 +671,28 @@ mod tests {
             ("borderBottomWidth", "1px"),
             ("backgroundColor", "rgba(255, 255, 255, 0.05)"),
         ]))));
+    }
+
+    #[test]
+    fn monospace_faces_advance_six_tenths_of_an_em() {
+        for family in [
+            "\"JetBrains Mono\", \"JetBrains Mono Fallback\", ui-monospace, monospace",
+            "ui-monospace, SFMono-Regular, Menlo, monospace",
+            "SFMono-Regular, Consolas, monospace",
+            "monospace",
+            "'Courier New', Courier, monospace",
+            "Menlo",
+            "\"Roboto Mono\", sans-serif",
+        ] {
+            assert!(is_monospace_family(family), "{family}");
+        }
+        for family in ["\"Monotype Corsiva\", cursive", "Inter, monospace", "system-ui, sans-serif", ""] {
+            assert!(!is_monospace_family(family), "{family}");
+        }
+        assert_eq!(average_glyph_advance_em("plain latin text"), 0.5);
+        assert_eq!(average_glyph_advance_em_at("plain latin text", MONOSPACE_ADVANCE_EM), 0.6);
+        // A full-width glyph is an em in either face: one of four.
+        assert!((average_glyph_advance_em_at("ab c漢", 0.6) - (0.6 * 4.0 + 1.0) / 5.0).abs() < 1e-12);
     }
 
     #[test]

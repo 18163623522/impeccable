@@ -7,8 +7,8 @@
 
 use crate::background::{
     a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
-    resolve_background_info, resolve_background_info_skipping_images, resolve_border_radius_px,
-    resolve_gradient_stops, resolve_side_accent_corners, sv, sv_opt, CustomPropMap,
+    resolve_border_radius_px, resolve_side_accent_corners, resolve_text_gradient_stops,
+    resolve_text_surface, sv, sv_opt, CustomPropMap, TextSurface,
 };
 use crate::cascade::StyleValues;
 use crate::layer::picture_under_text;
@@ -27,10 +27,11 @@ use impeccable_core::checks::measures::{
 use impeccable_core::checks::rules::{
     check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
-    check_placeholder_colors, check_stripe_child, is_emoji_only_text, is_glyph_only_text,
-    is_heading_tag, resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts,
-    HeroEyebrowOpts, HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate,
-    MotionOpts, RuleHit, SafeTagTextSeen, Sides,
+    check_placeholder_colors, check_stripe_child, is_close_letter_text, is_emoji_only_text,
+    is_glyph_only_text, is_heading_tag, is_icon_ligature_text, names_close_control,
+    resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts,
+    HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit,
+    SafeTagTextSeen, Sides,
 };
 use impeccable_core::checks::text_rules::{
     check_numbered_section_labels, is_kicker_candidate, is_numbered_section_label_candidate,
@@ -589,17 +590,18 @@ fn resolved_text_color(style: &StyleValues, custom_props: CustomPropMap<'_>) -> 
 /// Whether an ancestor carrying direct text is one the contrast pass
 /// actually scores, so a descendant sharing its colour can stand down. A
 /// SAFE_TAG ancestor is only scored under the same predicate its
-/// descendant is, and an ancestor whose own text is an arrow or an icon
-/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
-/// report the span, because nothing reports the anchor.
+/// descendant is, and an ancestor whose own text is an arrow, an icon glyph
+/// or a pair of braces is not scored at all, whatever its tag —
+/// `<a><span>Read more</span> →</a>` has to report the span, because nothing
+/// reports the anchor.
 fn ancestor_scores_its_text(el: &StaticElement<'_>, direct: &str) -> bool {
-    if is_emoji_only_text(direct) {
+    if is_emoji_only_text(direct) || is_glyph_only_text(direct) {
         return false;
     }
     if !SAFE_TAGS.contains(&el.tag_lower().as_str()) {
         return true;
     }
-    !is_glyph_only_text(direct) && !is_visually_hidden(el, el.style())
+    !is_visually_hidden(el, el.style())
 }
 
 /// Whether this element's `color` comes from an ancestor the contrast pass
@@ -702,6 +704,96 @@ fn icon_hosts(el: &StaticElement<'_>) -> Vec<ego_tree::NodeId> {
         cur = c.parent_element();
     }
     hosts
+}
+
+/// The element's own declared `opacity`, `1` where it does not read.
+fn opacity_of(style: &StyleValues) -> f64 {
+    let raw = sv(style, "opacity");
+    let v = parse_float(raw);
+    if js::trim(raw).is_empty() || !v.is_finite() {
+        1.0
+    } else {
+        v.clamp(0.0, 1.0)
+    }
+}
+
+/// The ink a reader sees once the opacity of the boxes between the text and
+/// its surface is applied. The browser engine's fold (see
+/// `impeccable_core::browser::element_checks`) over the cascade's declared
+/// opacity: only boxes below the surface take part, a faded box with no fill
+/// inside it fades the glyphs alone, and one with a fill fades both.
+fn fold_surface_opacity(
+    el: &StaticElement<'_>,
+    ink: &Rgba,
+    surface: &TextSurface,
+    effective_bg: &mut Option<Rgba>,
+) -> Option<Rgba> {
+    const MAX_ANCESTORS: usize = 64;
+    let mut layers: Vec<(Option<Rgba>, f64)> = Vec::new();
+    let mut cur = Some(*el);
+    let mut reached = false;
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else {
+            reached = surface.host.is_none();
+            break;
+        };
+        if Some(c.id()) == surface.host {
+            reached = true;
+            break;
+        }
+        let fill = surface.overlays.iter().find(|(n, _)| *n == c.id()).map(|(_, f)| *f);
+        layers.push((fill, opacity_of(c.style())));
+        cur = c.parent_element();
+    }
+    if !reached {
+        return None;
+    }
+    let product: f64 = layers.iter().map(|(_, o)| *o).product();
+    if !(product < 0.999) {
+        return None;
+    }
+    let outermost_fade = layers.iter().rposition(|(_, o)| *o < 0.999)?;
+    let fill_inside_fade = layers[..=outermost_fade].iter().any(|(f, _)| f.is_some());
+    if !fill_inside_fade {
+        return Some(Rgba {
+            a: Some(ink.alpha_or_one() * product),
+            ..*ink
+        });
+    }
+    if effective_bg.is_none() {
+        return None;
+    }
+    let base = surface.base?;
+    let (fg, bg) = impeccable_core::checks::gradient_geometry::fold_opacity(ink, &layers, &base);
+    *effective_bg = Some(bg);
+    Some(fg)
+}
+
+/// Text a reader sees as an icon rather than words, as the URL engine reads
+/// it (`element_checks::is_icon_text`): no letter or digit, a ligature set in
+/// an icon font, or a Latin `x` in a control that names itself a close or
+/// dismiss button.
+fn is_icon_text(el: &StaticElement<'_>, style: &StyleValues, direct: &str) -> bool {
+    if is_glyph_only_text(direct) || is_icon_ligature_text(direct, sv(style, "fontFamily")) {
+        return true;
+    }
+    if !is_close_letter_text(direct) {
+        return false;
+    }
+    let mut boxes = vec![*el];
+    if let Some(p) = el.parent_element() {
+        boxes.push(p);
+    }
+    if let Some(control) = el.closest("button, [role=\"button\"], a") {
+        boxes.push(control);
+    }
+    boxes.iter().any(|b| {
+        let values: Vec<&str> = ["class", "id", "aria-label", "title"]
+            .iter()
+            .filter_map(|name| b.get_attribute(name))
+            .collect();
+        names_close_control(&values)
+    })
 }
 
 const STRIPE_CHILD_SKIP: &str = "nav, blockquote, pre, table, button, a, select, progress, meter, [role=\"progressbar\"], [role=\"slider\"], [role=\"scrollbar\"], [role=\"separator\"], [role=\"tablist\"]";
@@ -872,13 +964,14 @@ pub fn check_element_colors(
     let has_direct_text = !js::trim(&direct_text).is_empty();
     let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
+    let icon_text = has_direct_text && is_icon_text(el, style, &direct_text);
 
     // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
     // walk and the hidden-text selector run only for those tags.
     let paints_own_text = has_direct_text
         && SAFE_TAGS.contains(&tag)
         && !is_emoji_only_text(&direct_text)
-        && !is_glyph_only_text(&direct_text)
+        && !icon_text
         && !is_visually_hidden(el, style)
         // The browser path also stands down where `-webkit-text-fill-color`
         // paints the glyphs in nothing. This engine cannot: the static
@@ -898,31 +991,69 @@ pub fn check_element_colors(
     } else {
         Vec::new()
     };
-    let bg_info = if icons.is_empty() {
-        resolve_background_info(el, custom_props)
-    } else {
-        resolve_background_info_skipping_images(el, custom_props, &|c| icons.contains(&c.id()))
+    let font_size = {
+        let n = parse_float(sv(style, "fontSize"));
+        if num_truthy(n) {
+            n
+        } else {
+            16.0
+        }
     };
-    let effective_bg = bg_info.color;
+    // The coverage test compares a tile's px height with the text's. A size
+    // in `em` or `rem` has no px value here, and the 9px floor below which
+    // nothing is scored is the smallest the text can be.
+    let coverage_font_px = if js::trim(sv(style, "fontSize")).ends_with("px") {
+        font_size
+    } else {
+        9.0
+    };
+    let surface = resolve_text_surface(el, custom_props, &|c| icons.contains(&c.id()), coverage_font_px);
+    let effective_bg = surface.info.color;
 
     let mut own_bg = custom_props
         .and_then(|m| measures::parse_color_resolved(sv_opt(style, "backgroundColor"), Some(m)))
         .or_else(|| read_own_background_color(el, style));
 
     let mut final_effective_bg = effective_bg;
-    let mut surface_unresolved = bg_info.unresolved;
+    let mut surface_unresolved = surface.info.unresolved;
+    let mut pseudo_surface_read = false;
     if own_bg.is_none() || own_bg.is_some_and(|c| c.alpha_or_one() <= 0.5) {
         if let Some(pseudo) = el.doc.get_pseudo_surface(el.id()) {
             own_bg = Some(pseudo);
             final_effective_bg = Some(pseudo);
             surface_unresolved = false;
+            pseudo_surface_read = true;
         }
     }
 
-    let effective_bg_stops = if surface_unresolved || final_effective_bg.is_some() {
-        None
+    let (effective_bg_stops, bg_source, bg_source_host) =
+        if surface_unresolved || final_effective_bg.is_some() {
+            (None, None, None)
+        } else {
+            let stops = resolve_text_gradient_stops(el, custom_props, &surface);
+            let source = stops
+                .as_ref()
+                .and(surface.gradient_label.as_ref())
+                .map(|label| format!("gradient on {label}"));
+            let host = source
+                .as_ref()
+                .and(surface.gradient_host)
+                .map(|id| format!("{id:?}"));
+            (stops, source, host)
+        };
+    let visible_text = match text_color {
+        Some(ink) if !pseudo_surface_read && !surface_unresolved => {
+            fold_surface_opacity(el, &ink, &surface, &mut final_effective_bg)
+        }
+        _ => None,
+    }
+    .or_else(|| text_color.filter(|c| c.a.is_some_and(|a| a < 1.0)));
+    // An element's own gradient whose tile cannot cover its text (a hover
+    // underline) does not make it a styled control.
+    let own_image = if surface.skipped_images.contains(&el.id()) {
+        "none"
     } else {
-        resolve_gradient_stops(el, custom_props)
+        sv(style, "backgroundImage")
     };
     let font_weight = {
         let n = parse_int(sv(style, "fontWeight"), 10);
@@ -930,14 +1061,6 @@ pub fn check_element_colors(
             n
         } else {
             400.0
-        }
-    };
-    let font_size = {
-        let n = parse_float(sv(style, "fontSize"));
-        if num_truthy(n) {
-            n
-        } else {
-            16.0
         }
     };
     let bg_clip = {
@@ -962,11 +1085,16 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
+        is_glyph_only: icon_text,
         paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
-        bg_image: Some(sv(style, "backgroundImage").to_string()),
+        bg_image: Some(own_image.to_string()),
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
+        visible_text,
+        bg_source,
+        bg_source_host,
+        same_color_surface_is_unread: true,
     };
     // The page's one report of a colour pair goes to an element that will
     // actually print it, so an inline ignore on the first of fifty links
@@ -1113,7 +1241,21 @@ pub fn check_element_icon_tile(el: &StaticElement<'_>, tag: &str) -> Vec<RuleHit
         sibling_bottom: 0.0,
         sibling_bg_color: parse_rgb(sv_opt(sib_style, "backgroundColor")),
         sibling_bg_image: Some(sv(sib_style, "backgroundImage").to_string()),
-        sibling_border_width: pf0(sv(sib_style, "borderTopWidth")),
+        // A ring drawn by a zero-blur box-shadow (`ring-1`) is the tile's
+        // border as far as a reader can tell.
+        sibling_border_width: pf0(sv(sib_style, "borderTopWidth")).max(
+            impeccable_core::checks::measures::parse_shadow_layers(sv(sib_style, "boxShadow"))
+                .iter()
+                .filter(|l| {
+                    l.alpha >= impeccable_core::checks::measures::FAINT_PAINT_ALPHA
+                        && l.x == 0.0
+                        && l.y == 0.0
+                        && l.blur == 0.0
+                        && l.spread >= 0.5
+                })
+                .map(|l| l.spread)
+                .fold(0.0, f64::max),
+        ),
         sibling_border_radius: resolve_border_radius_px(sib_style, sib_width),
         has_icon_child: icon_child.is_some() || has_inline_emoji_icon,
         icon_child_width: icon_width,
@@ -1262,6 +1404,7 @@ pub fn check_element_glow(
         effective_bg,
         element_opacity: opacity,
         element_size: None,
+        surface: None,
     })
 }
 
@@ -1452,19 +1595,8 @@ pub fn class_selector(el: &StaticElement<'_>) -> String {
     }
 }
 
-static DECORATIVE_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)(?-u:\b)(art|bg|background|badge|blob|crop|decor|dot|glow|grain|image|mask|ornament|overlay|photo|scrim|shadow|shine|texture)(?-u:\b)")
-        .expect("DECORATIVE_IDENT_RE")
-});
 static VIEWPORT_ROLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?-u:\b)(carousel|slider)(?-u:\b)").expect("VIEWPORT_ROLE_RE"));
-static VIEWPORT_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|flickity|marquee|owl|preview|scroller|slider|slideshow|splide|split|swiper|ticker|viewport)(?-u:\b)")
-        .expect("VIEWPORT_IDENT_RE")
-});
-static VIEWPORT_DEMO_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(demo-area|demo-stage|demo-viewport)(?-u:\b)").expect("VIEWPORT_DEMO_RE")
-});
 
 /// JS: checks.mjs#positionedChildHasSubstantiveContent(child)
 fn positioned_child_has_substantive_content(child: &StaticElement<'_>) -> bool {
@@ -1496,7 +1628,12 @@ fn positioned_child_is_decorative(child: &StaticElement<'_>) -> bool {
         child.get_attribute("class").unwrap_or(""),
         child.get_attribute("id").unwrap_or("")
     );
-    if DECORATIVE_IDENT_RE.is_match(&ident) && !positioned_child_has_substantive_content(child) {
+    if impeccable_core::checks::measures::ident_names_any(
+        &ident,
+        impeccable_core::browser::element_checks::DECOR_IDENT_WORDS,
+        &[],
+    ) && !positioned_child_has_substantive_content(child)
+    {
         return true;
     }
     false
@@ -1540,12 +1677,16 @@ fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
 }
 
 fn ident_names_viewport(el: &StaticElement<'_>) -> bool {
-    let ident = js::to_lower_case(&format!(
+    let ident = format!(
         "{} {}",
         el.get_attribute("class").unwrap_or(""),
         el.get_attribute("id").unwrap_or("")
-    ));
-    VIEWPORT_IDENT_RE.is_match(&ident) || VIEWPORT_DEMO_RE.is_match(&ident)
+    );
+    impeccable_core::checks::measures::ident_names_any(
+        &ident,
+        impeccable_core::browser::element_checks::VIEWPORT_IDENT_WORDS,
+        impeccable_core::browser::element_checks::VIEWPORT_IDENT_PAIRS,
+    )
 }
 
 /// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
@@ -1631,6 +1772,11 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
             continue;
         }
         if positioned_child_is_decorative(&child) {
+            continue;
+        }
+        // A slide, a ticker track or a scroller names itself: what its window
+        // cuts off is the next frame, wherever it sits under the container.
+        if ident_names_viewport(&child) {
             continue;
         }
         // No layout statically: `positionedChildEscapesClip` is null, and

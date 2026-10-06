@@ -416,12 +416,44 @@ re!(TW_BG_CLIP_TEXT, format!(r"{B}bg-clip-text{B}"));
 pub fn find_solid_chromatic_bg(s: &str) -> Option<&str> {
     let mut from = 0usize;
     while let Some(m) = TW_COLOR_BG.find_at(s, from) {
-        if s.as_bytes().get(m.end()) != Some(&b'/') {
+        if s.as_bytes().get(m.end()) != Some(&b'/') && !in_state_variant(s, m.start()) {
             return Some(m.as_str());
         }
         from = m.start() + 1;
     }
     None
+}
+
+/// The first gray text utility that applies at rest and is not near-black ink.
+fn find_resting_gray_text(s: &str) -> Option<regex::Match<'_>> {
+    TW_GRAY_TEXT
+        .find_iter(s)
+        .find(|m| !in_state_variant(s, m.start()) && !is_near_black_neutral_class(m.as_str()))
+}
+
+/// Whether the utility starting at `start` sits behind a state variant
+/// (`hover:bg-emerald-400`, `group-focus:text-gray-500`): it paints only in
+/// that state, so it says nothing about the resting colours. Breakpoint and
+/// theme variants (`md:`, `dark:`) apply at rest and still count.
+fn in_state_variant(s: &str, start: usize) -> bool {
+    let token_start = s[..start]
+        .rfind(|c: char| c.is_ascii_whitespace())
+        .map_or(0, |i| i + 1);
+    let prefix = &s[token_start..start];
+    if !prefix.ends_with(':') {
+        return false;
+    }
+    prefix.trim_end_matches(':').split(':').any(|variant| {
+        let v = variant.trim_start_matches('!');
+        matches!(
+            v,
+            "hover" | "focus" | "focus-visible" | "focus-within" | "active" | "visited"
+                | "disabled" | "checked" | "open" | "enabled" | "invalid" | "placeholder"
+        ) || v.starts_with("group-")
+            || v.starts_with("peer-")
+            || v.starts_with("aria-")
+            || v.starts_with("data-")
+    })
 }
 re!(TW_BG_GRADIENT_TO, format!(r"{B}bg-gradient-to-"));
 re!(
@@ -481,6 +513,20 @@ fn scores_safe_tag_text(opts: &ColorOpts) -> bool {
 #[derive(Debug, Default)]
 pub struct SafeTagTextSeen {
     reported: Vec<(String, String)>,
+    /// Keys claimed by a hit on an element only partly on screen, with that
+    /// element's handle and snippet.
+    provisional: Vec<((String, String), u64, String)>,
+    /// Provisional hits a later on-screen element wearing the same pair
+    /// replaced: `(handle, snippet)`.
+    superseded: Vec<(u64, String)>,
+}
+
+/// Who claims a colour pair, for [`SafeTagTextSeen::keep_first_keyed_claiming`]:
+/// an opaque handle for the element, and whether it lies wholly on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairClaim {
+    pub owner: u64,
+    pub on_screen: bool,
 }
 
 impl SafeTagTextSeen {
@@ -498,17 +544,95 @@ impl SafeTagTextSeen {
     /// yet: a duplicate the dedupe drops anyway costs no engine work, so an
     /// engine may put real work behind the callback.
     pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>, keep: &mut dyn FnMut(&RuleHit) -> bool) {
+        self.keep_first_keyed(hits, &|h: &RuleHit| vec![h.snippet.clone()], keep);
+    }
+
+    /// [`Self::keep_first`] with the pairs a hit claims named by `keys_of`
+    /// instead of by its snippet alone. A hit is dropped when the page has
+    /// already reported any of its keys, and a hit that stands claims all of
+    /// them.
+    pub fn keep_first_keyed(
+        &mut self,
+        hits: &mut Vec<RuleHit>,
+        keys_of: &dyn Fn(&RuleHit) -> Vec<String>,
+        keep: &mut dyn FnMut(&RuleHit) -> bool,
+    ) {
+        self.keep_first_keyed_claiming(hits, keys_of, None, keep);
+    }
+
+    /// [`Self::keep_first_keyed`] where the claimant may lie only partly on
+    /// screen. A marquee's first copy starts past the page's left edge, and a
+    /// carousel's first card is cut by its right edge: only 'IR' of 'HAIR'
+    /// is visible, and the words beside it wearing the same pair are the
+    /// ones a reader meets. A hit from such an element stands, but claims its
+    /// pair provisionally: the first later element that lies wholly on
+    /// screen and wears the same pair reports instead, and the provisional
+    /// hit is recorded in [`Self::take_superseded`] for the engine to
+    /// withdraw. A provisional claim nobody replaces stands. With no claim
+    /// every hit is on screen, which is what `keep_first_keyed` does.
+    pub fn keep_first_keyed_claiming(
+        &mut self,
+        hits: &mut Vec<RuleHit>,
+        keys_of: &dyn Fn(&RuleHit) -> Vec<String>,
+        claim: Option<PairClaim>,
+        keep: &mut dyn FnMut(&RuleHit) -> bool,
+    ) {
+        let on_screen = claim.map_or(true, |c| c.on_screen);
         hits.retain(|h| {
-            let key = (h.id.clone(), h.snippet.clone());
-            if self.reported.contains(&key) {
+            let keys: Vec<(String, String)> =
+                keys_of(h).into_iter().map(|k| (h.id.clone(), k)).collect();
+            if keys.iter().any(|k| self.reported.contains(k)) {
+                return false;
+            }
+            let held = keys
+                .iter()
+                .any(|k| self.provisional.iter().any(|(p, _, _)| p == k));
+            if held && !on_screen {
                 return false;
             }
             if !keep(h) {
                 return false;
             }
-            self.reported.push(key);
+            if held {
+                let mut replaced: Vec<(u64, String)> = Vec::new();
+                self.provisional.retain(|(p, owner, snippet)| {
+                    if keys.contains(p) {
+                        if !replaced.iter().any(|(o, s)| o == owner && s == snippet) {
+                            replaced.push((*owner, snippet.clone()));
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for r in replaced {
+                    // Every key the replaced hit claimed goes with it.
+                    self.provisional.retain(|(_, owner, snippet)| !(r.0 == *owner && r.1 == *snippet));
+                    self.superseded.push(r);
+                }
+            }
+            match claim {
+                Some(c) if !on_screen => {
+                    for key in keys {
+                        self.provisional.push((key, c.owner, h.snippet.clone()));
+                    }
+                }
+                _ => {
+                    for key in keys {
+                        if !self.reported.contains(&key) {
+                            self.reported.push(key);
+                        }
+                    }
+                }
+            }
             true
         });
+    }
+
+    /// The provisional hits later on-screen elements replaced, as
+    /// `(handle, snippet)` (drained).
+    pub fn take_superseded(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.superseded)
     }
 }
 
@@ -525,8 +649,16 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     if opts.has_direct_text && opts.text_color.is_some() && !opts.is_emoji_only {
         let text_color = opts.text_color.unwrap();
         // Gradient-clipped text paints the gradient, not `color`, so there
-        // is no background to score it against.
-        if bg_clip != "text" {
+        // is no background to score it against. Text with no letter and no
+        // digit (a lone circle, a pair of braces) is not read, which the
+        // SAFE_TAGS path already says through `paints_own_text`.
+        // A surface in exactly the text's own colour is the walk landing on
+        // a fill the text does not sit on, the same guard the SAFE_TAGS path
+        // applies (`resolved_bg_matches_text`).
+        if bg_clip != "text"
+            && !opts.is_glyph_only
+            && !(opts.same_color_surface_is_unread && resolved_bg_matches_text(opts, &text_color))
+        {
             findings.extend(contrast_findings(opts, &text_color));
         }
 
@@ -552,9 +684,7 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     }
 
     if let Some(class_str) = opts.class_list.as_deref().filter(|s| !s.is_empty()) {
-        let gray_match = TW_GRAY_TEXT
-            .find_iter(class_str)
-            .find(|m| !is_near_black_neutral_class(m.as_str()));
+        let gray_match = find_resting_gray_text(class_str);
         let color_bg_match = find_solid_chromatic_bg(class_str);
         if let (Some(g), Some(c)) = (gray_match, color_bg_match) {
             findings.push(RuleHit::new(
@@ -587,6 +717,19 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     findings
 }
 
+/// A text colour as a dedupe key: its hex, and its alpha where it is
+/// translucent. `color_to_hex` drops alpha, so `text-blue-100/70` on a link
+/// and `text-blue-100/80` on a caption beside it were one key on one
+/// gradient box, and the caption went unreported (veeza.ai).
+fn ink_key(text: &Rgba) -> String {
+    let alpha = text.alpha_or_one();
+    if alpha < 1.0 {
+        format!("{}@{}", color_to_hex(Some(text)), (alpha * 1000.0).round() / 1000.0)
+    } else {
+        color_to_hex(Some(text))
+    }
+}
+
 /// `check_colors` with the per-page dedupe the SAFE_TAGS text path owes.
 /// Each document's element loop threads one `SafeTagTextSeen` through this
 /// so a colour the page repeats on every link is reported where it first
@@ -601,9 +744,49 @@ pub fn check_colors_deduped(
     seen: &mut SafeTagTextSeen,
     keep: &mut dyn FnMut(&RuleHit) -> bool,
 ) -> Vec<RuleHit> {
+    check_colors_deduped_claiming(opts, seen, None, keep)
+}
+
+/// [`check_colors_deduped`] with the claimant named, so an element only
+/// partly on screen claims its pair provisionally
+/// ([`SafeTagTextSeen::keep_first_keyed_claiming`]).
+pub fn check_colors_deduped_claiming(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    claim: Option<PairClaim>,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
     let mut hits = check_colors(opts);
     if scores_safe_tag_text(opts) {
-        seen.keep_first(&mut hits, keep);
+        match (
+            opts.bg_source.as_deref(),
+            opts.bg_source_host.as_deref(),
+            opts.text_color.as_ref(),
+        ) {
+            // A gradient is sampled where each element's text sits, so fifty
+            // links across one gradient header name fifty slightly different
+            // colours. They are one text colour on one box, reported once.
+            // The box is named by its identity, not by its label: a row of
+            // `div.w-14` tiles on amber, lime and blue gradients is three
+            // surfaces. The snippet is claimed as well, so identical tiles on
+            // one gradient stay one report, as they always were.
+            (Some(source), Some(host), Some(text)) => {
+                let surface_key =
+                    format!("text {} over {} [{}]", ink_key(text), source, host);
+                seen.keep_first_keyed_claiming(
+                    &mut hits,
+                    &|h: &RuleHit| vec![h.snippet.clone(), surface_key.clone()],
+                    claim,
+                    keep,
+                );
+            }
+            _ => seen.keep_first_keyed_claiming(
+                &mut hits,
+                &|h: &RuleHit| vec![h.snippet.clone()],
+                claim,
+                keep,
+            ),
+        }
     }
     hits
 }
@@ -657,11 +840,13 @@ fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
 ///
 /// What it hides, stated plainly: text that really is painted in its own
 /// background colour, which is invisible and a genuine 1:1 failure. That
-/// shape is rare, and when an author writes it deliberately it is usually
-/// `<p>` or `<div>` markup, which never reaches here: this guard covers
-/// only the SAFE_TAGS text path, and every other tag still reports the
-/// `1.0:1`. It is exact equality on the resolved hex, not a near-match, so
-/// a link one shade off its surface still reports.
+/// shape is rare, and a guard on the SAFE_TAGS path alone left `<p>`,
+/// headings and custom elements printing `1.0:1 — text #ffffff on #ffffff`
+/// for white copy over a photo or a card the walk never read (nike.com,
+/// exxonmobil.com), so the full pass in `check_colors` asks it too. It is
+/// exact equality on the resolved hex, not a near-match, so text one shade
+/// off its surface still reports. In the URL engine an element the pixel
+/// pass takes as a candidate is still measured there.
 ///
 /// Narrowing it means knowing whether the walk resolved a surface or gave
 /// up and fell through to the page fill, which the check cannot see from
@@ -682,11 +867,53 @@ fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
         .map_or(false, |stops| stops.iter().any(same))
 }
 
+/// The alpha at or below which an ink paints no glyph a reader could see.
+pub(crate) const TRANSPARENT_INK_FLOOR: f64 = 0.02;
+
 /// The contrast scoring `check_colors` and `check_placeholder_colors`
 /// share: gray-on-color, then WCAG AA against the worst background. The
-/// backgrounds are the composited `effective_bg`, or the gradient stops when
-/// no opaque surface resolved; with neither there is nothing to score.
+/// backgrounds are the composited `effective_bg`, or the gradient stops (or
+/// the gradient sampled under the text) when no opaque surface resolved;
+/// with neither there is nothing to score.
+///
+/// The ink scored is what a reader sees when the adapter says so:
+/// `visible_text`, composited over each background where it is translucent
+/// before it is scored and printed (`rgba(255, 255, 255, 0.7)` is not
+/// `#ffffff` on the page). Without it `text_color` is scored as declared,
+/// which is what the recorded call vectors pin.
+/// The channel spread a background needs before gray text on it reads as
+/// gray on colour, at a luminance of 0.01 or more.
+const GRAY_ON_COLOR_BG_SPREAD: f64 = 40.0;
+/// Below this luminance (a CIELAB lightness of about 9, where a colour reads
+/// as black) the spread needed grows as the colour darkens.
+const GRAY_ON_COLOR_DARK_LUMINANCE: f64 = 0.01;
+
+/// Whether a background reads as colour. The spread bar rises with the square
+/// root of how far the colour sits under a luminance of 0.01: a near-black
+/// navy (`#04002d`, luminance 0.002, spread 45) and a near-black purple
+/// (`#1e002f`, 0.005, spread 47) read as black, while a dark navy (`#001c47`,
+/// 0.013), a dark petrol (`#002733`, 0.017) and a very dark blue with a wide
+/// spread (`#00004d`, 0.005, spread 77) still read as colour.
+fn background_reads_as_colour(bg: &Rgba) -> bool {
+    let lum = relative_luminance(bg);
+    let scale = if lum >= GRAY_ON_COLOR_DARK_LUMINANCE {
+        1.0
+    } else {
+        (GRAY_ON_COLOR_DARK_LUMINANCE / math_max(lum, 1e-4)).sqrt()
+    };
+    has_chroma(Some(bg), Some(GRAY_ON_COLOR_BG_SPREAD * scale))
+}
+
 fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
+    // Glyphs inked at (nearly) zero alpha paint nothing: a `color:
+    // transparent` label over a sprite, a letter-by-letter reveal at its
+    // first frame. The paint gate's floor, for the same reason.
+    if opts
+        .visible_text
+        .is_some_and(|ink| ink.alpha_or_one() <= TRANSPARENT_INK_FLOOR)
+    {
+        return Vec::new();
+    }
     let bgs: Vec<Rgba> = if let Some(bg) = opts.effective_bg {
         vec![bg]
     } else {
@@ -701,7 +928,7 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
     // tests read relative luminance as if it were lightness, which made every
     // off-white under 0.85 gray and charged an off-white nav on a teal
     // masthead three times over (REN-404).
-    if is_gray_ink(text_color) && bgs.iter().all(|b| has_chroma(Some(b), Some(40.0))) {
+    if is_gray_ink(text_color) && bgs.iter().all(background_reads_as_colour) {
         let bg_label = match opts.effective_bg {
             Some(bg) => color_to_hex(Some(&bg)),
             None => format!(
@@ -718,7 +945,15 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
         ));
     }
 
-    let ratios: Vec<f64> = bgs.iter().map(|b| contrast_ratio(text_color, b)).collect();
+    let inks: Vec<Rgba> = bgs
+        .iter()
+        .map(|b| match opts.visible_text {
+            Some(ink) if ink.a.map_or(false, |a| a < 1.0) => composite_color_over(&ink, b),
+            Some(ink) => ink,
+            None => *text_color,
+        })
+        .collect();
+    let ratios: Vec<f64> = bgs.iter().zip(&inks).map(|(b, i)| contrast_ratio(i, b)).collect();
     let mut worst_idx = 0usize;
     for i in 1..ratios.len() {
         if ratios[i] < ratios[worst_idx] {
@@ -734,19 +969,21 @@ fn contrast_findings(opts: &ColorOpts, text_color: &Rgba) -> Vec<RuleHit> {
             && opts.effective_bg.is_none()
             && text_color.a.map_or(false, |a| a < 1.0);
         if !is_alpha_fallback_fp {
-            let ratio_label = if to_fixed(ratio, 1) == to_fixed(threshold, 1) {
-                to_fixed(ratio, 2)
-            } else {
-                to_fixed(ratio, 1)
-            };
+            let ratio_label = crate::color::ratio_label(ratio, threshold);
+            let source = opts
+                .bg_source
+                .as_deref()
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
             findings.push(RuleHit::new(
                 "low-contrast",
                 format!(
-                    "{}:1 (need {}:1) — text {} on {}",
+                    "{}:1 (need {}:1) — text {} on {}{}",
                     ratio_label,
                     number_to_string(threshold),
-                    color_to_hex(Some(text_color)),
-                    color_to_hex(Some(&bgs[worst_idx]))
+                    color_to_hex(Some(&inks[worst_idx])),
+                    color_to_hex(Some(&bgs[worst_idx])),
+                    source
                 ),
             ));
         }
@@ -766,6 +1003,17 @@ pub fn check_placeholder_colors(
     placeholder_text: &str,
     mut text_color: Rgba,
 ) -> Vec<RuleHit> {
+    // `visible_text` is the host's own ink; the placeholder paints its own.
+    let host_ink_cleared;
+    let opts = if opts.visible_text.is_some() {
+        host_ink_cleared = ColorOpts {
+            visible_text: None,
+            ..opts.clone()
+        };
+        &host_ink_cleared
+    } else {
+        opts
+    };
     let mut flat: Option<ColorOpts> = None;
     if text_color.a.map_or(false, |a| a < 1.0) {
         if let Some(bg) = opts.effective_bg {
@@ -820,7 +1068,7 @@ pub fn check_hover_contrast(opts: &HoverContrastOpts) -> Vec<RuleHit> {
         "low-contrast",
         format!(
             ":hover state {}:1 (need {}:1) — text {} on {}",
-            to_fixed(ratio, 1),
+            crate::color::ratio_label(ratio, threshold),
             number_to_string(threshold),
             color_to_hex(Some(&text_color)),
             color_to_hex(Some(&bg))
@@ -842,6 +1090,9 @@ pub fn is_card_like_from_props(
     }
     has_radius || has_bg
 }
+
+/// The background alpha at which an icon tile's tint is drawn.
+pub const ICON_TILE_MIN_BG_ALPHA: f64 = 0.05;
 
 /// JS: checks.mjs#checkIconTile
 pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
@@ -867,9 +1118,11 @@ pub fn check_icon_tile(opts: &IconTileOpts) -> Vec<RuleHit> {
     if ratio < 0.7 || ratio > 1.4 {
         return Vec::new();
     }
+    // Tailwind's `/10` tint computes to an alpha of exactly 0.1, and a tint
+    // that faint still draws the tile.
     let bg_visible = opts
         .sibling_bg_color
-        .map_or(false, |c| c.a.map_or(false, |a| a > 0.1))
+        .map_or(false, |c| c.a.map_or(false, |a| a >= ICON_TILE_MIN_BG_ALPHA))
         || opts
             .sibling_bg_image
             .as_deref()
@@ -1296,13 +1549,40 @@ fn glow_extent_px(blur: f64, spread: f64) -> f64 {
     blur / 2.0 + spread
 }
 
+/// How far a glow has to move the surface it lands on, in 0..255 channel
+/// units, at its brightest point. A blurred shadow is densest at the box's
+/// edge, where it carries about half the shadow colour's alpha, so each
+/// chromatic layer lifts the surface there by half its ink times the largest
+/// channel difference between its colour and the surface, and the layers of
+/// one shadow add up.
+///
+/// Measured on the site corpus (runs 2 to 20): the glows both judges called
+/// imperceptible lift their surface by 14 or less (a 20px green halo at 15%
+/// alpha around avatars on a near-black page, which sits exactly on
+/// [`GLOW_MIN_STRENGTH_PX`]); the glows they could find lift it by 28 or
+/// more (a 12px teal button glow at 40% alpha, 20px text glows at 28%, a
+/// three-layer blue elevation ramp). One judged glow falls under the floor:
+/// a pricing card's 30px halo at 15% alpha (lift 10), whose crop shows no
+/// light past the card's edge while the call-to-action glow inside it (lift
+/// 28) is still reported.
+pub const GLOW_MIN_LIFT: f64 = 20.0;
+
+/// The share of the shadow colour's alpha a blurred shadow carries at the
+/// edge of its box.
+const GLOW_EDGE_DENSITY: f64 = 0.5;
+
 /// Whether one qualifying shadow layer renders as a glow a reader can see.
 /// `element_opacity` and `element_size` are `None` on the engines with no
 /// layout, which leaves the blur and the alpha to carry the decision.
+/// `surface_lift` is how far the whole shadow lifts the surface it lands on
+/// (see [`GLOW_MIN_LIFT`]); the lift test runs only where the engine measured
+/// the element (`element_size` is known) and resolved that surface, and the
+/// declaration floor decides alone everywhere else.
 pub(crate) fn glow_is_perceptible(
     blur: f64,
     spread: f64,
     alpha: f64,
+    surface_lift: Option<f64>,
     element_opacity: Option<f64>,
     element_size: Option<(f64, f64)>,
 ) -> bool {
@@ -1311,7 +1591,8 @@ pub(crate) fn glow_is_perceptible(
         // A negative spread that swallows the blur keeps the light in the box.
         return false;
     }
-    if blur * alpha * element_opacity.unwrap_or(1.0) < GLOW_MIN_STRENGTH_PX {
+    let ink = alpha * element_opacity.unwrap_or(1.0);
+    if blur * ink < GLOW_MIN_STRENGTH_PX {
         return false;
     }
     let Some((width, height)) = element_size else {
@@ -1323,13 +1604,36 @@ pub(crate) fn glow_is_perceptible(
         return false;
     }
     let lit_area = (width + 2.0 * extent) * (height + 2.0 * extent) - element_area;
-    lit_area <= element_area * GLOW_MAX_AREA_RATIO
+    if lit_area > element_area * GLOW_MAX_AREA_RATIO {
+        return false;
+    }
+    surface_lift.map_or(true, |lift| lift >= GLOW_MIN_LIFT)
+}
+
+/// How far the chromatic layers of one shadow value lift `surface` at the
+/// edge of the box (see [`GLOW_MIN_LIFT`]). Neutral layers are elevation, not
+/// glow light, and do not count.
+fn glow_surface_lift(value: &str, surface: &Rgba, element_opacity: Option<f64>) -> f64 {
+    let opacity = element_opacity.unwrap_or(1.0);
+    split_commas_outside_parens(value)
+        .into_iter()
+        .filter_map(|layer| find_shadow_color(layer).and_then(|info| info.color))
+        .filter(|color| has_chroma(Some(color), Some(30.0)))
+        .map(|color| {
+            let difference = (color.r - surface.r)
+                .abs()
+                .max((color.g - surface.g).abs())
+                .max((color.b - surface.b).abs());
+            GLOW_EDGE_DENSITY * color.alpha_or_one() * opacity * difference
+        })
+        .sum()
 }
 
 fn glow_scan(
     value: Option<&str>,
     prop: &str,
     on_dark_bg: bool,
+    surface: Option<Rgba>,
     element_opacity: Option<f64>,
     element_size: Option<(f64, f64)>,
 ) -> Option<RuleHit> {
@@ -1337,6 +1641,7 @@ fn glow_scan(
         None | Some("") | Some("none") => return None,
         Some(v) => v,
     };
+    let surface_lift = surface.map(|s| glow_surface_lift(value, &s, element_opacity));
     for layer in split_commas_outside_parens(value) {
         let info = match find_shadow_color(layer) {
             Some(i) => i,
@@ -1357,6 +1662,7 @@ fn glow_scan(
             vals[2],
             vals.get(3).copied().unwrap_or(0.0),
             color.alpha_or_one(),
+            surface_lift,
             element_opacity,
             element_size,
         ) {
@@ -1394,6 +1700,7 @@ pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
         opts.box_shadow.as_deref(),
         "box-shadow",
         on_dark_bg,
+        opts.surface,
         opacity,
         size,
     )
@@ -1402,6 +1709,7 @@ pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
             opts.text_shadow.as_deref(),
             "text-shadow",
             on_dark_bg,
+            opts.surface,
             opacity,
             size,
         )
@@ -1440,7 +1748,7 @@ pub fn type_hierarchy_role(tag: &str) -> String {
 }
 
 /// JS: checks.mjs#dominantTypeRoleSize
-fn dominant_type_role_size(samples: &[f64]) -> Option<f64> {
+fn dominant_type_role_size(role: &str, samples: &[f64]) -> Option<f64> {
     // `new Map()` keeps insertion order; the JS sorts by count desc then size asc.
     let mut counts: Vec<(f64, f64)> = Vec::new();
     for size in samples {
@@ -1459,7 +1767,20 @@ fn dominant_type_role_size(samples: &[f64]) -> Option<f64> {
             .then(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
     });
     if ranked.len() > 1 && ranked[0].1 == ranked[1].1 {
-        return None;
+        // A page whose h1 is set at two sizes equally often (a 66px page title
+        // and a 48px closing title) still has a top of its ladder, at the
+        // larger size. Every other role with no dominant size stays out, as
+        // before: which size stands for an h3 used once at 15px, once at 17px
+        // and once at 22px is not something the samples say.
+        if role != "h1" {
+            return None;
+        }
+        let top = ranked[0].1;
+        return ranked
+            .iter()
+            .take_while(|(_, count)| *count == top)
+            .map(|(size, _)| *size)
+            .reduce(math_max);
     }
     ranked.first().map(|(size, _)| *size)
 }
@@ -1481,7 +1802,7 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 
     let mut roles: Vec<(String, f64)> = by_role
         .into_iter()
-        .filter_map(|(role, sizes)| dominant_type_role_size(&sizes).map(|size| (role, size)))
+        .filter_map(|(role, sizes)| dominant_type_role_size(&role, &sizes).map(|size| (role, size)))
         .collect();
 
     if roles.len() < TYPE_HIERARCHY_MIN_ROLES {
@@ -1522,6 +1843,218 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(r: f64, g: f64, b: f64) -> Rgba {
+        Rgba::new(r, g, b, 1.0)
+    }
+
+    /// swipeloan.in: light gray on #04002d, a navy that reads as black.
+    #[test]
+    fn gray_on_color_bar_rises_as_the_background_darkens() {
+        assert!(!background_reads_as_colour(&rgb(4.0, 0.0, 45.0)));
+        assert!(!background_reads_as_colour(&rgb(30.0, 0.0, 47.0)));
+        assert!(!background_reads_as_colour(&rgb(48.0, 0.0, 0.0)));
+        assert!(!background_reads_as_colour(&rgb(15.0, 23.0, 42.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 0.0, 77.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 28.0, 71.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 39.0, 51.0)));
+        assert!(background_reads_as_colour(&rgb(33.0, 37.0, 74.0)));
+        assert!(background_reads_as_colour(&rgb(30.0, 58.0, 138.0)));
+        assert!(background_reads_as_colour(&rgb(0.0, 0.0, 255.0)));
+        assert!(background_reads_as_colour(&rgb(17.0, 94.0, 89.0)));
+        // At or above a luminance of 0.01 the bar is the old 40.
+        assert!(background_reads_as_colour(&rgb(16.0, 185.0, 129.0)));
+        assert!(!background_reads_as_colour(&rgb(120.0, 140.0, 150.0)));
+    }
+
+    #[test]
+    fn gray_on_color_scores_the_near_black_navy_as_gray_on_black() {
+        let opts = |bg: Rgba| ColorOpts {
+            tag: "div".to_string(),
+            text_color: Some(rgb(209.0, 209.0, 209.0)),
+            effective_bg: Some(bg),
+            font_size: 16.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            ..Default::default()
+        };
+        let ids = |bg: Rgba| {
+            check_colors(&opts(bg))
+                .into_iter()
+                .map(|h| h.id)
+                .collect::<Vec<_>>()
+        };
+        assert!(!ids(rgb(4.0, 0.0, 45.0)).contains(&"gray-on-color".to_string()));
+        assert!(ids(rgb(30.0, 58.0, 138.0)).contains(&"gray-on-color".to_string()));
+    }
+
+    /// veeza.ai: `hover:bg-emerald-400` read as the resting fill.
+    #[test]
+    fn gray_on_color_classes_skip_state_variants() {
+        assert_eq!(find_solid_chromatic_bg("text-slate-500 hover:bg-emerald-400"), None);
+        assert_eq!(find_solid_chromatic_bg("group-hover:bg-blue-500 bg-red-600"), Some("bg-red-600"));
+        assert_eq!(find_solid_chromatic_bg("md:bg-blue-600"), Some("bg-blue-600"));
+        assert_eq!(find_solid_chromatic_bg("dark:bg-indigo-700"), Some("bg-indigo-700"));
+        assert!(find_resting_gray_text("focus:text-gray-500 bg-blue-600").is_none());
+        assert_eq!(
+            find_resting_gray_text("text-gray-400 bg-blue-600").map(|m| m.as_str()),
+            Some("text-gray-400")
+        );
+    }
+
+    /// ai-pact.com and podprime.ai: Tailwind's `bg-primary/10` computes to an
+    /// alpha of exactly 0.1.
+    #[test]
+    fn icon_tile_counts_a_ten_percent_tint() {
+        let opts = |a: f64| IconTileOpts {
+            heading_tag: "h3".to_string(),
+            heading_text: Some("Guest CRM".to_string()),
+            heading_top: 706.0,
+            sibling_tag: Some("div".to_string()),
+            sibling_width: 40.0,
+            sibling_height: 40.0,
+            sibling_bottom: 694.0,
+            sibling_bg_color: Some(Rgba::new(53.0, 80.0, 212.0, a)),
+            sibling_bg_image: Some("none".to_string()),
+            sibling_border_width: 0.0,
+            sibling_border_radius: 8.0,
+            has_icon_child: true,
+            icon_child_width: 20.0,
+        };
+        assert_eq!(check_icon_tile(&opts(0.1)).len(), 1);
+        assert_eq!(check_icon_tile(&opts(0.05)).len(), 1);
+        assert!(check_icon_tile(&opts(0.04)).is_empty());
+    }
+
+    fn samples(pairs: &[(&str, f64)]) -> Vec<TypeSample> {
+        pairs
+            .iter()
+            .map(|(role, size)| TypeSample {
+                role: role.to_string(),
+                size: *size,
+            })
+            .collect()
+    }
+
+    /// copperhead.sh: a 66px title and a 48px closing title, both h1.
+    #[test]
+    fn flat_type_hierarchy_keeps_a_tied_h1_at_its_larger_size() {
+        let mut page = vec![("h1", 66.56), ("h1", 48.64)];
+        page.extend([("p", 17.0); 6].iter().map(|(_, s)| ("body", *s)));
+        page.extend([("h2", 18.4); 4]);
+        page.extend([("h3", 20.8); 8]);
+        assert!(check_flat_type_hierarchy_samples(&samples(&page)).is_empty());
+
+        // A tie between two sizes close to the rest still reads as flat.
+        let mut flat = vec![("h1", 22.0), ("h1", 21.0)];
+        flat.extend([("body", 17.0); 6]);
+        flat.extend([("h2", 18.4); 4]);
+        flat.extend([("h3", 20.8); 8]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&flat));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].snippet.contains("h1 22px"), "{hits:?}");
+
+        // Any other tied role stays out of the ladder, as before.
+        let mut h3_tie = vec![("h1", 18.0), ("h1", 18.0)];
+        h3_tie.extend([("body", 16.0); 4]);
+        h3_tie.extend([("h2", 16.0); 3]);
+        h3_tie.extend([("h3", 15.0), ("h3", 22.0)]);
+        let hits = check_flat_type_hierarchy_samples(&samples(&h3_tie));
+        assert!(hits.is_empty() || !hits[0].snippet.contains("h3"), "{hits:?}");
+    }
+
+    #[test]
+    fn a_provisional_claim_gives_way_to_a_copy_on_screen() {
+        let hit = || RuleHit::new("low-contrast", "2.2:1 (need 4.5:1) — text #c9a3c8 on #ffffff".to_string());
+        let keys = |h: &RuleHit| vec![h.snippet.clone()];
+        let claim = |owner: u64, on_screen: bool| Some(PairClaim { owner, on_screen });
+        let mut seen = SafeTagTextSeen::default();
+        let mut cut = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut cut, &keys, claim(1, false), &mut |_| true);
+        assert_eq!(cut.len(), 1, "the first cut copy stands for now");
+        let mut second_cut = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut second_cut, &keys, claim(2, false), &mut |_| true);
+        assert!(second_cut.is_empty(), "a second cut copy adds nothing");
+        let mut waived = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut waived, &keys, claim(3, true), &mut |_| false);
+        assert!(waived.is_empty());
+        assert!(seen.take_superseded().is_empty(), "a waived copy replaces nothing");
+        let mut readable = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut readable, &keys, claim(4, true), &mut |_| true);
+        assert_eq!(readable.len(), 1);
+        assert_eq!(seen.take_superseded(), vec![(1, hit().snippet)]);
+        let mut again = vec![hit()];
+        seen.keep_first_keyed_claiming(&mut again, &keys, claim(5, true), &mut |_| true);
+        assert!(again.is_empty(), "the readable copy owns the pair");
+        let mut lone = SafeTagTextSeen::default();
+        let mut only = vec![hit()];
+        lone.keep_first_keyed_claiming(&mut only, &keys, claim(6, false), &mut |_| true);
+        assert_eq!(only.len(), 1);
+        assert!(lone.take_superseded().is_empty(), "a cut copy nobody replaces stands");
+    }
+
+    #[test]
+    fn translucent_inks_on_one_gradient_box_are_separate_pairs() {
+        // veeza.ai: `text-blue-100/70` on a link and `/80` on a caption beside
+        // it, on one blue gradient section.
+        let span = |alpha: f64| {
+            let ink = Rgba::new(219.0, 234.0, 254.0, alpha);
+            ColorOpts {
+                tag: "span".to_string(),
+                text_color: Some(ink),
+                effective_bg_stops: Some(vec![Rgba::new(37.0, 99.0, 235.0, 1.0)]),
+                font_size: 12.0,
+                font_weight: 400.0,
+                has_direct_text: true,
+                paints_own_text: true,
+                detector_is_browser: true,
+                visible_text: Some(ink),
+                bg_source: Some("gradient on section.blue-band".to_string()),
+                bg_source_host: Some("7".to_string()),
+                ..Default::default()
+            }
+        };
+        let mut seen = SafeTagTextSeen::default();
+        assert_eq!(check_colors_deduped(&span(0.7), &mut seen, &mut |_| true).len(), 1);
+        assert_eq!(check_colors_deduped(&span(0.8), &mut seen, &mut |_| true).len(), 1);
+        assert!(check_colors_deduped(&span(0.8), &mut seen, &mut |_| true).is_empty());
+    }
+
+    #[test]
+    fn the_full_pass_guard_is_opt_in() {
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        let opts = |guard: bool| ColorOpts {
+            tag: "p".to_string(),
+            text_color: Some(white),
+            effective_bg: Some(white),
+            font_size: 16.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            same_color_surface_is_unread: guard,
+            ..Default::default()
+        };
+        assert!(check_colors(&opts(false)).iter().any(|h| h.id == "low-contrast"));
+        assert!(!check_colors(&opts(true)).iter().any(|h| h.id == "low-contrast"));
+    }
+
+    #[test]
+    fn icon_fonts_and_close_letters() {
+        assert!(is_icon_font_family("\"Material Symbols Outlined\""));
+        assert!(is_icon_font_family("'Material Icons', sans-serif"));
+        assert!(is_icon_font_family("icomoon"));
+        assert!(is_icon_font_family("Brand Icons, sans-serif"));
+        assert!(!is_icon_font_family("Inter, sans-serif"));
+        assert!(!is_icon_font_family("sans-serif, 'Material Icons'"));
+        assert!(is_icon_ligature_text("arrow_forward", "Material Symbols Outlined"));
+        assert!(is_icon_ligature_text("counter_1", "Material Icons"));
+        assert!(!is_icon_ligature_text("Arrow forward", "Material Symbols Outlined"));
+        assert!(!is_icon_ligature_text("arrow_forward", "Inter"));
+        assert!(is_close_letter_text(" x "));
+        assert!(!is_close_letter_text("xl"));
+        assert!(names_close_control(&["modal-closeButton"]));
+        assert!(names_close_control(&["", "Dismiss banner"]));
+        assert!(!names_close_control(&["tag", "chip"]));
+    }
 
     #[test]
     fn declared_corners_apply_in_order() {
@@ -1640,6 +2173,42 @@ mod tests {
     }
 
     #[test]
+    fn a_ratio_just_under_the_bar_never_prints_as_the_bar() {
+        let hover = |text: Rgba, bg: Rgba, font_size: f64| {
+            check_hover_contrast(&HoverContrastOpts {
+                tag: "div".into(),
+                text_color: Some(text),
+                bg: Some(bg),
+                own_bg_alpha: Some(1.0),
+                font_size,
+                font_weight: 400.0,
+                has_direct_text: true,
+                is_emoji_only: false,
+            })
+        };
+        // #747474 on black is 4.49:1, which one decimal rounded to the bar.
+        let grey = Rgba::new(116.0, 116.0, 116.0, 1.0);
+        let black = Rgba::new(0.0, 0.0, 0.0, 1.0);
+        assert_eq!(
+            hover(grey, black, 16.0)[0].snippet,
+            ":hover state 4.49:1 (need 4.5:1) — text #747474 on #000000"
+        );
+        // #595959 on black is 2.998:1: two decimals round to 3.00, so they are cut.
+        let dim = Rgba::new(89.0, 89.0, 89.0, 1.0);
+        assert_eq!(
+            hover(dim, black, 24.0)[0].snippet,
+            ":hover state 2.99:1 (need 3:1) — text #595959 on #000000"
+        );
+        // Far under the bar, one decimal as before.
+        let pale = Rgba::new(160.0, 160.0, 160.0, 1.0);
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        assert_eq!(
+            hover(pale, white, 16.0)[0].snippet,
+            ":hover state 2.6:1 (need 4.5:1) — text #a0a0a0 on #ffffff"
+        );
+    }
+
+    #[test]
     fn glow_needs_to_be_perceptible() {
         let glow = |shadow: &str, opacity: f64, size: Option<(f64, f64)>| {
             check_glow(&GlowOpts {
@@ -1648,6 +2217,7 @@ mod tests {
                 effective_bg: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
                 element_opacity: Some(opacity),
                 element_size: size,
+                surface: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
             })
         };
         // A 24px halo at 60% alpha around a 197x40 button: the treatment the
@@ -1694,6 +2264,32 @@ mod tests {
                     rgba(64, 120, 168, 0.31) 0px 6.87px 6.87px -2.67px, \
                     rgba(64, 120, 168, 0.247) 0px 13.65px 13.65px -3.33px";
         assert_eq!(glow(ramp, 1.0, Some((96.0, 96.0))).len(), 1);
+        // A 20px green halo at 15% alpha around an 80px avatar sits exactly
+        // on the strength floor, but lifts a near-black page by 14: nobody
+        // sees it. The same halo at 40% alpha lifts it by 36.
+        let avatar = |alpha: f64| {
+            check_glow(&GlowOpts {
+                box_shadow: Some(format!("rgba(33, 196, 93, {alpha}) 0px 0px 20px 0px")),
+                text_shadow: None,
+                effective_bg: Some(Rgba::new(10.0, 10.0, 12.0, 1.0)),
+                element_opacity: Some(1.0),
+                element_size: Some((80.0, 80.0)),
+                surface: Some(Rgba::new(10.0, 10.0, 12.0, 1.0)),
+            })
+        };
+        assert!(avatar(0.15).is_empty());
+        assert_eq!(avatar(0.4).len(), 1);
+        // With no resolved fill behind it (a gradient, an image) the lift is
+        // not measured, and the strength floor decides as before.
+        let unresolved = check_glow(&GlowOpts {
+            box_shadow: Some("rgba(33, 196, 93, 0.15) 0px 0px 20px 0px".to_string()),
+            text_shadow: None,
+            effective_bg: Some(Rgba::new(128.0, 88.0, 0.0, 1.0)),
+            element_opacity: Some(1.0),
+            element_size: Some((80.0, 80.0)),
+            surface: None,
+        });
+        assert_eq!(unresolved.len(), 1);
     }
 
     #[test]
@@ -1741,6 +2337,32 @@ mod tests {
         assert_eq!(
             extract_shadow_lengths("rgb(1, 2, 3) 0px 0px 20px", None),
             vec![1.0, 2.0, 3.0, 0.0, 0.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn glyph_only_text_is_not_scored_on_any_path() {
+        // A lone circle in white at 20% on green (bt.cn): the full pass for
+        // a div scored it at 1.3:1, while the same glyph in a span was
+        // already skipped. Words in that ink still report.
+        let opts = |is_glyph_only: bool| ColorOpts {
+            tag: "div".to_string(),
+            text_color: Some(Rgba::new(255.0, 255.0, 255.0, 0.2)),
+            effective_bg: Some(Rgba::new(29.0, 150.0, 52.0, 1.0)),
+            visible_text: Some(Rgba::new(255.0, 255.0, 255.0, 0.2)),
+            font_size: 20.0,
+            font_weight: 400.0,
+            has_direct_text: true,
+            is_glyph_only,
+            bg_clip: Some("border-box".to_string()),
+            bg_image: Some("none".to_string()),
+            ..Default::default()
+        };
+        assert!(check_colors(&opts(false)).iter().any(|h| h.id == "low-contrast"));
+        let glyph = check_colors(&opts(true));
+        assert!(
+            glyph.iter().all(|h| h.id != "low-contrast" && h.id != "gray-on-color"),
+            "{glyph:?}"
         );
     }
 
@@ -1898,6 +2520,65 @@ mod tests {
         );
         assert_eq!(wash.len(), 1, "{wash:?}");
         assert_eq!(wash[0].id, "low-contrast");
+    }
+
+    #[test]
+    fn a_gradient_text_colour_is_reported_once_per_box_not_per_label() {
+        let white = Rgba::new(255.0, 255.0, 255.0, 1.0);
+        let tile = |stops: Vec<Rgba>, host: Option<&str>| ColorOpts {
+            tag: "span".to_string(),
+            text_color: Some(white),
+            effective_bg_stops: Some(stops),
+            font_size: 24.0,
+            font_weight: 700.0,
+            has_direct_text: true,
+            paints_own_text: true,
+            bg_clip: Some("border-box".to_string()),
+            bg_image: Some("none".to_string()),
+            bg_source: Some("gradient on div.w-14".to_string()),
+            bg_source_host: host.map(str::to_string),
+            ..Default::default()
+        };
+        let amber = vec![Rgba::new(251.0, 191.0, 36.0, 1.0)];
+        let amber_edge = vec![Rgba::new(249.0, 179.0, 27.0, 1.0)];
+        let lime = vec![Rgba::new(163.0, 230.0, 53.0, 1.0)];
+        let report = |seen: &mut SafeTagTextSeen, opts: &ColorOpts| {
+            check_colors_deduped(opts, seen, &mut |_h: &RuleHit| true)
+                .into_iter()
+                .filter(|h| h.id == "low-contrast")
+                .count()
+        };
+
+        // chorusai.replit.app: tiles sharing `div.w-14` on amber and lime
+        // gradients are two surfaces, and the lime one still reports.
+        let mut seen = SafeTagTextSeen::default();
+        assert_eq!(report(&mut seen, &tile(amber.clone(), Some("12"))), 1);
+        assert_eq!(report(&mut seen, &tile(lime.clone(), Some("40"))), 1);
+        // A second element on the amber box, sampled elsewhere, is the same
+        // colour on the same box.
+        assert_eq!(report(&mut seen, &tile(amber_edge, Some("12"))), 0);
+        // Another box whose snippet is the same pair is the pair the page
+        // already reported.
+        assert_eq!(report(&mut seen, &tile(amber.clone(), Some("77"))), 0);
+
+        // Without an identity the snippet alone is the key.
+        let mut seen = SafeTagTextSeen::default();
+        assert_eq!(report(&mut seen, &tile(amber.clone(), None)), 1);
+        assert_eq!(report(&mut seen, &tile(lime, None)), 1);
+        assert_eq!(report(&mut seen, &tile(amber, None)), 0);
+    }
+
+    #[test]
+    fn a_waived_hit_claims_neither_key() {
+        let mut seen = SafeTagTextSeen::default();
+        let hit = || vec![RuleHit::new("low-contrast", "1.7:1 (need 3:1) — text #ffffff on #fbbf24".to_string())];
+        let keys = |h: &RuleHit| vec![h.snippet.clone(), "text #ffffff over gradient on div.w-14 [12]".to_string()];
+        let mut hits = hit();
+        seen.keep_first_keyed(&mut hits, &keys, &mut |_h: &RuleHit| false);
+        assert!(hits.is_empty());
+        let mut hits = hit();
+        seen.keep_first_keyed(&mut hits, &keys, &mut |_h: &RuleHit| true);
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]

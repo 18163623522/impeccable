@@ -139,6 +139,75 @@ pub fn is_glyph_only_text(text: &str) -> bool {
     !trimmed.is_empty() && !trimmed.chars().any(char::is_alphanumeric)
 }
 
+/// Families that draw icons rather than letters. Material Icons and Material
+/// Symbols turn a word into a glyph through a ligature (`arrow_forward`
+/// renders as an arrow); the others map private-use code points, which
+/// [`is_glyph_only_text`] already reads as glyphs.
+const ICON_FONT_NAMES: &[&str] = &[
+    "material icons",
+    "material symbols",
+    "materialicons",
+    "materialsymbols",
+    "material design icons",
+    "font awesome",
+    "fontawesome",
+    "icomoon",
+    "glyphicons",
+    "bootstrap-icons",
+    "remixicon",
+    "ionicons",
+    "tabler-icons",
+    "boxicons",
+    "codicon",
+    "octicons",
+    "dashicons",
+    "lineicons",
+    "themify",
+];
+
+/// Whether the first family of a `font-family` list is an icon font: one of
+/// [`ICON_FONT_NAMES`], or a name one of whose words is `icons` or `icon`.
+pub fn is_icon_font_family(font_family: &str) -> bool {
+    let first = font_family.split(',').next().unwrap_or("");
+    let name = js::to_lower_case(js::trim(first).trim_matches(|c| c == '"' || c == '\''));
+    if name.is_empty() {
+        return false;
+    }
+    ICON_FONT_NAMES.iter().any(|n| name.contains(n))
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == "icons" || w == "icon")
+}
+
+/// Text an icon font turns into a glyph through a ligature: one word of
+/// lowercase letters, digits, `_` or `-` (`arrow_forward`, `close`,
+/// `counter_1`) set in an icon font. A reader sees an icon, not the word.
+pub fn is_icon_ligature_text(text: &str, font_family: &str) -> bool {
+    let word = js::trim(text);
+    !word.is_empty()
+        && word.len() <= 48
+        && word.chars().any(|c| c.is_ascii_lowercase())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        && is_icon_font_family(font_family)
+}
+
+/// A Latin `x` standing in for a close glyph, where [`names_close_control`]
+/// says the control it sits in closes something.
+pub fn is_close_letter_text(text: &str) -> bool {
+    matches!(js::trim(text), "x" | "X")
+}
+
+/// Whether attribute values (a class list, an id, an `aria-label`, a
+/// `title`) name a close or dismiss control.
+pub fn names_close_control(values: &[&str]) -> bool {
+    values.iter().any(|v| {
+        let lower = js::to_lower_case(v);
+        lower.contains("close") || lower.contains("dismiss")
+    })
+}
+
 /// Whether a computed `-webkit-text-fill-color` says the element's glyphs
 /// are not painted in its `color` at all. A gradient heading is written by
 /// clipping a background to the text and filling the text with nothing, so
@@ -167,6 +236,13 @@ pub struct ColorOpts {
     pub font_weight: f64,
     pub has_direct_text: bool,
     pub is_emoji_only: bool,
+    /// The element's own text has no letter and no digit
+    /// ([`is_glyph_only_text`]): a lone circle, a pair of braces, an arrow.
+    /// Nobody reads it, so it is not scored for text contrast on any path,
+    /// SAFE_TAGS or not. The recorded call vectors predate the field and
+    /// leave it false, which scores as they recorded.
+    #[serde(default)]
+    pub is_glyph_only: bool,
     /// The adapter's verdict that this element paints reading text of its
     /// own that no already-scored ancestor carries: direct text that is not
     /// an icon glyph, not visually hidden, and a `color` the nearest
@@ -183,6 +259,35 @@ pub struct ColorOpts {
     /// JS `DETECTOR_IS_BROWSER` (`typeof window !== 'undefined'`): the
     /// static engines pass false, the browser build true.
     pub detector_is_browser: bool,
+    /// The colour the glyphs read in over `effective_bg` (or each gradient
+    /// sample), when the adapter folded the opacity of the boxes between the
+    /// text and its surface into it. `None` scores `text_color`. Either way a
+    /// translucent colour is composited over each background before it is
+    /// scored and printed. The recorded call vectors predate the field.
+    #[serde(default)]
+    pub visible_text: Option<Rgba>,
+    /// What painted the surface when it was not a plain fill, printed after
+    /// the background colour (`gradient on a.primary`). One page reports a
+    /// text colour once per box that paints the gradient, not once per
+    /// sampled colour.
+    #[serde(default)]
+    pub bg_source: Option<String>,
+    /// An opaque identity of the box `bg_source` names, unique within one
+    /// document. The page's one report of a text colour on a gradient is
+    /// claimed per box, because the label is only a tag and a class, which a
+    /// row of same-class tiles on different gradients shares. `None` dedupes
+    /// on the snippet alone.
+    #[serde(default)]
+    pub bg_source_host: Option<String>,
+    /// The adapter's knowledge that its background walk reads only ancestor
+    /// fills, so a resolved surface in exactly the text's own colour is the
+    /// walk landing on a fill the text does not sit on (white copy over a
+    /// photo scored `#ffffff on #ffffff`). With it set the full pass stands
+    /// down there, as the SAFE_TAGS path always has. The recorded call
+    /// vectors predate the field and leave it false, which scores the `1.0:1`
+    /// as they recorded.
+    #[serde(default)]
+    pub same_color_surface_is_unread: bool,
 }
 
 // ─── checkHoverContrast ─────────────────────────────────────────────────────
@@ -382,4 +487,10 @@ pub struct GlowOpts {
     /// The element's border-box size in CSS px; `None` without layout.
     #[serde(default)]
     pub element_size: Option<(f64, f64)>,
+    /// The fill behind the element as the background walk resolved it, used
+    /// to measure how far a glow lifts it. `None` where the walk named no
+    /// single fill (an image, a gradient, a surface it could not read), and
+    /// on the engines that pass no surface.
+    #[serde(default)]
+    pub surface: Option<Rgba>,
 }

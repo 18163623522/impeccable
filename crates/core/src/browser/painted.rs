@@ -17,12 +17,23 @@
 //! What it cannot decide it keeps: a property or metric the capture did not
 //! record (a snapshot older than the measurement) never removes a finding.
 //!
+//! Rules that name an element other than the one they report on, or that report
+//! on the page, ask the predicate about it themselves: `clipped-overflow-container`
+//! about the positioned child it names ([`unpainted_inside`], which leaves the
+//! container's own clip to the rule), `nested-cards` about the inner card,
+//! `kicker-above-heading` about the heading and the label above it,
+//! `text-occlusion` about the covered text, the text or box covering it and
+//! the card a headline overhangs, and the page-level CSS-text forms in
+//! [`PAINT_GATED_PAGE_FORMS`] about the elements their selector matches.
+//!
 //! `content-hidden-at-rest` is deliberately not gated: hidden text is what it
 //! reports.
 
-use super::dom::{class_attr, tag_lower, Dom, ElId, Rect};
+use super::dom::{class_attr, has_direct_text_longer_than, tag_lower, Dom, ElId, Rect};
 use super::element_checks::effective_opacity_dom;
+use super::text_geometry::phrasing_text_extent;
 use super::BrowserFinding;
+use crate::checks::measures::{clipped_by_inset, clipped_by_rect};
 use crate::js;
 
 /// Why an element is not painted at capture.
@@ -42,6 +53,32 @@ pub enum Unpainted {
     /// The box lies wholly outside the scrollable document (or, inside a
     /// fixed layer, wholly outside the viewport).
     OutsideDocument,
+    /// The element or an ancestor is a visually hidden box: at most 1px on
+    /// each axis, with a `clip: rect()` or `clip-path: inset()` that removes
+    /// it (`.sr-only`, `.visually-hidden`, video.js control text).
+    VisuallyHidden,
+    /// A text measurement's element holds no text.
+    NoText,
+    /// The box has no width or no height, and none of its content shows past
+    /// that edge.
+    NoArea,
+}
+
+/// Which predicate a rule's findings pass through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintGate {
+    /// A text measurement: the element's own opacity counts, and it needs
+    /// text and a box with area to show it in.
+    Text,
+    /// `buried-raster`, which measures the element's own opacity.
+    Raster,
+    /// A rule about the element's own box: its own opacity counts, and it
+    /// needs area.
+    Box,
+    /// `blinking-cursor`, which reports the element toggling its own opacity
+    /// or visibility: a cursor caught in its off phase is still the cursor,
+    /// so only what its ancestors do hides it, and it needs area.
+    Toggle,
 }
 
 /// How the element's own opacity takes part.
@@ -53,17 +90,23 @@ pub enum OwnOpacity {
     /// ancestors count toward transparency, and a near-transparent element
     /// that is one state of a moving layer is skipped.
     Measured,
+    /// The rule reports the element switching its own opacity or visibility
+    /// on and off (`blinking-cursor`), so neither its own opacity nor a
+    /// `visibility: hidden` that its parent does not share hides it.
+    Toggled,
 }
 
-/// The text measurements that need painted text. Style tells (gradient text,
-/// palette, fonts, borders) describe authored CSS whatever state is showing
-/// and are not gated.
+/// The rules that measure one element's text. Style tells about the page
+/// (gradient text, fonts, borders) describe authored CSS whatever state is
+/// showing and are not gated; `italic-serif-display` reports one heading's
+/// display treatment, which a visitor meets only where the heading is shown.
 pub const PAINT_GATED_TEXT_RULES: &[&str] = &[
     "all-caps-body",
     "body-text-viewport-edge",
     "cramped-padding",
     "extreme-negative-tracking",
     "gray-on-color",
+    "italic-serif-display",
     "justified-text",
     "line-length",
     "low-contrast",
@@ -81,31 +124,86 @@ const TRANSPARENT_FLOOR: f64 = 0.02;
 /// The own-opacity ceiling of `buried-raster`'s opacity form.
 const STATE_LAYER_OPACITY: f64 = 0.15;
 
+/// The share of a text measurement's width that has to show inside its
+/// clipping ancestors and the document for a text rule to score it. A date on
+/// a Swiper slide parked at x -66 with 4 of its 70px on the page, or a slick
+/// clone 79% past its track, is a copy nobody reads; the copies on screen are
+/// the ones a reader meets. Only the x axis is floored: a line-clamped
+/// standfirst or a collapsed "read more" box shows its first lines, and the
+/// text rects of the lines it hides run past its bottom edge.
+pub const TEXT_MIN_VISIBLE_SHARE: f64 = 0.25;
+
+/// The rules about an element's own box. A box that shows nothing at rest (a
+/// collapsed tray at height 0, the volume panel of a player whose control bar
+/// is not rendered, a seek bar parked off the canvas, a loader at
+/// `display: none`, a closed flyout, a row still waiting to be revealed, a
+/// slide parked past its track's clip) is not where a visitor meets how it
+/// animates (`layout-transition`, `bounce-easing`), the glow around it
+/// (`dark-glow`) or the palette it paints (`ai-color-palette`).
+pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing", "dark-glow", "layout-transition"];
+
+/// The rules whose page-level CSS-text form names the rule a selector
+/// declared: such a finding reports only when at least one element the
+/// selector matches is painted at capture. The match is tested on the base
+/// predicate alone, with no area test, because the selector may name a
+/// pseudo-element (`.node::after`) whose host has no box of its own.
+pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "pulsing-dot"];
+
 /// Which gate a rule's findings pass through, or `None` for an ungated rule.
-pub fn paint_gate(rule_id: &str) -> Option<OwnOpacity> {
+pub fn paint_gate(rule_id: &str) -> Option<PaintGate> {
     if rule_id == "buried-raster" {
-        Some(OwnOpacity::Measured)
+        Some(PaintGate::Raster)
+    } else if rule_id == "blinking-cursor" {
+        Some(PaintGate::Toggle)
     } else if PAINT_GATED_TEXT_RULES.contains(&rule_id) {
-        Some(OwnOpacity::Counts)
+        Some(PaintGate::Text)
+    } else if PAINT_GATED_BOX_RULES.contains(&rule_id) {
+        Some(PaintGate::Box)
     } else {
         None
     }
+}
+
+/// Whether a page-level CSS-text form of `rule_id` should report, given the
+/// elements its selector matched. A rule outside [`PAINT_GATED_PAGE_FORMS`],
+/// and a selector that matched nothing (which the caller decides on its
+/// own), keep base behavior.
+pub fn page_form_painted(dom: &dyn Dom, rule_id: &str, matches: &[ElId]) -> bool {
+    !PAINT_GATED_PAGE_FORMS.contains(&rule_id)
+        || matches.is_empty()
+        || matches.iter().any(|&el| painted_at_capture(dom, el))
 }
 
 /// Drop the findings on `el` whose rule needs a painted element when `el` is
 /// not painted. Each gate is evaluated at most once per element, and not at
 /// all when no finding needs it.
 pub fn retain_painted(dom: &dyn Dom, el: ElId, findings: &mut Vec<BrowserFinding>) {
-    let mut counts: Option<bool> = None;
-    let mut measured: Option<bool> = None;
+    let mut painted: [Option<bool>; 4] = [None; 4];
     findings.retain(|f| match paint_gate(&f.type_) {
         None => true,
-        Some(OwnOpacity::Counts) => {
-            *counts.get_or_insert_with(|| unpainted_at_capture(dom, el, OwnOpacity::Counts).is_none())
-        }
-        Some(OwnOpacity::Measured) => *measured
-            .get_or_insert_with(|| unpainted_at_capture(dom, el, OwnOpacity::Measured).is_none()),
+        Some(gate) => *painted[gate as usize].get_or_insert_with(|| unpainted_for(dom, el, gate).is_none()),
     });
+}
+
+/// Why `el` is not painted for a rule behind `gate`, or `None` when it is.
+pub fn unpainted_for(dom: &dyn Dom, el: ElId, gate: PaintGate) -> Option<Unpainted> {
+    match gate {
+        PaintGate::Raster => unpainted_at_capture(dom, el, OwnOpacity::Measured),
+        PaintGate::Box => unpainted_at_capture(dom, el, OwnOpacity::Counts).or_else(|| no_area(dom, el)),
+        PaintGate::Toggle => unpainted_at_capture(dom, el, OwnOpacity::Toggled).or_else(|| no_area(dom, el)),
+        PaintGate::Text => unpainted_walk(dom, el, OwnOpacity::Counts, None, &mut Visible::floored(TEXT_MIN_VISIBLE_SHARE))
+            .or_else(|| no_text(dom, el))
+            .or_else(|| no_area(dom, el)),
+    }
+}
+
+/// Whether `el`'s text shows across its whole width at rest: no clipping
+/// ancestor and no edge of the document cuts it on the x axis (within a
+/// pixel). A Dom that cannot measure it answers yes. The page's one report of
+/// a colour pair is claimed for good only by such a copy.
+pub fn text_shown_across(dom: &dyn Dom, el: ElId) -> bool {
+    let mut vis = Visible::tracking();
+    unpainted_walk(dom, el, OwnOpacity::Counts, None, &mut vis).is_none() && vis.shown_across()
 }
 
 /// Whether a visitor sees `el` painted at rest, counting its own opacity.
@@ -116,21 +214,140 @@ pub fn painted_at_capture(dom: &dyn Dom, el: ElId) -> bool {
 /// Why `el` is not painted at capture, or `None` when it is (or when the Dom
 /// cannot measure it, which keeps the finding).
 pub fn unpainted_at_capture(dom: &dyn Dom, el: ElId, own: OwnOpacity) -> Option<Unpainted> {
+    unpainted_walk(dom, el, own, None, &mut Visible::floored(0.0))
+}
+
+/// Why `el` is not painted at capture apart from the clipping of `container`
+/// and of everything above it (the document's edges included), or `None` when
+/// nothing else hides it. A rule that reports what `container`'s clip does to
+/// `el` (`clipped-overflow-container`) asks this: that clip is the finding,
+/// and what the ancestors above do to the container is the container's own
+/// paint. Everything that hides the whole subtree (`display: none`,
+/// transparency, a visually hidden box) still counts at every level, and so
+/// does a fixed layer parked outside the viewport.
+pub fn unpainted_inside(dom: &dyn Dom, el: ElId, container: ElId) -> Option<Unpainted> {
+    unpainted_walk(dom, el, OwnOpacity::Counts, Some(container), &mut Visible::floored(0.0))
+}
+
+/// How much of a text measurement shows on the x axis, for the visible-share
+/// floor: the extent it is taken of (the text where it can be measured, else
+/// the box), and the part of it no clip has cut. Passing a horizontal
+/// scroller replaces both with the scroller's box, since scrolling brings
+/// anything in its range into it.
+struct Visible {
+    min_share: f64,
+    /// Whether the shown part is tracked with no floor to apply.
+    track: bool,
+    measured: bool,
+    extent: (f64, f64),
+    shown: (f64, f64),
+}
+
+impl Visible {
+    /// No floor at 0, which leaves every decision to the overlap tests.
+    fn floored(min_share: f64) -> Visible {
+        Visible { min_share, track: false, measured: false, extent: (0.0, 0.0), shown: (0.0, 0.0) }
+    }
+
+    /// No floor, but the shown part is tracked.
+    fn tracking() -> Visible {
+        Visible { track: true, ..Visible::floored(0.0) }
+    }
+
+    /// Only a floor or a tracked walk measures the text, so the base
+    /// predicate costs what it did.
+    fn measure(&mut self, dom: &dyn Dom, el: ElId, rect: &Rect) {
+        if !(self.min_share > 0.0 || self.track) {
+            return;
+        }
+        let text = phrasing_text_extent(dom, el).filter(|t| t.all_finite() && t.width > 0.0 && t.height > 0.0);
+        let r = text.unwrap_or(*rect);
+        self.measured = r.width > 0.0;
+        self.extent = (r.left, r.right);
+        self.shown = self.extent;
+    }
+
+    /// Cut the shown part to `[lo, hi]`; true when what is left falls under
+    /// the floor. `floors` says whether this cut may count toward the floor
+    /// (asked only on a floored walk): a cut that may not leaves the share
+    /// as it was, so the walk decides as the base predicate did. A tracked
+    /// walk records every cut.
+    fn cut(&mut self, lo: f64, hi: f64, floors: impl FnOnce() -> bool) -> bool {
+        if !self.measured {
+            return false;
+        }
+        if self.min_share > 0.0 {
+            if !floors() {
+                return false;
+            }
+        } else if !self.track {
+            return false;
+        }
+        self.shown = (js::math_max(self.shown.0, lo), js::math_min(self.shown.1, hi));
+        self.under_floor()
+    }
+
+    fn scroll(&mut self, lo: f64, hi: f64) {
+        if !self.measured {
+            return;
+        }
+        self.extent = (lo, hi);
+        self.shown = (lo, hi);
+    }
+
+    fn under_floor(&self) -> bool {
+        let width = self.extent.1 - self.extent.0;
+        self.min_share > 0.0
+            && self.measured
+            && width > 0.0
+            && js::math_max(0.0, self.shown.1 - self.shown.0) / width < self.min_share
+    }
+
+    fn shown_across(&self) -> bool {
+        !self.measured || (self.shown.0 <= self.extent.0 + 1.0 && self.shown.1 >= self.extent.1 - 1.0)
+    }
+}
+
+fn unpainted_walk(
+    dom: &dyn Dom,
+    el: ElId,
+    own: OwnOpacity,
+    clip_root: Option<ElId>,
+    vis: &mut Visible,
+) -> Option<Unpainted> {
     if Some(el) == dom.body() || Some(el) == dom.document_element() {
         return None;
     }
-    if dom.check_visibility(el) == Some(false) {
+    // An element caught in the off phase of its own toggle carries a
+    // `visibility: hidden` its parent does not, and `checkVisibility()`, which
+    // the capture asks with `checkVisibilityCSS`, answers false for it. For a
+    // rule about the toggle neither hides it; the walk below still reads the
+    // ancestors' `display` and `content-visibility`. A parent whose visibility
+    // was not recorded cannot share it, so the element is kept.
+    let toggled_off = own == OwnOpacity::Toggled
+        && hides_by_visibility(dom, el)
+        && !dom.parent(el).is_some_and(|p| hides_by_visibility(dom, p));
+    if !toggled_off && dom.check_visibility(el) == Some(false) {
         return Some(Unpainted::NotRendered);
     }
     // `visibility` inherits, so the element's computed value covers its
     // ancestors; `display: none` and `content-visibility: hidden` do not, and
     // the walk below reads them.
-    let visibility = js::to_lower_case(&dom.style(el, "visibility"));
-    if visibility == "hidden" || visibility == "collapse" || dom.style(el, "display") == "none" {
+    if (!toggled_off && hides_by_visibility(dom, el)) || dom.style(el, "display") == "none" {
         return Some(Unpainted::NotRendered);
+    }
+    if is_visually_hidden_box(dom, el) {
+        return Some(Unpainted::VisuallyHidden);
     }
 
     match own {
+        OwnOpacity::Toggled => {
+            if let Some(p) = dom.parent(el) {
+                if effective_opacity_dom(dom, p) <= TRANSPARENT_FLOOR {
+                    return Some(Unpainted::Transparent);
+                }
+            }
+        }
         OwnOpacity::Counts => {
             if effective_opacity_dom(dom, el) <= TRANSPARENT_FLOOR {
                 return Some(Unpainted::Transparent);
@@ -153,6 +370,7 @@ pub fn unpainted_at_capture(dom: &dyn Dom, el: ElId, own: OwnOpacity) -> Option<
     if !rect.all_finite() {
         return None;
     }
+    vis.measure(dom, el, &rect);
     let viewport_w = finite_or(dom.inner_width(), 0.0);
     let viewport_h = finite_or(dom.inner_height(), 0.0);
 
@@ -170,11 +388,16 @@ pub fn unpainted_at_capture(dom: &dyn Dom, el: ElId, own: OwnOpacity) -> Option<
     // scroller's range into the scroller's box, so an ancestor above the
     // scroller hides the element only where it hides the scroller.
     let mut band = rect;
+    // Whether the walk still tests overflow clips; it stops at `clip_root`.
+    let mut clip_tests = true;
     let mut cur = dom.parent(el);
     while let Some(p) = cur {
         let display = dom.style(p, "display");
         if display == "none" || js::to_lower_case(&dom.style(p, "contentVisibility")) == "hidden" {
             return Some(Unpainted::NotRendered);
+        }
+        if Some(p) == clip_root {
+            clip_tests = false;
         }
         let containment = if placement == Placement::InFlow {
             Containment::DoesNot
@@ -185,12 +408,17 @@ pub fn unpainted_at_capture(dom: &dyn Dom, el: ElId, own: OwnOpacity) -> Option<
             fixed_undecided = true;
         }
         if placement.clipped_by(dom, p, containment) {
+            // A 1px box whose clip removes it shows none of its content, even
+            // where that content overlaps the pixel it keeps.
+            if is_visually_hidden_box(dom, p) {
+                return Some(Unpainted::VisuallyHidden);
+            }
             // The page's own overflow propagates to the viewport, whose
             // scrolling is what brings content into view; the document test
             // below covers what it can never reach.
             let is_page = Some(p) == body || Some(p) == root;
-            if !is_page && clips_contents(&display) {
-                match clip_outcome(dom, p, &band, viewport_w, viewport_h) {
+            if clip_tests && !is_page && clips_contents(&display) {
+                match clip_outcome(dom, el, p, &band, vis, viewport_w, viewport_h) {
                     Ok(next) => band = next,
                     Err(reason) => return Some(reason),
                 }
@@ -222,7 +450,11 @@ pub fn unpainted_at_capture(dom: &dyn Dom, el: ElId, own: OwnOpacity) -> Option<
         }
         return None;
     }
-    outside_document(dom, &band, viewport_w)
+    // The document's edges are the outermost clip, above any container.
+    if clip_root.is_some() {
+        return None;
+    }
+    outside_document(dom, &band, vis, viewport_w)
 }
 
 /// How an element's box is placed, which decides which ancestors clip it.
@@ -254,6 +486,11 @@ impl Placement {
             Placement::Fixed => containment == Containment::Contains,
         }
     }
+}
+
+/// `visibility: hidden` or `collapse`, computed (so inherited).
+fn hides_by_visibility(dom: &dyn Dom, el: ElId) -> bool {
+    matches!(js::to_lower_case(&dom.style(el, "visibility")).as_str(), "hidden" | "collapse")
 }
 
 fn is_positioned(dom: &dyn Dom, el: ElId) -> bool {
@@ -320,6 +557,89 @@ fn contains_fixed(dom: &dyn Dom, el: ElId) -> Containment {
     }
 }
 
+/// Whether an overflow clip on `container` can cut `el`, a `position: fixed`
+/// box inside it. A fixed box is clipped only from its containing block up,
+/// so `container` or an element between the two has to be that block: an
+/// overflow-hidden host that is not one (a card holding a floating player)
+/// cannot cut it. An element whose containment the capture could not decide
+/// counts as one, which keeps the finding.
+pub fn fixed_box_clippable_by(dom: &dyn Dom, el: ElId, container: ElId) -> bool {
+    let mut cur = dom.parent(el);
+    while let Some(p) = cur {
+        if contains_fixed(dom, p) != Containment::DoesNot {
+            return true;
+        }
+        if p == container {
+            return false;
+        }
+        cur = dom.parent(p);
+    }
+    true
+}
+
+/// A box at most 1px on each axis whose `clip: rect()` (on an absolutely
+/// positioned box, the only kind `clip` applies to) or `clip-path: inset()`
+/// removes it: the screen-reader-only utility. Its content is laid out, and
+/// can overlap the pixel the box keeps, but none of it is seen. The rect is
+/// read first, so the common case costs one read.
+fn is_visually_hidden_box(dom: &dyn Dom, el: ElId) -> bool {
+    let r = dom.rect(el);
+    if !r.all_finite() || r.width > 1.0 || r.height > 1.0 {
+        return false;
+    }
+    let clip_applies = matches!(dom.style(el, "position").as_str(), "absolute" | "fixed");
+    (clip_applies && clipped_by_rect(Some(&dom.style(el, "clip"))))
+        || clipped_by_inset(Some(&dom.style(el, "clipPath")))
+        || clipped_by_inset(Some(&dom.style(el, "webkitClipPath")))
+}
+
+/// The elements a text rule scores that paint a value or a placeholder
+/// rather than text content.
+const TEXT_CONTROL_TAGS: &[&str] = &["input", "textarea", "select"];
+
+/// A text measurement's element with no text: nothing but whitespace in it.
+/// The direct text is asked first, which settles every element that carries
+/// its own words without reading the subtree.
+fn no_text(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
+    if has_direct_text_longer_than(dom, el, 0) || TEXT_CONTROL_TAGS.contains(&tag_lower(dom, el).as_str()) {
+        return None;
+    }
+    js::trim(&dom.text_content(el)).is_empty().then_some(Unpainted::NoText)
+}
+
+/// A box with no width or no height shows nothing when its content cannot
+/// show past that edge either: the element clips that axis, or its scroll
+/// extent there is at most 1px (an inline box, which grows with its glyphs,
+/// reports 0). Text that runs past a zero-width box with visible overflow
+/// shows in its scroll extent and is kept, as is a metric the capture did not
+/// record, and `display: contents`, which generates no box for its content to
+/// sit in. The Text gate asks the same test: a 0x0 anchor whose nowrap label
+/// overflows it (a map pin, a chart label) shows that label, and a 0x0 box
+/// with nothing past its edges is flat on both axes.
+fn no_area(dom: &dyn Dom, el: ElId) -> Option<Unpainted> {
+    let r = dom.rect(el);
+    if !r.all_finite() || (r.width > 0.0 && r.height > 0.0) || dom.style(el, "display") == "contents" {
+        return None;
+    }
+    let (ox, oy) = overflow_axes(dom, el);
+    let at_most_1px = |v: f64| v.is_finite() && v <= 1.0;
+    let flat_x = r.width <= 0.0 && (clips(&ox) || at_most_1px(dom.scroll_width(el)));
+    let flat_y = r.height <= 0.0 && (clips(&oy) || at_most_1px(dom.scroll_height(el)));
+    (flat_x || flat_y).then_some(Unpainted::NoArea)
+}
+
+/// `overflow-x` / `overflow-y`, from the shorthand when neither was recorded.
+fn overflow_axes(dom: &dyn Dom, el: ElId) -> (String, String) {
+    let ox = dom.style(el, "overflowX");
+    let oy = dom.style(el, "overflowY");
+    if ox.is_empty() && oy.is_empty() {
+        let o = dom.style(el, "overflow");
+        (o.clone(), o)
+    } else {
+        (ox, oy)
+    }
+}
+
 /// `overflow` does not apply to boxes that generate no block of their own.
 fn clips_contents(display: &str) -> bool {
     !matches!(display, "contents" | "inline" | "table-row" | "table-row-group")
@@ -366,15 +686,16 @@ fn has_overflow(scroll: f64, client: f64) -> bool {
 /// The clip test for one ancestor `p` that clips the element, over `band`,
 /// where the element can be shown as `p` sees it. `Err` names why `p` hides
 /// the element; `Ok` carries the band for the ancestors above `p`.
-fn clip_outcome(dom: &dyn Dom, p: ElId, band: &Rect, viewport_w: f64, viewport_h: f64) -> Result<Rect, Unpainted> {
-    let ox = dom.style(p, "overflowX");
-    let oy = dom.style(p, "overflowY");
-    let (ox, oy) = if ox.is_empty() && oy.is_empty() {
-        let o = dom.style(p, "overflow");
-        (o.clone(), o)
-    } else {
-        (ox, oy)
-    };
+fn clip_outcome(
+    dom: &dyn Dom,
+    el: ElId,
+    p: ElId,
+    band: &Rect,
+    vis: &mut Visible,
+    viewport_w: f64,
+    viewport_h: f64,
+) -> Result<Rect, Unpainted> {
+    let (ox, oy) = overflow_axes(dom, p);
     let clip_x = clips(&ox);
     let clip_y = clips(&oy);
     if !clip_x && !clip_y {
@@ -392,6 +713,15 @@ fn clip_outcome(dom: &dyn Dom, p: ElId, band: &Rect, viewport_w: f64, viewport_h
     // Horizontally, every clipping or scrolling box hides what lies past its
     // edge at rest: carousel tracks, the columns of a scrolled table.
     if clip_x && misses_axis(band.left, band.right, band.width, cr.left, cr.right) {
+        return Err(Unpainted::ClippedOut);
+    }
+    // A text measurement has to show enough of its width inside the box to be
+    // read. A box that truncates its line with an ellipsis shows the start of
+    // it, which is what a reader reads.
+    if clip_x
+        && dom.style(p, "textOverflow") != "ellipsis"
+        && vis.cut(cr.left, cr.right, || parks_copies(dom, el, p, &cr, viewport_w))
+    {
         return Err(Unpainted::ClippedOut);
     }
     // Vertically only a box that hides its overflow does. A vertical scroll
@@ -412,6 +742,7 @@ fn clip_outcome(dom: &dyn Dom, p: ElId, band: &Rect, viewport_w: f64, viewport_h
     if scrolls(&ox) && has_overflow(dom.scroll_width(p), dom.client_width(p)) {
         left = cr.left;
         width = cr.width;
+        vis.scroll(cr.left, cr.right);
     }
     if script_frame || (scrolls(&oy) && has_overflow(dom.scroll_height(p), dom.client_height(p))) {
         top = cr.top;
@@ -453,7 +784,7 @@ fn is_viewport_layer(dom: &dyn Dom, p: ElId, cr: &Rect, viewport_w: f64, viewpor
 
 /// Whether the box lies wholly where the document cannot be scrolled to:
 /// before its start, or past its scroll width.
-fn outside_document(dom: &dyn Dom, rect: &Rect, viewport_w: f64) -> Option<Unpainted> {
+fn outside_document(dom: &dyn Dom, rect: &Rect, vis: &mut Visible, viewport_w: f64) -> Option<Unpainted> {
     let sx = finite_or(dom.scroll_x(), 0.0);
     let sy = finite_or(dom.scroll_y(), 0.0);
     let left = rect.left + sx;
@@ -481,7 +812,45 @@ fn outside_document(dom: &dyn Dom, rect: &Rect, viewport_w: f64) -> Option<Unpai
     if rect.width > 0.0 && (right <= start || left >= end) {
         return Some(Unpainted::OutsideDocument);
     }
+    // A text measurement needs enough of its width on the page's scroll
+    // origin side: a copy parked before the start of the document (a slide at
+    // x -66 with 4px on the page) can never be scrolled to. Text cut at the
+    // page's far edge runs past a page that hides its overflow, the page
+    // shell cutting a line a visitor reads, and keeps reporting as it did.
+    let (origin_lo, origin_hi) = if rtl { (f64::NEG_INFINITY, end - sx) } else { (start - sx, f64::INFINITY) };
+    if vis.cut(origin_lo, origin_hi, || true) {
+        return Some(Unpainted::OutsideDocument);
+    }
+    vis.cut(start - sx, end - sx, || false);
     None
+}
+
+/// Whether a clip that cuts a text measurement on the x axis is one that
+/// parks copies, where the visible-share floor applies: a box narrower than
+/// the page (a carousel, a swatch or badge row), a box that scrolls on x with
+/// content to scroll to, or a box around a track a script moves with
+/// transforms. A box at least as wide as the viewport that only hides its
+/// overflow is the page shell, and text it cuts is a layout bug a visitor
+/// sees (a non-wrapping row's second column, a desktop column at a phone
+/// width), so it keeps base behaviour. With no measured viewport the width
+/// test proves nothing.
+fn parks_copies(dom: &dyn Dom, el: ElId, p: ElId, cr: &Rect, viewport_w: f64) -> bool {
+    let page_w = page_width(dom, viewport_w);
+    (page_w > 0.0 && cr.width < page_w - 1.0)
+        || super::text_geometry::scrolls_x(dom, p)
+        || super::text_geometry::moves_a_track(dom, el, p)
+}
+
+/// The width of the page a visitor sees: the viewport, or the root's client
+/// width when a classic scrollbar makes that narrower. 0 when neither was
+/// measured.
+fn page_width(dom: &dyn Dom, viewport_w: f64) -> f64 {
+    let client = dom.document_element().map(|root| dom.client_width(root)).filter(|w| w.is_finite() && *w > 0.0);
+    match client {
+        Some(w) if viewport_w > 0.0 => js::math_min(w, viewport_w),
+        Some(w) => w,
+        None => viewport_w,
+    }
 }
 
 /// Whether a near-transparent raster is one state of a moving layer rather
@@ -1254,6 +1623,202 @@ mod tests {
         assert_eq!(raster(&d, poster), None);
     }
 
+    /// video.js control text: a 1px absolute box whose clip removes it,
+    /// holding labels laid out over the pixel it keeps.
+    #[test]
+    fn screen_reader_text_is_visually_hidden() {
+        let (mut d, body) = page();
+        let bar = d.add(Some(body), "div");
+        d.set_style(bar, "position", "absolute");
+        d.set_rect(bar, 660.0, 8071.0, 270.0, 32.0);
+        let sr = d.add(Some(bar), "span");
+        d.set_styles(
+            sr,
+            &[
+                ("display", "block"),
+                ("position", "absolute"),
+                ("overflowX", "hidden"),
+                ("overflowY", "hidden"),
+                ("clip", "rect(0px, 0px, 0px, 0px)"),
+                ("clipPath", "inset(50%)"),
+            ],
+        );
+        d.set_rect(sr, 708.0, 8076.0, 1.0, 1.0);
+        let label = d.add(Some(sr), "span");
+        d.set_style(label, "display", "inline-block");
+        d.set_rect(label, 708.0, 8076.0, 31.0, 10.0);
+        d.add_text(label, "Loaded");
+        assert_eq!(why(&d, label), Some(Unpainted::VisuallyHidden));
+        assert_eq!(why(&d, sr), Some(Unpainted::VisuallyHidden));
+
+        // Either clip removes it on its own.
+        d.set_style(sr, "clipPath", "none");
+        assert_eq!(why(&d, label), Some(Unpainted::VisuallyHidden));
+        d.set_styles(sr, &[("clip", "auto"), ("clipPath", "inset(50%)")]);
+        assert_eq!(why(&d, label), Some(Unpainted::VisuallyHidden));
+        d.set_styles(sr, &[("clipPath", "none"), ("webkitClipPath", "inset(50%)")]);
+        assert_eq!(why(&d, label), Some(Unpainted::VisuallyHidden));
+
+        // Without a clip, the pixel the box keeps overlaps the label, and the
+        // overflow test keeps it.
+        d.set_style(sr, "webkitClipPath", "none");
+        assert_eq!(why(&d, label), None);
+
+        // `clip` applies only to an absolutely positioned box.
+        d.set_styles(sr, &[("position", "static"), ("clip", "rect(0px, 0px, 0px, 0px)")]);
+        assert_eq!(why(&d, label), None);
+
+        // A box larger than 1px is not the utility; the clip tests decide it.
+        d.set_styles(sr, &[("position", "absolute"), ("clipPath", "inset(50%)")]);
+        d.set_rect(sr, 700.0, 8070.0, 60.0, 30.0);
+        assert_eq!(why(&d, label), None);
+    }
+
+    /// The framer typewriter between words, and a paragraph held at no
+    /// height.
+    #[test]
+    fn a_text_rule_needs_text_and_a_box_that_shows_it() {
+        let (mut d, body) = page();
+        let wrapper = d.add(Some(body), "span");
+        d.set_style(wrapper, "display", "inline");
+        d.set_rect(wrapper, 887.0, 6522.0, 0.0, 18.0);
+        d.el_mut(wrapper).scroll_width = 0.0;
+        assert_eq!(unpainted_for(&d, wrapper, PaintGate::Text), Some(Unpainted::NoText));
+        // The base predicate and the other gates do not ask for text.
+        assert_eq!(why(&d, wrapper), None);
+        assert_eq!(unpainted_for(&d, wrapper, PaintGate::Box), Some(Unpainted::NoArea));
+        let copy = d.add(Some(wrapper), "b");
+        d.add_text(copy, "   ");
+        assert_eq!(unpainted_for(&d, wrapper, PaintGate::Text), Some(Unpainted::NoText));
+        d.add_text(copy, "Search your word");
+        assert_eq!(unpainted_for(&d, wrapper, PaintGate::Text), Some(Unpainted::NoArea));
+        d.set_rect(wrapper, 887.0, 6522.0, 108.0, 18.0);
+        assert_eq!(unpainted_for(&d, wrapper, PaintGate::Text), None);
+
+        // A form control paints its value or its placeholder.
+        let field = d.add(Some(body), "input");
+        d.set_rect(field, 40.0, 200.0, 240.0, 32.0);
+        assert_eq!(unpainted_for(&d, field, PaintGate::Text), None);
+
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "Collapsed answer copy");
+        d.set_styles(p, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(p, 40.0, 900.0, 400.0, 0.0);
+        d.el_mut(p).scroll_height = Some(54.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::NoArea));
+        // With visible overflow its lines show past the edge.
+        d.set_styles(p, &[("overflowX", "visible"), ("overflowY", "visible")]);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+        // Nothing past the edge: no lines at all.
+        d.el_mut(p).scroll_height = Some(0.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::NoArea));
+        // A metric the capture did not record keeps it.
+        d.el_mut(p).scroll_height = None;
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+
+        // `display: contents` reports no box of its own and keeps its text.
+        let contents = d.add(Some(body), "span");
+        d.add_text(contents, "Pricing");
+        d.set_style(contents, "display", "contents");
+        d.set_rect(contents, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(unpainted_for(&d, contents, PaintGate::Text), None);
+    }
+
+    /// The att.com tray at `max-height: 0`, the video.js volume panel and the
+    /// Flowplayer seek bar: boxes `layout-transition` reported unpainted.
+    #[test]
+    fn a_box_rule_skips_boxes_that_show_nothing() {
+        let (mut d, body) = page();
+        let tray = d.add(Some(body), "div");
+        d.set_styles(tray, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(tray, 16.0, 4688.0, 1248.0, 0.0);
+        d.el_mut(tray).scroll_height = Some(0.0);
+        assert_eq!(unpainted_for(&d, tray, PaintGate::Box), Some(Unpainted::NoArea));
+        // A zero-height box whose content shows past its edge is kept.
+        d.set_styles(tray, &[("overflowX", "visible"), ("overflowY", "visible")]);
+        d.el_mut(tray).scroll_height = Some(240.0);
+        assert_eq!(unpainted_for(&d, tray, PaintGate::Box), None);
+        // Open, it is painted.
+        d.set_styles(tray, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(tray, 16.0, 4688.0, 1248.0, 240.0);
+        assert_eq!(unpainted_for(&d, tray, PaintGate::Box), None);
+
+        let bar = d.add(Some(body), "div");
+        d.set_style(bar, "display", "none");
+        let volume = d.add(Some(bar), "div");
+        d.set_styles(volume, &[("display", "flex"), ("transitionProperty", "width")]);
+        d.set_rect(volume, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(unpainted_for(&d, volume, PaintGate::Box), Some(Unpainted::NotRendered));
+
+        let seek = d.add(Some(body), "div");
+        d.set_styles(seek, &[("display", "block"), ("position", "absolute")]);
+        d.set_rect(seek, -326.0, 1061.0, 140.0, 2.0);
+        assert_eq!(unpainted_for(&d, seek, PaintGate::Box), Some(Unpainted::OutsideDocument));
+    }
+
+    #[test]
+    fn unpainted_inside_leaves_the_container_clip_to_the_rule() {
+        let (mut d, body) = page();
+        let frame = d.add(Some(body), "div");
+        d.set_styles(frame, &[("display", "block"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(frame, 40.0, 300.0, 300.0, 40.0);
+        let host = d.add(Some(frame), "div");
+        resolved(&mut d, host);
+        d.set_styles(host, &[("display", "block"), ("position", "relative"), ("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(host, 40.0, 300.0, 300.0, 40.0);
+        let menu = d.add(Some(host), "div");
+        d.set_style(menu, "position", "absolute");
+        d.set_rect(menu, 40.0, 340.0, 200.0, 60.0);
+        // The host's clip hides the menu: that is what the rule reports, and
+        // the frame above repeats it.
+        assert_eq!(why(&d, menu), Some(Unpainted::ClippedOut));
+        assert_eq!(unpainted_inside(&d, menu, host), None);
+        // Nor is the document edge: a tooltip over a header at the top of
+        // the page.
+        let tip = d.add(Some(host), "div");
+        d.set_style(tip, "position", "absolute");
+        d.set_rect(tip, 40.0, -60.0, 160.0, 30.0);
+        assert_eq!(unpainted_inside(&d, tip, host), None);
+
+        // A control bar at display none between them hides it all the same.
+        let controls = d.add(Some(host), "div");
+        d.set_style(controls, "display", "none");
+        let rate_menu = d.add(Some(controls), "div");
+        d.set_style(rate_menu, "position", "absolute");
+        d.set_rect(rate_menu, 40.0, 340.0, 200.0, 60.0);
+        assert_eq!(unpainted_inside(&d, rate_menu, host), Some(Unpainted::NotRendered));
+
+        // So does transparency.
+        d.set_style(menu, "opacity", "0");
+        assert_eq!(unpainted_inside(&d, menu, host), Some(Unpainted::Transparent));
+    }
+
+    /// ynet.co.il: a floating player, `position: fixed`, inside a card that
+    /// hides overflow.
+    #[test]
+    fn a_fixed_box_is_clippable_only_through_its_containing_block() {
+        let (mut d, body) = page();
+        let card = d.add(Some(body), "div");
+        resolved(&mut d, card);
+        let wrap = d.add(Some(card), "div");
+        resolved(&mut d, wrap);
+        let player = d.add(Some(wrap), "div");
+        d.set_style(player, "position", "fixed");
+        assert!(!fixed_box_clippable_by(&d, player, card));
+        d.set_style(wrap, "willChange", "transform");
+        assert!(fixed_box_clippable_by(&d, player, card));
+        d.set_style(wrap, "willChange", "auto");
+        d.set_style(card, "transform", "matrix(1, 0, 0, 1, 0, 0)");
+        assert!(fixed_box_clippable_by(&d, player, card));
+
+        // A containment the capture did not record keeps the finding.
+        let (mut d, body) = page();
+        let card = d.add(Some(body), "div");
+        let player = d.add(Some(card), "div");
+        d.set_style(player, "position", "fixed");
+        assert!(fixed_box_clippable_by(&d, player, card));
+    }
+
     #[test]
     fn retain_painted_only_touches_gated_rules() {
         let (mut d, body) = page();
@@ -1262,14 +1827,314 @@ mod tests {
         d.set_rect(wrap, 40.0, 300.0, 0.0, 0.0);
         let a = d.add(Some(wrap), "a");
         d.set_rect(a, 40.0, 300.0, 80.0, 14.0);
+        d.add_text(a, "Read more");
         let mut findings = vec![
             BrowserFinding::new("undersized-ui-text", "10px functional text"),
             BrowserFinding::new("gradient-text", "gradient"),
             BrowserFinding::new("low-contrast", "2.0:1"),
+            BrowserFinding::new("layout-transition", "transition: width"),
+            BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("dark-glow", "Colored box-shadow glow (#cdaca2) on dark background"),
+            BrowserFinding::new("ai-color-palette", "Purple/violet gradient background"),
+            BrowserFinding::new("italic-serif-display", "italic serif h1 (playfair display) at 60px"),
+            BrowserFinding::new("blinking-cursor", "i.caret — 5x10px blinking cursor"),
         ];
         retain_painted(&d, a, &mut findings);
         let ids: Vec<&str> = findings.iter().map(|f| f.type_.as_str()).collect();
         assert_eq!(ids, vec!["gradient-text"]);
+
+        // Painted, every finding stays.
+        d.set_rect(wrap, 40.0, 300.0, 400.0, 40.0);
+        let mut kept = vec![
+            BrowserFinding::new("bounce-easing", "animation: bounce"),
+            BrowserFinding::new("dark-glow", "glow"),
+            BrowserFinding::new("blinking-cursor", "cursor"),
+        ];
+        retain_painted(&d, a, &mut kept);
+        assert_eq!(kept.len(), 3);
+
         assert_eq!(paint_gate("content-hidden-at-rest"), None);
+        assert_eq!(paint_gate("gradient-text"), None);
+        assert_eq!(paint_gate("layout-transition"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("bounce-easing"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("dark-glow"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("ai-color-palette"), Some(PaintGate::Box));
+        assert_eq!(paint_gate("italic-serif-display"), Some(PaintGate::Text));
+        assert_eq!(paint_gate("low-contrast"), Some(PaintGate::Text));
+        assert_eq!(paint_gate("buried-raster"), Some(PaintGate::Raster));
+        assert_eq!(paint_gate("blinking-cursor"), Some(PaintGate::Toggle));
+    }
+
+    /// copperhead.sh's caret between blinks, and a cursor inside a panel a
+    /// visitor never sees.
+    #[test]
+    fn a_toggle_rule_reads_only_what_hides_the_element_from_outside() {
+        let (mut d, body) = page();
+        let term = d.add(Some(body), "div");
+        d.set_rect(term, 40.0, 100.0, 280.0, 32.0);
+        let cursor = d.add(Some(term), "span");
+        d.set_rect(cursor, 100.0, 107.0, 10.0, 18.0);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+
+        // The off phase of an opacity blink is still the cursor.
+        d.set_style(cursor, "opacity", "0");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Box), Some(Unpainted::Transparent));
+        d.set_style(cursor, "opacity", "1");
+
+        // So is the off phase of a visibility blink, which checkVisibility()
+        // answers false for, while its parent stays visible or unrecorded.
+        d.set_style(cursor, "visibility", "hidden");
+        d.el_mut(cursor).check_visibility = Some(false);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        d.set_style(term, "visibility", "visible");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), None);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Box), Some(Unpainted::NotRendered));
+
+        // A panel at visibility: hidden hides it.
+        d.set_style(term, "visibility", "hidden");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+        d.set_style(term, "visibility", "visible");
+        d.set_style(cursor, "visibility", "visible");
+        d.el_mut(cursor).check_visibility = Some(true);
+
+        // So does a transparent panel, and one at display: none.
+        d.set_style(term, "opacity", "0");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::Transparent));
+        d.set_style(term, "opacity", "1");
+        d.set_style(term, "display", "none");
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+        d.set_style(term, "visibility", "hidden");
+        d.set_style(cursor, "visibility", "hidden");
+        d.el_mut(cursor).check_visibility = Some(false);
+        assert_eq!(unpainted_for(&d, cursor, PaintGate::Toggle), Some(Unpainted::NotRendered));
+    }
+
+    /// observations-25 issue 4: co-trip.jp's date on a Swiper slide parked
+    /// with a sliver in view, and a slick clone 79% past its track. A text
+    /// measurement with less than a quarter of its width inside its clip is
+    /// not painted for the text rules; the other gates keep the overlap test.
+    #[test]
+    fn a_text_copy_mostly_past_its_clip_is_not_painted_for_text_rules() {
+        let (mut d, body) = page();
+        let clip = d.add(Some(body), "div");
+        d.set_styles(clip, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(clip, 240.0, 100.0, 600.0, 60.0);
+        let track = d.add(Some(clip), "div");
+        d.set_style(track, "transform", "matrix(1, 0, 0, 1, -82, 0)");
+        d.set_rect(track, 158.0, 100.0, 900.0, 60.0);
+        let date = d.add(Some(track), "div");
+        d.add_text(date, "2026.08.13");
+        // 4 of its 70px inside the clip.
+        d.set_rect(date, 174.0, 116.0, 70.0, 20.0);
+        assert_eq!(why(&d, date), None, "the base predicate keeps any overlap");
+        assert_eq!(unpainted_for(&d, date, PaintGate::Box), None);
+        assert_eq!(unpainted_for(&d, date, PaintGate::Text), Some(Unpainted::ClippedOut));
+        // 30 of 70px shows: a copy a reader can make out still reports.
+        d.set_rect(date, 210.0, 116.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, date, PaintGate::Text), None);
+        // The text's own extent is what shows, not the box around it.
+        d.set_rect(date, -600.0, 116.0, 1000.0, 20.0);
+        d.set_text_rect(date, 250.0, 118.0, 70.0, 16.0);
+        assert_eq!(unpainted_for(&d, date, PaintGate::Text), None, "text inside a wide box");
+        d.set_text_rect(date, 176.0, 118.0, 70.0, 16.0);
+        assert_eq!(unpainted_for(&d, date, PaintGate::Text), Some(Unpainted::ClippedOut));
+
+        // A box that truncates its line with an ellipsis shows the start of it.
+        let truncate = d.add(Some(body), "div");
+        d.set_styles(truncate, &[("overflowX", "hidden"), ("overflowY", "hidden"), ("textOverflow", "ellipsis")]);
+        d.set_rect(truncate, 20.0, 300.0, 150.0, 24.0);
+        let label = d.add(Some(truncate), "span");
+        d.set_style(label, "display", "inline");
+        d.add_text(label, "A very long label that runs far past its narrow box");
+        d.set_rect(label, 20.0, 300.0, 900.0, 24.0);
+        assert_eq!(unpainted_for(&d, label, PaintGate::Text), None);
+        d.set_style(truncate, "textOverflow", "clip");
+        assert_eq!(unpainted_for(&d, label, PaintGate::Text), Some(Unpainted::ClippedOut));
+
+        // Only the x axis is floored: a line-clamped standfirst shows its first
+        // lines, while the text rects of the lines it hides run past its bottom.
+        let clamp = d.add(Some(body), "div");
+        d.set_styles(clamp, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(clamp, 40.0, 900.0, 400.0, 40.0);
+        let standfirst = d.add(Some(clamp), "p");
+        d.add_text(standfirst, "A standfirst clamped to two lines of a much longer summary");
+        d.set_rect(standfirst, 40.0, 900.0, 400.0, 200.0);
+        assert_eq!(unpainted_for(&d, standfirst, PaintGate::Text), None);
+
+        // A cell a horizontal scroller shows a sliver of at rest; past the
+        // scroller, the ancestors above judge the scroller's box.
+        let scroller = d.add(Some(body), "div");
+        d.set_styles(scroller, &[("overflowX", "auto"), ("overflowY", "hidden")]);
+        d.set_rect(scroller, 40.0, 1200.0, 310.0, 100.0);
+        d.el_mut(scroller).client_width = 310.0;
+        d.el_mut(scroller).scroll_width = 900.0;
+        let cell = d.add(Some(scroller), "div");
+        d.add_text(cell, "Third column");
+        d.set_rect(cell, 330.0, 1200.0, 150.0, 40.0);
+        assert_eq!(unpainted_for(&d, cell, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_rect(cell, 250.0, 1200.0, 150.0, 40.0);
+        assert_eq!(unpainted_for(&d, cell, PaintGate::Text), None);
+    }
+
+    /// A date parked past the page's left edge with 4px on the page.
+    #[test]
+    fn a_text_copy_mostly_off_the_document_is_not_painted_for_text_rules() {
+        let (mut d, body) = page();
+        let edge = d.add(Some(body), "div");
+        d.add_text(edge, "2026.08.09");
+        d.set_rect(edge, -66.0, 560.0, 70.0, 20.0);
+        assert_eq!(why(&d, edge), None);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), Some(Unpainted::OutsideDocument));
+        d.set_rect(edge, -30.0, 560.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None, "40 of 70px on the page");
+        // Past the document's far edge the page shell cuts a line that starts
+        // in view: a layout bug a visitor sees, which keeps reporting.
+        d.set_rect(edge, 1270.0, 560.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None);
+        // Right to left, the page scrolls past the left edge instead, and the
+        // scroll origin is the right edge.
+        let root = d.document_element.unwrap();
+        d.set_style(root, "direction", "rtl");
+        d.el_mut(root).scroll_width = 2560.0;
+        d.set_rect(edge, -66.0, 560.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), None);
+        d.set_rect(edge, 1276.0, 560.0, 70.0, 20.0);
+        assert_eq!(unpainted_for(&d, edge, PaintGate::Text), Some(Unpainted::OutsideDocument));
+    }
+
+    /// The review's overflow probe at 390px: a non-wrapping row's second
+    /// column with 50 of 280px in view, cut by a wrapper that hides overflow
+    /// across the whole viewport. A page shell's cut is a layout bug, not a
+    /// parked copy, so the floor does not apply; a narrower clip, a scroller
+    /// and a transformed track as wide as the viewport still floor.
+    #[test]
+    fn a_page_shell_cut_is_not_floored() {
+        let (mut d, body) = page();
+        d.inner_width = 390.0;
+        let root = d.document_element.unwrap();
+        d.set_rect(root, 0.0, 0.0, 390.0, 4000.0);
+        d.el_mut(root).scroll_width = 390.0;
+        d.el_mut(root).client_width = 390.0;
+        let shell = d.add(Some(body), "div");
+        d.set_styles(shell, &[("overflowX", "hidden"), ("overflowY", "visible")]);
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+        d.el_mut(shell).client_width = 390.0;
+        d.el_mut(shell).scroll_width = 640.0;
+        let row = d.add(Some(shell), "div");
+        d.set_rect(row, 0.0, 400.0, 640.0, 120.0);
+        let left = d.add(Some(row), "div");
+        d.set_rect(left, 0.0, 400.0, 320.0, 120.0);
+        let right = d.add(Some(row), "div");
+        d.set_rect(right, 320.0, 400.0, 320.0, 120.0);
+        let p = d.add(Some(right), "p");
+        d.add_text(p, "The right column of the same row starts near the right edge of the phone screen");
+        d.set_rect(p, 340.0, 400.0, 280.0, 120.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None, "50 of 280px in view, cut by the page shell");
+        // A desktop column 1,700px wide in the same shell.
+        d.set_rect(p, 20.0, 400.0, 1700.0, 120.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+        d.set_rect(p, 340.0, 400.0, 280.0, 120.0);
+
+        // A classic scrollbar narrows the page: a shell at the root's client
+        // width is still the page shell.
+        d.el_mut(root).client_width = 375.0;
+        d.set_rect(shell, 0.0, 0.0, 375.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+        d.el_mut(root).client_width = 390.0;
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+
+        // A clip narrower than the page parks copies.
+        d.set_rect(shell, 0.0, 0.0, 360.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_rect(shell, 0.0, 0.0, 390.0, 2000.0);
+
+        // A scroller as wide as the page brings its cells into view.
+        d.set_style(shell, "overflowX", "auto");
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_style(shell, "overflowX", "hidden");
+
+        // A track a script moves with transforms, as wide as the page.
+        d.set_style(row, "transform", "matrix(1, 0, 0, 1, -40, 0)");
+        d.el_mut(row).scroll_width = 640.0;
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), Some(Unpainted::ClippedOut));
+        d.set_style(row, "transform", "none");
+
+        // With no measured viewport the width test proves nothing.
+        d.inner_width = f64::NAN;
+        d.el_mut(root).client_width = 0.0;
+        d.set_rect(shell, 0.0, 0.0, 360.0, 2000.0);
+        assert_eq!(unpainted_for(&d, p, PaintGate::Text), None);
+    }
+
+    /// A 0x0 anchor whose nowrap label overflows it visibly (a map pin, a
+    /// chart label) shows that label, and the Text gate keeps it; a 0x0 box
+    /// with nothing past its edges shows no text.
+    #[test]
+    fn a_zero_box_shows_the_text_that_overflows_it() {
+        let (mut d, body) = page();
+        let pin = d.add(Some(body), "span");
+        d.set_styles(pin, &[("position", "absolute"), ("overflowX", "visible"), ("overflowY", "visible")]);
+        d.add_text(pin, "Harbour office, open 9 to 5");
+        d.set_rect(pin, 120.0, 60.0, 0.0, 0.0);
+        d.el_mut(pin).scroll_width = 140.0;
+        d.el_mut(pin).scroll_height = Some(15.0);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), None, "the label overflows visibly");
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Box), None);
+        // A metric the capture did not record keeps it.
+        d.el_mut(pin).scroll_width = f64::NAN;
+        d.el_mut(pin).scroll_height = None;
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), None);
+        // Nothing runs past its edges: no text shows.
+        d.el_mut(pin).scroll_width = 0.0;
+        d.el_mut(pin).scroll_height = Some(0.0);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), Some(Unpainted::NoArea));
+        // A 0x0 box that hides its overflow shows none of it.
+        d.el_mut(pin).scroll_width = 140.0;
+        d.el_mut(pin).scroll_height = Some(15.0);
+        d.set_styles(pin, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        assert_eq!(unpainted_for(&d, pin, PaintGate::Text), Some(Unpainted::NoArea));
+    }
+
+    #[test]
+    fn text_shown_across_reads_the_x_cuts() {
+        let (mut d, body) = page();
+        let clip = d.add(Some(body), "div");
+        d.set_styles(clip, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(clip, 240.0, 100.0, 300.0, 40.0);
+        let word = d.add(Some(clip), "span");
+        d.set_style(word, "display", "inline-block");
+        d.add_text(word, "Journal entries");
+        d.set_rect(word, 180.0, 100.0, 140.0, 40.0);
+        assert!(!text_shown_across(&d, word), "60px of it past the clip");
+        d.set_rect(word, 260.0, 100.0, 140.0, 40.0);
+        assert!(text_shown_across(&d, word));
+        // A cut on y alone does not count.
+        d.set_rect(word, 260.0, 120.0, 140.0, 40.0);
+        assert!(text_shown_across(&d, word));
+        // Not painted at all: not shown.
+        d.set_style(clip, "display", "none");
+        assert!(!text_shown_across(&d, word));
+    }
+
+    #[test]
+    fn a_page_form_needs_a_painted_match() {
+        let (mut d, body) = page();
+        let loader = d.add(Some(body), "div");
+        d.set_style(loader, "display", "none");
+        d.el_mut(loader).check_visibility = Some(false);
+        let shown = d.add(Some(body), "div");
+        d.set_rect(shown, 40.0, 100.0, 200.0, 40.0);
+        assert!(!page_form_painted(&d, "bounce-easing", &[loader]));
+        assert!(page_form_painted(&d, "bounce-easing", &[loader, shown]));
+        assert!(!page_form_painted(&d, "pulsing-dot", &[loader]));
+        assert!(!page_form_painted(&d, "dark-glow", &[loader]));
+        // Outside the list, and with nothing matched, base behavior stands.
+        assert!(page_form_painted(&d, "layout-transition", &[loader]));
+        assert!(page_form_painted(&d, "bounce-easing", &[]));
+        // A pseudo-element host with no box of its own still counts.
+        let host = d.add(Some(body), "div");
+        d.set_rect(host, 40.0, 200.0, 0.0, 0.0);
+        assert!(page_form_painted(&d, "pulsing-dot", &[host]));
     }
 }

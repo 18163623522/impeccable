@@ -10,7 +10,7 @@ use base64::Engine as _;
 use impeccable_core::browser::visual::{
     self, GlyphPixel, PixelContrastOutcome, GLYPH_MIN_PIXELS,
 };
-use impeccable_core::js::{math_max, number_to_string, to_fixed};
+use impeccable_core::js::{math_max, number_to_string};
 use serde_json::{json, Value};
 
 use crate::cdp::{CdpResult, Page};
@@ -257,6 +257,129 @@ pub fn capture_visual_contrast_candidate(
     let Some(clip) = sanitize_screenshot_clip(candidate.get("clip"), Some(viewport_width)) else {
         return Ok(None);
     };
+    // A candidate past the document's content box (text inside an element the
+    // page scrolls instead of its document) paints nothing in a beyond-viewport
+    // capture, so both shots would read blank. Scroll it into view, read its
+    // pixels there, and put the scroll back.
+    let brought = bring_into_view(page, candidate, &clip, viewport_width);
+    let (candidate, clip) = match &brought {
+        Some((moved, moved_clip)) => (moved, *moved_clip),
+        None => (candidate, clip),
+    };
+    let outcome = measure_candidate(page, candidate, &reasons, clip);
+    if brought.is_some() {
+        let _ = page.evaluate(RESTORE_SCROLL_JS);
+    }
+    outcome
+}
+
+/// `(selector, match) => element`: the element a candidate names. `match` is
+/// the candidate's `[n, count]` when its selector matched several elements
+/// (a repeated id), and then the `n`th match is the one, while the page still
+/// has `count` of them; `querySelector`'s first match would be a copy the
+/// candidate never came from. `null` for an invalid selector or no match.
+pub(crate) const PICK_CANDIDATE_JS: &str = r#"((selector, match) => {
+  let matches;
+  try {
+    matches = document.querySelectorAll(selector);
+  } catch (e) {
+    return null;
+  }
+  if (Array.isArray(match) && matches.length === match[1] && matches[match[0]]) return matches[match[0]];
+  return matches[0] || null;
+})"#;
+
+const BRING_INTO_VIEW_JS: &str = r#"(async (el) => {
+  if (!el) return null;
+  const saved = [];
+  // Ancestors through slots and shadow roots, so a shadow frame the scroll
+  // moves is put back too.
+  const up = n => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  for (let p = up(el); p; p = up(p)) saved.push([p, p.scrollTop, p.scrollLeft]);
+  const sx = window.scrollX;
+  const sy = window.scrollY;
+  el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+  const moved = window.scrollX !== sx || window.scrollY !== sy
+    || saved.some(([p, t, l]) => p.scrollTop !== t || p.scrollLeft !== l);
+  if (!moved) return { moved: false };
+  window.__impeccableContrastRestore = () => {
+    for (const [p, t, l] of saved) {
+      if (p.scrollTop !== t || p.scrollLeft !== l) p.scrollTo({ top: t, left: l, behavior: 'instant' });
+    }
+    window.scrollTo({ left: sx, top: sy, behavior: 'instant' });
+  };
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const r = el.getBoundingClientRect();
+  return { moved: true, x: r.left + window.scrollX, y: r.top + window.scrollY, width: r.width, height: r.height };
+})"#;
+
+const RESTORE_SCROLL_JS: &str = "(() => { const restore = window.__impeccableContrastRestore; delete window.__impeccableContrastRestore; if (restore) restore(); })()";
+
+/// Whether a clip reaches where a beyond-viewport capture paints nothing:
+/// below the document's content box (allowing the 2px pad and the rounding a
+/// candidate clip carries) or starting right of it. `content` is
+/// `Page.getLayoutMetrics().cssContentSize`.
+pub fn clip_beyond_content(clip: &Clip, content: (f64, f64)) -> bool {
+    let (width, height) = content;
+    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+        return false;
+    }
+    clip.y + clip.height > height + 4.0 || clip.x >= width
+}
+
+/// For a clip past the content box, scroll its element into view and return
+/// the candidate with the clip measured there. `None` leaves the page as it
+/// was: nothing moved, or nothing to move.
+fn bring_into_view(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    clip: &Clip,
+    viewport_width: f64,
+) -> Option<(Value, Clip)> {
+    let content = page.content_size().ok()?;
+    if !clip_beyond_content(clip, content) {
+        return None;
+    }
+    let selector = candidate
+        .get("selector")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let v = page
+        .evaluate_value(&format!(
+            "({BRING_INTO_VIEW_JS})(({PICK_CANDIDATE_JS})({}, {}))",
+            json!(selector),
+            candidate.get("match").cloned().unwrap_or(Value::Null)
+        ))
+        .ok()?;
+    if v.get("moved").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let n = |key: &str| v.get(key).and_then(Value::as_f64).filter(|f| f.is_finite());
+    let live = match (n("x"), n("y"), n("width"), n("height")) {
+        (Some(x), Some(y), Some(w), Some(h)) => json!({
+            "x": math_max(0.0, (x - 2.0).floor()),
+            "y": math_max(0.0, (y - 2.0).floor()),
+            "width": math_max(1.0, (w + 4.0).ceil()),
+            "height": math_max(1.0, (h + 4.0).ceil()),
+        }),
+        _ => Value::Null,
+    };
+    let Some(moved_clip) = sanitize_screenshot_clip(Some(&live), Some(viewport_width)) else {
+        let _ = page.evaluate(RESTORE_SCROLL_JS);
+        return None;
+    };
+    let mut moved = candidate.clone();
+    moved["clip"] = live;
+    Some((moved, moved_clip))
+}
+
+/// The pixel pair for one candidate at `clip`: text painted, then hidden.
+fn measure_candidate(
+    page: &mut Page<'_>,
+    candidate: &Value,
+    reasons: &[String],
+    clip: Clip,
+) -> CdpResult<Option<RawFinding>> {
     let before = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height)?;
     let token = format!(
         "impeccable-contrast-{}-{}",
@@ -276,13 +399,8 @@ pub fn capture_visual_contrast_candidate(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let apply_expr = format!(
-        r#"(({{ selector, token, backgroundClipText }}) => {{
-    let el;
-    try {{
-      el = document.querySelector(selector);
-    }} catch {{
-      return false;
-    }}
+        r#"(({{ selector, match, token, backgroundClipText }}) => {{
+    const el = ({PICK_CANDIDATE_JS})(selector, match);
     if (!el) return false;
     let style = document.getElementById('impeccable-visual-contrast-hide-style');
     if (!style) {{
@@ -304,7 +422,7 @@ pub fn capture_visual_contrast_candidate(
     if (backgroundClipText) el.setAttribute('data-impeccable-bgclip-text', 'true');
     return true;
   }})({})"#,
-        json!({ "selector": selector, "token": token, "backgroundClipText": bgclip })
+        json!({ "selector": selector, "match": candidate.get("match").cloned().unwrap_or(Value::Null), "token": token, "backgroundClipText": bgclip })
     );
     let applied = page.evaluate_value(&apply_expr)?;
     if applied.as_bool() != Some(true) {
@@ -313,17 +431,14 @@ pub fn capture_visual_contrast_candidate(
     let after = page.screenshot_clip(clip.x, clip.y, clip.width, clip.height);
     // finally: remove the marker attributes (errors swallowed).
     let cleanup_expr = format!(
-        r#"(({{ selector }}) => {{
-      try {{
-        const el = document.querySelector(selector);
-        if (el) {{
-          el.removeAttribute('data-impeccable-visual-contrast-target');
-          el.removeAttribute('data-impeccable-bgclip-text');
-        }}
-      }} catch {{
+        r#"(({{ token }}) => {{
+      for (const el of document.querySelectorAll('[data-impeccable-visual-contrast-target]')) {{
+        if (el.getAttribute('data-impeccable-visual-contrast-target') !== token) continue;
+        el.removeAttribute('data-impeccable-visual-contrast-target');
+        el.removeAttribute('data-impeccable-bgclip-text');
       }}
     }})({})"#,
-        json!({ "selector": selector })
+        json!({ "token": token })
     );
     let _ = page.evaluate(&cleanup_expr);
     let after = after?;
@@ -365,15 +480,35 @@ pub fn capture_visual_contrast_candidate(
     };
     Ok(Some(RawFinding {
         id: "low-contrast",
-        snippet: format!(
-            "pixel contrast {}:1 median {}:1 (need {}:1) on {}{}",
-            to_fixed(measured, 1),
-            to_fixed(median, 1),
-            js_string(candidate.get("threshold").unwrap_or(&Value::Null)),
-            reason_label,
-            text_label
+        snippet: pixel_contrast_snippet(
+            measured,
+            median,
+            candidate.get("threshold").unwrap_or(&Value::Null),
+            &reason_label,
+            &text_label,
         ),
     }))
+}
+
+/// The pixel pass's snippet. The verdict and the median print against the
+/// threshold ([`impeccable_core::color::ratio_label`]), so a verdict just
+/// under the bar never reads as the bar itself.
+fn pixel_contrast_snippet(
+    measured: f64,
+    median: f64,
+    threshold: &Value,
+    reason_label: &str,
+    text_label: &str,
+) -> String {
+    let bar = num(Some(threshold));
+    format!(
+        "pixel contrast {}:1 median {}:1 (need {}:1) on {}{}",
+        impeccable_core::color::ratio_label(measured, bar),
+        impeccable_core::color::ratio_label(median, bar),
+        js_string(threshold),
+        reason_label,
+        text_label
+    )
 }
 
 fn truthy(v: &Value) -> bool {
@@ -407,6 +542,51 @@ fn rand_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use impeccable_core::js::to_fixed;
+
+    /// A slotted element scrolls inside its host's shadow frame: bringing it
+    /// into view records that frame, and the restore puts it back.
+    #[test]
+    fn a_shadow_frame_the_scroll_moves_is_put_back() {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let Ok(exe) = crate::discovery::find_browser(&env) else { return };
+        let Ok(mut browser) = crate::cdp::Browser::launch(&exe, &[], false) else { return };
+        let mut page = browser.new_page().unwrap();
+        page.goto("about:blank", "load", std::time::Duration::from_secs(15)).unwrap();
+        let setup = r#"(() => {
+  document.body.innerHTML = '<x-frame><p id="deep">Deep copy</p></x-frame>';
+  document.querySelector('x-frame').attachShadow({ mode: 'open' }).innerHTML =
+    '<div id="frame" style="height:300px;overflow:auto"><div style="height:3000px"></div><slot></slot></div>';
+  return true;
+})()"#;
+        page.evaluate_value(setup).unwrap();
+        let moved = page
+            .evaluate_value(&format!("({BRING_INTO_VIEW_JS})(document.getElementById('deep'))"))
+            .unwrap();
+        assert_eq!(moved.get("moved").and_then(Value::as_bool), Some(true), "{moved}");
+        let frame = "document.querySelector('x-frame').shadowRoot.getElementById('frame').scrollTop";
+        assert!(page.evaluate_value(frame).unwrap().as_f64().unwrap() > 0.0);
+        page.evaluate_value(RESTORE_SCROLL_JS).unwrap();
+        assert_eq!(page.evaluate_value(frame).unwrap().as_f64(), Some(0.0));
+        page.close();
+        browser.close();
+    }
+
+    #[test]
+    fn pixel_snippet_never_prints_a_failing_verdict_as_the_bar() {
+        assert_eq!(
+            pixel_contrast_snippet(4.4983, 4.62, &json!(4.5), "solid-background", " \"Plans\""),
+            "pixel contrast 4.49:1 median 4.6:1 (need 4.5:1) on solid-background \"Plans\""
+        );
+        assert_eq!(
+            pixel_contrast_snippet(2.998, 2.998, &json!(3), "visual background", ""),
+            "pixel contrast 2.99:1 median 2.99:1 (need 3:1) on visual background"
+        );
+        assert_eq!(
+            pixel_contrast_snippet(3.46, 3.9, &json!(4.5), "image", ""),
+            "pixel contrast 3.5:1 median 3.9:1 (need 4.5:1) on image"
+        );
+    }
 
     #[test]
     fn sanitize_clip_matches_js() {
@@ -425,6 +605,23 @@ mod tests {
         assert_eq!(c.width, 1.0);
         assert!(sanitize_screenshot_clip(None, None).is_none());
         assert!(sanitize_screenshot_clip(Some(&Value::Null), None).is_none());
+    }
+
+    #[test]
+    fn clips_past_the_content_box_are_brought_into_view() {
+        let clip = |x: f64, y: f64, width: f64, height: f64| Clip { x, y, width, height };
+        // A body scroller: the document is one 844px viewport tall.
+        assert!(clip_beyond_content(&clip(42.0, 2709.0, 357.0, 47.0), (390.0, 844.0)));
+        // Text at the document's foot, the clip's pad and rounding included.
+        assert!(!clip_beyond_content(&clip(40.0, 3380.0, 200.0, 24.0), (1280.0, 3401.0)));
+        assert!(!clip_beyond_content(&clip(40.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // Starting past the right edge.
+        assert!(clip_beyond_content(&clip(1400.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // Straddling the right edge still paints.
+        assert!(!clip_beyond_content(&clip(1200.0, 300.0, 200.0, 24.0), (1280.0, 3401.0)));
+        // No usable content size: leave the clip as it is.
+        assert!(!clip_beyond_content(&clip(0.0, 5000.0, 10.0, 10.0), (0.0, 0.0)));
+        assert!(!clip_beyond_content(&clip(0.0, 5000.0, 10.0, 10.0), (f64::NAN, 800.0)));
     }
 
     fn png_base64(w: u32, h: u32, rgba: &[u8]) -> String {
@@ -509,5 +706,42 @@ mod tests {
         .unwrap();
         assert_eq!(m.glyph_pixels, 32);
         assert!(measured(&m).unwrap() > 15.0, "{:?}", m.outcome);
+    }
+
+    #[test]
+    fn partly_covered_pixels_do_not_set_the_verdict_or_the_median() {
+        // 12 glyph cores (#141414 on white, 18.4:1) and 30 pixels four fifths
+        // covered (#434343, 9.9:1). The partly covered ones clear three
+        // quarters of the strongest change, so they used to outvote the cores
+        // for the verdict, while the median came from yet another set.
+        let mut before = vec![255u8; 16 * 16 * 4];
+        for i in 0..12 {
+            for c in 0..3 {
+                before[i * 4 + c] = 20;
+            }
+        }
+        for i in 12..42 {
+            for c in 0..3 {
+                before[i * 4 + c] = 67;
+            }
+        }
+        let after = vec![255u8; 16 * 16 * 4];
+        let cand = json!({ "preferRenderedForeground": true, "textColor": Value::Null });
+        let m = compare_screenshot_contrast(
+            &png_base64(16, 16, &before),
+            &png_base64(16, 16, &after),
+            &cand,
+        )
+        .unwrap()
+        .unwrap();
+        match m.outcome {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 12);
+                assert!(measured > 15.0, "{measured}");
+                assert!(measured <= median, "{measured} above {median}");
+                assert_eq!(to_fixed(measured, 1), to_fixed(median, 1));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

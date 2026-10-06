@@ -56,6 +56,34 @@
       text-transform: uppercase;
       color: #5b5046;
     }
+    /* A 15px eyebrow over a 44px heading: the ceiling follows the heading. */
+    .large-kicker,
+    .mid-kicker {
+      display: block;
+      width: 280px;
+      margin: 0 0 8px;
+      font-size: 15px;
+      line-height: 20px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: #5b5046;
+    }
+    .large-h2 {
+      font-size: 44px;
+      line-height: 50px;
+    }
+    /* Framer sets the eyebrow's type on a p inside a bare div. */
+    .eyebrow-wrap {
+      margin: 0 0 16px;
+    }
+    .framer-eyebrow {
+      margin: 0;
+      font-size: 12.375px;
+      line-height: 14px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #8a6417;
+    }
     .smallcaps-kicker {
       display: block;
       width: 240px;
@@ -235,6 +263,18 @@
         <div role="heading" aria-level="2" class="role-heading">"Heading Role Kicker"</div>
         <p>Elements carrying a heading role are headings for this rule.</p>
       </section>
+
+      <section class="case">
+        <p class="large-kicker">Device walkthrough</p>
+        <h2 class="large-h2">"Relative Kicker Ceiling"</h2>
+        <p>A 15px tracked label over a 44px heading is as small, relative to it, as a 12px one over a 32px heading.</p>
+      </section>
+
+      <section class="case">
+        <div class="eyebrow-wrap"><p class="framer-eyebrow">Hear from our client</p></div>
+        <div class="heading-wrap"><h2>"Eyebrow In A Framer Wrapper"</h2></div>
+        <p>The label's type lives on a p inside a bare div, and the heading leads its own wrapper.</p>
+      </section>
     </section>
 
     <section class="col" aria-label="Should pass">
@@ -315,6 +355,12 @@
         <span class="pass-kicker">A quiet lead-in sentence</span>
         <h2>"Sentence Case Lead In"</h2>
         <p>Not uppercase, not small-caps: an ordinary standfirst.</p>
+      </section>
+
+      <section class="case">
+        <span class="mid-kicker">Supported hardware</span>
+        <h3>"Label Too Large For Its Heading"</h3>
+        <p>A 15px label over a 24px heading reads as a subheading, not a kicker.</p>
       </section>
 
       <section class="case">

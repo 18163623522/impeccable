@@ -16,10 +16,15 @@ use crate::checks::measures::{
     resolve_length_px, text_wraps_to_multiple_lines, TRACKED_LABEL_MAX_CHARS,
 };
 use crate::checks::rules::RuleHit;
+use super::text_geometry::{
+    holds_only_phrasing, line_pitch_px, phrasing_holds_break, phrasing_text_extent, phrasing_text_font,
+    scrolling_ancestor_cuts, text_line_count,
+};
 use crate::checks::text_rules::{
-    is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
+    average_glyph_advance_em_at, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
+    ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
+    LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
     SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
@@ -444,15 +449,70 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
 }
 
 /// Whether this element carries heading text, for the tight-leading floor:
-/// the element is a heading (or takes the ARIA role), or it is one of the
-/// inline tags a heading's text sits in. A block of body copy nested inside a
-/// heading is not heading text and keeps the floor.
-pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+/// the element is a heading (or takes the ARIA role), one of the inline tags
+/// a heading's text sits in, or any other box under a heading (the `div` a
+/// design system wraps heading copy in). A reading block nested inside a
+/// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
+/// keeps the floor.
+pub fn is_heading_text(dom: &dyn Dom, el: ElId) -> bool {
     if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
         return true;
     }
-    LEADING_HEADING_TEXT_TAGS.contains(&tag)
-        && closest_or_none(dom, el, LEADING_HEADING_CONTEXT).is_some()
+    let Some(heading) = closest_or_none(dom, el, LEADING_HEADING_CONTEXT) else {
+        return false;
+    };
+    // An inline tag (an anchor, a span) is heading text too, by the same
+    // walk: no reading block sits between it and the heading. One inside a
+    // `p` nested in the heading is that paragraph's body copy.
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        if c == heading {
+            break;
+        }
+        if QUALITY_TEXT_TAGS.contains(&tag_lower(dom, c).as_str()) {
+            return false;
+        }
+        cur = dom.parent(c);
+    }
+    true
+}
+
+/// The tags whose prose is measured for `line-length` when its words sit
+/// wholly in inline children (`<p><i>…</i></p>`).
+const LINE_PROSE_TAGS: &[&str] = &["p", "li", "dd", "blockquote"];
+
+/// The line-height `normal` stands for when counting line boxes: a text rect
+/// one line tall is at most about 1.5em, two lines at least about 2.3em.
+const NORMAL_LINE_HEIGHT_EM: f64 = 1.2;
+
+/// How much of its content box a block's widest line fills before
+/// `body-text-viewport-edge` takes the box's edges as the text's. A wrapped
+/// paragraph's ragged right is under a word short of its column, and the box
+/// is what an author sets.
+const TEXT_FILLS_MEASURE: f64 = 0.9;
+
+/// The height of one line box of an element's own box. An inline box that
+/// wraps reports the union of its fragments, two 21px highlight lines as one
+/// 43px box, while each fragment a reader sees is one line tall. Blocks, and
+/// an inline box whose lines cannot be counted, keep their box height.
+fn own_line_box_height(
+    dom: &dyn Dom,
+    el: ElId,
+    rect: &Rect,
+    own_line_height: Option<f64>,
+    font_size: f64,
+) -> f64 {
+    if dom.style(el, "display") != "inline" {
+        return rect.height;
+    }
+    let (Some(own), Some(t)) = (own_line_height, dom.direct_text_rect(el)) else {
+        return rect.height;
+    };
+    if !(own > 0.0) || !t.all_finite() || t.height <= 0.0 {
+        return rect.height;
+    }
+    let lines = text_line_count(t.height, line_pitch_px(dom, el, own), font_size);
+    rect.height / lines
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -488,6 +548,92 @@ pub struct QualityInput {
     pub viewport_width: f64,
 }
 
+/// The largest box, on either axis, that reads as an icon rather than a
+/// picture.
+const RASTER_ICON_MAX_PX: f64 = 48.0;
+
+/// The `blur()` radius past which a faint raster is a blur-up placeholder.
+const RASTER_PLACEHOLDER_MIN_BLUR_PX: f64 = 4.0;
+
+/// Whether a near-transparent raster is one state of a layer rather than
+/// buried material: vector art, an icon-sized box, a blurred low-resolution
+/// placeholder, or a frame stacked under a painted raster in the same box (a
+/// crossfade whose visible frame is a sibling, a placeholder under a parent
+/// that paints the loaded picture).
+fn raster_is_state_layer(dom: &dyn Dom, el: ElId, tag: &str, bg: &str, rect: &Rect) -> bool {
+    if crate::checks::measures::raster_source_is_svg(tag == "img", dom.attr(el, "src").as_deref(), bg) {
+        return true;
+    }
+    if rect.width > 0.0
+        && rect.height > 0.0
+        && rect.width <= RASTER_ICON_MAX_PX
+        && rect.height <= RASTER_ICON_MAX_PX
+    {
+        return true;
+    }
+    if filter_blur_px(&dom.style(el, "filter")) >= RASTER_PLACEHOLDER_MIN_BLUR_PX {
+        return true;
+    }
+    let area = rect.width * rect.height;
+    if !(area > 0.0) {
+        return false;
+    }
+    let covers = |other: &Rect| {
+        let w = (rect.right.min(other.right) - rect.left.max(other.left)).max(0.0);
+        let h = (rect.bottom.min(other.bottom) - rect.top.max(other.top)).max(0.0);
+        w * h >= area * 0.5
+    };
+    let paints_raster = |node: ElId| {
+        let own = parse_float(&dom.style(node, "opacity"));
+        let visible = !own.is_finite() || own >= 0.15;
+        let t = tag_lower(dom, node);
+        let raster = matches!(t.as_str(), "img" | "picture" | "video" | "canvas")
+            || QUALITY_RASTER_URL_RE.is_match(&dom.style(node, "backgroundImage"));
+        visible && raster && dom.style(node, "display") != "none" && covers(&dom.rect(node))
+    };
+    let Some(parent) = dom.parent(el) else {
+        return false;
+    };
+    if dom
+        .children(parent)
+        .into_iter()
+        .any(|sibling| sibling != el && paints_raster(sibling))
+    {
+        return true;
+    }
+    let mut ancestor = Some(parent);
+    for _ in 0..2 {
+        let Some(node) = ancestor else {
+            break;
+        };
+        if Some(node) == dom.body() || Some(node) == dom.document_element() {
+            break;
+        }
+        if paints_raster(node) {
+            return true;
+        }
+        ancestor = dom.parent(node);
+    }
+    false
+}
+
+/// The largest `blur()` radius in a computed `filter`, 0 when there is none.
+fn filter_blur_px(filter: &str) -> f64 {
+    let mut max = 0.0f64;
+    let lower = filter.to_ascii_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(start) = rest.find("blur(") {
+        let after = &rest[start + 5..];
+        let end = after.find(')').unwrap_or(after.len());
+        let v = parse_float(js::trim(&after[..end]));
+        if v.is_finite() {
+            max = max.max(v);
+        }
+        rest = &after[end..];
+    }
+    max
+}
+
 /// JS: checks.mjs#checkQuality(opts), browser adapter inputs (`rect` set,
 /// `win` = window).
 pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
@@ -517,7 +663,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let op = parse_float(&st("opacity"));
         if op.is_finite() && op < 0.15 && op >= 0.0 {
             let bg = st("backgroundImage");
-            if tag == "img" || QUALITY_RASTER_URL_RE.is_match(&bg) {
+            if (tag == "img" || QUALITY_RASTER_URL_RE.is_match(&bg))
+                && !raster_is_state_layer(dom, el, tag, &bg, rect)
+            {
                 let label = if tag == "img" {
                     dom.attr(el, "alt").unwrap_or_default()
                 } else {
@@ -568,7 +716,13 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     // this rule names is the eye losing its place tracking back to the start
     // of the next line, so it takes a column of long lines to do the damage;
     // one long line and a short tail is a sentence that wrapped once.
-    if has_direct_text
+    //
+    // Prose whose words sit wholly in inline children is read the same way:
+    // the rects cover every text node under the element, so the block that
+    // sets the lines is the one measured.
+    let prose_in_phrasing =
+        !has_direct_text && LINE_PROSE_TAGS.contains(&tag) && holds_only_phrasing(dom, el);
+    if (has_direct_text || prose_in_phrasing)
         && QUALITY_TEXT_TAGS.contains(&tag)
         && rect.width > 0.0
         && (text_len as f64) > line_max
@@ -599,7 +753,12 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
 
     // --- Cramped padding ---
     let is_inline_code = tag == "code" && closest_or_none(dom, el, "pre").is_none();
-    if !is_inline_code && has_direct_text && text_len > 20 && rect.width > 100.0 && rect.height > 30.0 {
+    if !is_inline_code
+        && has_direct_text
+        && text_len > 20
+        && rect.width > 100.0
+        && own_line_box_height(dom, el, rect, q.line_height_px, font_size) > 30.0
+    {
         let borders = [
             spx("borderTopWidth"),
             spx("borderRightWidth"),
@@ -891,11 +1050,16 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Body text touching viewport edge ---
-    if has_direct_text
-        && text_len > 40
-        && matches!(js::to_upper_case(tag).as_str(), "P" | "LI")
-        && viewport_width > 0.0
-    {
+    // Measured on the text where it can be: a centred or padded paragraph
+    // spans the viewport with its box while its glyphs keep a gutter, and a
+    // paragraph a horizontal scroller cuts (a slide in a swiped track) meets
+    // that track's clip rather than the page edge. A box that only hides its
+    // overflow proves no track, so text it cuts at the screen edge reports.
+    // Prose whose words sit wholly in inline children is measured the same
+    // way. Where the text cannot be measured the box stands in, as before.
+    let is_edge_tag = matches!(js::to_upper_case(tag).as_str(), "P" | "LI");
+    let edge_prose = !has_direct_text && is_edge_tag && holds_only_phrasing(dom, el);
+    if (has_direct_text || edge_prose) && text_len > 40 && is_edge_tag && viewport_width > 0.0 {
         let in_nav_header =
             closest_or_none(dom, el, "nav").is_some() || closest_or_none(dom, el, "header").is_some();
         let bg = st("backgroundColor");
@@ -903,11 +1067,52 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let pos = st("position");
         let is_positioned = pos == "fixed" || pos == "absolute";
         let width_ratio = rect.width / viewport_width;
-        let left_close = rect.left < 16.0;
-        let right_close = rect.right > viewport_width - 16.0;
-        if !in_nav_header && !has_own_bg && !is_positioned && width_ratio > 0.5 && (left_close || right_close) {
-            let l = number_to_string(math_round(rect.left));
-            let r = number_to_string(math_round(viewport_width - rect.right));
+        let span = if in_nav_header || has_own_bg || is_positioned || !(width_ratio > 0.5) {
+            None
+        } else {
+            match phrasing_text_extent(dom, el) {
+                Some(t) if scrolling_ancestor_cuts(dom, el, &t) => None,
+                Some(t) => {
+                    let content_left = rect.left + spx("borderLeftWidth") + spx("paddingLeft");
+                    let content_right = rect.right - spx("borderRightWidth") - spx("paddingRight");
+                    let pitch = q
+                        .line_height_px
+                        .filter(|lh| *lh > 0.0)
+                        .unwrap_or(font_size * NORMAL_LINE_HEIGHT_EM);
+                    if text_line_count(t.height, pitch, font_size) >= 2.0
+                        && t.width >= (content_right - content_left) * TEXT_FILLS_MEASURE
+                    {
+                        // Wrapped lines that fill the column reach its edges;
+                        // how ragged the longest line happens to be is not
+                        // the gutter.
+                        Some((content_left, content_right))
+                    } else if st("display") == "list-item" {
+                        // A list item's marker is painted, not a text node:
+                        // an `inside` bullet sits at the content edge ahead of
+                        // the text, so the start side reaches that edge.
+                        if st("direction") == "rtl" {
+                            Some((t.left, js::math_max(t.right, content_right)))
+                        } else {
+                            Some((js::math_min(t.left, content_left), t.right))
+                        }
+                    } else {
+                        Some((t.left, t.right))
+                    }
+                }
+                None if has_direct_text => Some((rect.left, rect.right)),
+                None => None,
+            }
+        };
+        let (left, right) = span.unwrap_or((f64::NAN, f64::NAN));
+        // Text wholly past either side of the viewport meets no edge a reader
+        // sees: a desktop column laid out past a phone viewport, a list
+        // parked 800px to the right.
+        let in_viewport = right > 0.0 && left < viewport_width;
+        let left_close = in_viewport && left < 16.0;
+        let right_close = in_viewport && right > viewport_width - 16.0;
+        if left_close || right_close {
+            let l = number_to_string(math_round(left));
+            let r = number_to_string(math_round(viewport_width - right));
             let which = if left_close && right_close {
                 format!("left {}px / right {}px", l, r)
             } else if left_close {
@@ -946,7 +1151,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         && font_size > 0.0
         && font_size < LEADING_DISPLAY_TYPE_PX
     {
-        if let Some(lh) = q.line_height_px {
+        if let Some(own_lh) = q.line_height_px {
+            // An inline run's lines are set on the block around it, whose
+            // strut is the pitch when it is taller than the run's own value.
+            let lh = line_pitch_px(dom, el, own_lh);
             let ratio = lh / font_size;
             // Compare on the ratio the snippet prints, so a page that sets
             // line-height: 1.3 exactly is never flagged for hitting the floor
@@ -958,7 +1166,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 if wraps
                     && !is_non_rendered_text(dom, el, tag)
                     && !is_visually_hidden(dom, el)
-                    && !is_heading_text(dom, el, tag)
+                    && !is_heading_text(dom, el)
                 {
                     findings.push(RuleHit::new(
                         "tight-leading",
@@ -1018,6 +1226,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             && font_size < 11.0
             && dt_len >= 2
             && !ui_skip_tags.contains(&tag)
+            // A footnote marker is set small by convention, and so is the
+            // link inside it (`<sup><a>[7]</a></sup>`).
+            && closest_or_none(dom, el, "sub, sup").is_none()
             && !is_non_rendered_text(dom, el, tag)
         {
             let is_exempt_context = matches_or_closest(dom, el, EXEMPT_CONTEXT);
@@ -1198,6 +1409,113 @@ pub fn check_page_quality_dom(dom: &dyn Dom) -> Vec<BrowserFinding> {
 mod tests {
     use super::*;
     use crate::browser::fake_dom::FakeDom;
+
+    fn raster(d: &mut FakeDom, parent: ElId, tag: &str, rect: (f64, f64, f64, f64)) -> ElId {
+        let el = d.add(Some(parent), tag);
+        d.set_styles(el, &[("opacity", "0"), ("backgroundImage", "none"), ("filter", "none")]);
+        d.set_rect(el, rect.0, rect.1, rect.2, rect.3);
+        el
+    }
+
+    fn buried(d: &FakeDom, el: ElId) -> bool {
+        check_quality(
+            d,
+            &QualityInput {
+                el,
+                tag: tag_lower(d, el),
+                has_direct_text: false,
+                text_len: 0,
+                font_size: 16.0,
+                line_height_px: None,
+                letter_spacing_px: None,
+                rect: d.rect(el),
+                line_max: 80.0,
+                viewport_width: 1280.0,
+            },
+        )
+        .iter()
+        .any(|h| h.id == "buried-raster")
+    }
+
+    /// climatempo.com.br's icon states, picomq.com's copy button,
+    /// exxonmobil.com's blur-up placeholders, resurf.so's crossfade frames.
+    #[test]
+    fn buried_raster_skips_state_layers() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let photo = raster(&mut d, body, "img", (0.0, 0.0, 480.0, 300.0));
+        d.set_attr(photo, "src", "/texture.png");
+        assert!(buried(&d, photo));
+        d.set_attr(photo, "src", "/dist/images/v2/svg/location-granted.svg");
+        assert!(!buried(&d, photo), "vector art");
+
+        let copy = raster(&mut d, body, "button", (0.0, 400.0, 480.0, 300.0));
+        d.set_style(copy, "backgroundImage", "url(\"data:image/svg+xml,%3Csvg%3E\")");
+        assert!(!buried(&d, copy), "an SVG data URI");
+
+        let icon = raster(&mut d, body, "img", (0.0, 800.0, 16.0, 16.0));
+        d.set_attr(icon, "src", "/pin.png");
+        assert!(!buried(&d, icon), "an icon-sized raster");
+
+        let placeholder = raster(&mut d, body, "canvas", (0.0, 1000.0, 353.0, 199.0));
+        d.set_style(placeholder, "backgroundImage", "url(\"/keytopic.jpg?w=40\")");
+        assert!(buried(&d, placeholder));
+        d.set_style(placeholder, "filter", "blur(10px)");
+        assert!(!buried(&d, placeholder), "a blurred placeholder");
+
+        let card = d.add(Some(body), "article");
+        d.set_style(card, "backgroundImage", "url(\"/keytopic.jpg?w=2048\")");
+        d.set_rect(card, 16.0, 1600.0, 321.0, 181.0);
+        let under = raster(&mut d, card, "canvas", (0.0, 1590.0, 353.0, 199.0));
+        d.set_style(under, "backgroundImage", "url(\"/keytopic.jpg?w=40\")");
+        assert!(!buried(&d, under), "under a parent painting the loaded picture");
+
+        let stack = d.add(Some(body), "div");
+        let shown = raster(&mut d, stack, "img", (160.0, 3012.0, 960.0, 600.0));
+        d.set_style(shown, "opacity", "1");
+        let frame = raster(&mut d, stack, "img", (160.0, 3012.0, 960.0, 600.0));
+        d.set_attr(frame, "src", "/screenshot-inbox.png");
+        assert!(!buried(&d, frame), "a crossfade frame under a painted sibling");
+        d.set_style(shown, "opacity", "0");
+        assert!(buried(&d, frame), "no painted frame over it");
+    }
+
+    /// copperhead.sh: `<sup><a>[7]</a></sup>` at 10.2px.
+    #[test]
+    fn undersized_ui_text_skips_links_inside_markers() {
+        let ui = |d: &FakeDom, el: ElId| {
+            check_quality(
+                d,
+                &QualityInput {
+                    el,
+                    tag: "a".to_string(),
+                    has_direct_text: true,
+                    text_len: 3,
+                    font_size: 10.2,
+                    line_height_px: None,
+                    letter_spacing_px: None,
+                    rect: Rect::from_xywh(0.0, 0.0, 12.0, 13.0),
+                    line_max: 80.0,
+                    viewport_width: 1280.0,
+                },
+            )
+            .iter()
+            .any(|h| h.id == "undersized-ui-text")
+        };
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = d.add(Some(body), "p");
+        d.add_text(p, "The board was routed in one pass");
+        let sup = d.add(Some(p), "sup");
+        let link = d.add(Some(sup), "a");
+        d.add_text(link, "[7]");
+        d.add_selector(link, INTERACTIVE);
+        assert!(!ui(&d, link));
+        let nav_link = d.add(Some(body), "a");
+        d.add_text(nav_link, "[7]");
+        d.add_selector(nav_link, INTERACTIVE);
+        assert!(ui(&d, nav_link));
+    }
 
     fn text_el(d: &mut FakeDom, body: ElId, tag: &str, text: &str, font: &str) -> ElId {
         let p = d.add(Some(body), tag);
@@ -1978,6 +2296,14 @@ mod tests {
             vec!["line-height 1.10x (need >=1.3)"],
             "paragraph nested in a heading"
         );
+        // And so is an inline run inside that paragraph.
+        let nested_p = d.add(Some(h3), "p");
+        let nested_run = wrapped(&mut d, nested_p, "span", "16px", 17.6);
+        assert_eq!(
+            leading(&d, nested_run),
+            vec!["line-height 1.10x (need >=1.3)"],
+            "span in a paragraph nested in a heading"
+        );
 
         // line-height: 1.3 on 18px computes to 23.4px, and 23.4 / 18 lands
         // just under 1.3 in binary floats.
@@ -1997,6 +2323,314 @@ mod tests {
         d.set_rect(boxless, 0.0, 0.0, 0.0, 0.0);
         d.el_mut(boxless).direct_text_rect = None;
         assert!(leading(&d, boxless).is_empty(), "zero-area box");
+    }
+
+    fn snippets(d: &FakeDom, el: ElId, rule: &str) -> Vec<String> {
+        check_element_quality_dom(d, el, &BrowserConfig::default())
+            .into_iter()
+            .filter(|h| h.id == rule)
+            .map(|h| h.snippet)
+            .collect()
+    }
+
+    /// observations-20 row 8: the estimate read the box, so a one-line note
+    /// in a wide box, a centred footer line and a block that never fills its
+    /// column reported. Where the text is measured, the text decides.
+    #[test]
+    fn line_length_measures_the_rendered_text() {
+        let long = "word ".repeat(40);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = text_el(&mut d, body, "p", &long, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 40.0, 100.0, 1200.0, 48.0);
+
+        // Two lines that fill their 1,200px box.
+        d.set_text_lines(p, &[(40.0, 102.0, 1180.0, 20.0), (40.0, 126.0, 1180.0, 20.0)]);
+        assert_eq!(
+            snippets(&d, p, "line-length"),
+            vec!["~100 chars on 2 of 2 rendered lines (aim for <80)"]
+        );
+        // One line in the same box sends the eye nowhere.
+        d.set_text_lines(p, &[(40.0, 102.0, 1180.0, 20.0)]);
+        assert!(snippets(&d, p, "line-length").is_empty(), "one line");
+        // Centred lines well short of the box: 119 characters on two lines
+        // is ~60 a line.
+        let centred = text_el(&mut d, body, "p", &"word ".repeat(24), "16px");
+        d.set_style(centred, "lineHeight", "24px");
+        d.set_rect(centred, 40.0, 200.0, 1200.0, 48.0);
+        d.set_text_lines(centred, &[(340.0, 202.0, 600.0, 20.0), (340.0, 226.0, 600.0, 20.0)]);
+        assert!(snippets(&d, centred, "line-length").is_empty(), "centred block");
+        // A union with no lines behind it is not read.
+        d.el_mut(p).text_line_rects = None;
+        d.set_text_rect(p, 40.0, 102.0, 1180.0, 44.0);
+        assert!(snippets(&d, p, "line-length").is_empty(), "no lines recorded");
+
+        // simplybudget.framer.ai: 94 characters on two lines ended by a
+        // `<br>`. Each line is as long as the author left it.
+        let broken = text_el(&mut d, body, "p", &"word ".repeat(19), "16px");
+        d.set_style(broken, "lineHeight", "28.8px");
+        d.set_rect(broken, 260.0, 900.0, 760.0, 57.6);
+        d.set_text_lines(broken, &[(260.0, 904.0, 660.0, 20.0), (260.0, 933.0, 80.0, 20.0)]);
+        assert!(snippets(&d, broken, "line-length").is_empty(), "one long line and a tail");
+    }
+
+    /// observations-20 row 29: a full-width CJK glyph is an em wide, so the
+    /// half-em estimate doubled so-net.ne.jp's count.
+    #[test]
+    fn line_length_counts_cjk_glyphs_at_an_em() {
+        let copy = "戸建/マンションは、NTTから送付される「開通のご案内」に記載の「ご利用サービス名」など、回線事業者からの案内をご確認のうえタイプに合ったコースをお選びください。".repeat(2);
+        let len = utf16_len(&copy);
+        assert!(len > 80);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = text_el(&mut d, body, "p", &copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 110.0, 100.0, 1060.0, 72.0);
+        d.set_text_lines(
+            p,
+            &[(110.0, 104.0, 1048.0, 16.0), (110.0, 128.0, 1048.0, 16.0), (110.0, 152.0, 1048.0, 16.0)],
+        );
+        assert!(snippets(&d, p, "line-length").is_empty(), "a third of the glyphs a line");
+        // A wider CJK column still reports, at its own count.
+        let wide = text_el(&mut d, body, "p", &copy.repeat(2), "16px");
+        d.set_rect(wide, 0.0, 300.0, 1600.0, 72.0);
+        d.set_text_lines(
+            wide,
+            &[(0.0, 304.0, 1590.0, 16.0), (0.0, 328.0, 1590.0, 16.0), (0.0, 352.0, 1590.0, 16.0)],
+        );
+        let hits = snippets(&d, wide, "line-length");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].starts_with("~10"), "{hits:?}");
+    }
+
+    /// walkthroughs-20 miss 2: prose whose words sit wholly in `<b>`, `<i>` or
+    /// `<span>` was never measured, because the paragraph has no direct text.
+    #[test]
+    fn prose_in_inline_children_is_measured_on_its_paragraph() {
+        let long = "word ".repeat(40);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        let intro = text_el(&mut d, body, "p", "", "16px");
+        d.set_styles(intro, &[("lineHeight", "24px"), ("display", "block")]);
+        d.set_rect(intro, 0.0, 100.0, 1280.0, 72.0);
+        let b = d.add(Some(intro), "b");
+        d.set_style(b, "display", "inline");
+        d.add_text(b, "Opening words ");
+        d.set_text_rect(b, 0.0, 102.0, 120.0, 20.0);
+        let i = d.add(Some(intro), "i");
+        d.set_style(i, "display", "inline");
+        d.add_text(i, &long);
+        d.set_text_rect(i, 0.0, 102.0, 1270.0, 68.0);
+        // The paragraph's lines are the lines of the text under it.
+        d.set_text_lines(intro, &[(0.0, 102.0, 1270.0, 20.0), (0.0, 126.0, 1270.0, 20.0), (0.0, 150.0, 300.0, 20.0)]);
+        d.el_mut(intro).direct_text_rect = None;
+        let len = utf16_len(js::trim(&d.text_content(intro)));
+        assert_eq!(
+            snippets(&d, intro, "line-length"),
+            vec![format!(
+                "~{} chars on 2 of 3 rendered lines (aim for <80)",
+                ((len as f64) * 1270.0 / 2840.0).round()
+            )]
+        );
+        assert_eq!(
+            snippets(&d, intro, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px / right 0px)")]
+        );
+        // The inline children report neither rule themselves.
+        for child in [b, i] {
+            let hits = check_element_quality_dom(&d, child, &BrowserConfig::default());
+            assert!(
+                !hits.iter().any(|h| h.id == "line-length" || h.id == "body-text-viewport-edge"),
+                "{hits:?}"
+            );
+        }
+        // Inline prose the Dom cannot measure stays silent, as before.
+        d.el_mut(intro).text_line_rects = None;
+        d.el_mut(b).direct_text_rect = None;
+        d.el_mut(i).direct_text_rect = None;
+        assert!(snippets(&d, intro, "line-length").is_empty());
+        assert!(snippets(&d, intro, "body-text-viewport-edge").is_empty());
+        // A paragraph holding a block component is not inline prose.
+        d.set_text_rect(i, 0.0, 102.0, 1270.0, 68.0);
+        d.set_text_lines(intro, &[(0.0, 102.0, 1270.0, 20.0), (0.0, 126.0, 1270.0, 20.0), (0.0, 150.0, 300.0, 20.0)]);
+        d.el_mut(intro).direct_text_rect = None;
+        let card = d.add(Some(intro), "div");
+        d.set_style(card, "display", "block");
+        assert!(snippets(&d, intro, "line-length").is_empty());
+    }
+
+    /// observations-20 row 31: a centred or padded paragraph spans the
+    /// viewport with its box while its glyphs keep a gutter, and a slide cut
+    /// by its carousel track meets the track's clip, not the page edge.
+    #[test]
+    fn viewport_edge_measures_the_text_not_the_box() {
+        let copy = "Two sides. One rivalry. Zero middle ground. Show them where you stand today.";
+        let len = utf16_len(copy);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        let p = text_el(&mut d, body, "p", copy, "16px");
+        d.set_style(p, "lineHeight", "24px");
+        d.set_rect(p, 0.0, 100.0, 1280.0, 24.0);
+        // Centred glyphs, 300px off both edges.
+        d.set_text_rect(p, 300.0, 102.0, 680.0, 20.0);
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "centred");
+        // Padded: the glyphs start 32px in.
+        d.set_text_rect(p, 32.0, 102.0, 680.0, 20.0);
+        assert!(snippets(&d, p, "body-text-viewport-edge").is_empty(), "padded");
+        // Glyphs at the edge report, with the text's own distances.
+        d.set_text_rect(p, 0.0, 102.0, 680.0, 20.0);
+        assert_eq!(
+            snippets(&d, p, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px)")]
+        );
+        // With no text rect the box stands in, as before.
+        d.el_mut(p).direct_text_rect = None;
+        assert_eq!(
+            snippets(&d, p, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 0px / right 0px)")]
+        );
+
+        // Text a box that only hides overflow cuts at 1,270px: an
+        // `overflow-hidden` section (v0-optimus-delta.vercel.app) cannot be
+        // told from a carousel track, and the text reports as base did. Its
+        // two lines fill the paragraph, so the paragraph's edge is the one
+        // printed.
+        let track = d.add(Some(body), "div");
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden")]);
+        d.set_rect(track, 10.0, 300.0, 1260.0, 200.0);
+        d.el_mut(track).client_width = 1260.0;
+        d.el_mut(track).scroll_width = 1590.0;
+        let slide = text_el(&mut d, track, "p", copy, "16px");
+        d.set_style(slide, "lineHeight", "24px");
+        d.set_rect(slide, 900.0, 320.0, 700.0, 48.0);
+        d.set_text_rect(slide, 900.0, 322.0, 690.0, 44.0);
+        let cut = vec![format!("<p> with {len}-char body bleeds to viewport edge (right -320px)")];
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow: hidden");
+        d.set_styles(track, &[("overflowX", "hidden"), ("overflow", "hidden auto")]);
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut, "cut by overflow-x-hidden");
+        // A track that scrolls on x, with the slide to scroll to, brings the
+        // text into view: its clip is the track's, not the page's gutter.
+        d.set_styles(track, &[("overflowX", "auto"), ("overflow", "auto")]);
+        assert!(snippets(&d, slide, "body-text-viewport-edge").is_empty(), "a swiped track");
+        // Out of the track, the same text runs off the page and reports.
+        d.set_styles(track, &[("overflowX", "visible"), ("overflow", "visible")]);
+        assert_eq!(snippets(&d, slide, "body-text-viewport-edge"), cut);
+
+        // Wrapped lines that fill a padded paragraph sit on its content box.
+        let padded = text_el(&mut d, body, "p", copy, "16px");
+        d.set_styles(padded, &[("lineHeight", "24px"), ("paddingLeft", "24px"), ("paddingRight", "24px")]);
+        d.set_rect(padded, 0.0, 700.0, 1280.0, 48.0);
+        d.set_text_rect(padded, 24.0, 702.0, 1220.0, 44.0);
+        assert!(snippets(&d, padded, "body-text-viewport-edge").is_empty(), "24px padding");
+        d.set_styles(padded, &[("paddingLeft", "8px"), ("paddingRight", "8px")]);
+        d.set_text_rect(padded, 8.0, 702.0, 1230.0, 44.0);
+        assert_eq!(
+            snippets(&d, padded, "body-text-viewport-edge"),
+            vec![format!("<p> with {len}-char body bleeds to viewport edge (left 8px / right 8px)")]
+        );
+
+        // A list item's `inside` marker paints at the content edge ahead of
+        // its text, so the start side reaches that edge.
+        let li = text_el(&mut d, body, "li", copy, "16px");
+        d.set_styles(li, &[("lineHeight", "24px"), ("display", "list-item"), ("paddingLeft", "0px"), ("borderLeftWidth", "0px")]);
+        d.set_rect(li, 0.0, 600.0, 1280.0, 24.0);
+        d.set_text_rect(li, 18.0, 602.0, 700.0, 20.0);
+        assert_eq!(
+            snippets(&d, li, "body-text-viewport-edge"),
+            vec![format!("<li> with {len}-char body bleeds to viewport edge (left 0px)")]
+        );
+        // Given a gutter of its own, the item keeps off the edge.
+        d.set_style(li, "paddingLeft", "24px");
+        d.set_text_rect(li, 42.0, 602.0, 700.0, 20.0);
+        assert!(snippets(&d, li, "body-text-viewport-edge").is_empty());
+    }
+
+    /// observations-20 row 40: an inline run at `line-height: 11px` inside a
+    /// 14px block sits on 14px lines, and a label at 18px inside a 22.4px
+    /// block sits on 22.4px ones.
+    #[test]
+    fn tight_leading_reads_the_block_an_inline_run_sits_on() {
+        const COPY: &str = "Free furniture, free books, free clothes, free computers, and more besides.";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let block = d.add(Some(body), "div");
+        d.set_styles(block, &[("display", "inline-block"), ("fontSize", "14px"), ("lineHeight", "14px")]);
+        let run = text_el(&mut d, block, "span", COPY, "11px");
+        d.set_styles(run, &[("display", "inline"), ("lineHeight", "11px")]);
+        d.set_rect(run, 46.0, 100.0, 298.0, 40.0);
+        d.set_text_rect(run, 46.0, 100.0, 280.0, 40.0);
+        assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.27x (need >=1.3)"]);
+        d.set_style(block, "lineHeight", "22.4px");
+        assert!(snippets(&d, run, "tight-leading").is_empty(), "set on the block's 22.4px");
+        // A block strut that cannot be resolved leaves the run's own value.
+        d.set_style(block, "lineHeight", "normal");
+        assert_eq!(snippets(&d, run, "tight-leading"), vec!["line-height 1.00x (need >=1.3)"]);
+    }
+
+    /// walkthroughs-20 note 13: tchibo.de sets its teaser headlines as
+    /// `<h5><div>…</div></h5>`. Any box inside a heading carries heading text,
+    /// unless it is a reading block nested there.
+    #[test]
+    fn tight_leading_exempts_heading_copy_in_a_block_wrapper() {
+        const COPY: &str = "Jede Woche neu! Lassen Sie sich von unseren Kollektionen immer wieder neu inspirieren";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let h5 = d.add(Some(body), "h5");
+        let wrapper = text_el(&mut d, h5, "div", COPY, "19px");
+        d.set_style(wrapper, "lineHeight", "24px");
+        d.set_rect(wrapper, 12.0, 100.0, 366.0, 72.0);
+        d.set_text_rect(wrapper, 12.0, 100.0, 330.0, 71.0);
+        assert!(snippets(&d, wrapper, "tight-leading").is_empty(), "div in a heading");
+        // A paragraph of body copy in a heading keeps the floor, and so does
+        // what sits inside it.
+        let para = text_el(&mut d, h5, "p", COPY, "16px");
+        d.set_style(para, "lineHeight", "17.6px");
+        d.set_rect(para, 12.0, 200.0, 300.0, 70.4);
+        d.set_text_rect(para, 12.0, 200.0, 300.0, 70.4);
+        assert_eq!(snippets(&d, para, "tight-leading"), vec!["line-height 1.10x (need >=1.3)"]);
+        let inner = text_el(&mut d, para, "div", COPY, "16px");
+        d.set_style(inner, "lineHeight", "17.6px");
+        d.set_rect(inner, 12.0, 300.0, 300.0, 70.4);
+        d.set_text_rect(inner, 12.0, 300.0, 300.0, 70.4);
+        assert_eq!(snippets(&d, inner, "tight-leading").len(), 1, "a box inside the paragraph");
+    }
+
+    /// observations-20 row 41: a two-line inline highlight reports the union
+    /// of its fragments, 43px, while each fragment is one 21px line.
+    #[test]
+    fn cramped_padding_judges_an_inline_box_per_line() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let hl = text_el(&mut d, body, "span", "carrier's own estimating guide", "14px");
+        d.set_styles(
+            hl,
+            &[
+                ("display", "inline"),
+                ("lineHeight", "25.9px"),
+                ("backgroundColor", "rgb(254, 240, 138)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "5px"),
+                ("paddingRight", "5px"),
+            ],
+        );
+        d.set_rect(hl, 55.0, 100.0, 234.0, 42.9);
+        d.set_text_rect(hl, 55.0, 100.0, 234.0, 42.9);
+        assert!(snippets(&d, hl, "cramped-padding").is_empty(), "two one-line fragments");
+        // A box one 43px line tall is past the gate.
+        d.set_style(hl, "display", "inline-block");
+        assert_eq!(
+            snippets(&d, hl, "cramped-padding"),
+            vec!["0px of space above and below the text (need ≥4.2px for 14px text)"]
+        );
     }
 
     #[test]

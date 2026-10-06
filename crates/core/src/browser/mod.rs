@@ -67,6 +67,9 @@
 //!   `getLayerValue`, the candidate-analysis finalization. Its plain-data
 //!   plans and rects are shared. The async pixel sampling (Image loading,
 //!   canvas draws) stays JS and feeds these.
+//! - `text_layers`: what the hit-test stacks over a run of text say about the
+//!   surface the contrast walk resolved (covered at capture, paint the walk
+//!   never read, or consistent), over the occlusion grid's points.
 //!
 //! Porting rules are the crate's usual ones (see docs/PORTING-GUIDE.md):
 //! JS number/string semantics through `crate::js`, field order preserved,
@@ -87,6 +90,8 @@ pub mod painted;
 pub mod quality;
 pub mod snapshot;
 pub mod text_collectors;
+pub mod text_geometry;
+pub mod text_layers;
 pub mod visual;
 
 pub use dom::{Dom, ElId, Rect};

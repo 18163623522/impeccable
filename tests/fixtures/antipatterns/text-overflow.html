@@ -38,6 +38,10 @@
       width: 120px;
       white-space: nowrap;
     }
+    .ellipsis { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .truncate { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+    .flag-pseudo-suffix::after { content: " and a long generated suffix that runs past the box"; }
   </style>
 </head>
 <body>
@@ -49,6 +53,18 @@
       <!-- Inline owner: the span has no client geometry, so only the rect-vs-container
            path can catch it. The parent box has no direct text and must not flag. -->
       <div class="box"><span class="flag-inline-spill" style="white-space: nowrap">IOC-QARTOD-ARGO-PROFILES-SPILLING-WELL-PAST-THE-CELL</span></div>
+      <!-- Clipped with no marker: the line is cut off mid-word, a real spill. -->
+      <div class="box flag-hidden-no-marker" style="overflow: hidden; white-space: nowrap; text-overflow: clip">A clipped line with no ellipsis that simply cuts the words off at the edge.</div>
+      <!-- Truncation classes on an inline span: overflow does not apply to an
+           inline box, so nothing clips or ellipsizes and the line spills. -->
+      <div class="box"><span class="flag-inline-truncate truncate">Order #4821 shipped to the Rotterdam warehouse on Tuesday</span></div>
+      <!-- A page wrapper that hides x overflow (Tailwind overflow-x-hidden)
+           computes the shorthand to `hidden auto`: it scrolls only on y and
+           exempts nothing on x. -->
+      <div style="overflow-x: hidden"><div class="box flag-in-x-hidden-wrapper" style="white-space: nowrap">A long unwrapped line inside a page wrapper that only hides sideways overflow.</div></div>
+      <!-- Generated content past the box. No text rect covers a pseudo-element,
+           so the engine cannot measure it and the spill stands. -->
+      <div class="box flag-pseudo-suffix" style="white-space: nowrap">Tag</div>
     </section>
 
     <!-- PASS column: real scroll regions, preformatted code, wrapping text, scroll ancestors -->
@@ -66,6 +82,17 @@
       </div>
       <div class="box"><span class="pass-inline-fits" style="white-space: nowrap">Fits fine</span></div>
       <div class="box"><span class="pass-inline-wraps">An ordinary inline span with wrapping text that stays inside its container across several lines.</span></div>
+      <!-- Truncation the author asked for: an ellipsis, a line clamp, and an
+           inline run inside an ellipsizing row all end at their marker. -->
+      <div class="box pass-ellipsis ellipsis">A byline long enough to end in an ellipsis inside its narrow box.</div>
+      <div class="box pass-clamp clamp">Supercalifragilisticexpialidocioussupercalifragilisticexpialidocious in a two line clamp.</div>
+      <div class="box ellipsis"><span class="pass-inline-in-ellipsis">An inline headline run that the ellipsizing row around it truncates.</span></div>
+      <!-- scrollWidth counts content that paints nothing past the box: an
+           empty ripple layer, text pushed out of a clipping box to show a
+           sprite, a min-width reserve kept for a rotating word. -->
+      <a class="box pass-ripple" href="#" style="display: inline-flex; position: relative; overflow: hidden; width: 120px">Shop now<span style="position: absolute; display: block; width: 340px; height: 340px; left: -110px; top: -150px"></span></a>
+      <a class="box pass-image-replacement" href="#" style="display: block; overflow: hidden; text-indent: -9999px; height: 20px">Internet access plans</a>
+      <div class="box pass-reserve">Durable streams on <span style="display: inline-block; min-width: 220px">storage</span></div>
     </section>
   </div>
 </body>

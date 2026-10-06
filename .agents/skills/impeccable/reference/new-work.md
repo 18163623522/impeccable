@@ -98,7 +98,7 @@ Build the assigned direction, not a safer interpretation of it. The form supplie
 
 When an approved comp exists, it is a spatial contract, not a mood board: only the user can downgrade its authority, in explicit words. Models systematically believe their HTML, CSS, and SVG recreation of an image succeeded when it did not, so the build runs as a state machine on disk whose gates measure the screen against the comp instead of asking you to remember it. Start it once, and let it tell you what is next:
 
-`.agents/skills/impeccable/scripts/impeccable build-phase start --direction <seed key> --kind <assigned|pick|challenger|canon> --artifact <entry file>` right after the direction choice (this is also the choice ping; the roll's output names the exact command), or `start --comp <approved comp> --artifact <entry file>` when a surface round already locked one.
+`.agents/skills/impeccable/scripts/impeccable build-phase start --direction <seed key> --artifact <entry file>` right after the direction choice, adding `--decision-comp <path>` when the chosen card has a decision comp (the path CHOSEN COMP names) so the comps gate counts it as option one, or `start --comp <approved comp> --artifact <entry file>` when a surface round already locked one. Start is not the choice ping: that is the `concept-seed --kind` rerun the roll's TELEMETRY line names, sent once when the roll printed one.
 
 Then, in order, each closed by `.agents/skills/impeccable/scripts/impeccable build-phase advance` (every verb below runs as `.agents/skills/impeccable/scripts/impeccable <verb>`; exit 2 means the gate failed and printed why; fix that and advance again; write nothing for a later phase while an earlier gate is open):
 

@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod background;
 pub mod cascade;
+pub mod decorative_text;
 pub mod dom;
 pub mod engine;
 pub mod layer;

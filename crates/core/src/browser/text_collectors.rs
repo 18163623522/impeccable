@@ -325,6 +325,7 @@ fn hits(v: Vec<crate::checks::measures::Finding>) -> Vec<RuleHit> {
         .map(|f| RuleHit {
             id: f.id,
             snippet: f.snippet,
+            severity: None,
         })
         .collect()
 }

@@ -133,6 +133,10 @@ pub const STATIC_DEFAULT_STYLE: &[(&str, &str)] = &[
     ("left", "auto"),
     ("inset", ""),
     ("display", ""),
+    // Past the JS list: the tight-leading floor exempts a bold title in a
+    // `-webkit-box` line clamp, which takes the clamp value as well as the
+    // display.
+    ("webkitLineClamp", "none"),
     ("overflow", "visible"),
     ("overflowX", "visible"),
     ("overflowY", "visible"),
@@ -181,6 +185,7 @@ pub const STATIC_PROP_MAP: &[(&str, &str)] = &[
     ("text-align", "textAlign"),
     ("hyphens", "hyphens"),
     ("-webkit-hyphens", "webkitHyphens"),
+    ("-webkit-line-clamp", "webkitLineClamp"),
     ("transition-property", "transitionProperty"),
     ("transition-timing-function", "transitionTimingFunction"),
     ("animation-name", "animationName"),

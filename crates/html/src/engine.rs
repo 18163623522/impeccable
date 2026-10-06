@@ -48,6 +48,11 @@ pub trait DesignSystemHook {
     fn collect_static(&self, doc: &StaticDocument, file_path: &str) -> Vec<Finding>;
     /// JS `mergeDesignSystemFindings(staticDesignFindings, sourceDesignFindings)`.
     fn merge(&self, static_findings: Vec<Finding>, source_findings: Vec<Finding>) -> Vec<Finding>;
+    /// Drop the findings of checks the design system switches off (the
+    /// purple forms of ai-color-palette when DESIGN.md declares a purple).
+    /// Runs over every built-in finding, before a rule pack and inline
+    /// ignores.
+    fn drop_switched_off(&self, _findings: &mut Vec<Finding>) {}
 }
 
 /// JS `runTextContentAnalyzers(html, filePath, options)` from the regex
@@ -246,7 +251,13 @@ pub fn detect_html_source(
                 if scoped_ignore_active(el, &h.id) {
                     continue;
                 }
-                if let Some(f) = mk(&h.id, &h.snippet) {
+                if let Some(mut f) = mk(&h.id, &h.snippet) {
+                    // A hit's own severity (a contrast ratio just under its
+                    // bar) overrides the registry's.
+                    if let Some(sev) = h.severity.filter(|s| !s.is_empty()) {
+                        f.severity = sev;
+                        impeccable_core::findings::derive_advisory_flag(&mut f);
+                    }
                     findings.push(f);
                 }
             }
@@ -278,6 +289,18 @@ pub fn detect_html_source(
                 f,
             )
         };
+        let flat_type_severity = crate::page::flat_type_hierarchy_severity_for_doc(&doc);
+        for h in page("typography-rules", &|| check_static_page_typography(&doc)) {
+            if let Some(mut f) = mk(&h.id, &h.snippet) {
+                if h.id == "flat-type-hierarchy" {
+                    if let Some(sev) = flat_type_severity {
+                        f.severity = sev.to_string();
+                        impeccable_core::findings::derive_advisory_flag(&mut f);
+                    }
+                }
+                findings.push(f);
+            }
+        }
         let mut push_hits = |hits: Vec<RuleHit>| {
             for h in hits {
                 if let Some(f) = mk(&h.id, &h.snippet) {
@@ -285,9 +308,6 @@ pub fn detect_html_source(
                 }
             }
         };
-        push_hits(page("typography-rules", &|| {
-            check_static_page_typography(&doc)
-        }));
         push_hits(page("kicker-above-heading", &|| {
             check_kicker_above_heading_from_doc(&doc)
         }));
@@ -397,6 +417,10 @@ pub fn detect_html_source(
                 }
             }
         }
+    }
+
+    if let Some(ds) = options.design_system {
+        ds.drop_switched_off(&mut findings);
     }
 
     // A rule pack sees the page after every built-in pass (element rules, the

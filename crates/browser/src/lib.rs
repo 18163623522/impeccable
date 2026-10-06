@@ -274,6 +274,9 @@ struct RawResult {
     /// and the evidence resolves the selector to this element (see
     /// [`scan_identities`]).
     scan_el: Option<ElId>,
+    /// The third-party vendor the finding belongs to (see
+    /// [`impeccable_core::third_party`]); its message already names it.
+    third_party: Option<String>,
 }
 
 impl RawResult {
@@ -286,6 +289,7 @@ impl RawResult {
             selector: None,
             origin,
             scan_el: None,
+            third_party: None,
         }
     }
 }
@@ -503,7 +507,7 @@ fn detect_url_impl(
             step(profile, "load", "close-browser", url, || b.close());
         }
     }
-    let (findings, _) = results_to_findings(url, scanned?)?;
+    let (findings, _) = results_to_findings(url, scanned?, options.design_system.as_deref())?;
     Ok(findings)
 }
 
@@ -532,7 +536,7 @@ pub fn detect_url_evidence(
         options.profile.as_deref(),
         Some((&mut evidence, request)),
     )?;
-    let (findings, origins) = results_to_findings(&url, results)?;
+    let (findings, origins) = results_to_findings(&url, results, options.design_system.as_deref())?;
     evidence.origins = origins;
     Ok((findings, evidence))
 }
@@ -583,7 +587,7 @@ pub fn replay_url_scan(
         measured.hidden_chars,
         measured.hidden_samples,
     ));
-    let (findings, _) = results_to_findings(url, results)?;
+    let (findings, _) = results_to_findings(url, results, options.design_system.as_deref())?;
     Ok(ReplayOutcome {
         findings,
         unanswered_hit_tests: unanswered,
@@ -591,14 +595,24 @@ pub fn replay_url_scan(
 }
 
 /// Map raw results onto registry findings, returning each one's origin
-/// alongside.
+/// alongside. A design system that declares a purple switches the purple
+/// forms of ai-color-palette off (see
+/// [`impeccable_detect::design_system::drop_declared_purple_findings`]).
 fn results_to_findings(
     url: &str,
     results: Vec<RawResult>,
+    design_system: Option<&DesignSystem>,
 ) -> Result<(Vec<Finding>, Vec<&'static str>), EngineError> {
+    let purple_off = design_system
+        .filter(|ds| ds.present)
+        .and_then(|ds| ds.declared_purple())
+        .is_some();
     let mut findings = Vec::with_capacity(results.len());
     let mut origins = Vec::with_capacity(results.len());
     for r in results {
+        if purple_off && impeccable_core::checks::rules::is_purple_palette_finding(&r.id, &r.snippet) {
+            continue;
+        }
         let Some(mut item) = try_finding(&r.id, url, &r.snippet, 0.0) else {
             // JS: `finding()` dereferences an unknown registry entry.
             return Err(EngineError::new(
@@ -611,6 +625,9 @@ fn results_to_findings(
         }
         if let Some(selector) = r.selector {
             item.extras.insert("selector".into(), Value::String(selector));
+        }
+        if let Some(vendor) = r.third_party {
+            item.extras.insert("thirdParty".into(), Value::String(vendor));
         }
         if !r.severity.is_empty() && r.severity != item.severity {
             item.severity = r.severity;
@@ -640,6 +657,10 @@ fn results_from_groups(groups: &[Value]) -> Vec<RawResult> {
                 selector: selector.clone(),
                 origin: origin::SCAN,
                 scan_el: None,
+                third_party: f
+                    .get("thirdParty")
+                    .and_then(Value::as_str)
+                    .map(String::from),
             });
         }
     }
@@ -871,26 +892,18 @@ fn scan_page_inner(
     })?;
     results.extend(hidden);
 
-    for error in page.page_errors().into_iter().take(3) {
-        // The message alone rarely says which script failed (`Uncaught
-        // [object Object]`, a minified React invariant), so the finding names
-        // where it was thrown.
-        let snippet = match error.source {
-            Some(source) => format!("{} ({source})", error.message),
-            None => error.message,
-        };
-        results.push(RawResult::new(
-            origin::SCRIPT_ERROR,
-            "script-error".to_string(),
-            snippet,
-        ));
-    }
+    results.extend(capped_script_errors(
+        page.page_errors().iter().map(|e| (e.message.as_str(), e.source.as_deref())),
+    ));
 
     let analyses = step(profile, "visual-contrast", "browser-analyze", url, || {
         snapshot_engine::analyze_visual_contrast(page, &base, 12.0, true)
     })
     .map_err(cdp_err)?;
     let mut visual = run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
+    for r in visual.iter_mut() {
+        tag_widget_vendor(&base, r);
+    }
     if evidence.is_some() {
         for r in visual.iter_mut() {
             r.scan_el = r.selector.as_deref().and_then(|s| visual_scan_element(&base, s, &analyses));
@@ -911,6 +924,70 @@ fn scan_page_inner(
         capture_post_scan(page, ev, request, &selectors, &identities);
     }
     Ok(results)
+}
+
+/// At most this many counted script errors per scan, and separately at
+/// most this many ad-tech ones.
+const SCRIPT_ERROR_CAP: usize = 3;
+
+/// The page's deduped errors as `script-error` results, in arrival order.
+/// The cap applies to counted errors and advisory ad-tech errors
+/// separately, after classifying, so ad-tech errors never take the slots a
+/// first-party error needs: three failing ad scripts ahead of a broken app
+/// bundle still report the bundle as an error.
+fn capped_script_errors<'a>(errors: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) -> Vec<RawResult> {
+    let (mut counted, mut ad_tech) = (0usize, 0usize);
+    let mut out = Vec::new();
+    for (message, source) in errors {
+        let r = script_error_result(message, source);
+        let slot = if r.third_party.is_some() { &mut ad_tech } else { &mut counted };
+        if *slot < SCRIPT_ERROR_CAP {
+            *slot += 1;
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// One uncaught page error as a `script-error` result. The message alone
+/// rarely says which script failed (`Uncaught [object Object]`, a minified
+/// React invariant), so the finding names where it was thrown. An error an
+/// ad-tech script threw, or an ad API rejected, names the vendor and reports
+/// as advisory: the page renders fine and the fix is the vendor's (corpus
+/// decision r3-31-script-error-ad-tech).
+fn script_error_result(message: &str, source: Option<&str>) -> RawResult {
+    let snippet = match source {
+        Some(source) => format!("{message} ({source})"),
+        None => message.to_string(),
+    };
+    match impeccable_core::third_party::ad_tech_vendor(message, source) {
+        Some(vendor) => RawResult {
+            severity: "advisory".to_string(),
+            third_party: Some(vendor.to_string()),
+            ..RawResult::new(
+                origin::SCRIPT_ERROR,
+                "script-error".to_string(),
+                impeccable_core::third_party::tag_detail(&snippet, vendor),
+            )
+        },
+        None => RawResult::new(origin::SCRIPT_ERROR, "script-error".to_string(), snippet),
+    }
+}
+
+/// Tag a visual-contrast result on a known widget vendor's markup the way
+/// `serialize_findings` tags the rule pass's: the vendor at the end of the
+/// message and on the finding. The selector's first match in the scan's
+/// capture decides.
+fn tag_widget_vendor(dom: &SnapshotDom, r: &mut RawResult) {
+    if r.third_party.is_some() {
+        return;
+    }
+    let Some(selector) = r.selector.as_deref() else { return };
+    let Ok(Some(el)) = dom.query_one(None, selector) else { return };
+    if let Some(vendor) = impeccable_core::third_party::widget_vendor(dom, el) {
+        r.snippet = impeccable_core::third_party::tag_detail(&r.snippet, vendor);
+        r.third_party = Some(vendor.to_string());
+    }
 }
 
 /// Per flagged selector the scan's capture matched on more than one element,
@@ -1121,6 +1198,7 @@ fn run_visual_contrast_fallback(
         .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
         .map(|(f, selector)| RawResult {
             selector,
+            severity: js_str(f.get("severity")),
             ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
         })
         .collect();
@@ -1175,6 +1253,7 @@ fn run_visual_contrast_fallback(
                 f.map(|f| {
                     vec![RawResult {
                         selector: selector_of(candidate),
+                        severity: f.severity.unwrap_or_default(),
                         ..RawResult::new(origin::VISUAL_CONTRAST, f.id.to_string(), f.snippet)
                     }]
                 })
@@ -1201,6 +1280,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ad_tech_errors_never_take_a_counted_errors_slot() {
+        let prebid = |n: u32| (format!("Uncaught Error: bid {n}"), Some(format!("at https://example.com/prebid/prebid-p{n}.js:1:1")));
+        let mut errors: Vec<(String, Option<String>)> = (1..=4).map(prebid).collect();
+        errors.push(("Uncaught TypeError: cart is undefined".to_string(), Some("at https://example.com/js/app.js:1:1".to_string())));
+        for n in 1..=4 {
+            errors.push((format!("Uncaught Error: first-party {n}"), None));
+        }
+        let results = capped_script_errors(errors.iter().map(|(m, s)| (m.as_str(), s.as_deref())));
+        let summary: Vec<(bool, &str)> =
+            results.iter().map(|r| (r.severity == "advisory", r.snippet.as_str())).collect();
+        assert_eq!(summary.len(), 6, "{summary:?}");
+        // Three ad-tech errors, in arrival order; the fourth is capped.
+        assert!(summary[..3].iter().all(|(advisory, s)| *advisory && s.contains("(third-party: Prebid)")));
+        // The first-party error after them still reports, counted, and the
+        // counted cap stops at three of its own.
+        assert_eq!(summary[3], (false, "Uncaught TypeError: cart is undefined (at https://example.com/js/app.js:1:1)"));
+        assert_eq!(summary[4], (false, "Uncaught Error: first-party 1"));
+        assert_eq!(summary[5], (false, "Uncaught Error: first-party 2"));
+    }
+
+    #[test]
     fn design_system_serialization_shape() {
         assert!(serialize_design_system_for_browser(None).is_null());
         let ds = DesignSystem::default();
@@ -1216,12 +1316,69 @@ mod tests {
             ],
         })];
         let (findings, origins) =
-            results_to_findings("https://example.com/", results_from_groups(&groups)).unwrap();
+            results_to_findings("https://example.com/", results_from_groups(&groups), None).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].extras.get("selector"), Some(&json!("main > h1")));
         assert_eq!(origins, vec![origin::SCAN]);
         let text = serde_json::to_string(&findings[0]).unwrap();
         assert!(text.ends_with(r#""line":0,"snippet":"line-height 1.15x (need >=1.3)","selector":"main > h1"}"#));
+    }
+
+    /// A vendor the serialized group names travels onto the finding, after
+    /// its selector.
+    #[test]
+    fn group_findings_carry_their_vendor() {
+        let groups = vec![json!({
+            "selector": "div.videoCube > button",
+            "findings": [
+                { "type": "undersized-ui-text", "detail": "10px functional text \"Learn More\" (below 11px floor) (third-party: Taboola)", "ignoreValue": "", "severity": "warning", "thirdParty": "Taboola" },
+            ],
+        })];
+        let (findings, _) =
+            results_to_findings("https://example.com/", results_from_groups(&groups), None).unwrap();
+        assert_eq!(findings[0].severity, "warning");
+        let text = serde_json::to_string(&findings[0]).unwrap();
+        assert!(text.ends_with(r#"(third-party: Taboola)","selector":"div.videoCube > button","thirdParty":"Taboola"}"#), "{text}");
+    }
+
+    /// r3-31-script-error-ad-tech: an ad-tech error is advisory and names its
+    /// vendor; anything else is the rule's error.
+    #[test]
+    fn ad_tech_script_errors_are_advisory() {
+        let r = script_error_result(
+            "Uncaught TypeError: a.__fbeventsModules[e] is not a function",
+            Some("at a.getFbeventsModules, https://connect.facebook.net/signals/config/1:20:4472"),
+        );
+        let (findings, _) = results_to_findings("https://example.com/", vec![r], None).unwrap();
+        let f = &findings[0];
+        assert_eq!((f.severity.as_str(), f.advisory), ("advisory", Some(true)));
+        assert_eq!(
+            f.snippet,
+            "Uncaught TypeError: a.__fbeventsModules[e] is not a function (at a.getFbeventsModules, https://connect.facebook.net/signals/config/1:20:4472) (third-party: Meta Pixel)"
+        );
+        assert_eq!(f.extras.get("thirdParty"), Some(&json!("Meta Pixel")));
+
+        let r = script_error_result("Uncaught TypeError: cart is undefined", Some("at renderCart, https://shop.example/app.js:1:1"));
+        let (findings, _) = results_to_findings("https://example.com/", vec![r], None).unwrap();
+        assert_eq!((findings[0].severity.as_str(), findings[0].advisory), ("error", None));
+        assert!(findings[0].extras.get("thirdParty").is_none());
+    }
+
+    /// A design system that declares a purple drops the purple forms of
+    /// ai-color-palette from a URL scan and keeps the evidence origins in step.
+    #[test]
+    fn a_declared_purple_drops_the_purple_forms() {
+        let fm: Map<String, Value> = serde_json::from_value(json!({ "colors": { "primary": "#6d28d9" } })).unwrap();
+        let ds = impeccable_detect::design_system::normalize_design_system(Some(&fm), None, None, None, false);
+        let results = vec![
+            RawResult::new(origin::SCAN, "ai-color-palette".into(), "Purple/violet gradient background".into()),
+            RawResult::new(origin::SCAN, "ai-color-palette".into(), "Cyan gradient background".into()),
+            RawResult::new(origin::SCRIPT_ERROR, "script-error".into(), "Uncaught Error: x".into()),
+        ];
+        let (findings, origins) = results_to_findings("file:///p/index.html", results, Some(&ds)).unwrap();
+        let snippets: Vec<&str> = findings.iter().map(|f| f.snippet.as_str()).collect();
+        assert_eq!(snippets, vec!["Cyan gradient background", "Uncaught Error: x"]);
+        assert_eq!(origins, vec![origin::SCAN, origin::SCRIPT_ERROR]);
     }
 
     // Expected values come from tests/detect-url-launch.test.mjs (issue #657).

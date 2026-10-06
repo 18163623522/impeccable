@@ -15,7 +15,10 @@
 //!   under the bar, never as the bar itself.
 //! - `text-overflow.html`: an ellipsis, a line clamp and an inline run inside
 //!   an ellipsizing row are truncations, not spills; a clipped line with no
-//!   marker, and truncation classes on an inline span, still report.
+//!   marker, and truncation classes on an inline span, still report, cut by
+//!   the flag column's clip; a spill into the next stat, one off the side
+//!   of the window and ones under a positioned image or filled box report;
+//!   spills into free space or under a hairline do not.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -297,6 +300,12 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         "flag-in-x-hidden-wrapper",
         // Generated content no text rect covers: the spill stands.
         "flag-pseudo-suffix",
+        // A spill into the next stat, and one off the side of the window.
+        "flag-stat-collides",
+        "flag-viewport-edge",
+        // A spill under a positioned image, and under a filled box.
+        "flag-under-positioned-image",
+        "flag-under-positioned-box",
     ] {
         assert!(
             overflow.iter().any(|(s, sel)| s.contains(flag) || sel.contains(flag)),
@@ -308,5 +317,5 @@ fn text_overflow_skips_marked_truncation_and_keeps_real_spills() {
         .filter(|(s, sel)| s.contains("pass-") || sel.contains("pass-") || sel.contains("ellipsis"))
         .collect();
     assert!(stray.is_empty(), "should-pass boxes flagged: {stray:?}");
-    assert_eq!(overflow.len(), 7, "{overflow:?}");
+    assert_eq!(overflow.len(), 11, "{overflow:?}");
 }

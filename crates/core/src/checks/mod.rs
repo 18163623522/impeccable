@@ -24,11 +24,16 @@
 //!   positionedStyleImpliesEscape, isOpaqueDecoratedBox. Open (value parsing,
 //!   lengths, alphas, shadows, the style traits and the input structs):
 //!   `impeccable_foundation::css::measures`.
+//! - `decorative_text`: the shapes of text with no reading job (avatar
+//!   initials, version stamps, signatures, mockup text) that report
+//!   `low-contrast` as advisory. The adapters gather the facts.
 //! - `text_rules`: the kicker / numbered-label / em-dash / repeated-text
 //!   gates: isKickerCandidate, isNumberedSectionLabelCandidate,
 //!   checkNumberedSectionLabels, checkEmDashOveruse, isRepeatedTextContainer.
 //!   Open (selector and tag lists, thresholds, the two text parsers):
 //!   `impeccable_foundation::rules::text`.
+//! - `embedded_content`: how both engines read the controls and captions in
+//!   a box that frames embedded content for nested-cards (r4-p17).
 //!
 //! Element/document adapters (`checkElement*`, `*DOM`, `*FromDoc`) are NOT in
 //! core: the static ones live in the `html` crate against its DOM model, the
@@ -40,6 +45,8 @@
 //! `impeccable_foundation::vectors`.
 
 pub mod css_scan;
+pub mod decorative_text;
+pub mod embedded_content;
 pub mod gradient_geometry;
 pub mod html_patterns;
 pub mod measures;

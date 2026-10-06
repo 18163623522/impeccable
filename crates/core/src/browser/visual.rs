@@ -1006,6 +1006,11 @@ pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec
             "backgroundClipText".into(),
             Value::Bool(reasons.iter().any(|r| r == "background-clip text")),
         );
+        // Text with no reading job reports as advisory from either visual
+        // pass; the key is only written when it holds.
+        if super::decorative_text::is_decorative_text_dom(dom, el) {
+            m.insert("decorative".into(), Value::Bool(true));
+        }
         if let Some(identity) = identity {
             m.insert("match".into(), identity);
         }
@@ -1927,6 +1932,18 @@ pub fn sampled_verdict(sorted: &[f64]) -> f64 {
     }
 }
 
+/// The severity a failing visual-contrast verdict on `candidate` carries:
+/// `advisory` for text with no reading job (the candidate's `decorative`)
+/// and for a verdict just under its bar
+/// ([`crate::checks::rules::contrast_near_bar`]), else the rule's own. The
+/// sampled pass here and the URL engine's pixel pass both ask it.
+pub fn visual_contrast_severity(candidate: &Value, measured: f64, threshold: f64) -> Option<String> {
+    if candidate.get("decorative").and_then(Value::as_bool) == Some(true) {
+        return Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+    }
+    crate::checks::rules::contrast_severity(measured, threshold)
+}
+
 /// JS: index.mjs#analyzeVisualContrastCandidate — after the sampling loop:
 /// `samples` is one `{ status, color?, method?, reason? }` per point.
 pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], points_len: usize) -> Value {
@@ -1990,7 +2007,10 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
         text_label
     );
     let finding = if status == "fail" {
-        json!({ "id": "low-contrast", "snippet": detail })
+        match visual_contrast_severity(candidate, measured, threshold) {
+            Some(severity) => json!({ "id": "low-contrast", "snippet": detail, "severity": severity }),
+            None => json!({ "id": "low-contrast", "snippet": detail }),
+        }
     } else {
         Value::Null
     };
@@ -2264,6 +2284,24 @@ mod tests {
         assert_eq!(out2["status"], "unresolved");
         assert_eq!(out2["reason"], "not enough readable samples");
         assert_eq!(out2["samples"], json!(1));
+    }
+
+    #[test]
+    fn finish_analysis_carries_the_advisory_severity() {
+        let white: Vec<Value> = (0..3)
+            .map(|_| json!({ "status": "sampled", "color": { "r": 255, "g": 255, "b": 255, "a": 1 }, "method": "solid-background" }))
+            .collect();
+        let candidate = json!({ "selector": "p", "text": "Hello", "threshold": 4.5 });
+        // 4.4:1 sits inside the normal-text margin (r3-02).
+        let near = finish_analysis(&candidate, &rgba(120.0, 120.0, 120.0, 1.0), &white, 3);
+        assert_eq!(near["finding"]["severity"], "advisory");
+        // 2.3:1 fails outright, unless the text has no reading job (r3-04).
+        let far = finish_analysis(&candidate, &rgba(170.0, 170.0, 170.0, 1.0), &white, 3);
+        assert_eq!(far["status"], "fail");
+        assert!(far["finding"].get("severity").is_none(), "{far}");
+        let decorative = json!({ "selector": "p", "text": "JD", "threshold": 4.5, "decorative": true });
+        let shaped = finish_analysis(&decorative, &rgba(170.0, 170.0, 170.0, 1.0), &white, 3);
+        assert_eq!(shaped["finding"]["severity"], "advisory");
     }
 
     #[test]

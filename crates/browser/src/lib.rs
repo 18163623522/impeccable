@@ -836,11 +836,23 @@ fn hand_over(results: &mut [RawResult], handed: &[bool]) {
 /// r6-t5-unread-pixel-verdicts). Its text is unchanged. Only the verdicts
 /// `hand_over` moved to the visual-contrast origin are touched: the scan
 /// origin is what a replay reproduces, and a replay has no pixels.
-fn settle_handed_over(results: &mut Vec<RawResult>, superseded: &[String]) {
+///
+/// A selector that names several elements (a repeated id) is told apart by
+/// its match (`[n, count]`): `match_of` gives a result's, and a pixel verdict
+/// on one copy leaves the verdict on another standing.
+fn settle_handed_over(
+    results: &mut Vec<RawResult>,
+    superseded: &[CandidateKey],
+    match_of: impl Fn(&RawResult) -> Option<Value>,
+) {
     let handed = |r: &RawResult| r.origin == origin::VISUAL_CONTRAST && r.id == "low-contrast";
     if !superseded.is_empty() {
         results.retain(|r| {
-            !(handed(r) && r.selector.as_deref().is_some_and(|s| superseded.iter().any(|x| x == s)))
+            !(handed(r)
+                && r.selector.as_deref().is_some_and(|s| {
+                    let m = match_of(r);
+                    superseded.iter().any(|k| k.names(s, m.as_ref()))
+                }))
         });
     }
     for r in results.iter_mut().filter(|r| handed(r)) {
@@ -971,32 +983,78 @@ fn check_validity(
     Ok((response, probe, verdict))
 }
 
-/// The consent-wall verdict for a page whose consent manager arrived after
-/// the load-time validity check, with the probe it was read from. `None`
-/// when the page is not a consent wall now, or the probe failed (the hide
-/// pass then runs as before).
-fn late_consent_wall(page: &mut Page<'_>) -> Option<(PageProbe, PageValidity)> {
-    // The first hide pass's rules are on: a root that was an empty stub then
+/// What a late consent pass ([`late_consent_pass`]) found.
+enum LateConsent {
+    /// The page is a consent wall now, with the probe it was read from.
+    Wall(PageProbe, PageValidity),
+    /// It is not; `changed` is whether the hide step altered the page.
+    Clear { changed: bool },
+}
+
+/// The consent-wall check and the hide step for a manager that arrived after
+/// the load-time validity check, in one evaluation: discovery,
+/// classification and hiding read the same page, so a manager inserted in
+/// between can never be hidden without being asked whether it is a wall.
+/// The hide step runs either way (a wall is refused, so what it hid does not
+/// matter); the verdict is read in Rust off the probe it returns. A failed
+/// evaluation falls back to the hide step alone, which is best-effort as
+/// before.
+fn late_consent_pass(page: &mut Page<'_>, consent: &mut ConsentReport) -> LateConsent {
+    // The earlier passes' rules are on: a root that was an empty stub then
     // is hidden by them now, though it holds the wall. The probe reads the
     // page with them off, in one task, so nothing paints in between.
-    // The same goes for the inline hides that pass stamped on a manager
+    // The same goes for the inline hides those passes stamped on a manager
     // whose own inline `!important` outranked the rules, while they are still
-    // its own: a manager that has since set its own display (closing its
-    // dialog) keeps what it set.
+    // theirs ([`consent::STAMP_IS_OURS_JS`]): a manager that has since set its
+    // own display (closing its dialog) keeps what it set. The probe only runs
+    // when a manager's root is in the page, since it is a wall check.
+    let roots: Vec<&str> = consent::CONSENT_MANAGERS.iter().flat_map(|m| m.roots.iter().copied()).collect();
     let expr = format!(
-        "(() => {{ const s = document.getElementById({id}); const marked = Array.from(document.querySelectorAll('[' + {mark} + ']')).filter(el => el.style.getPropertyValue('display') === 'none' && el.style.getPropertyPriority('display') === 'important'); const put = marked.map(el => {{ let prev = ['', '']; try {{ prev = JSON.parse(el.getAttribute({mark})); }} catch (e) {{}} if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display'); return el; }}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; for (const el of put) el.style.setProperty('display', 'none', 'important'); }} }})()",
+        "(() => {{ const roots = {roots}; let any = false; for (const sel of roots) {{ try {{ if (document.querySelector(sel)) {{ any = true; break; }} }} catch (e) {{}} }} let probe = null; if (any) {{ try {{ probe = (() => {{ const s = document.getElementById({id}); const marked = Array.from(document.querySelectorAll('[' + {mark} + ']')).filter({ours}); const put = marked.map(el => {{ let prev = ['', '']; try {{ prev = JSON.parse(el.getAttribute({mark})); }} catch (e) {{}} if (prev[0]) el.style.setProperty('display', prev[0], prev[1]); else el.style.removeProperty('display'); return el; }}); if (s) s.disabled = true; try {{ return {probe}; }} finally {{ if (s) s.disabled = false; for (const el of put) el.style.setProperty('display', 'none', 'important'); }} }})(); }} catch (e) {{ probe = null; }} }} const hide = {hide}; return {{ probe, hide }}; }})()",
+        roots = serde_json::json!(roots),
         id = serde_json::json!(consent::HIDE_STYLE_ID),
         mark = serde_json::json!(consent::INLINE_HIDE_MARK),
+        ours = consent::STAMP_IS_OURS_JS,
         probe = validity::probe_js(),
+        hide = consent::hide_js(),
     );
-    let raw = page.evaluate_value(&expr).ok()?;
-    let probe = PageProbe::from_value(&raw);
-    if probe.consent.is_empty() {
-        return None;
+    let raw = match page.evaluate_value(&expr) {
+        Ok(v) => v,
+        Err(_) => return LateConsent::Clear { changed: hide_consent_banners(page, consent) },
+    };
+    let hide = raw.get("hide").cloned().unwrap_or(Value::Null);
+    consent.merge(&hide);
+    let changed = hide.get("changed").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(probe) = raw.get("probe").filter(|p| p.is_object()).map(PageProbe::from_value) {
+        if !probe.consent.is_empty() {
+            let verdict = validity::classify_with(None, &probe, true);
+            if matches!(verdict, PageValidity::Blocked { kind: validity::BlockKind::ConsentWall, .. }) {
+                return LateConsent::Wall(probe, verdict);
+            }
+        }
     }
-    let verdict = validity::classify_with(None, &probe, true);
-    matches!(verdict, PageValidity::Blocked { kind: validity::BlockKind::ConsentWall, .. })
-        .then_some((probe, verdict))
+    LateConsent::Clear { changed }
+}
+
+/// The refusal for a page [`late_consent_pass`] found to be a consent wall:
+/// the error a plain scan returns, or, for an evidence scan, the probe and
+/// verdict recorded beside an empty finding list.
+fn refuse_late_wall(
+    page: &mut Page<'_>,
+    evidence: Option<(&mut Evidence, &EvidenceRequest)>,
+    probe: PageProbe,
+    verdict: PageValidity,
+) -> Result<Vec<RawResult>, EngineError> {
+    let message = verdict.error_message().unwrap_or_default();
+    match evidence {
+        None => Err(EngineError::new(message)),
+        Some((ev, request)) => {
+            ev.probe = Some(probe);
+            ev.validity = Some(verdict);
+            capture_post_scan(page, ev, request, &[], &Map::new());
+            Ok(Vec::new())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1097,19 +1155,11 @@ fn scan_page_inner(
     // banner can be the whole page, so the consent-wall gate runs again
     // first: hiding a wall would leave nothing to read and report it clean.
     if hide_consent {
-        if let Some((probe, verdict)) = late_consent_wall(page) {
-            let message = verdict.error_message().unwrap_or_default();
-            return match evidence {
-                None => Err(EngineError::new(message)),
-                Some((ev, request)) => {
-                    ev.probe = Some(probe);
-                    ev.validity = Some(verdict);
-                    capture_post_scan(page, ev, request, &[], &Map::new());
-                    Ok(Vec::new())
-                }
-            };
+        if let LateConsent::Wall(probe, verdict) =
+            step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent))
+        {
+            return refuse_late_wall(page, evidence, probe, verdict);
         }
-        step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
     }
     if hide_overlays {
         step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
@@ -1124,8 +1174,11 @@ fn scan_page_inner(
     // A banner that arrived around the capture is hidden, and the page
     // captured again, so the capture, the live hit tests and the pixel reads
     // all see the page without it.
-    let consent_changed =
-        hide_consent && step(profile, "scan", "hide-consent", url, || hide_consent_banners(page, consent));
+    let consent_changed = hide_consent
+        && match step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent)) {
+            LateConsent::Wall(probe, verdict) => return refuse_late_wall(page, evidence, probe, verdict),
+            LateConsent::Clear { changed } => changed,
+        };
     let overlays_changed =
         hide_overlays && step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
     if consent_changed || overlays_changed {
@@ -1183,6 +1236,7 @@ fn scan_page_inner(
     // content-hidden-at-rest: what is still hidden once the reveal handlers
     // have run, measured over the same post-reveal capture.
     let mut unstarted: Option<(f64, Vec<String>)> = None;
+    let mut probed = false;
     let hidden = step_findings(profile, "scan", "content-hidden-at-rest", url, || {
         let mut facts = evidence.as_mut().map(|(ev, _)| &mut ev.scan_facts);
         let _ = base.take_scroll_probes();
@@ -1202,6 +1256,7 @@ fn scan_page_inner(
             if probes.is_empty() {
                 break;
             }
+            probed = true;
             let answers = step(profile, "scan", "scroll-probe", url, || {
                 snapshot_engine::probe_shown_on_scroll(page, &probes)
             })
@@ -1230,6 +1285,23 @@ fn scan_page_inner(
         ))
     })?;
     results.extend(hidden);
+    // The scroll probe scrolled the page after every pre-capture pass, and a
+    // manager or a tour that injects on scroll would now sit over the page
+    // for the pixel pass's hit tests and shots. The late consent check and
+    // the hide steps run once more; the capture the rule pass read predates
+    // them, so it stands.
+    if probed {
+        if hide_consent {
+            if let LateConsent::Wall(probe, verdict) =
+                step(profile, "scan", "hide-consent", url, || late_consent_pass(page, consent))
+            {
+                return refuse_late_wall(page, evidence, probe, verdict);
+            }
+        }
+        if hide_overlays {
+            step(profile, "scan", "hide-overlays", url, || hide_page_overlays(page, overlays));
+        }
+    }
     if let Some(note) = unstarted.and_then(|(chars, samples)| unstarted_slider_note(url, chars, &samples)) {
         notes.push(note);
     }
@@ -1250,7 +1322,9 @@ fn scan_page_inner(
     .map_err(cdp_err)?;
     let (mut visual, superseded) =
         run_visual_contrast_fallback(page, &analyses, &serialized_groups, viewport, profile, url)?;
-    settle_handed_over(&mut results, &superseded);
+    settle_handed_over(&mut results, &superseded, |r| {
+        repeated_match(&base, r.selector.as_deref()?, r.scan_el?)
+    });
     for r in visual.iter_mut() {
         tag_widget_vendor(&base, r);
     }
@@ -1602,6 +1676,54 @@ fn reveal_sweep(page: &mut Page<'_>) -> Result<(), CdpError> {
     Ok(())
 }
 
+/// A visual-contrast candidate's identity: its selector, and its match
+/// (`[n, count]`) when the selector named several elements in the capture (a
+/// repeated id), so copies sharing a selector are not taken for one another.
+#[derive(Debug, Clone, PartialEq)]
+struct CandidateKey {
+    selector: String,
+    matched: Option<Value>,
+}
+
+impl CandidateKey {
+    /// A candidate's or an analysis's key; `None` without a selector.
+    fn of(v: &Value) -> Option<CandidateKey> {
+        Some(CandidateKey {
+            selector: selector_of(v)?,
+            matched: v.get("match").filter(|m| m.is_array()).cloned(),
+        })
+    }
+
+    /// Whether this key names `selector` at `matched`. Without a match on
+    /// either side (a selector that named one element), the selector decides.
+    fn names(&self, selector: &str, matched: Option<&Value>) -> bool {
+        self.selector == selector
+            && match (&self.matched, matched) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+
+    fn names_value(&self, v: &Value) -> bool {
+        selector_of(v).is_some_and(|s| self.names(&s, v.get("match").filter(|m| m.is_array())))
+    }
+}
+
+/// The match [`impeccable_core::browser::visual`] records for a candidate on
+/// `el` (`[n, count]` among the capture's matches of `selector`), for a
+/// selector anchored on an id that names several elements; `None` otherwise.
+fn repeated_match(dom: &dyn Dom, selector: &str, el: ElId) -> Option<Value> {
+    if !selector.contains('#') {
+        return None;
+    }
+    let matches = dom.query_all(None, selector).ok()?;
+    if matches.len() < 2 {
+        return None;
+    }
+    let n = matches.iter().position(|m| *m == el)?;
+    Some(json!([n, matches.len()]))
+}
+
 /// The findings the analytic and canvas analyses give, and the routed
 /// selectors whose element verdict they replace. A selector the element pass
 /// already reported keeps that report, except where the element pass handed
@@ -1611,15 +1733,15 @@ fn reveal_sweep(page: &mut Page<'_>) -> Result<(), CdpError> {
 fn analysis_findings(
     browser_analyses: &[Value],
     existing_low_contrast: &[String],
-    routed: &[String],
-) -> (Vec<RawResult>, Vec<String>) {
-    let is_routed = |sel: Option<&str>| routed.iter().any(|s| Some(s.as_str()) == sel);
+    routed: &[CandidateKey],
+) -> (Vec<RawResult>, Vec<CandidateKey>) {
+    let is_routed = |v: &Value| routed.iter().any(|k| k.names_value(v));
     let findings = browser_analyses
         .iter()
         .filter(|r| {
             let sel = r.get("selector").and_then(Value::as_str);
             truthy(r.get("finding"))
-                && (is_routed(sel) || !existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel))
+                && (is_routed(r) || !existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel))
         })
         .filter_map(|r| r.get("finding").map(|f| (f, selector_of(r))))
         .map(|(f, selector)| RawResult {
@@ -1628,13 +1750,12 @@ fn analysis_findings(
             ..RawResult::new(origin::VISUAL_CONTRAST, js_str(f.get("id")), js_str(f.get("snippet")))
         })
         .collect();
-    let mut superseded: Vec<String> = Vec::new();
+    let mut superseded: Vec<CandidateKey> = Vec::new();
     for r in browser_analyses {
-        let sel = r.get("selector").and_then(Value::as_str);
         let resolved = matches!(r.get("status").and_then(Value::as_str), Some("fail") | Some("pass"));
-        if let Some(s) = sel.filter(|s| resolved && !s.is_empty() && is_routed(Some(s))) {
-            if !superseded.iter().any(|x| x == s) {
-                superseded.push(s.to_string());
+        if let Some(key) = CandidateKey::of(r).filter(|_| resolved && is_routed(r)) {
+            if !superseded.contains(&key) {
+                superseded.push(key);
             }
         }
     }
@@ -1652,16 +1773,16 @@ fn run_visual_contrast_fallback(
     viewport: Viewport,
     profile: Option<&DetectorProfile>,
     target: &str,
-) -> Result<(Vec<RawResult>, Vec<String>), EngineError> {
+) -> Result<(Vec<RawResult>, Vec<CandidateKey>), EngineError> {
     // Text the element pass hands over rather than scores (see
     // `visual::routed_reason`): its element verdict does not keep the pixels
     // from reading it, and the pixels' verdict replaces that one.
-    let routed: Vec<String> = browser_analyses
+    let routed: Vec<CandidateKey> = browser_analyses
         .iter()
         .filter(|a| a.get("routed").is_some_and(|r| !r.is_null()))
-        .filter_map(|a| a.get("selector").and_then(Value::as_str))
-        .map(String::from)
+        .filter_map(CandidateKey::of)
         .collect();
+    let is_routed = |v: &Value| routed.iter().any(|k| k.names_value(v));
     let existing_low_contrast: Vec<String> = serialized_groups
         .iter()
         .filter(|g| {
@@ -1686,7 +1807,7 @@ fn run_visual_contrast_fallback(
     // the candidate list; when there are none, there are none to collect.
     let candidates: &[Value] = browser_analyses;
 
-    let browser_resolved: Vec<String> = browser_analyses
+    let browser_resolved: Vec<CandidateKey> = browser_analyses
         .iter()
         .filter(|r| {
             matches!(
@@ -1694,9 +1815,7 @@ fn run_visual_contrast_fallback(
                 Some("fail") | Some("pass")
             )
         })
-        .filter_map(|r| r.get("selector").and_then(Value::as_str))
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+        .filter_map(CandidateKey::of)
         .collect();
     let filtered: Vec<&Value> = candidates
         .iter()
@@ -1705,10 +1824,13 @@ fn run_visual_contrast_fallback(
             (!existing_low_contrast
                 .iter()
                 .any(|s| Some(s.as_str()) == sel)
-                || routed.iter().any(|s| Some(s.as_str()) == sel))
-                && !browser_resolved.iter().any(|s| Some(s.as_str()) == sel)
+                || is_routed(c))
+                && !browser_resolved.iter().any(|k| k.names_value(c))
         })
         .collect();
+    // Where a clip's x 0 sits: the left edge of a right-to-left page's
+    // overflow, asked once for every candidate.
+    let origin_x = if filtered.is_empty() { 0.0 } else { screenshot_contrast::scroll_origin_x(page) };
     if !filtered.is_empty() {
         // The pixel pass reads one box twice, once with the text painted and
         // once without. A frame that advances between the two shots turns
@@ -1725,7 +1847,7 @@ fn run_visual_contrast_fallback(
     for candidate in filtered {
         let sel = candidate.get("selector").and_then(Value::as_str);
         // A read the first budget's rules would not have made.
-        let extra = routed.iter().any(|s| Some(s.as_str()) == sel)
+        let extra = is_routed(candidate)
             && (candidate.get("reasons").and_then(Value::as_array).is_some_and(|rs| {
                 rs.iter().any(|r| matches!(r.as_str(), Some("unread layer") | Some("text outline")))
             }) || existing_low_contrast.iter().any(|s| Some(s.as_str()) == sel));
@@ -1739,6 +1861,7 @@ fn run_visual_contrast_fallback(
                 page,
                 candidate,
                 viewport.width as f64,
+                origin_x,
             )
             .map_err(cdp_err)?;
             measured = m.measured;
@@ -1765,11 +1888,9 @@ fn run_visual_contrast_fallback(
                 routed_misses += 1;
             }
         }
-        if measured {
-            if let Some(s) = sel {
-                if routed.iter().any(|r| r == s) {
-                    superseded.push(s.to_string());
-                }
+        if measured && is_routed(candidate) {
+            if let Some(key) = CandidateKey::of(candidate) {
+                superseded.push(key);
             }
         }
         findings.extend(result);
@@ -1806,11 +1927,43 @@ mod tests {
             json!({"selector": "#vector", "routed": "unread layer", "status": "unresolved"}),
         ];
         let existing: Vec<String> = ["#photo-copy", "#photo-ok", "#plain", "#vector"].iter().map(|s| s.to_string()).collect();
-        let routed: Vec<String> = ["#photo-copy", "#photo-ok", "#vector"].iter().map(|s| s.to_string()).collect();
+        let routed: Vec<CandidateKey> = analyses.iter().filter(|a| a.get("routed").is_some()).filter_map(CandidateKey::of).collect();
         let (findings, superseded) = analysis_findings(&analyses, &existing, &routed);
         let sels: Vec<&str> = findings.iter().filter_map(|f| f.selector.as_deref()).collect();
         assert_eq!(sels, vec!["#photo-copy"]);
+        let superseded: Vec<&str> = superseded.iter().map(|k| k.selector.as_str()).collect();
         assert_eq!(superseded, vec!["#photo-copy", "#photo-ok"]);
+    }
+
+    /// Two copies of a repeated id are two candidates: the copy an analysis
+    /// resolved is superseded, its unresolved twin stays routed to the
+    /// pixels, and the element pass's verdict on the twin stands.
+    #[test]
+    fn copies_of_a_repeated_id_are_settled_apart() {
+        let analyses = vec![
+            json!({"selector": "#hero > p", "match": [0, 2], "routed": "unread layer", "status": "pass"}),
+            json!({"selector": "#hero > p", "match": [1, 2], "routed": "unread layer", "status": "unresolved"}),
+        ];
+        let existing = vec!["#hero > p".to_string()];
+        let routed: Vec<CandidateKey> = analyses.iter().filter_map(CandidateKey::of).collect();
+        let (_, superseded) = analysis_findings(&analyses, &existing, &routed);
+        assert_eq!(superseded, vec![CandidateKey { selector: "#hero > p".into(), matched: Some(json!([0, 2])) }]);
+        // The unresolved copy is not taken for the resolved one.
+        assert!(!superseded[0].names_value(&analyses[1]));
+        assert!(superseded[0].names_value(&analyses[0]));
+        // A selector that named one element has no match, and the selector decides.
+        let single = CandidateKey::of(&json!({"selector": "#solo"})).unwrap();
+        assert!(single.names("#solo", Some(&json!([1, 2]))));
+
+        let verdict = |n: u64| RawResult {
+            selector: Some("#hero > p".into()),
+            ..RawResult::new(origin::VISUAL_CONTRAST, "low-contrast".into(), format!("copy {n}"))
+        };
+        let mut results = vec![verdict(0), verdict(1)];
+        let copy_of = |r: &RawResult| r.snippet.strip_prefix("copy ").and_then(|n| n.parse::<u64>().ok());
+        settle_handed_over(&mut results, &superseded, |r| copy_of(r).map(|n| json!([n, 2])));
+        let left: Vec<(&str, &str)> = results.iter().map(|r| (r.snippet.as_str(), r.severity.as_str())).collect();
+        assert_eq!(left, vec![("copy 1", "advisory")]);
     }
 
     #[test]
@@ -1850,7 +2003,7 @@ mod tests {
             result(origin::SCAN, "low-contrast", "#scored", ""),
             result(origin::SCAN, "tiny-text", "#unread", ""),
         ];
-        settle_handed_over(&mut results, &["#read".to_string()]);
+        settle_handed_over(&mut results, &[CandidateKey { selector: "#read".into(), matched: None }], |_| None);
         let summary: Vec<(&str, &str, &str)> =
             results.iter().map(|r| (r.origin, r.snippet.as_str(), r.severity.as_str())).collect();
         assert_eq!(

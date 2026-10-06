@@ -20,8 +20,11 @@
 //!   (r4-p23-flat-type-hierarchy-commerce).
 //! - `ai-color-palette-category-colours.html`: a violet, purple or cyan that
 //!   is one of six or more hues its role carries is a category colour and
-//!   does not report; a lone one does, and so do six tiles that stay inside
-//!   the violet and cyan bands (r5-p28-ai-color-palette-category-colours).
+//!   does not report; a lone one does, and so do six tiles of which five sit
+//!   inside the violet and cyan bands (r5-p28-ai-color-palette-category-colours).
+//! - `ai-color-palette.html`: the cyan band is hue 170 to 197 with a
+//!   saturation floor; a teal-to-cyan ramp and a cyan-950 panel report,
+//!   emerald, sky and a grayed teal do not (r6-t7-cyan-band).
 //! - `skipped-heading-footer.html`: a skip into the footer does not report; a
 //!   skip in the content and one between two later footer headings do
 //!   (r5-p29-skipped-heading-footer-titles).
@@ -126,6 +129,23 @@ fn purple_headings_in_the_brand_hue_do_not_report() {
 }
 
 #[test]
+fn cyan_band_skips_emerald_sky_and_grayed_teal() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let findings = scan(&engine, port, "ai-color-palette.html");
+    let palette: Vec<(&str, &str)> = of(&findings, "ai-color-palette")
+        .iter()
+        .map(|f| (f.snippet.as_str(), selector(f)))
+        .collect();
+    for flag in ["teal-cta", "cyan-950-panel"] {
+        assert!(palette.iter().any(|(_, sel)| sel.contains(flag)), "{flag}: {palette:#?}");
+    }
+    for pass in ["emerald-cta", "sky-cta", "grayed-teal-cta"] {
+        assert!(!palette.iter().any(|(_, sel)| sel.contains(pass)), "{pass}: {palette:#?}");
+    }
+}
+
+#[test]
 fn category_colours_do_not_report() {
     let Some(engine) = engine() else { return };
     let port = serve();
@@ -139,7 +159,8 @@ fn category_colours_do_not_report() {
     assert_eq!(
         snippets,
         vec![
-            "Cyan gradient background",
+            // The cyan and teal swatches. The sky swatch (hue 199 to 200) is
+            // outside the cyan band (r6-t7-cyan-band).
             "Cyan gradient background",
             "Cyan gradient background",
             // The page-level stylesheet form is not about one element and

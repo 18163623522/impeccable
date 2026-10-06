@@ -51,6 +51,10 @@
   /* PASS: a caption tight under its photo */
   .thumb { display: block; width: 240px; height: 120px; }
 
+  /* FLAG: a module box filled with the page's own white shows no edge */
+  .white-module { background: #fff; }
+  .shadow-carousel { display: block; }
+
   /* PASS: a title band that draws its own rules */
   .banded { border-top: 1px solid #84263f; border-bottom: 1px solid #84263f; padding: 15px 0; }
 
@@ -91,6 +95,30 @@
     </section>
 
     <section class="case">
+      <p class="blk">A paragraph of running prose, set with one uniform margin, so the subhead below sits as close to it as to its own text.</p>
+      <h2 class="above-20 below-24">Flag Near Equal Under Prose</h2>
+      <p class="blk">Twenty pixels above and twenty-four below, under two lines of body copy: the subhead reads as part of the run above.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">Another paragraph of running prose. The subhead below keeps exactly the gap it keeps to the paragraph it introduces.</p>
+      <h3 class="above-24 below-24">Flag Even Under Prose</h3>
+      <p class="blk">Twenty-four pixels on both sides of the subhead, under body copy that runs across the column.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph ten pixels above a title whose module box is painted the same white as the page around it.</p>
+      <div class="white-module above-10"><h2 class="below-40">Flag White Module Title</h2><p class="blk">The white fill shows no edge, so the paragraph above is still the title's neighbour.</p></div>
+    </section>
+
+    <section class="case">
+      <p class="blk">A closing paragraph ten pixels above a title over a carousel that draws its slides in a shadow tree.</p>
+      <h2 class="above-10 below-40">Flag Title Over Shadow Carousel</h2>
+      <x-carousel class="shadow-carousel"><template shadowrootmode="open"><style>:host { display: block; } .track { display: flex; gap: 12px; } .slide { width: 160px; height: 120px; background: #d9d4ea; }</style><div class="track"><div class="slide">One</div><div class="slide">Two</div><div class="slide">Three</div></div></template></x-carousel>
+      <div class="above-72"><p class="blk">The next module starts well below the carousel; the title introduces the carousel, not this.</p></div>
+    </section>
+
+    <section class="case">
       <div class="carousel">
         <div class="slide"></div>
         <div class="dots"><span class="dot"></span> <span class="dot"></span> <span class="dot"></span></div>
@@ -115,9 +143,15 @@
     </section>
 
     <section class="case">
-      <p class="blk">A paragraph before a heading whose spacing above and below is nearly equal, which is ambiguous rather than inverted.</p>
-      <h2 class="above-20 below-24">Pass Near Equal</h2>
-      <p class="blk">Twenty pixels above and twenty-four below. Ambiguous rather than inverted, so the rule leaves it alone.</p>
+      <p class="blk">A short line of copy.</p>
+      <h2 class="above-24 below-24">Pass Even Under One Line</h2>
+      <p class="blk">Even spacing under a single line is not running prose: a closing line, a kicker, a caption.</p>
+    </section>
+
+    <section class="case">
+      <p class="blk">A paragraph before a heading whose spacing above and below is nearly equal, with more room above than the crowded test asks.</p>
+      <h2 class="above-24 below-20">Pass More Room Above</h2>
+      <p class="blk">Twenty-four pixels above and twenty below. The heading sits closer to its own content, the healthy direction.</p>
     </section>
 
     <section class="case">
@@ -168,8 +202,8 @@
     </section>
 
     <section class="case">
-      <p class="blk">A paragraph ten pixels above a heading whose standfirst sits behind a wrapper that generates no box at all.</p>
-      <h2 class="above-10">Pass Standfirst Behind Contents</h2>
+      <p class="blk">A paragraph twenty-four pixels above a heading whose standfirst sits behind a wrapper that generates no box at all.</p>
+      <h2 class="above-24">Pass Standfirst Behind Contents</h2>
       <div class="contents"><p class="standfirst above-12">A short standfirst twelve pixels under the heading.</p></div>
       <div class="tiles above-48"></div>
     </section>
@@ -325,13 +359,13 @@ npx impeccable detect src/</pre>
 
     <section class="case">
       <p class="blk">A closing paragraph, then an italic eyebrow at body size that opens the box holding a section title.</p>
-      <div class="above-24"><p class="kick-italic">Five screens</p><h2 class="above-12 below-24">Pass Italic Eyebrow</h2></div>
-      <p class="blk">The italic line is the title's label, and the cluster sits twenty-four pixels from both neighbours.</p>
+      <div class="above-48"><p class="kick-italic">Five screens</p><h2 class="above-12 below-24">Pass Italic Eyebrow</h2></div>
+      <p class="blk">The italic line is the title's label, and the cluster sits forty-eight pixels under the block above.</p>
     </section>
 
     <section class="case">
       <p class="blk">A closing paragraph, then a hairline eyebrow at body size that opens the box holding a section title.</p>
-      <div class="above-24"><p class="kick-light">Compare plans</p><h2 class="above-12 below-24">Pass Light Eyebrow</h2></div>
+      <div class="above-48"><p class="kick-light">Compare plans</p><h2 class="above-12 below-24">Pass Light Eyebrow</h2></div>
       <p class="blk">The weight sets the line apart from the copy around it, so it is read as the title's label.</p>
     </section>
 

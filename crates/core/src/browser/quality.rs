@@ -534,11 +534,13 @@ impl RenderedTextCount {
                 // A no-break space under a preserving white-space renders at
                 // the edges like a preserved space does.
                 if preserved && self.count == 0 {
-                    if line_break(c) {
-                        self.lead = 0;
-                    } else {
-                        self.lead += 1;
-                    }
+                    // Collapsible white space before the first preserved
+                    // space starts the line and is removed; after it, it
+                    // renders, so it joins the indentation.
+                    self.lead = if line_break(c) { 0 } else { self.lead + self.lead.min(1) * self.pending + 1 };
+                    self.pending = 0;
+                    self.in_collapsible_run = false;
+                    continue;
                 } else if preserved && line_break(c) {
                     self.tail_open = false;
                 } else if preserved && !hangs && self.tail_open {
@@ -555,8 +557,9 @@ impl RenderedTextCount {
             }
             if self.count > 0 {
                 self.count += self.pending;
-            } else {
-                self.count += self.lead;
+            } else if self.lead > 0 {
+                // Indentation, then any white space that followed it.
+                self.count += self.lead + self.pending;
             }
             self.pending = 0;
             self.lead = 0;
@@ -590,8 +593,10 @@ impl RenderedTextCount {
         }
         if self.count > 0 {
             self.count += self.pending;
-        } else {
-            self.count += self.lead;
+        } else if self.lead > 0 {
+            // Indentation, then any white space that followed it, as before
+            // a first character.
+            self.count += self.lead + self.pending;
         }
         self.pending = 0;
         self.lead = 0;
@@ -4963,6 +4968,34 @@ mod rendered_text_tests {
         d.add_text(r, "\u{a0}indented\u{a0}");
         d.set_style(r, "whiteSpace", "pre");
         assert_eq!(rendered_text_len(&d, r), "_indented_".len());
+    }
+
+    /// Preserved indentation from one node and a collapsible space from the
+    /// next both paint before the first word; a collapsible space before
+    /// the indentation starts the line and is removed.
+    #[test]
+    fn indentation_and_a_following_collapsible_space_both_count() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, " ");
+        let span = d.add(Some(p), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre");
+        d.add_text(span, "  ");
+        d.add_text(p, " \n  hello");
+        assert_eq!(rendered_text_len(&d, p), "   hello".len());
+        // The same when the first word sits in an inline-block.
+        let q = two_line_p(&mut d, body);
+        let span = d.add(Some(q), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre");
+        d.add_text(span, "  ");
+        d.add_text(q, " ");
+        let word = d.add(Some(q), "span");
+        d.set_style(word, "display", "inline-block");
+        d.add_text(word, "hello");
+        assert_eq!(rendered_text_len(&d, q), "   hello".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

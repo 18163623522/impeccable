@@ -93,6 +93,11 @@ pub fn in_framed_demo(el: &StaticElement<'_>) -> bool {
     text_context::in_framed_demo(&StaticNode(*el))
 }
 
+/// Whether the element is itself a framed HTML demo, by structure.
+pub fn is_demo_frame(el: &StaticElement<'_>) -> bool {
+    text_context::is_demo_frame(&StaticNode(*el))
+}
+
 /// Whether the element's text sits in mock context: an illustration mockup
 /// by its marker, its `role="img"` or its structure.
 pub fn in_mock_context(el: &StaticElement<'_>) -> bool {

@@ -1043,16 +1043,20 @@ pub fn positioned_style_implies_escape_axis(
     false
 }
 
+/// Whether [`check_content_hidden_at_rest`] reports on these counts: at
+/// least 200 characters of text, at least 150 of them hidden, and more than
+/// 30% hidden.
+pub fn content_hidden_reports(total_chars: f64, hidden_chars: f64) -> bool {
+    total_chars >= 200.0 && hidden_chars >= 150.0 && hidden_chars / total_chars > 0.3
+}
+
 /// JS: checks.mjs#checkContentHiddenAtRest. Pure threshold check over a
 /// `measureHiddenTextDOM()` result.
 pub fn check_content_hidden_at_rest(input: &ContentHiddenInput) -> Vec<Finding> {
-    if input.total_chars < 200.0 || input.hidden_chars < 150.0 {
+    if !content_hidden_reports(input.total_chars, input.hidden_chars) {
         return vec![];
     }
     let share = input.hidden_chars / input.total_chars;
-    if share <= 0.3 {
-        return vec![];
-    }
     let sample = match input.hidden_samples.first() {
         Some(s) => format!(" (e.g. \"{}\")", s),
         None => String::new(),

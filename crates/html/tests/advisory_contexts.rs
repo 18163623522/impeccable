@@ -8,6 +8,8 @@
 //!   (`fine-print.html`; `line-length` needs layout).
 //! - r5-p26: `undersized-ui-text`, `tiny-text` and `low-contrast` inside a
 //!   framed HTML demo read from structure (`mockup-structure.html`).
+//! - r6-t3: `nested-cards` on an inner card in a framed demo or under
+//!   `role="img"` (`nested-cards-mockups.html`).
 //!
 //! There is no layout here, so the rows that need rects keep failing: a
 //! label drawn over a plot and labels lined up along an axis.
@@ -192,6 +194,17 @@ fn a_class_marked_mockup_reports_small_text_as_advisory() {
     );
     assert_eq!(severities(&f, "undersized-ui-text", "Ready"), ["advisory"], "{f:#?}");
     assert_eq!(severities(&f, "undersized-ui-text", "Queued"), ["warning"], "{f:#?}");
+}
+
+#[test]
+fn nested_cards_in_a_mockup_are_advisory() {
+    let f = scan_fixture("nested-cards-mockups.html");
+    // Four inner cards in mockups (in a three-dot window, in a tilted frame,
+    // a three-dot window inside a card, a `role="img"` subtree); three
+    // paseo.sh cards in a plain panel, one under a two-dot bar and one under
+    // a mockup class keep failing.
+    assert_eq!(count(&f, "nested-cards", true), 4, "{f:#?}");
+    assert_eq!(count(&f, "nested-cards", false), 5, "{f:#?}");
 }
 
 #[test]

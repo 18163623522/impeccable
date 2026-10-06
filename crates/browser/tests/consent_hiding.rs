@@ -103,6 +103,7 @@ const KEEP: ScanOptions = ScanOptions {
     profile: None,
     rule_pack: None,
     keep_consent_banners: true,
+    keep_overlays: false,
 };
 
 #[test]
@@ -243,6 +244,52 @@ fn an_app_shells_own_body_lock_stays() {
     assert!(consent.unlocked.is_empty(), "{:?}", consent.unlocked);
     let snapshot = evidence.scan_snapshot.as_deref().unwrap();
     assert!(snapshot.contains("overflow: hidden"), "the body keeps its own lock");
+}
+
+#[test]
+fn a_consentmanager_box_in_a_shadow_root_is_hidden() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/consentmanager.html");
+    let scan = engine.detect_url_scan(&url, &ScanOptions::default()).expect("scan");
+    let found = flagged(&scan.findings);
+    assert!(has(&found, "low-contrast", "#covered-copy"), "{found:#?}");
+    assert!(has(&found, "low-contrast", "#covered-cta"), "{found:#?}");
+    for f in &scan.findings {
+        assert_eq!(f.extras.get("consentHidden"), Some(&serde_json::json!(["consentmanager"])), "{f:?}");
+    }
+    let kept = engine.detect_url_scan(&url, &KEEP).expect("scan");
+    assert!(kept.findings.iter().all(|f| f.extras.get("consentHidden").is_none()));
+    assert!(kept.notes.is_empty());
+}
+
+#[test]
+fn borlabs_leaves_no_scroll_lock_and_no_aria_hidden_behind() {
+    let Some(engine) = engine() else { return };
+    let port = serve();
+    let url = format!("http://127.0.0.1:{port}/borlabs.html");
+    let mut browser = engine.launch().expect("launch");
+    let (_, evidence) =
+        detect_url_evidence(&mut browser, &url, &ScanOptions::default(), "load", 100, &EvidenceRequest::default())
+            .expect("scan");
+    browser.close();
+    let consent = evidence.consent.as_ref().expect("consent report");
+    assert_eq!(consent.hidden, vec!["Borlabs Cookie"]);
+    assert_eq!(
+        consent.matched[0].1,
+        vec!["#BorlabsCookieBox", "#BorlabsCookieWidget", "#BorlabsDialogBackdrop"],
+        "{:?}",
+        consent.matched
+    );
+    assert_eq!(
+        consent.unlocked,
+        vec!["aria-hidden [data-borlabs-cookie-aria-hidden]", "body style overflow"]
+    );
+    let snapshot = evidence.scan_snapshot.as_deref().unwrap();
+    // The wrapper Borlabs marked is back in the page; the site's own
+    // aria-hidden icon keeps its attribute.
+    assert!(!snapshot.contains(r#"["aria-hidden","true"],["data-borlabs-cookie-aria-hidden""#), "wrapper unhidden");
+    assert!(snapshot.contains(r#"["id","site-icon"],["aria-hidden","true"]"#), "site icon keeps aria-hidden");
 }
 
 #[test]

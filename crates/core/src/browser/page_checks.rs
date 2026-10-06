@@ -849,10 +849,14 @@ pub fn check_layout(dom: &dyn Dom) -> Vec<ElFinding> {
             .iter()
             .any(|&other| other != el && dom.contains(el, other));
         if !is_ancestor {
-            findings.push(ElFinding {
-                el: Some(el),
-                finding: BrowserFinding::new("nested-cards", "Card inside card"),
-            });
+            let mut finding = BrowserFinding::new("nested-cards", "Card inside card");
+            // The panels of a drawn product mockup are a picture of an
+            // interface, not cards nested on this page: advisory there
+            // (decision r6-t3-nested-cards-mockups).
+            if super::decorative_text::box_in_mockup_dom(dom, el) {
+                finding.severity = Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+            }
+            findings.push(ElFinding { el: Some(el), finding });
         }
     }
     findings
@@ -1118,9 +1122,49 @@ fn rhythm_is_empty_box(dom: &dyn Dom, el: ElId, depth: usize) -> bool {
     {
         return false;
     }
+    // A rule drawn along the top of an empty box (an `hr`, a divider `div`)
+    // is a line a reader sees, not space: the walk above meets it as the
+    // block that separates the heading from the content above.
+    if tag_lower(dom, el) == "hr" || style_px(dom, el, "borderTopWidth") > 0.0 {
+        return false;
+    }
+    if rhythm_shadow_content(dom, el, depth) {
+        return false;
+    }
     let children = rhythm_rendered_children(dom, el);
     children.is_empty() || (depth > 0 && children.into_iter().all(|k| rhythm_is_empty_box(dom, k, depth - 1)))
 }
+
+/// A shadow host whose shadow tree lays out content: a box there with words,
+/// or one that is not itself an empty box. The light tree of a web component
+/// can be empty while its shadow tree draws a whole carousel (otto.de's
+/// `oc-cinema-v1`, cisco.com's and hp.com's custom elements); read through
+/// `children` and `text_content` alone, such a host looks like a spacer and
+/// the walks measured past it. A shadow tree that holds only a `<slot>` and
+/// `<style>` lays out nothing of its own, and the host's light children are
+/// judged as before. A probe that cannot see shadow trees lists none.
+fn rhythm_shadow_content(dom: &dyn Dom, el: ElId, depth: usize) -> bool {
+    dom.shadow_children(el).into_iter().any(|k| {
+        if dom.style(k, "display") == "none" {
+            return false;
+        }
+        let pos = dom.style(k, "position");
+        if pos == "absolute" || pos == "fixed" {
+            return false;
+        }
+        let r = dom.rect(k);
+        if r.width < 1.0 || r.height < 1.0 {
+            return false;
+        }
+        if RHYTHM_UNRENDERED_TAGS.contains(&tag_lower(dom, k).as_str()) {
+            return false;
+        }
+        !js::trim(&dom.text_content(k)).is_empty() || !rhythm_is_empty_box(dom, k, depth)
+    })
+}
+
+/// Elements whose text is in `textContent` and never on screen.
+const RHYTHM_UNRENDERED_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
 
 /// A page landmark other than the main content: the footer, a navigation
 /// block, a sidebar, a banner. A heading introduces none of them.
@@ -1361,6 +1405,34 @@ fn rhythm_draws_bottom_edge(dom: &dyn Dom, el: ElId) -> bool {
     if crate::checks::measures::box_shadow_paints(&dom.style(el, "boxShadow")) {
         return true;
     }
+    rhythm_band_differs_from_backdrop(dom, el)
+}
+
+/// A wrapper the walk above cannot look past: one that shows where it
+/// starts with a top border, a shadow, a background image that bands it, or
+/// a background colour that differs from the backdrop behind it. A wrapper
+/// filled with the same colour as the page around it (a white section on a
+/// white page, samsung.com's and costco.com's full-width module boxes) has no
+/// edge a reader sees, so the block above it is still the heading's
+/// neighbour, as [`rhythm_draws_bottom_edge`] already holds for the walk
+/// below.
+fn rhythm_draws_top_edge(dom: &dyn Dom, el: ElId) -> bool {
+    if rhythm_is_contents(dom, el) {
+        return false;
+    }
+    if style_px(dom, el, "borderTopWidth") > 0.0 || rhythm_image_band(dom, el) {
+        return true;
+    }
+    let bs = dom.style(el, "boxShadow");
+    if !bs.is_empty() && bs != "none" {
+        return true;
+    }
+    rhythm_band_differs_from_backdrop(dom, el)
+}
+
+/// `el` paints a background colour that differs from the nearest painted
+/// background behind it (white when none is).
+fn rhythm_band_differs_from_backdrop(dom: &dyn Dom, el: ElId) -> bool {
     let Some(band) = rhythm_painted_background(dom, el) else { return false };
     // With no fill above it, the band sits on the canvas: white, or the
     // browser's dark canvas on a page that asks for a dark scheme only.
@@ -1536,6 +1608,80 @@ fn rhythm_repeats(dom: &dyn Dom, el: ElId, h: ElId) -> bool {
     false
 }
 
+/// Subpixel layout puts two gaps set with one margin a fraction of a pixel
+/// apart; a gap above this much larger than the gap below still reads as
+/// equal.
+const RHYTHM_EVEN_SLACK_PX: f64 = 0.5;
+
+/// Running prose has at least this many characters...
+const RHYTHM_PROSE_MIN_CHARS: usize = 80;
+/// ...on at least this many rendered lines...
+const RHYTHM_PROSE_MIN_LINES: usize = 2;
+/// ...set no larger than this multiple of the body text size...
+const RHYTHM_PROSE_MAX_SIZE_RATIO: f64 = 1.25;
+/// ...across at least this share of the heading's width.
+const RHYTHM_PROSE_MIN_WIDTH_SHARE: f64 = 0.5;
+
+/// The text block a reader sees at the bottom of `block`: the block itself
+/// when it sets words, else the lowest box it lays out, followed down until
+/// one does. `None` when that edge is a picture or a box that shows where it
+/// ends (a card, a panel, a band): the heading then sits under that edge,
+/// not under text.
+fn rhythm_closing_text(dom: &dyn Dom, block: ElId) -> Option<ElId> {
+    let mut cur = block;
+    for _ in 0..12 {
+        if RHYTHM_MEDIA_TAGS.contains(&tag_lower(dom, cur).as_str()) || rhythm_draws_bottom_edge(dom, cur) {
+            return None;
+        }
+        if rhythm_has_words(dom, cur) {
+            return Some(cur);
+        }
+        cur = rhythm_rendered_children(dom, cur)
+            .into_iter()
+            .filter(|&k| !rhythm_is_spacer(dom, k))
+            .max_by(|&a, &b| {
+                dom.rect(a)
+                    .bottom
+                    .partial_cmp(&dom.rect(b).bottom)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+    }
+    None
+}
+
+/// The block above a heading ends in running prose: a paragraph or text
+/// block of several lines of body-size text, set across the column. The
+/// text that closes the block ([`rhythm_closing_text`]) has at least 80
+/// characters on at least two rendered lines, is set smaller than the
+/// heading and no larger than 1.25 times the body text (`text_size`), is
+/// not itself a heading, and spans at least half the heading's width.
+///
+/// Each part keeps out something the probe on run 38 found reading fine
+/// with even gaps: a short closing line or a pull statement (a line or two
+/// of large type), a card grid whose last caption is the block's bottom (a
+/// column a third as wide as the heading), and an eyebrow set like body text
+/// (one line). Lines are read from the capture's line boxes; a DOM that
+/// cannot say where the lines are (snapshots recorded before line rects)
+/// stands down, and the heading is judged by the crowded test alone.
+fn rhythm_ends_in_prose(dom: &dyn Dom, block: ElId, heading: ElId, text_size: f64) -> bool {
+    let Some(text_el) = rhythm_closing_text(dom, block) else { return false };
+    if matches!(tag_lower(dom, text_el).as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+        return false;
+    }
+    let size = rhythm_font_size(dom, text_el);
+    if size >= rhythm_font_size(dom, heading) || size > text_size * RHYTHM_PROSE_MAX_SIZE_RATIO {
+        return false;
+    }
+    if utf16_len(js::trim(&collapse_ws(&dom.text_content(text_el)))) < RHYTHM_PROSE_MIN_CHARS {
+        return false;
+    }
+    if dom.rect(text_el).width < dom.rect(heading).width * RHYTHM_PROSE_MIN_WIDTH_SHARE {
+        return false;
+    }
+    let Some(lines) = dom.text_line_rects(text_el) else { return false };
+    lines.iter().filter(|r| r.width > 0.0 && r.height > 0.0).count() >= RHYTHM_PROSE_MIN_LINES
+}
+
 /// JS: checks.mjs#checkHeadingRhythmDOM()
 pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     const MIN_VIOLATIONS: usize = 2;
@@ -1638,7 +1784,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
     // runs from that content to the cluster's own first line: empty spacer
     // boxes are part of the gap, so is the bottom padding of a block that
     // paints no edge, and so is top padding on the cluster's first box.
-    let edge_above = |start_el: ElId, top: f64, rect: &Rect| -> Option<(f64, ElId)> {
+    let edge_above = |h: ElId, start_el: ElId, top: f64, rect: &Rect| -> Option<(f64, ElId)> {
         let pick = |sr: &Rect| sr.bottom <= top + 2.0;
         let inset = if rhythm_paints_edge(dom, start_el, "Top") {
             0.0
@@ -1673,7 +1819,15 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             if Some(p) == body {
                 return None;
             }
-            if has_own_top_boundary(p) {
+            // A wrapper whose start a reader sees separates the heading from
+            // whatever is above it; one painted the colour behind it does not,
+            // unless it is one of a run of like boxes. Then its fill marks a
+            // card (haraj.com.sa's listings alternate grey and white rows) and
+            // the box above is the card before it, not content the heading
+            // follows, as before.
+            if rhythm_draws_top_edge(dom, p)
+                || (rhythm_paints_edge(dom, p, "Top") && rhythm_repeats(dom, p, h))
+            {
                 return None;
             }
             node = Some(p);
@@ -1788,7 +1942,7 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
             rhythm_text_size(dom, below_el),
         );
         let (top_el, top) = cluster_top(h, &rect, text_size);
-        let Some((above_bottom, above_el)) = edge_above(top_el, top, &rect) else { continue };
+        let Some((above_bottom, above_el)) = edge_above(h, top_el, top, &rect) else { continue };
         if inside_small_card(h) {
             continue;
         }
@@ -1797,10 +1951,16 @@ pub fn check_heading_rhythm_dom(dom: &dyn Dom) -> Vec<ElFinding> {
         if below < 6.0 || below > MAX_BELOW_PX {
             continue;
         }
-        if above < below * 0.75
-            && below - above >= MIN_DEFICIT_PX
-            && !rhythm_block_separates(dom, above_el)
-        {
+        // Crowded: clearly less space above than below. Even: no more space
+        // above than below, under running prose, where the paragraph above
+        // and the heading read as one run of text (Paul, round 7:
+        // r7-t1-heading-rhythm-equal-gaps). Under any other block an even
+        // gap mostly reads fine: a band edge, a card grid, a kicker.
+        let crowded = above < below * 0.75 && below - above >= MIN_DEFICIT_PX;
+        let even_under_prose = !crowded
+            && above <= below + RHYTHM_EVEN_SLACK_PX
+            && rhythm_ends_in_prose(dom, above_el, h, text_size);
+        if (crowded || even_under_prose) && !rhythm_block_separates(dom, above_el) {
             candidates.push(Cand {
                 el: h,
                 tag: tag_lower(dom, h),
@@ -1885,7 +2045,88 @@ enum HiddenState {
     Visible,
     Invisible,
     Excluded,
+    /// Inside a slider that never started ([`unstarted_slider`]): out of
+    /// both counts, and reported as a capture note instead.
+    Unstarted,
 }
+
+/// Class words that name a slider or carousel: the box's own class, or a
+/// class of its library (`swiper`, `slick`, `splide`, `glide`, `flickity`,
+/// Slider Revolution's `rev_slider`).
+const SLIDER_CLASS_WORDS: &[&str] =
+    &["slider", "carousel", "swiper", "slick", "splide", "glide", "flickity", "slideshow", "revslider"];
+
+/// How far above a hidden box the slider that holds it is looked for.
+const SLIDER_MAX_DEPTH: usize = 6;
+
+/// Class words that name one slide of a slider (`swiper-slide`,
+/// `carousel-item`, `splide__slide`): such a box is a slide, not the slider.
+const SLIDE_CLASS_WORDS: &[&str] = &["slide", "item", "cell", "card", "pane"];
+
+/// Whether `el` is a slider box: a class token names a slider
+/// ([`SLIDER_CLASS_WORDS`]) and not one of its slides
+/// ([`SLIDE_CLASS_WORDS`]).
+fn slider_class(dom: &dyn Dom, el: ElId) -> bool {
+    dom.attr(el, "class").unwrap_or_default().split_whitespace().any(|token| {
+        let words = class_words(token);
+        words.iter().any(|w| SLIDER_CLASS_WORDS.contains(&w.as_str()))
+            && !words.iter().any(|w| SLIDE_CLASS_WORDS.contains(&w.as_str()))
+    })
+}
+
+/// Whether `el`'s own text paints within `upto`: it is not
+/// `visibility: hidden | collapse`, and no box from it up to `upto`
+/// (inclusive) is `display: none`, `aria-hidden="true"` or at opacity 0.02 or
+/// less.
+fn text_shows_within(dom: &dyn Dom, el: ElId, upto: ElId) -> bool {
+    if HIDDEN_VIS_RE.is_match(&dom.style(el, "visibility")) {
+        return false;
+    }
+    let mut cur = Some(el);
+    while let Some(e) = cur {
+        if dom.style(e, "display") == "none"
+            || dom.attr(e, "aria-hidden").as_deref() == Some("true")
+            || pf0(&dom.style(e, "opacity")) <= 0.02
+        {
+            return false;
+        }
+        if e == upto {
+            return true;
+        }
+        cur = dom.parent(e);
+    }
+    true
+}
+
+/// Whether `el`, a box that is itself transparent or `visibility: hidden`,
+/// sits in a slider that never started (corpus decision
+/// r6-t6-hidden-scroll-linked): the box or one of its nearest
+/// [`SLIDER_MAX_DEPTH`] ancestors carries a slider class
+/// ([`SLIDER_CLASS_WORDS`]), and not one element in that slider shows text
+/// ([`text_shows_within`]). A slider that started shows its current slide,
+/// so its other slides are not this (they count as before). One that shows
+/// nothing at all is the capture's state (a script that had not run, a
+/// preloader still up), not something to measure the page by.
+fn unstarted_slider(dom: &dyn Dom, el: ElId, verdicts: &mut std::collections::HashMap<ElId, bool>) -> bool {
+    let Some(slider) = ancestors_inclusive(dom, el).into_iter().take(SLIDER_MAX_DEPTH + 1).find(|a| slider_class(dom, *a))
+    else {
+        return false;
+    };
+    if let Some(v) = verdicts.get(&slider) {
+        return *v;
+    }
+    let shows = |e: ElId| {
+        dom.direct_text_nodes(e).iter().any(|t| !js::trim(&collapse_ws(t)).is_empty()) && text_shows_within(dom, e, slider)
+    };
+    let started =
+        shows(slider) || dom.query_all(Some(slider), "*").unwrap_or_default().into_iter().any(shows);
+    verdicts.insert(slider, !started);
+    !started
+}
+
+/// At most this many hidden boxes are probed for a scroll-linked reveal
+/// ([`Dom::shown_when_scrolled_to`]), the ones holding the most text.
+pub const SCROLL_PROBE_MAX: usize = 8;
 
 /// Roles that make an invisible box, or an invisible box inside one, closed
 /// navigation: a menu that opens on demand.
@@ -2043,6 +2284,33 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
     false
 }
 
+/// The topmost box from `el` up to, but not including, `start` that holds
+/// itself at opacity 0.02 or less, or hides itself with `visibility` under a
+/// visible parent: a box inside a hidden one that stays hidden when the outer
+/// one is revealed. `None` when `el` is hidden only
+/// through `start`.
+fn held_inside(dom: &dyn Dom, el: ElId, start: ElId) -> Option<ElId> {
+    let mut found = None;
+    let mut cur = Some(el);
+    while let Some(b) = cur {
+        if b == start {
+            break;
+        }
+        let opacity = js::parse_float(&dom.style(b, "opacity"));
+        // `visibility` inherits, so a hidden box hides itself only where its
+        // parent is visible: there the declaration is its own.
+        let hidden = |e: ElId| matches!(dom.style(e, "visibility").as_str(), "hidden" | "collapse");
+        // ...and only while `el` inherits it: a descendant that sets
+        // `visibility: visible` again shows through it.
+        let own_hidden = hidden(b) && hidden(el) && dom.parent(b).is_some_and(|p| !hidden(p));
+        if (opacity.is_finite() && opacity <= 0.02) || own_hidden {
+            found = Some(b);
+        }
+        cur = dom.parent(b);
+    }
+    found
+}
+
 /// JS: checks.mjs#measureHiddenTextDOM()
 ///
 /// Text in closed interface is left out of both counts, like text under
@@ -2050,6 +2318,21 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
 /// `visibility: hidden` subtree and is a [`closed_container`] (a closed menu,
 /// drawer or dialog, an unselected tab or accordion panel). Nobody expects a
 /// closed menu to show, so it is not content a reveal failed to show.
+///
+/// Corpus decision r6-t6-hidden-scroll-linked adds two more:
+///
+/// - Text in a slider that never started ([`unstarted_slider`]) leaves both
+///   counts and is reported in [`HiddenTextMeasure::unstarted_slider_chars`],
+///   which the URL engine turns into a capture note rather than a finding.
+/// - When the share would report, the hidden boxes holding the most text (up
+///   to [`SCROLL_PROBE_MAX`]) are asked [`Dom::shown_when_scrolled_to`]. A box
+///   that shows once the page is scrolled to it is a scroll-linked reveal the
+///   measure caught at the top of the page: its text counts as shown, as a
+///   box a CSS scroll or view timeline holds at 0 does, except text under a
+///   box inside it that holds itself at opacity 0, which is asked about on
+///   its own ([`held_inside`]). A box the probe has
+///   not looked at (`None`: a replay of a recording made before the probe,
+///   any DOM with no page behind it) stays hidden.
 pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let root = dom.document_element();
     let mut cache: std::collections::HashMap<ElId, HiddenState> = std::collections::HashMap::new();
@@ -2057,6 +2340,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
     let closed_ids: std::cell::OnceCell<std::collections::HashSet<String>> = std::cell::OnceCell::new();
     // The page's CSS, read once and only for a box an animation holds at 0.
     let style_text: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+    // Per slider box: whether it never started.
+    let mut sliders: std::collections::HashMap<ElId, bool> = std::collections::HashMap::new();
 
     fn page_style_text(dom: &dyn Dom) -> String {
         let html = dom.document_html_for_patterns();
@@ -2066,12 +2351,14 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         text
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn state_of(
         dom: &dyn Dom,
         root: Option<ElId>,
         cache: &mut std::collections::HashMap<ElId, HiddenState>,
         closed_ids: &std::cell::OnceCell<std::collections::HashSet<String>>,
         style_text: &std::cell::OnceCell<String>,
+        sliders: &mut std::collections::HashMap<ElId, bool>,
         el: Option<ElId>,
     ) -> HiddenState {
         let Some(el) = el else { return HiddenState::Visible };
@@ -2085,7 +2372,7 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         let state = if HIDDEN_TEXT_EXCLUDE_TAGS.contains(&tag.as_str()) {
             HiddenState::Excluded
         } else {
-            let parent_state = state_of(dom, root, cache, closed_ids, style_text, dom.parent(el));
+            let parent_state = state_of(dom, root, cache, closed_ids, style_text, sliders, dom.parent(el));
             if parent_state == HiddenState::Excluded {
                 HiddenState::Excluded
             } else {
@@ -2097,6 +2384,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                     || cv == "hidden"
                 {
                     HiddenState::Excluded
+                } else if parent_state == HiddenState::Unstarted {
+                    HiddenState::Unstarted
                 } else if parent_state == HiddenState::Invisible {
                     HiddenState::Invisible
                 } else if pf0(&dom.style(el, "opacity")) <= 0.02
@@ -2125,6 +2414,8 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                         // and shows it to a visitor who scrolls: its text is
                         // content they read.
                         HiddenState::Visible
+                    } else if unstarted_slider(dom, el, sliders) {
+                        HiddenState::Unstarted
                     } else {
                         HiddenState::Invisible
                     }
@@ -2139,7 +2430,12 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
 
     let mut total_chars = 0.0f64;
     let mut hidden_chars = 0.0f64;
-    let mut hidden_samples: Vec<String> = Vec::new();
+    let mut unstarted_slider_chars = 0.0f64;
+    let mut unstarted_slider_samples: Vec<String> = Vec::new();
+    // Each hidden text element and the box its invisible subtree starts at,
+    // in document order, and the characters each such box holds.
+    let mut hidden_els: Vec<(ElId, ElId, f64)> = Vec::new();
+    let mut hidden_roots: Vec<(ElId, f64)> = Vec::new();
     for el in dom.query_all(None, "body *").unwrap_or_default() {
         let mut len = 0usize;
         for t in dom.direct_text_nodes(el) {
@@ -2148,25 +2444,100 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
         if len == 0 {
             continue;
         }
-        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, Some(el));
-        if state == HiddenState::Excluded {
-            continue;
+        let state = state_of(dom, root, &mut cache, &closed_ids, &style_text, &mut sliders, Some(el));
+        match state {
+            HiddenState::Excluded => continue,
+            HiddenState::Unstarted => {
+                unstarted_slider_chars += len as f64;
+                if unstarted_slider_samples.len() < 3 {
+                    let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
+                    if !text.is_empty() {
+                        unstarted_slider_samples.push(text);
+                    }
+                }
+                continue;
+            }
+            _ => {}
         }
         total_chars += len as f64;
         if state == HiddenState::Invisible {
             hidden_chars += len as f64;
-            if hidden_samples.len() < 3 {
-                let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
-                if !text.is_empty() {
-                    hidden_samples.push(text);
+            // The topmost invisible box above it, which every state above
+            // was cached on the way to this one.
+            let mut start = el;
+            while let Some(p) = dom.parent(start) {
+                if cache.get(&p) != Some(&HiddenState::Invisible) {
+                    break;
                 }
+                start = p;
             }
+            hidden_els.push((el, start, len as f64));
+            match hidden_roots.iter_mut().find(|(r, _)| *r == start) {
+                Some((_, chars)) => *chars += len as f64,
+                None => hidden_roots.push((start, len as f64)),
+            }
+        }
+    }
+
+    // Scroll-linked reveals, asked only of a page the share would report.
+    // A shown box takes along the text that was hidden only through it. Text
+    // under a box of its own held at opacity 0 inside it (a staggered child,
+    // or one a reveal never reached) is asked about on its own, in a second
+    // probe round, and stays hidden until the probe says it shows.
+    let mut shown_els: Vec<ElId> = Vec::new();
+    if crate::checks::measures::content_hidden_reports(total_chars, hidden_chars) {
+        let mut by_size = hidden_roots.clone();
+        by_size.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut shown_roots: Vec<ElId> = Vec::new();
+        for (start, _) in by_size.into_iter().take(SCROLL_PROBE_MAX) {
+            if dom.shown_when_scrolled_to(start) == Some(true) {
+                shown_roots.push(start);
+            }
+        }
+        let mut inner_asked: Vec<ElId> = Vec::new();
+        for &(el, start, len) in &hidden_els {
+            if !shown_roots.contains(&start) {
+                continue;
+            }
+            let inner = held_inside(dom, el, start);
+            let shown = match inner {
+                None => true,
+                Some(b) => {
+                    if !inner_asked.contains(&b) {
+                        if inner_asked.len() >= SCROLL_PROBE_MAX {
+                            continue;
+                        }
+                        inner_asked.push(b);
+                    }
+                    dom.shown_when_scrolled_to(b) == Some(true)
+                }
+            };
+            if shown {
+                hidden_chars -= len;
+                shown_els.push(el);
+            }
+        }
+    }
+
+    let mut hidden_samples: Vec<String> = Vec::new();
+    for (el, _, _) in hidden_els {
+        if hidden_samples.len() >= 3 {
+            break;
+        }
+        if shown_els.contains(&el) {
+            continue;
+        }
+        let text = slice_utf16_prefix(js::trim(&collapse_ws(&dom.text_content(el))), 40);
+        if !text.is_empty() {
+            hidden_samples.push(text);
         }
     }
     HiddenTextMeasure {
         total_chars,
         hidden_chars,
         hidden_samples,
+        unstarted_slider_chars,
+        unstarted_slider_samples,
     }
 }
 
@@ -3614,6 +3985,53 @@ mod tests {
         assert!(check_layout(&d).is_empty());
     }
 
+    /// Decision r6-t3-nested-cards-mockups (advisory): the panels of a drawn
+    /// product mockup report as advisory, in a framed demo (r5-p26's
+    /// structure) or under an HTML `role="img"`.
+    /// Bordered cards in a bordered panel outside any mockup (paseo.sh)
+    /// keep the registry's severity.
+    #[test]
+    fn nested_cards_in_a_mockup_are_advisory() {
+        let build = |frame: &dyn Fn(&mut FakeDom, ElId, ElId)| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let wrap = d.add(Some(body), "div");
+            d.set_rect(wrap, 0.0, 0.0, 400.0, 300.0);
+            let outer = d.add(Some(wrap), "div");
+            card_styles(&mut d, outer, "rgb(255, 255, 255)");
+            d.set_rect(outer, 0.0, 0.0, 400.0, 300.0);
+            let inner = d.add(Some(outer), "div");
+            card_styles(&mut d, inner, "rgb(250, 250, 250)");
+            d.set_rect(inner, 10.0, 10.0, 200.0, 100.0);
+            d.add_text(inner, "Some card body text");
+            d.add_text(outer, "Outer text longer than ten");
+            frame(&mut d, wrap, outer);
+            let f = check_layout(&d);
+            assert_eq!(f.len(), 1, "{f:?}");
+            f[0].finding.severity.clone()
+        };
+        let advisory = Some(crate::checks::rules::ADVISORY_SEVERITY.to_string());
+        assert_eq!(build(&|_, _, _| {}), None, "outside any mockup");
+        assert_eq!(build(&|d, wrap, _| { d.set_attr(wrap, "role", "img"); }), advisory);
+        // A class is not read: an `illustration` names a feature tile's
+        // picture as often as a mockup (r4-p17 keeps those failing).
+        assert_eq!(build(&|d, wrap, _| { d.set_attr(wrap, "class", "mockup-window"); }), None);
+        assert_eq!(
+            build(&|d, _, outer| { d.set_style(outer, "transform", "perspective(900px) rotateX(8deg)"); }),
+            advisory,
+            "a device frame tilted in 3D"
+        );
+        // The inner card can be the frame itself.
+        assert_eq!(
+            build(&|d, _, outer| {
+                let inner = d.children(outer)[0];
+                d.set_style(inner, "transform", "perspective(900px) rotateX(8deg)");
+            }),
+            advisory,
+            "the inner card is the tilted frame"
+        );
+    }
+
     #[test]
     fn heading_rhythm_two_violations() {
         let mut d = FakeDom::new();
@@ -4102,6 +4520,106 @@ mod tests {
         let m = measure_hidden_text_dom(&d);
         let hidden = 16.0 + 18.0 + 20.0 + 21.0 + 17.0;
         assert_eq!((m.total_chars, m.hidden_chars), (12.0 + 21.0 + hidden, hidden), "{:?}", m.hidden_samples);
+    }
+
+    /// r6-t6-hidden-scroll-linked: a hidden box that shows once the page is
+    /// scrolled to it leaves the hidden share; one the probe saw stay hidden,
+    /// or never looked at, still counts. A slider with every slide hidden
+    /// leaves both counts and is reported apart; a slider showing its current
+    /// slide is a page, and its other slides count as before.
+    #[test]
+    fn hidden_text_measure_probes_scroll_linked_reveals_and_sets_aside_unstarted_sliders() {
+        let text = |c: &str, n: usize| c.repeat(n);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0")], "");
+        d.set_shown_on_scroll(scrubbed, true);
+        hidden_box(&mut d, scrubbed, "p", &[], &text("s", 150));
+        let failed = hidden_box(&mut d, body, "div", &[("opacity", "0")], &text("f", 60));
+        d.set_shown_on_scroll(failed, false);
+        hidden_box(&mut d, body, "div", &[("visibility", "hidden")], &text("u", 40));
+        // A slider that never started: its box is transparent, and so is
+        // every slide of one whose box is not.
+        let dead = hidden_box(&mut d, body, "div", &[("opacity", "0")], "");
+        d.set_attr(dead, "class", "slider slider--thumbnails js-slider");
+        hidden_box(&mut d, dead, "div", &[], &text("a", 50));
+        let rev = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(rev, "class", "rev_slider");
+        let list = hidden_box(&mut d, rev, "ul", &[], "");
+        hidden_box(&mut d, list, "li", &[("visibility", "hidden")], &text("b", 30));
+        hidden_box(&mut d, list, "li", &[("visibility", "hidden")], &text("c", 30));
+        // A slider showing its current slide: the waiting slides are not the
+        // slider, though their class names it.
+        let live = hidden_box(&mut d, body, "div", &[], "");
+        d.set_attr(live, "class", "swiper-wrapper");
+        let current = hidden_box(&mut d, live, "div", &[], &text("d", 20));
+        d.set_attr(current, "class", "swiper-slide swiper-slide-active");
+        let waiting = hidden_box(&mut d, live, "div", &[("opacity", "0")], &text("e", 20));
+        d.set_attr(waiting, "class", "swiper-slide");
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!(
+            (m.total_chars, m.hidden_chars, m.unstarted_slider_chars),
+            (100.0 + 150.0 + 60.0 + 40.0 + 40.0, 60.0 + 40.0 + 20.0, 110.0)
+        );
+        assert_eq!(m.hidden_samples, vec![text("f", 40), text("u", 40), text("e", 20)]);
+        assert_eq!(m.unstarted_slider_samples, vec![text("a", 40), text("b", 30), text("c", 30)]);
+
+        // An outer section revealed on scroll, holding a child that stays at
+        // opacity 0: the child's text stays hidden until the probe says it
+        // shows too, and a child it says shows leaves with its section.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        let stuck = hidden_box(&mut d, section, "div", &[("opacity", "0")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0), "the inner box was not asked about");
+        d.set_shown_on_scroll(stuck, false);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0));
+        assert_eq!(m.hidden_samples, vec![text("k", 40)]);
+        d.set_shown_on_scroll(stuck, true);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 0.0));
+
+        // A child that hides itself with `visibility` inside a section held
+        // at opacity 0 stays hidden too until the probe says it shows.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        hidden_box(&mut d, section, "div", &[("visibility", "hidden")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 150.0));
+
+        // A grandchild that sets visibility: visible again shows once its
+        // section does.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 100));
+        let section = hidden_box(&mut d, body, "section", &[("opacity", "0")], &text("s", 60));
+        d.set_shown_on_scroll(section, true);
+        let wrap = hidden_box(&mut d, section, "div", &[("visibility", "hidden")], "");
+        hidden_box(&mut d, wrap, "p", &[("visibility", "visible")], &text("k", 150));
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (310.0, 0.0));
+
+        // Below the reporting share nothing is probed, and nothing moves.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        hidden_box(&mut d, body, "p", &[], &text("v", 400));
+        let scrubbed = hidden_box(&mut d, body, "div", &[("opacity", "0")], &text("s", 150));
+        d.set_shown_on_scroll(scrubbed, true);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (550.0, 150.0));
     }
 
     #[test]

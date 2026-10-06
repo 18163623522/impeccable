@@ -40,6 +40,9 @@ Options:
   --no-consent-hiding URL scans: keep known consent managers' banners
                       (OneTrust, Cookiebot, ...) on the page instead of hiding
                       them before the scan
+  --no-overlay-hiding URL scans: keep product tours (driver.js) and
+                      preloaders still covering the page instead of hiding
+                      them before the scan
   --help              Show this help message
 
 Advisory findings:
@@ -533,6 +536,7 @@ fn detect_cli(args_in: &[String], io: &mut Io, engines: &Engines) -> Result<i32,
         // does sets this before handing the options to an engine.
         rule_pack: None,
         keep_consent_banners: has(&args, "--no-consent-hiding"),
+        keep_overlays: has(&args, "--no-overlay-hiding"),
     };
     let targets: Vec<String> = expand_joined_url_targets(
         args.iter()

@@ -6639,6 +6639,222 @@ finding by finding against its predecessor.
 8. **A stripe coloured by an unresolved `var()` or by `currentColor`** in a
    `url()` background still reports from the stylesheet scan, as before.
 
+
+## Recorded 2026-10-03: near-black ink is not gray (corpus/premise5-hues, r6-t8)
+
+Corpus decision `r6-t8-gray-on-color-near-black` (narrow). The same change
+reached main as #935 and is recorded there ("Recorded 2026-10-02: near-black
+ink is not gray"); merging main replaced this branch's copy with it. The
+own-box fixture golden it also moves is recorded where that merge landed
+("main's near-black floor reaches the own-box fixture").
+
+## Recorded 2026-10-03: the cyan band is 170 to 197 with a saturation floor (corpus/premise5-hues, r6-t7)
+
+Corpus decision `r6-t7-cyan-band` (narrow). `TellHue::of` read any hue from
+160 to 200 as cyan, so emerald buttons and icon tiles (`#059669` at 161,
+`#047857` at 163, harmless to both judges on leilonozap.vercel.app) reported
+as "Cyan gradient background". The band is now 170 to 197, and a cyan also
+needs an HSL saturation of at least 0.4. The decision said "about 170 to
+195"; the top edge is 197 so Tailwind's `cyan-900` (196) and `cyan-950`
+(197) stay in, while sky (198 to 200) and hue-200 glows drop. The violet band is unchanged. The
+band is defined once (`AI_PALETTE_CYAN_HUES` in `element_checks.rs`); the
+category-colour test (r5-p28) reads it by hue alone through `TellHue::of_hue`.
+
+- No golden moved. The element-level gradient and neon-ink forms are URL
+  engine only, and the static engine's output for `ai-color-palette.html`
+  and `ai-color-palette-category-colours.html` is unchanged by their new rows.
+  The URL engine rows are pinned by `crates/browser/tests/brand_and_vendors.rs`.
+
+### Known limits
+
+1. **The category-colour test counts hues, not colours,** so a grayed teal
+   under the saturation floor still counts as inside the cyan band there.
+   That only makes the exemption harder to reach.
+2. **Sky blue at 198 to 200 is no longer cyan,** so the category fixture's
+   sky swatch stops reporting; the set it belongs to is still the palette.
+3. **A hue-200 glow drops with sky.** arbiproseller-app.vercel.app's
+   section-wide hsl(200) radial glow on dark navy (findings 138945, 139054,
+   harmful to both judges) no longer reports; the band's top edge is a hue,
+   and 200 is where sky sits.
+## Recorded 2026-10-03: verdicts the pixels could not read, scroll-linked reveals and sliders that never started
+
+Corpus decisions r6-t5-unread-pixel-verdicts (advisory) and
+r6-t6-hidden-scroll-linked (narrow). Both change the URL engine only: a
+`low-contrast` verdict the element pass hands to the pixel pass that the
+pixels do not read now reports as advisory, and `content-hidden-at-rest`
+leaves out reveals that show once the page is scrolled to them (a live
+scroll probe, recorded in the capture's facts) and sliders whose every slide
+is hidden (a capture note instead of a finding). The static engine, which
+every oracle case runs, has no pixel pass and no hidden-share measure, so no
+existing case moved. Three fixtures were added for the browser tests
+(`content-hidden-scroll-linked.html`, `content-hidden-unstarted-slider.html`,
+`low-contrast-unread-pixels.html`); their own cases are new goldens and the
+directory cases changed only by their findings.
+
+- `detect-fixture-json-content-hidden-scroll-linked-html`,
+  `detect-fixture-text-content-hidden-scroll-linked-html`,
+  `detect-fixture-json-content-hidden-unstarted-slider-html`,
+  `detect-fixture-text-content-hidden-unstarted-slider-html`: new, no
+  findings, exit 0 (both rules they exercise are browser-only).
+- `detect-fixture-json-low-contrast-unread-pixels-html`,
+  `detect-fixture-text-low-contrast-unread-pixels-html`: new, two
+  `low-contrast` findings at full severity (`2.9:1 (need 4.5:1) — text
+  #ffffff on #979797`, once per column). The static engine has no pixel pass
+  to hand either verdict to, so it reports both as before; the URL engine
+  drops the one the pixels read and makes the other advisory.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`,
+  `detect-dir-quiet-all-fixtures`, `detect-no-advisory-json`,
+  `detect-no-advisory-text`: those two findings only (875 to 877 counted).
+  No existing finding moved and no snippet changed.
+
+Known limits:
+1. **A recording made before the scroll probe answers none of its
+   questions,** so a replay counts every scroll-linked box as hidden: every
+   capture up to run 38 reports antropi.world as before. Only a capture made
+   with this engine records `shownOnScroll`.
+2. **The probe reads the box's own computed opacity and visibility.** A box
+   that a script reveals by moving a child out from under a mask, or that
+   needs a hover or a click, is not shown to it and counts as hidden.
+3. **A reveal that runs once and failed during the sweep but runs on the
+   probe's longer dwell** counts as shown: a visitor who scrolls there sees
+   it. A reveal that only fires on the probe's viewport position but not a
+   visitor's is not distinguished.
+4. **A slider is known by its class words only.** An unclassed slider whose
+   slides are all hidden still counts, as before (the base fixture's
+   0px-high slider case), and a box classed `slider` that is not one (a
+   range input's track) is read as one.
+5. **The static engine and the extension are unchanged:** they have no page
+   to scroll and no pixels, so both decisions fail safe to base behaviour
+   there.
+## Recorded 2026-10-03: URL scans hide tours, stuck preloaders and two more consent layers (corpus/overlays)
+
+From the corpus round 8 harness items (site-made consent boxes, preloaders,
+tours). One golden changes, `detect-help`: the usage text gains
+`--no-overlay-hiding` after `--no-consent-hiding`. No fixture case changes:
+the oracle scans files. The URL behavior is pinned by
+`crates/browser/tests/overlay_hiding.rs` over `tests/fixtures/overlays/` and
+two new cases in `consent_hiding.rs`.
+
+- **consentmanager** (letour.fr): `#cmpwrapper` (the open shadow root host
+  its `#cmpbox` renders in) and `#cmpbox`.
+- **Borlabs Cookie** (fischundfang.de) was already hidden by
+  `#BorlabsCookieBox`; it now also hides `#BorlabsCookieWidget`, counts
+  `#BorlabsDialogBackdrop` as a backdrop (so its inline body
+  `overflow: hidden` is undone), and removes the `aria-hidden="true"` Borlabs
+  marked with `data-borlabs-cookie-aria-hidden` (the page wrapper).
+- **Tours:** driver.js 1.x only, by its own classes; no other tour library
+  appears in the corpus. **Preloaders:** structural (see the contract); wait
+  up to 5s, then hide. Findings carry `overlaysHidden: [{ kind, name }]`;
+  `consentHidden` is unchanged.
+
+Measured live, runs 39 and 40 against run 38 (same pages):
+fischundfang.de 2,928 to 5,729 findings, all but 12 of the rise
+`undersized-ui-text` on the 10px category tags of every post card, which the
+Borlabs aria-hidden had kept out of the rule; letour.fr 104 to 102 with
+consentmanager hidden on every capture; gamer.com.tw 374 to 372 with the
+tour hidden on all four; epcco.com.sa's `div#preloader` hidden on two of six
+captures; bankofamerica.com unchanged (no state picker showed in either run,
+and nothing of the site's was hidden).
+## Recorded 2026-10-03: popover clips, rounded-card bands, mockup panels (corpus/premise5-clip-stripe-mockup)
+
+Three taste calls from premise round 6 (run 35), each built in the browser
+and static engines and, for the stripe gate, the text engine too.
+
+- **r6-t1-clipped-overflow-popovers, narrow.** `clipped-overflow-container`
+  reports only when the positioned child is a popover layer: the child or a
+  descendant matches `POPOVER_LAYER_SELECTOR` (`[popover]`, `role` `dialog`,
+  `listbox`, `menu`, `menubar` or `tooltip`). Every other clipped child is
+  the effect (a curved masthead, an icon in a field, a card's image crop).
+  The exemptions only a non-popover could reach are gone with it: the
+  ornament test, the masked-reveal transform test and the transparent
+  wrapper measure. A popover is cut by its border box, as before.
+- **r6-t2-side-tab-bands, narrow.** A top or bottom border, pseudo-element
+  stripe or inset box-shadow stripe reports `side-tab` only on a card
+  rounded away from it (`is_rounded_away_from_side` for sides 0 and 2), the
+  gate left and right accents already pass. A band on a card rounded all
+  round still reports as `border-accent-on-rounded`, unchanged.
+- **r6-t3-nested-cards-mockups, advisory.** An inner card reports
+  `nested-cards` as advisory when it is under an HTML `role="img"` outside
+  any `svg`, in a framed demo by r5-p26's structure (`in_framed_demo`), or
+  is itself such a frame (`is_demo_frame`: a three-dot title bar, a framed
+  box under a preview caption, a device frame scaled or tilted in 3D). A
+  mockup class or id is not read for this rule: `illustration` names a
+  feature tile's picture as often as a mockup (nested-cards.html's
+  `flag-illustration-inner` would have moved), and r4-p17 keeps those
+  failing. The URL engine now carries a page check's own severity through
+  `el_pass`, and the static engine through its page-level `push_hits`;
+  neither had a page check that set one before.
+
+Fixtures: `clipped-overflow-container.html` gives its flag rows popover
+roles and moves the ribbon to the pass column with a curved masthead and a
+dropdown named only by its class; `clipped-overflow-painted-box.html`,
+`never-painted.html` and `painted-at-capture.html` mark their clipped layers
+as menus, tooltips or dialogs; `side-tab-stylesheet-forms.html` rounds its
+flagged hosts and adds a square band that passes; `border-baseline.html` and
+`named-color-borders.html` move their square top and bottom bands to the
+pass column. New `nested-cards-mockups.html`, pinned on both engines by the
+`advisory_contexts` tests. Every re-recorded golden was diffed finding by
+finding against its predecessor.
+
+- `detect-fixture-json-clipped-overflow-container-html`, `detect-fixture-text-clipped-overflow-container-html`: the ribbon's clip is gone (13 to 12 advisory notes); every popover row still reports.
+- `detect-fixture-json-on-screen-html`, `detect-fixture-text-on-screen-html`: the two `div.word-clip` clips of a word track are gone.
+- `detect-fixture-json-overlay-positioning-html`, `detect-fixture-text-overlay-positioning-html`: the plain `div clips positioned div` is gone.
+- `detect-fixture-json-border-baseline-html`, `detect-fixture-text-border-baseline-html`: the square `border-top: 4px` and `border-bottom: 3px` are gone (10 to 8).
+- `detect-fixture-json-linked-stylesheet-html`, `detect-fixture-text-linked-stylesheet-html`: `.external-square-top`'s `border-top: 4px` is gone (3 to 2), which its stylesheet comment already said.
+- `detect-fixture-json-named-color-borders-html`, `detect-fixture-text-named-color-borders-html`: the square crimson `border-top: 4px` is gone (7 to 6).
+- `detect-fixture-json-nested-cards-mockups-html`, `detect-fixture-text-nested-cards-mockups-html`: new cases, five warnings and four advisory notes.
+- `detect-dir-json-all-fixtures`, `detect-dir-text-all-fixtures`, `detect-dir-quiet-all-fixtures`, `detect-scope-layout-text`, `detect-scope-both`, `detect-no-advisory-json`, `detect-no-advisory-text`: the moves above and the new fixture, nothing else (875 to 876 counted: four square bands out, five nested cards in; 170 advisory notes either way: four clips out, four mockup panels in).
+
+### Known limits
+
+1. **A dropdown named only by its class is silent.** The popover test reads
+   roles and the `popover` attribute, so a menu built from bare `div`s with
+   a `dropdown` class no longer reports. No judged finding showed one cut.
+2. **Mock context for `nested-cards` is read from structure and
+   `role="img"` only.** directus.com's app screenshot built in HTML
+   (215951), quickrefs.com's profile cards (217021, 217066) and
+   context.dev's preview window with a URL bar and no dots (203683, 203837)
+   carry none of those marks and keep failing at full severity.
+3. **The static engine reads a frame's transform from the inline `style`
+   only,** as r5-p26 does, so a device frame tilted by a stylesheet rule
+   is not seen there and its panels keep failing.
+4. **A band whose corners cannot be read keeps reporting,** as a left or
+   right accent does: an unresolved `var()` radius, a stylesheet the static
+   engine could not load.
+
+## Recorded 2026-10-04: heading-rhythm counts even gaps under running prose (corpus/premise6-heading-rhythm, r7-t1)
+
+Paul's call r7-t1-heading-rhythm-equal-gaps (narrow): a heading whose gap
+above is no larger than its gap below (0.5px slack) also counts when the
+block above ends in running prose: the text block at its bottom edge has at
+least 80 characters on at least two rendered lines, is set smaller than the
+heading and no larger than 1.25 times the body text, is not a heading, spans
+at least half the heading's width, and is not inside a box that shows its
+bottom edge. The crowded test (above < 0.75 x below and a 12px deficit) and
+the two-heading page minimum are unchanged. Three walk fixes ride along: a
+shadow host whose shadow tree lays out content is a block, not a spacer; an
+`hr` or an empty box with a top border is a rule, not a spacer; and the walk
+above passes a wrapper painted the colour of its backdrop unless the wrapper
+is one of a run of like boxes. `heading-rhythm.html` moves "Pass Near Equal"
+to the flag column, adds two even-under-prose rows, a white module row and a
+shadow-DOM carousel row (declarative shadow root), and gives three pass rows
+more room above so they keep testing what they were written for.
+
+No golden changed: the static engine does not run `heading-rhythm`, and the
+fixture edits move no static finding.
+
+### Known limits
+
+1. **Captures recorded before line rects stand down.** The prose test reads
+   the capture's line boxes; run 28 and older snapshots have none, so only the
+   crowded test applies there.
+2. **otto.de's carousel is still missed,** and not for the reason the probe
+   gave: its host has light children and is no spacer. The host box starts
+   4px above the heading's padding-box bottom, past the walk's 2px tolerance,
+   and the heading's own 16px bottom padding is not counted as gap below.
+3. **A heading beside a paragraph in a two-column row** can now meet the page
+   minimum through its even-gap neighbours (everhomes.ae "Featured
+   apartments", 80 / 136 under a dark banner) and report on the crowded test.
 ## Recorded 2026-10-01: MODE RULES printed by concept-seed
 
 Mode-specific rules for directions and comps moved out of the shared reference files into `skill/reference/mode-persuade.md` (persuade and experience), `mode-operate.md` and `mode-read.md`. With `--mode`, `concept-seed` now prints the bodies of the mode file's `## Directions` and `## Comps` sections inside a `MODE RULES (<mode>, from <path>). ...` block, so the agent gets them in output it already reads instead of a file it can skip. The block sits right after the richness instruction on a full roll and after the authority instruction on a degraded one, and prints on every round, re-rolls and both registers included. An unreadable file or a missing section prints one `MODE RULES unavailable: read <path> before writing directions or comps.` line and the roll still succeeds. The richness instruction lost its Persuade/Experience versus Operate/Read sentence, which now lives in the mode files, and reads `Keep a literal carrier only when it becomes functional.` where it read `Otherwise keep ...`.

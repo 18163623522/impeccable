@@ -25,7 +25,7 @@
 //! The findings are identical to the in-page bundle's; the differential
 //! (`crates/browser/tests/differential.rs`) is the gate.
 
-use impeccable_core::browser::snapshot::{Facts, SnapshotDom};
+use impeccable_core::browser::snapshot::{Facts, ScrollShown, SnapshotDom};
 use impeccable_core::browser::visual::{self, CssPlan, Prepared, StackNode};
 use impeccable_core::browser::{BrowserConfig, ElId};
 use impeccable_core::color::Rgba;
@@ -75,6 +75,73 @@ pub fn capture_snapshot_json(page: &mut Page<'_>) -> CdpResult<String> {
         .map(String::from)
         .ok_or_else(|| CdpError::new("snapshot capture returned no json"))
 }
+
+/// Answer [`SnapshotDom::take_scroll_probes`]: scroll the page to each box
+/// (its centre to the viewport's centre; for a box inside a `position:
+/// sticky` stage, through the stage's scroll range in half-viewport steps),
+/// wait a few frames, and read whether it is still at opacity 0.02 or less or
+/// `visibility: hidden | collapse`. The page is scrolled back to the top and
+/// given the same 700ms the reveal sweep gives it before anything reads it
+/// again. Boxes the page no longer holds are left unanswered. The whole
+/// probe stops after [`SCROLL_PROBE_BUDGET_MS`], and boxes it did not reach
+/// are left unanswered too, so they count as hidden.
+pub fn probe_shown_on_scroll(page: &mut Page<'_>, ids: &[ElId]) -> CdpResult<Vec<ScrollShown>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let expr = format!(
+        r#"(async (ids, budget) => {{
+  const cap = window.__impCap;
+  const out = [];
+  if (!cap || !cap.elements) return out;
+  const started = performance.now();
+  const frame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 60)));
+  const shown = (el) => {{
+    const cs = getComputedStyle(el);
+    return parseFloat(cs.opacity) > 0.02 && cs.visibility !== 'hidden' && cs.visibility !== 'collapse';
+  }};
+  const docTop = (el) => el.getBoundingClientRect().top + window.scrollY;
+  for (const id of ids) {{
+    if (performance.now() - started > budget) break;
+    const el = cap.elements[id];
+    if (!el || !el.isConnected) continue;
+    const vh = window.innerHeight;
+    let stage = null;
+    for (let a = el; a && a !== document.body; a = a.parentElement) {{
+      if (getComputedStyle(a).position === 'sticky') {{ stage = a; break; }}
+    }}
+    const stops = [];
+    if (stage && stage.parentElement) {{
+      const host = stage.parentElement;
+      const from = docTop(host) - vh / 2;
+      const to = docTop(host) + host.getBoundingClientRect().height - vh / 2;
+      for (let y = from; y <= to && stops.length < 12; y += Math.max(100, vh / 2)) stops.push(y);
+    }}
+    const r = el.getBoundingClientRect();
+    stops.push(docTop(el) + r.height / 2 - vh / 2);
+    let seen = false;
+    for (const y of stops) {{
+      window.scrollTo({{ top: Math.max(0, y), left: 0, behavior: 'instant' }});
+      for (let i = 0; i < 4 && !seen; i++) {{ await frame(); seen = shown(el); }}
+      if (seen) break;
+    }}
+    out.push({{ el: id, shown: seen }});
+  }}
+  window.scrollTo({{ top: 0, left: 0, behavior: 'instant' }});
+  await new Promise(r => setTimeout(r, 700));
+  return out;
+}})({ids}, {budget})"#,
+        ids = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into()),
+        budget = SCROLL_PROBE_BUDGET_MS,
+    );
+    let out = page.evaluate_value(&expr)?;
+    Ok(serde_json::from_value(out).unwrap_or_default())
+}
+
+/// The time the scroll probe ([`probe_shown_on_scroll`]) may spend before
+/// it stops asking. Each box takes about a quarter of a second, a sticky
+/// stage up to three seconds.
+pub const SCROLL_PROBE_BUDGET_MS: u64 = 5000;
 
 /// Parse a capture's JSON into a [`SnapshotDom`].
 pub fn parse_snapshot(json: &str) -> CdpResult<SnapshotDom> {

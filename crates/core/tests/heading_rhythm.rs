@@ -619,6 +619,178 @@ fn a_date_set_smaller_than_the_body_text_folds_into_a_card_title() {
     assert_only_crowded(&p);
 }
 
+/// A paragraph of `lines` rendered lines, 24px apart, across `width`.
+fn prose(p: &mut Page, parent: ElId, y: f64, width: f64, lines: usize, styles: &[(&str, &str)], text: &str) -> ElId {
+    let el = p.el(parent, "p", (0.0, y, width, 24.0 * lines as f64), styles, text);
+    let rows: Vec<(f64, f64, f64, f64)> = (0..lines).map(|i| (0.0, y + 24.0 * i as f64, width - 40.0, 20.0)).collect();
+    p.d.set_text_lines(el, &rows);
+    el
+}
+
+/// r7-t1-heading-rhythm-equal-gaps: a heading set as far from the paragraph
+/// above as from its own content reads as a line of the paragraph's run
+/// (albayan.ae's article subheads, fabadda.com's and everhomes.ae's about
+/// pages, all one uniform margin).
+#[test]
+fn an_even_gap_under_running_prose_flags() {
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    prose(&mut p, sec, y, W, 2, &[], LONG);
+    p.el(sec, "h2", (0.0, y + 78.0, W, 36.0), &[("fontSize", "28px")], "Even Under Prose");
+    p.el(sec, "p", (0.0, y + 144.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Even Under Prose\" has 30px above vs 30px below");
+
+    // Less space above than below, by less than the crowded test needs.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(240.0);
+    prose(&mut p, sec, y, W, 2, &[], LONG);
+    p.el(sec, "h2", (0.0, y + 72.0, W, 36.0), &[("fontSize", "28px")], "Slightly Closer Under Prose");
+    p.el(sec, "p", (0.0, y + 144.0, W, 48.0), &[], LONG);
+    assert_flags(&p, "\"Slightly Closer Under Prose\" has 24px above vs 36px below");
+
+    // Two even headings meet the page minimum on their own.
+    let mut p = Page::new();
+    for title in ["Even One", "Even Two"] {
+        let (sec, y) = p.case(240.0);
+        prose(&mut p, sec, y, W, 3, &[], LONG);
+        p.el(sec, "h2", (0.0, y + 102.0, W, 36.0), &[("fontSize", "28px")], title);
+        p.el(sec, "p", (0.0, y + 168.0, W, 48.0), &[], LONG);
+    }
+    assert_eq!(p.flagged().len(), 2, "{:#?}", p.flagged());
+}
+
+#[test]
+fn an_even_gap_under_anything_but_running_prose_passes() {
+    // Each shape puts the heading 30px under the block above and 30px over
+    // its own content; only the block above changes.
+    let shapes: Vec<(&str, Box<dyn Fn(&mut Page, ElId, f64) -> f64>)> = vec![
+        ("one line", Box::new(|p, sec, y| {
+            prose(p, sec, y, W, 1, &[], LONG);
+            y + 24.0
+        })),
+        ("a short closing sentence", Box::new(|p, sec, y| {
+            prose(p, sec, y, W, 2, &[], "A short closing sentence.");
+            y + 48.0
+        })),
+        ("a pull statement set large", Box::new(|p, sec, y| {
+            prose(p, sec, y, W, 2, &[("fontSize", "24px")], LONG);
+            y + 48.0
+        })),
+        ("the caption of a column a third as wide", Box::new(|p, sec, y| {
+            let row = p.el(sec, "div", (0.0, y, W, 48.0), &[], "");
+            for i in 0..3 {
+                let x = i as f64 * 270.0;
+                let col = p.el(row, "div", (x, y, 260.0, 48.0), &[], "");
+                let el = p.el(col, "p", (x, y, 260.0, 48.0), &[], LONG);
+                p.d.set_text_lines(el, &[(x, y, 250.0, 20.0), (x, y + 24.0, 250.0, 20.0)]);
+            }
+            y + 48.0
+        })),
+        ("a painted panel", Box::new(|p, sec, y| {
+            let panel = p.el(sec, "div", (0.0, y, W, 80.0), &[("backgroundColor", "rgb(240, 240, 240)")], "");
+            prose(p, panel, y + 16.0, W, 2, &[], LONG);
+            y + 80.0
+        })),
+        ("a capture without line boxes", Box::new(|p, sec, y| {
+            p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+            y + 48.0
+        })),
+        ("more space above", Box::new(|p, sec, y| {
+            // 34px above, 30px below.
+            prose(p, sec, y, W, 2, &[], LONG);
+            y + 52.0
+        })),
+    ];
+    for (name, above) in shapes {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(260.0);
+        let bottom = above(&mut p, sec, y);
+        p.el(sec, "h2", (0.0, bottom + 30.0, W, 36.0), &[("fontSize", "28px")], "Even Heading");
+        p.el(sec, "p", (0.0, bottom + 96.0, W, 48.0), &[], LONG);
+        let flagged = p.flagged();
+        assert_eq!(flagged.len(), 2, "{name}: {flagged:#?}");
+    }
+}
+
+/// otto.de's `oc-cinema-v1`, cisco.com's and hp.com's custom elements draw
+/// their content in an open shadow tree. With no light children, the walk
+/// below read the host as an empty spacer and measured past it.
+#[test]
+fn a_shadow_host_that_draws_content_is_a_block() {
+    let build = |shadow: &dyn Fn(&mut Page, ElId, f64)| {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(420.0);
+        p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+        p.el(sec, "h2", (0.0, y + 58.0, W, 36.0), &[("fontSize", "28px")], "Above A Carousel");
+        let host = p.el(sec, "x-carousel", (0.0, y + 134.0, W, 120.0), &[], "");
+        shadow(&mut p, host, y + 134.0);
+        p.el(sec, "p", (0.0, y + 340.0, W, 48.0), &[], LONG);
+        p.flagged()
+    };
+    let shadow_box = |p: &mut Page, host: ElId, y: f64, text: &str| -> ElId {
+        let el = p.d.add_shadow_child(host, "div");
+        p.d.set_styles(el, &[("display", "block"), ("visibility", "visible"), ("opacity", "1"), ("position", "static")]);
+        p.d.set_rect(el, 0.0, y, W, 120.0);
+        if !text.is_empty() {
+            p.d.add_text(el, text);
+        }
+        el
+    };
+    let flagged = build(&|p, host, y| {
+        shadow_box(p, host, y, "Slide one");
+    });
+    assert_eq!(flagged.len(), 3, "{flagged:#?}");
+    assert!(flagged.iter().any(|s| s.contains("\"Above A Carousel\" has 10px above vs 40px below")), "{flagged:#?}");
+    // Pictures alone are content too.
+    let flagged = build(&|p, host, y| {
+        let track = shadow_box(p, host, y, "");
+        let img = p.d.add(Some(track), "img");
+        p.d.set_styles(img, &[("display", "block"), ("position", "static")]);
+        p.d.set_rect(img, 0.0, y, 300.0, 120.0);
+    });
+    assert_eq!(flagged.len(), 3, "{flagged:#?}");
+    // A shadow tree of styles and an empty box draws nothing: the host is
+    // space, as before, and the gap below runs to the paragraph 246px down.
+    let flagged = build(&|p, host, y| {
+        let style = p.d.add_shadow_child(host, "style");
+        p.d.add_text(style, ":host { display: block }");
+        shadow_box(p, host, y, "");
+    });
+    assert_eq!(flagged.len(), 2, "{flagged:#?}");
+}
+
+/// The walk above stops at a wrapper that shows where it starts. One filled
+/// with the colour behind it (samsung.com's and costco.com's white module
+/// boxes on a white page) shows nothing, and the walk goes on past it.
+#[test]
+fn a_wrapper_painted_like_its_backdrop_does_not_stop_the_walk_above() {
+    let build = |fill: &str| {
+        let mut p = crowded_pair();
+        let (sec, y) = p.case(240.0);
+        p.el(sec, "p", (0.0, y, W, 48.0), &[], LONG);
+        let module = p.el(sec, "div", (0.0, y + 58.0, W, 150.0), &[("backgroundColor", fill)], "");
+        p.el(module, "h2", (0.0, y + 58.0, W, 36.0), &[("fontSize", "28px")], "Module Title");
+        p.el(module, "p", (0.0, y + 134.0, W, 48.0), &[], LONG);
+        p.flagged()
+    };
+    let flagged = build("rgb(255, 255, 255)");
+    assert_eq!(flagged.len(), 3, "{flagged:#?}");
+    assert!(flagged.iter().any(|s| s.contains("\"Module Title\" has 10px above vs 40px below")), "{flagged:#?}");
+    assert_eq!(build("rgb(240, 240, 240)").len(), 2, "a band of its own colour starts a region");
+
+    // haraj.com.sa: listing rows alternate grey and white. A white row is
+    // still a card in a run of like cards, and the walk stops at it.
+    let mut p = crowded_pair();
+    let (sec, y) = p.case(420.0);
+    for (i, fill) in ["rgb(244, 246, 248)", "rgb(255, 255, 255)", "rgb(244, 246, 248)"].iter().enumerate() {
+        let top = y + i as f64 * 120.0;
+        let row = p.el(sec, "div", (0.0, top, W, 110.0), &[("backgroundColor", fill)], "");
+        p.el(row, "h3", (0.0, top + 10.0, W, 28.0), &[("fontSize", "20px")], &format!("Listing Title {i}"));
+        p.el(row, "p", (0.0, top + 80.0, W, 20.0), &[], "Riyadh, an hour ago");
+    }
+    assert_only_crowded(&p);
+}
+
 #[test]
 fn a_spacer_between_an_eyebrow_and_its_heading_keeps_the_fold() {
     // Builders put a spacer box between the label and the title. The walk

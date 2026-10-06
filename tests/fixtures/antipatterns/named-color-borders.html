@@ -46,8 +46,8 @@
       border-left: 5px solid rebeccapurple;
     }
 
-    /* 3: horizontal stripe variant — named crimson riding the top edge */
-    #flag-named-crimson-top {
+    /* 3: horizontal band on a square box: a rule, not a card's accent (r6-t2) */
+    #pass-named-crimson-top {
       width: 400px;
       background: #ffffff;
       border-top: 4px solid crimson;
@@ -120,7 +120,6 @@
       <h2>Should flag</h2>
       <div class="case" id="flag-named-purple"><h3>named purple</h3><p>border-left 4px solid purple + radius</p></div>
       <div class="case" id="flag-named-rebecca"><h3>rebeccapurple</h3><p>border-left 4px + radius</p></div>
-      <div class="case" id="flag-named-crimson-top"><h3>crimson top stripe</h3><p>border-top 4px, horizontal variant</p></div>
       <div class="case" id="flag-named-teal"><h3>named teal</h3><p>border-left 3px, rounded away from the stripe</p></div>
       <div class="case" id="flag-named-var"><h3>var() to named</h3><p>border-left 4px solid var(--accent)</p></div>
       <div class="case" style="width: 400px; background: #ffffff; border-radius: 0 6px 6px 0; border-left: 7px solid purple">
@@ -129,6 +128,7 @@
     </div>
     <div class="col" data-col="pass">
       <h2>Should pass</h2>
+      <div class="case" id="pass-named-crimson-top"><h3>crimson top band</h3><p>border-top 4px on a square box</p></div>
       <div class="case" id="pass-named-dimgray"><h3>dimgray</h3><p>neutral named color</p></div>
       <div class="case" id="pass-named-gainsboro"><h3>gainsboro</h3><p>light neutral named color</p></div>
       <div class="case" id="pass-named-black"><h3>named black</h3><p>neutral side border</p></div>

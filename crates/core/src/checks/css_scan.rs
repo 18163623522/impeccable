@@ -983,25 +983,31 @@ pub fn scan_css_text_for_inset_stripe(content: &str) -> Vec<PatternFinding> {
 }
 
 // ─── side stripes on a rounded card ─────────────────────────────────────────
-// `side-tab` reports a left or right accent only on a card rounded away from
+// `side-tab` reports an accent on any edge only on a card rounded away from
 // the stripe. The two CSS-text stripe scans above stay the recorded producers
 // (their call vectors pin them); every caller gates what they return, against
 // a computed style when it has elements in hand and against the host rule's
 // own declarations when it has only text.
 
-re!(STRIPE_EDGE_RE, r"\((left|right)(?:: 0)?\)$".to_string());
+re!(STRIPE_EDGE_RE, r"\((left|right|top|bottom)(?:: 0)?\)$".to_string());
 
 /// The side a CSS-text `side-tab` stripe sits on, as a `[Top, Right, Bottom,
 /// Left]` index, read off the snippet both scans end with: `(left: 0)` /
-/// `(right: 0)` from the pseudo-element scan, `(left)` / `(right)` from the
-/// inset box-shadow scan. `None` for a top or bottom stripe and for anything
-/// that is not one of those findings.
+/// `(bottom: 0)` from the pseudo-element scan, `(left)` / `(top)` from the
+/// inset box-shadow scan. Every edge counts: a top or bottom band is gated on
+/// a rounded card like a left or right one (decision r6-t2-side-tab-bands).
+/// `None` for anything that is not one of those findings.
 pub fn side_stripe_index(finding: &PatternFinding) -> Option<usize> {
     if finding.id != "side-tab" {
         return None;
     }
     let caps = STRIPE_EDGE_RE.captures(&finding.snippet)?;
-    Some(if &caps[1] == "left" { 3 } else { 1 })
+    Some(match &caps[1] {
+        "top" => 0,
+        "right" => 1,
+        "bottom" => 2,
+        _ => 3,
+    })
 }
 
 re!(
@@ -1636,8 +1642,8 @@ impl<'a> CssHostIndex<'a> {
     }
 
     /// [`side_stripe_on_rounded_host`](Self::side_stripe_on_rounded_host)'s
-    /// text engine twin: whether a left or right stripe from this text sits on
-    /// a box known square, so the finding drops. Anything but a left or right
+    /// text engine twin: whether a stripe from this text sits on
+    /// a box known square, so the finding drops. Anything but a
     /// `side-tab` stripe is never known square.
     pub fn side_stripe_known_square(&self, finding: &PatternFinding, sheet: &DeclaredCorners) -> bool {
         let Some(side) = side_stripe_index(finding) else {
@@ -1815,7 +1821,7 @@ impl<'a> CssHostIndex<'a> {
     }
 
     /// Whether a CSS-text finding from the text this index was built on
-    /// survives the rounded-card gate. Anything but a left or right
+    /// survives the rounded-card gate. Anything but a
     /// `side-tab` stripe passes untouched.
     pub fn side_stripe_on_rounded_host(&self, finding: &PatternFinding) -> bool {
         let Some(side) = side_stripe_index(finding) else {
@@ -2886,13 +2892,13 @@ mod tests {
              .c::after{position:absolute;height:4px;left:0;right:0;bottom:0;background:#3b82f6}",
         );
         let sides: Vec<Option<usize>> = pseudo.iter().map(side_stripe_index).collect();
-        assert_eq!(sides, vec![Some(3), Some(1), None]);
+        assert_eq!(sides, vec![Some(3), Some(1), Some(2)]);
         let inset = scan_css_text_for_inset_stripe(
             ".a{box-shadow:inset 4px 0 0 #6366f1}.b{box-shadow:inset -4px 0 0 #6366f1}\
              .c{box-shadow:inset 0 4px 0 #6366f1}",
         );
         let sides: Vec<Option<usize>> = inset.iter().map(side_stripe_index).collect();
-        assert_eq!(sides, vec![Some(3), Some(1), None]);
+        assert_eq!(sides, vec![Some(3), Some(1), Some(0)]);
     }
 
     #[test]

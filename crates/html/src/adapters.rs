@@ -576,8 +576,9 @@ pub fn check_element_borders(
         left: Some(sv(style, "borderLeftColor")),
     };
     let own_bg = parse_any_color(sv_opt(style, "backgroundColor"));
-    // Only a left or right accent is gated on the corners.
-    let corners = if widths.right > 0.0 || widths.left > 0.0 {
+    // An accent on any edge is gated on the corners (left and right by the
+    // rounded-card decision, top and bottom by r6-t2-side-tab-bands).
+    let corners = if widths.top > 0.0 || widths.right > 0.0 || widths.bottom > 0.0 || widths.left > 0.0 {
         resolve_side_accent_corners(el, style, pf0(sv(style, "width")))
     } else {
         None
@@ -1690,29 +1691,6 @@ fn positioned_child_is_popover_layer(child: &StaticElement<'_>) -> bool {
         || child.query_selector(POPOVER_LAYER_SELECTOR).is_some()
 }
 
-/// A positioned child that only paints: nothing to read, nothing to click,
-/// and either no content of its own, only media, no pointer target, or
-/// nothing visible at rest.
-fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
-    if positioned_child_has_substantive_content(child) {
-        return false;
-    }
-    let style = child.style();
-    if sv(style, "pointerEvents") == "none" {
-        return true;
-    }
-    // The child's own `opacity`, not the chain's, and a value that does not
-    // parse is not a transparent layer.
-    let opacity = parse_float(sv(style, "opacity"));
-    if opacity.is_finite() && opacity <= 0.05 {
-        return true;
-    }
-    if child.children().is_empty() {
-        return true;
-    }
-    child.query_selector("img,picture,svg,video,canvas").is_some()
-}
-
 fn ident_names_viewport(el: &StaticElement<'_>) -> bool {
     let ident = format!(
         "{} {}",
@@ -1808,6 +1786,11 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
         if pos != "absolute" && pos != "fixed" {
             continue;
         }
+        // Only a popover layer is a layer a clip can trap; the rest of what
+        // a clip cuts is the effect (decision r6-t1-clipped-overflow-popovers).
+        if !positioned_child_is_popover_layer(&child) {
+            continue;
+        }
         if positioned_child_is_decorative(&child) {
             continue;
         }
@@ -1819,9 +1802,6 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
         // No layout statically: `positionedChildEscapesClip` is null, and
         // so is the transform offset of a masked reveal.
         if !positioned_style_implies_escape_axis(&StyleRef(child_style), clip_x, clip_y) {
-            continue;
-        }
-        if !positioned_child_is_popover_layer(&child) && positioned_child_is_ornament(&child) {
             continue;
         }
         if nearer_clip_traps_child(el, &child) {

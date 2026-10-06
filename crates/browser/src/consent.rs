@@ -27,6 +27,17 @@
 //! `.cc-window[aria-label="cookieconsent"]`) and Google's consent messages
 //! (ynet.co.il, `.fc-ccpa-root`). The other vendors are listed from their
 //! published markup and have no corpus capture yet.
+//!
+//! Run 35 added two. consentmanager.net on letour.fr: `div#cmpbox` with
+//! `role=dialog`, rendered in the open shadow root of `div#cmpwrapper`, a
+//! fixed bar over the lower 28 to 36% of the first screen. And Borlabs Cookie
+//! 3 on fischundfang.de, already listed by `#BorlabsCookieBox`, left three
+//! things behind once the box was hidden: its floating reopen button
+//! (`#BorlabsCookieWidget`, a fixed 48px shield at the left edge), the inline
+//! `overflow: hidden` on `<body>` its modal sets behind
+//! `#BorlabsDialogBackdrop` (it stopped the reveal sweep from scrolling), and
+//! `aria-hidden="true"` on the page wrapper (`#td-outer-wrap`) and its
+//! siblings, each marked `data-borlabs-cookie-aria-hidden`.
 
 use serde_json::{json, Value};
 
@@ -42,6 +53,11 @@ pub struct ConsentManager {
     pub html_lock_classes: &'static [&'static str],
     /// Classes the manager puts on `<body>` to stop the page scrolling.
     pub body_lock_classes: &'static [&'static str],
+    /// Attributes the manager sets beside the `aria-hidden="true"` it puts on
+    /// the page while its dialog is open, as its own record of which elements
+    /// it hid. The hide step removes `aria-hidden` from exactly those
+    /// elements, since the rules treat aria-hidden text as not the page's.
+    pub aria_hidden_marks: &'static [&'static str],
 }
 
 /// Every known consent manager, in the order a report names them.
@@ -52,6 +68,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[".onetrust-pc-dark-filter"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Cookiebot",
@@ -59,6 +76,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &["#CybotCookiebotDialogBodyUnderlay"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Usercentrics",
@@ -66,6 +84,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "TrustArc",
@@ -73,6 +92,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[".truste_overlay"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Didomi",
@@ -80,6 +100,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &["didomi-popup-open"],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Quantcast Choice",
@@ -87,6 +108,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Sourcepoint",
@@ -94,6 +116,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &["sp-message-open"],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Osano",
@@ -101,6 +124,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Cookie Consent",
@@ -108,6 +132,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "CookieYes",
@@ -115,6 +140,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[".cky-overlay", ".cli-modal-backdrop"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Complianz",
@@ -122,6 +148,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[".cmplz-soft-cookiewall"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "iubenda",
@@ -129,6 +156,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Termly",
@@ -136,6 +164,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Axeptio",
@@ -143,13 +172,15 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &["#axeptio_overlay"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Borlabs Cookie",
-        roots: &["#BorlabsCookieBox", "#BorlabsCookieBoxWrap"],
-        backdrops: &[],
+        roots: &["#BorlabsCookieBox", "#BorlabsCookieBoxWrap", "#BorlabsCookieWidget"],
+        backdrops: &["#BorlabsDialogBackdrop"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &["data-borlabs-cookie-aria-hidden"],
     },
     ConsentManager {
         name: "Klaro",
@@ -157,6 +188,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Cookie Notice",
@@ -164,6 +196,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Shopify",
@@ -171,6 +204,18 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
+    },
+    ConsentManager {
+        name: "consentmanager",
+        // Current builds render the box inside an open shadow root on
+        // `#cmpwrapper`, out of reach of a document selector, so the host is
+        // what is hidden; `#cmpbox` covers builds that render it in the page.
+        roots: &["#cmpwrapper", "#cmpbox"],
+        backdrops: &[],
+        html_lock_classes: &[],
+        body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
     ConsentManager {
         name: "Google Funding Choices",
@@ -178,6 +223,7 @@ pub const CONSENT_MANAGERS: &[ConsentManager] = &[
         backdrops: &[".fc-dialog-overlay"],
         html_lock_classes: &[],
         body_lock_classes: &[],
+        aria_hidden_marks: &[],
     },
 ];
 
@@ -200,6 +246,7 @@ fn managers_json() -> Value {
                     "backdrops": m.backdrops,
                     "htmlLock": m.html_lock_classes,
                     "bodyLock": m.body_lock_classes,
+                    "ariaMarks": m.aria_hidden_marks,
                 })
             })
             .collect(),
@@ -438,6 +485,15 @@ pub fn hide_js() -> String {
     if (!out.hidden.includes(m.name)) continue;
     for (const c of m.htmlLock) if (html.classList.contains(c)) {{ html.classList.remove(c); out.unlocked.push('html.' + c); }}
     if (body) for (const c of m.bodyLock) if (body.classList.contains(c)) {{ body.classList.remove(c); out.unlocked.push('body.' + c); }}
+    // The aria-hidden the manager put on the page behind its dialog, read off
+    // the manager's own mark, so an aria-hidden the site set stays.
+    for (const mark of m.ariaMarks) {{
+      let n = 0;
+      for (const el of q('[' + mark + ']')) {{
+        if (el.getAttribute('aria-hidden') === 'true') {{ el.removeAttribute('aria-hidden'); n++; }}
+      }}
+      if (n && !out.unlocked.includes('aria-hidden [' + mark + ']')) out.unlocked.push('aria-hidden [' + mark + ']');
+    }}
   }}
   // An app shell locks <body> itself and scrolls an inner container that
   // fills the viewport. That lock is the site's, whatever the manager did,
@@ -559,7 +615,7 @@ mod tests {
         for name in [
             "OneTrust", "Cookiebot", "Usercentrics", "TrustArc", "Didomi", "Quantcast Choice", "Sourcepoint",
             "Osano", "CookieYes", "Complianz", "iubenda", "Termly", "Axeptio", "Borlabs Cookie", "Klaro",
-            "Cookie Notice", "Shopify",
+            "Cookie Notice", "Shopify", "consentmanager",
         ] {
             assert!(CONSENT_MANAGERS.iter().any(|m| m.name == name), "{name}");
         }

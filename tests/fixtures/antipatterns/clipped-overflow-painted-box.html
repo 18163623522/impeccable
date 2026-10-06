@@ -2,19 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>clipped-overflow-container, measured on what the layer paints</title>
+<title>clipped-overflow-container, popover layers by their box</title>
 <!--
-  A clipping container cuts a positioned child only where the child paints.
+  Only a popover layer is a layer a clip traps (decision
+  r6-t1-clipped-overflow-popovers). A transparent wrapper a few pixels
+  larger than the button it holds (mk.co.kr, bankofamerica.com) is not one,
+  and stays silent wherever it sits. The same wrapper marked as a menu is
+  cut by its border box: a layer that really opens reports whatever wraps it.
 
-  A transparent wrapper a few pixels larger than the button it holds leaves
-  its container with its border box while everything it paints sits inside
-  (mk.co.kr, bankofamerica.com). The same wrapper with the button itself past
-  the edge, or painting a box of its own, is cut.
-
-  A caption inside a card in a row that scrolls sideways belongs to that row:
+  A tooltip inside a card in a row that scrolls sideways belongs to that row:
   the row cuts and scrolls its cards, and a column that clips the row's
-  overhang cuts the row, not the caption (gamer.com.tw). The same row with
-  its overflow visible leaves the caption to the column.
+  overhang cuts the row, not the tooltip (gamer.com.tw). The same row with
+  its overflow visible leaves the tooltip to the column.
 
   The static engine measures no boxes, so it reads only the declared offsets.
 -->
@@ -27,13 +26,12 @@
   .more { position: absolute; top: 40px; width: 40px; height: 40px; padding: 5px; box-sizing: border-box; }
   .more button { display: block; width: 30px; height: 30px; padding: 0; border: 0; background: #2f2f2f; color: #ffffff; font-size: 14px; line-height: 30px; overflow: hidden; }
   .pass-transparent-wrapper { left: 322px; }
-  .flag-button-cut { left: 334px; }
-  .flag-wrapper-paints { left: 322px; background: #ffffff; }
+  .flag-menu-wrapper { left: 322px; }
   .column { overflow: hidden; width: 374px; margin: 0 0 24px 8px; }
   .row { display: flex; position: relative; margin: 0 -8px; padding: 0; list-style: none; }
   .row li { flex: 0 0 195px; }
   .tile { display: block; position: relative; height: 122px; margin: 0 4px; overflow: hidden; background: #d4d4d8; }
-  .tile h3 { position: absolute; left: 0; right: 0; bottom: 0; margin: 0; padding: 4px 8px; font-size: 14px; background: rgba(0, 0, 0, 0.6); color: #ffffff; }
+  .tile span { position: absolute; left: 0; right: 0; bottom: 0; margin: 0; padding: 4px 8px; font-size: 14px; background: rgba(0, 0, 0, 0.6); color: #ffffff; }
   .scrolls { overflow-x: auto; overflow-y: hidden; }
 </style>
 </head>
@@ -41,18 +39,14 @@
 
 <div class="col" id="should-flag">
   <h2>Should flag</h2>
-  <div class="story flag-cuts-button">
-    <p>The button itself runs past the edge of the story.</p>
-    <div class="more flag-button-cut"><button type="button">+</button></div>
+  <div class="story flag-cuts-menu">
+    <p>A menu wrapper reaches 4px past the edge of the story.</p>
+    <div class="more flag-menu-wrapper" role="menu"><button type="button" role="menuitem">+</button></div>
   </div>
-  <div class="story flag-cuts-painted-wrapper">
-    <p>The wrapper paints a white box, and that box is cut.</p>
-    <div class="more flag-wrapper-paints"><button type="button">+</button></div>
-  </div>
-  <div class="column flag-cuts-caption">
+  <div class="column flag-cuts-tooltip">
     <ul class="row">
-      <li><a class="tile" href="/one"><h3>First caption</h3></a></li>
-      <li><a class="tile" href="/two"><h3>Second caption</h3></a></li>
+      <li><a class="tile" href="/one"><span role="tooltip">First tip</span></a></li>
+      <li><a class="tile" href="/two"><span role="tooltip">Second tip</span></a></li>
     </ul>
   </div>
 </div>
@@ -60,14 +54,14 @@
 <div class="col" id="should-pass">
   <h2>Should pass</h2>
   <div class="story pass-holds-wrapper">
-    <p>A 40px wrapper reaches 4px past the edge; its 30px button does not.</p>
+    <p>A 40px wrapper reaches 4px past the edge, and it is no popover.</p>
     <div class="more pass-transparent-wrapper"><button type="button">+</button></div>
   </div>
   <div class="column pass-holds-scrolling-row">
     <ul class="row scrolls">
-      <li><a class="tile" href="/one"><h3>First caption</h3></a></li>
-      <li><a class="tile" href="/two"><h3>Second caption</h3></a></li>
-      <li><a class="tile" href="/three"><h3>Third caption</h3></a></li>
+      <li><a class="tile" href="/one"><span role="tooltip">First tip</span></a></li>
+      <li><a class="tile" href="/two"><span role="tooltip">Second tip</span></a></li>
+      <li><a class="tile" href="/three"><span role="tooltip">Third tip</span></a></li>
     </ul>
   </div>
 </div>

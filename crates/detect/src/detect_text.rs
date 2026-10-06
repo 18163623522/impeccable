@@ -1217,11 +1217,12 @@ pub fn scan_inset_stripe_css(
             } else {
                 "bottom"
             };
-            // A left or right stripe drops only on a box known square.
+            // A stripe on any edge drops only on a box known square.
             let side = match edge {
                 "left" => Some(3),
                 "right" => Some(1),
-                _ => None,
+                "top" => Some(0),
+                _ => Some(2),
             };
             if let Some(side) = side {
                 if host_index
@@ -1859,7 +1860,7 @@ fn pseudo_stripe_findings(
     let host_index = once_cell::unsync::OnceCell::new();
     scan_css_text_for_pseudo_stripe(text)
         .into_iter()
-        // A left or right stripe drops only on a host known square.
+        // A stripe on any edge drops only on a host known square.
         .filter(|hit| {
             side_stripe_index(hit).is_none()
                 || !host_index
@@ -2209,8 +2210,12 @@ function Thumb({ url }: { url?: string }) {
         assert_eq!(f[0].line, 1.0);
         // The same stripe on a square box is the old convention: silent.
         assert!(scan(".q {\n  box-shadow: inset 4px 0 0 #6366f1;\n}\n").is_empty());
-        // A top band is not gated.
-        assert_eq!(scan(".t { box-shadow: inset 0 4px 0 #6366f1; }").len(), 1);
+        // A top band passes the same gate (r6-t2-side-tab-bands).
+        assert!(scan(".t { box-shadow: inset 0 4px 0 #6366f1; }").is_empty());
+        assert_eq!(
+            scan(".t { box-shadow: inset 0 4px 0 #6366f1; border-radius: 0 0 8px 8px; }").len(),
+            1
+        );
     }
 
     /// Every text-engine producer of `side-tab` answers a square box and a

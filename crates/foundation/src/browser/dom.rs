@@ -236,6 +236,16 @@ pub trait Dom {
         None
     }
 
+    /// Whether a box that is hidden with the page scrolled to the top shows
+    /// once the page is scrolled to it: a reveal that follows the scroll
+    /// position (a scrubbed timeline, a reveal that hides again when its
+    /// section leaves the viewport). `None` is a probe that has not looked: a
+    /// recording made before the probe existed, a DOM with no page behind it.
+    /// A caller treats `None` as the base answer, hidden.
+    fn shown_when_scrolled_to(&self, _el: ElId) -> Option<bool> {
+        None
+    }
+
     // ── the flat tree ─────────────────────────────────────────────────
     /// The box an element paints inside once shadow trees are composed: the
     /// slot a light-DOM child is assigned to, else its parent, else the host
@@ -251,6 +261,13 @@ pub trait Dom {
     /// text inherits its colour and font from the slot, not from the host.
     fn text_slot(&self, _el: ElId) -> Option<ElId> {
         None
+    }
+    /// The top-level nodes of the open shadow tree `el` hosts, in order:
+    /// the elements whose [`Dom::flat_parent`] is `el` without being its
+    /// children. Empty for an element that hosts no shadow tree, and from a
+    /// probe that cannot see shadow trees (the default).
+    fn shadow_children(&self, _el: ElId) -> Vec<ElId> {
+        Vec::new()
     }
     /// Whether the probe reads open shadow trees ([`Dom::flat_parent`]), so
     /// that an element with no assigned slot is not slotted anywhere. A

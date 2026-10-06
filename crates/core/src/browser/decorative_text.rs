@@ -98,6 +98,40 @@ fn marked_mockup(dom: &dyn Dom, el: ElId) -> (bool, bool) {
     (false, false)
 }
 
+/// Whether a box sits in a drawn product mockup: under an HTML `role="img"`
+/// outside any `svg`, or in or itself a framed demo by its structure (r5-p26's
+/// three title-bar dots, preview caption, or scaled or tilted device frame).
+/// `nested-cards` reports an inner box here as advisory (decision
+/// r6-t3-nested-cards-mockups). A mockup class or id is not read: an
+/// `illustration` names a feature tile's picture as often as a mockup, and
+/// r4-p17 keeps such a tile failing.
+pub fn box_in_mockup_dom(dom: &dyn Dom, el: ElId) -> bool {
+    under_html_picture(dom, el)
+        || super::text_context::in_framed_demo_dom(dom, el)
+        || super::text_context::is_demo_frame_dom(dom, el)
+}
+
+/// `el` or an ancestor is an HTML element marked `role="img"`, outside any
+/// `svg`; a `figcaption` on the way up ends the walk, as in [`marked_mockup`].
+fn under_html_picture(dom: &dyn Dom, el: ElId) -> bool {
+    let mut in_svg = closest_or_none(dom, el, "svg").is_some();
+    let mut cur = Some(el);
+    while let Some(c) = cur {
+        let tag = tag_lower(dom, c);
+        if tag == "figcaption" {
+            return false;
+        }
+        if !in_svg && dom.attr(c, "role").is_some_and(|r| js::trim(&r).eq_ignore_ascii_case("img")) {
+            return true;
+        }
+        if tag == "svg" {
+            in_svg = false;
+        }
+        cur = dom.parent(c);
+    }
+    false
+}
+
 fn marked_signature(dom: &dyn Dom, el: ElId) -> bool {
     [Some(el), dom.parent(el)].into_iter().flatten().any(|c| {
         is_signature_marker(&class_attr(dom, c))

@@ -220,13 +220,13 @@
       <h3>Menu escaping a clipping host</h3>
       <div class="clip-host" id="flag-clip-menu-host">
         <button>Playback speed</button>
-        <div class="clip-menu"><a href="#rate">1.5x speed</a></div>
+        <div class="clip-menu" role="menu"><a href="#rate" role="menuitem">1.5x speed</a></div>
       </div>
 
       <h3>Fixed menu inside its containing block</h3>
       <div class="clip-host clip-host-cb" id="flag-clip-fixed-cb-host">
         <button>Share</button>
-        <div class="clip-fixed-cb"><a href="#share">Copy link</a></div>
+        <div class="clip-fixed-cb" role="menu"><a href="#share" role="menuitem">Copy link</a></div>
       </div>
 
       <h3>Card inside a card</h3>
@@ -319,13 +319,13 @@
       <h3>Menu that never renders</h3>
       <div class="clip-host" id="pass-clip-hidden-menu-host">
         <button>Playback speed</button>
-        <div class="clip-menu" style="display: none"><a href="#rate">2x speed</a></div>
+        <div class="clip-menu" role="menu" style="display: none"><a href="#rate" role="menuitem">2x speed</a></div>
       </div>
 
       <h3>Fixed layer inside a host that is not its containing block</h3>
       <div class="clip-host" id="pass-clip-fixed-host">
         <button>Listen</button>
-        <div class="clip-fixed"><a href="#player">Audio player</a></div>
+        <div class="clip-fixed" role="dialog"><a href="#player">Audio player</a></div>
       </div>
 
       <h3>Mega-nav panel named with BEM classes</h3>

@@ -105,17 +105,34 @@ fn is_comp_round_comp(path: &str) -> bool {
     dir == ".impeccable/mocks" || dir.ends_with("/.impeccable/mocks")
 }
 
-fn print_answer(io: &mut Io, raw: &str) {
+/// The comp round's option one: the decision comp `build-phase start
+/// --decision-comp` recorded, while that build's comps phase is open, served
+/// on a page that is the comp round (it also serves a comp directly in
+/// `.impeccable/mocks/`). A pick of it there is the approval, not a new
+/// option one; on any other page the same path is an ordinary decision slot.
+fn is_comp_rounds_option_one(cwd: &str, path: &str, served: &[String]) -> bool {
+    served.iter().any(|c| is_comp_round_comp(c)) && is_open_rounds_decision_comp(cwd, path)
+}
+
+fn is_open_rounds_decision_comp(cwd: &str, path: &str) -> bool {
+    let Some(state) = safe_read(&jsp::resolve(cwd, &[".impeccable/build/state.json"])).and_then(|raw| serde_json::from_str::<Value>(&raw).ok()) else { return false };
+    let Some(chosen) = state.get("decisionComp").and_then(Value::as_str) else { return false };
+    state.get("phase").and_then(Value::as_str) == Some("comps") && same_path(&jsp::resolve(cwd, &[chosen]), &jsp::resolve(cwd, &[path]))
+}
+
+fn print_answer(io: &mut Io, raw: &str, served: &[String]) {
     io.out(&format!("ANSWER: {}\n", raw));
     let Ok(a) = serde_json::from_str::<Value>(raw) else { return };
     let truthy = |k: &str| a.get(k).map(crate::staleness::js_truthy).unwrap_or(false);
     if truthy("hero") || truthy("board") {
         io.out("CHOSEN CARD: open the chosen world's board and hero images now, before any code. When your harness only reads files, or runs sandboxed, download them INTO the workspace and open the relative path; a sandboxed viewer rejects absolute paths outside it. They set the craft bar the build must reach.\n");
     }
-    if truthy("comp") && is_comp_round_comp(&a.get("comp").map(js_str).unwrap_or_default()) {
+    let comp = a.get("comp").map(js_str).unwrap_or_default();
+    let cwd = io.cwd.to_string_lossy().to_string();
+    if truthy("comp") && (is_comp_round_comp(&comp) || is_comp_rounds_option_one(&cwd, &comp, served)) {
         io.out("APPROVED COMP: the user picked this composition in the comp round, so it is the approved comp. Set \"approved\": true in its prompt sidecar, the image's full file name plus .json (a.png gets a.png.json), record its path in the surface brief, then close the comps phase with build-phase advance. Build from it as it stands; never regenerate it.\n");
     } else if truthy("comp") {
-        io.out("CHOSEN COMP: the decision comp at that path is compositional option one. On a comp-led build the comp round adds two variations beside it; on a code-led build it returns at the finish review as the critique reference. Never regenerate it from scratch.\n");
+        io.out("CHOSEN COMP: the decision comp at that path is compositional option one. On a comp-led build pass it to build-phase start as --decision-comp <that path>, and the comp round adds two variations beside it where it stands; on a code-led build it returns at the finish review as the critique reference. Never regenerate it from scratch.\n");
     }
     let option_id = a.get("optionId").and_then(|v| v.as_str());
     if option_id == Some("canon") {
@@ -166,6 +183,52 @@ fn declared_comps(payload: &Value) -> Vec<String> {
         out.push(s);
     }
     out
+}
+
+/// The cards a comp-led direction round leaves without a decision comp, by
+/// id (`canonCard` for the canon card, `options[<n>]` for a card with no
+/// id). The round owes a comp on every card, canon included and declined
+/// challengers excepted, only when all three hold: it is a direction round
+/// (it carries the canon exit, `canon` or `canonCard`, which surface rounds
+/// and the comp round never do), it has image generation and a comp-led
+/// default (`buildPath` `{"value": "comp", "toggle": true}`; a code-led
+/// round's slots are a flip reserve, and no toggle means no image
+/// generation), and it is a full hand (a degraded roll's single card is
+/// text-only). Empty when the round owes nothing or every card declares one.
+fn missing_direction_comps(payload: &Value) -> Vec<String> {
+    let comp_led = payload.pointer("/buildPath/value").and_then(Value::as_str) == Some("comp");
+    let toggle = payload.pointer("/buildPath/toggle") == Some(&Value::Bool(true));
+    let canon_card = payload.get("canonCard").filter(|c| c.is_object());
+    let direction = canon_card.is_some() || payload.get("canon").map(crate::staleness::js_truthy).unwrap_or(false);
+    let options = payload.get("options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+    if !comp_led || !toggle || !direction || options.len() < 2 {
+        return Vec::new();
+    }
+    let has_comp = |card: &Value| {
+        let comp = card.get("comp").filter(|v| !v.is_null()).or_else(|| card.get("sketch").filter(|v| !v.is_null()));
+        comp.map(crate::staleness::js_truthy).unwrap_or(false)
+    };
+    let mut missing: Vec<String> = options
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.get("verdict").and_then(Value::as_str) != Some("declined") && !has_comp(o))
+        .map(|(i, o)| o.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("options[{}]", i)))
+        .collect();
+    if canon_card.is_some_and(|c| !has_comp(c)) {
+        missing.push("canonCard".into());
+    }
+    missing
+}
+
+/// The refusal `--start` and `--update` print for a comp-led direction round
+/// that declares no comp on some card. `rerun` names the command to repeat.
+fn missing_comps_message(missing: &[String], rerun: &str, outcome: &str) -> String {
+    format!(
+        "serve-question: this direction round is comp-led with image generation (buildPath value \"comp\", toggle true), so every card declares a decision comp, canon included, declined challengers excepted; {}. Missing a \"comp\": {}. Give each of those cards \"comp\": \".impeccable/mocks/decision/<card id>.png\" (the canon card's goes inside canonCard), then {}; the comps are generated after the page serves, as its NEXT line says.\n",
+        outcome,
+        missing.join(", "),
+        rerun
+    )
 }
 
 /// Provenance of a hand lives in `<key>.hand.json`, written atomically by
@@ -403,14 +466,16 @@ fn round_comps(hand: Option<&Map<String, Value>>, state: Option<&Map<String, Val
 /// A declared comp is this hand's when its file exists and differs from the
 /// file that sat at the slot when the hand began (or none sat there). The comp
 /// round generates its comps directly in `.impeccable/mocks/` before it serves
-/// them, so those always count; with no hand recorded, existence decides.
+/// them, so those always count, as does its option one, the decision comp an
+/// open build recorded; with no hand recorded, existence decides.
 fn comp_is_this_hands(cwd: &str, comp: &str, hand: Option<&Map<String, Value>>) -> bool {
     let abs = jsp::resolve(cwd, &[comp]);
     if !exists(&abs) {
         return false;
     }
     let Some(hand) = hand else { return true };
-    if is_comp_round_comp(comp) {
+    let served = hand.get("comps").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default();
+    if is_comp_round_comp(comp) || is_comp_rounds_option_one(cwd, comp, &served) {
         return true;
     }
     let generated = hand.get("generated").and_then(Value::as_array).map(|g| g.iter().any(|v| v.as_str() == Some(comp))).unwrap_or(false);
@@ -486,7 +551,7 @@ fn sidecar_missing_line(env: &Env, cwd: &str, missing: &[String]) -> String {
 /// renders the agent owes visualize.md's post-render checks. Comp-round comps
 /// sit outside this: the decision round is where the checks go unrun.
 fn landed_decision_comps(cwd: &str, comps: &[String], hand: Option<&Map<String, Value>>) -> bool {
-    comps.iter().any(|c| !is_comp_round_comp(c) && comp_is_this_hands(cwd, c, hand) && exists(&format!("{}.json", jsp::resolve(cwd, &[c.as_str()]))))
+    comps.iter().any(|c| !is_comp_round_comp(c) && !is_comp_rounds_option_one(cwd, c, comps) && comp_is_this_hands(cwd, c, hand) && exists(&format!("{}.json", jsp::resolve(cwd, &[c.as_str()]))))
 }
 
 /// The `--wait` render-check directive: once per hand, the first poll that
@@ -645,9 +710,9 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
         }
         // Read before the answer path may delete the state file.
         let hand = read_hand(&qdir, &key);
-        let (missing, stale, landed) = {
+        let (missing, stale, landed, served) = {
             let comps = round_comps(hand.as_ref(), read_state(&qdir, &key).as_ref());
-            (comps_missing_sidecar(&cwd, &comps, hand.as_ref()), stale_comps(&cwd, &comps, hand.as_ref()), landed_decision_comps(&cwd, &comps, hand.as_ref()))
+            (comps_missing_sidecar(&cwd, &comps, hand.as_ref()), stale_comps(&cwd, &comps, hand.as_ref()), landed_decision_comps(&cwd, &comps, hand.as_ref()), comps)
         };
         if !answered() {
             io.out(&format!("WAITING: no answer yet after {}s; run --wait --key {} again\n", crate::util::js_number_to_string(poll_sec), key));
@@ -666,7 +731,7 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
         }
         let collected = safe_read(&answer_file(&qdir, &key)).unwrap_or_default();
         let collected = crate::util::js_trim(&collected).to_string();
-        print_answer(io, &collected);
+        print_answer(io, &collected, &served);
         if !missing.is_empty() {
             io.out(&sidecar_missing_line(&env, &cwd, &missing));
         }
@@ -721,6 +786,11 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
             io.err("serve-question: --update payload needs an options array; nothing was delivered. Fix the payload and rerun --update on the same key.\n");
             return 1;
         }
+        let missing = missing_direction_comps(&next_round);
+        if !missing.is_empty() {
+            io.err(&missing_comps_message(&missing, "rerun --update on the same key", "nothing was delivered"));
+            return 1;
+        }
         if !is_alive(&qdir, &key) {
             io.err("serve-question: no live question server for that key; the page it served is gone too. Re-present the round with --start and a fresh key, or fall back to the structured question tool.\n");
             return 2;
@@ -755,6 +825,11 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
                 return 1;
             }
         };
+        let missing = missing_direction_comps(&start_payload);
+        if !missing.is_empty() {
+            io.err(&missing_comps_message(&missing, "rerun --start", "the page was not served"));
+            return 1;
+        }
         let _ = std::fs::create_dir_all(&qdir);
         let key = a.arg("key").unwrap_or_else(random_key);
         let hand = match start_hand(&qdir, &key, &cwd, &start_payload) {
@@ -1098,7 +1173,7 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
                 let _ = std::fs::create_dir_all(&st.qdir);
                 let _ = std::fs::write(answer_file(&st.qdir, &k), format!("{}\n", answer));
             } else {
-                print_answer(io, &answer);
+                print_answer(io, &answer, &declared_comps(&st.payload));
                 let _ = io.stdout.flush();
             }
             if !((is_reroll || followup_open) && st.detached_key.is_some()) {
@@ -1989,6 +2064,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A comp-led direction round: the assigned card, the pick, a competitive
+    /// and a declined challenger, and the canon card.
+    fn direction_round(comps: bool) -> Value {
+        let comp = |id: &str| if comps { json!(format!(".impeccable/mocks/decision/{id}.png")) } else { Value::Null };
+        let mut p = json!({
+            "title": "Choose the visual world",
+            "options": [
+                { "id": "assigned", "kicker": "THE ROLL", "thesis": "One." },
+                { "id": "model-pick", "kicker": "IMPECCABLE’S PICK", "thesis": "Two." },
+                { "id": "challenger-a", "verdict": "competitive", "thesis": "Three.", "hero": "https://x/a-hero.webp" },
+                { "id": "challenger-b", "verdict": "declined", "thesis": "Four.", "hero": "https://x/b-hero.webp" }
+            ],
+            "reroll": { "registers": ["safer", "bolder"] },
+            "buildPath": { "value": "comp", "toggle": true },
+            "canon": true,
+            "canonCard": { "label": "The category standard", "thesis": "Five." }
+        });
+        if comps {
+            for (i, id) in ["assigned", "model-pick", "challenger-a"].iter().enumerate() {
+                p["options"][i]["comp"] = comp(id);
+            }
+            p["canonCard"]["comp"] = comp("canon");
+        }
+        p
+    }
+
+    #[test]
+    fn missing_direction_comps_names_every_eligible_card_without_one() {
+        let bare = direction_round(false);
+        assert_eq!(missing_direction_comps(&bare), vec!["assigned", "model-pick", "challenger-a", "canonCard"]);
+        // Declared everywhere it is owed: nothing missing; the declined
+        // challenger never owes one.
+        assert!(missing_direction_comps(&direction_round(true)).is_empty());
+        // One card short is enough, and the legacy sketch key counts.
+        let mut partial = direction_round(true);
+        partial["options"][1].as_object_mut().unwrap().remove("comp");
+        partial["options"][2]["sketch"] = partial["options"][2]["comp"].take();
+        partial["options"][2].as_object_mut().unwrap().remove("comp");
+        assert_eq!(missing_direction_comps(&partial), vec!["model-pick"]);
+        let mut no_canon_comp = direction_round(true);
+        no_canon_comp["canonCard"].as_object_mut().unwrap().remove("comp");
+        assert_eq!(missing_direction_comps(&no_canon_comp), vec!["canonCard"]);
+        // A card with no id is named by its index.
+        let mut no_id = direction_round(true);
+        no_id["options"][0].as_object_mut().unwrap().remove("id");
+        no_id["options"][0].as_object_mut().unwrap().remove("comp");
+        assert_eq!(missing_direction_comps(&no_id), vec!["options[0]"]);
+        // canon: true without a canonCard is a footer action, not a card.
+        let mut footer = bare.clone();
+        footer.as_object_mut().unwrap().remove("canonCard");
+        assert_eq!(missing_direction_comps(&footer), vec!["assigned", "model-pick", "challenger-a"]);
+    }
+
+    #[test]
+    fn missing_direction_comps_leaves_rounds_that_owe_none_alone() {
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut p = direction_round(false);
+            f(&mut p);
+            missing_direction_comps(&p)
+        };
+        // Code-led: the slots are a flip reserve.
+        assert!(with(&|p| p["buildPath"]["value"] = json!("code")).is_empty());
+        // No toggle, or no buildPath at all: no image generation this round.
+        assert!(with(&|p| p["buildPath"]["toggle"] = json!(false)).is_empty());
+        assert!(with(&|p| { p["buildPath"].as_object_mut().unwrap().remove("toggle"); }).is_empty());
+        assert!(with(&|p| { p.as_object_mut().unwrap().remove("buildPath"); }).is_empty());
+        // A surface round (no canon exit) and the comp round carry no canon.
+        assert!(with(&|p| { p.as_object_mut().unwrap().remove("canon"); p.as_object_mut().unwrap().remove("canonCard"); }).is_empty());
+        assert!(with(&|p| { p["canon"] = json!(false); p.as_object_mut().unwrap().remove("canonCard"); }).is_empty());
+        // A degraded roll's single text-only card.
+        assert!(with(&|p| { p["options"] = json!([{ "id": "assigned", "thesis": "One." }]); }).is_empty());
+    }
+
+    #[test]
+    fn start_and_update_refuse_a_comp_led_direction_round_without_comps() {
+        let dir = temp_project("missing-comps");
+        let qdir = jsp::join(&[&dir.to_string_lossy(), ".impeccable", "questions"]);
+        std::fs::write(dir.join("p.json"), direction_round(false).to_string()).unwrap();
+        let run_err = |args: &[&str]| {
+            let env = Env::from([("IMPECCABLE_SKILL_DIR".into(), "/skill".into())]);
+            let (mut io, cap) = Io::captured("", dir.clone(), env);
+            let argv: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let code = run(&argv, &mut io);
+            let out = String::from_utf8(cap.stdout.borrow().clone()).unwrap();
+            let err = String::from_utf8(cap.stderr.borrow().clone()).unwrap();
+            (code, out, err)
+        };
+        let (code, out, err) = run_err(&["--start", "--no-open", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("the page was not served"), "{err}");
+        assert!(err.contains("Missing a \"comp\": assigned, model-pick, challenger-a, canonCard."), "{err}");
+        assert!(err.contains(".impeccable/mocks/decision/<card id>.png") && err.contains("then rerun --start;"), "{err}");
+        // Refused before anything was recorded or spawned.
+        assert!(!std::path::Path::new(&hand_file(&qdir, "k1")).exists());
+        assert!(!std::path::Path::new(&state_file(&qdir, "k1")).exists());
+
+        // --update refuses the same round with the page left on its hand.
+        write_state(&dir, &json!({ "pid": std::process::id(), "port": 1, "url": "http://127.0.0.1:1/" }));
+        let (code, out, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("nothing was delivered") && err.contains("then rerun --update on the same key;"), "{err}");
+        assert!(!std::path::Path::new(&next_file(&qdir, "k1")).exists());
+        assert!(!std::path::Path::new(&hand_file(&qdir, "k1")).exists());
+
+        // With every comp declared, --update delivers and prints NEXT.
+        std::fs::write(dir.join("p.json"), direction_round(true).to_string()).unwrap();
+        let (code, out, err) = run_err(&["--update", "--key", "k1", "--payload", "p.json"]);
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("next round delivered") && out.contains("NEXT read "), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn markers_survive_a_failed_hand_write_and_leave_with_the_question() {
         let dir = temp_project("markers");
@@ -2134,7 +2323,7 @@ mod tests {
 
     fn answer_lines(raw: &str) -> String {
         let (mut io, cap) = Io::captured("", std::env::temp_dir(), Env::new());
-        print_answer(&mut io, raw);
+        print_answer(&mut io, raw, &[]);
         let out = String::from_utf8(cap.stdout.borrow().clone()).unwrap();
         out
     }
@@ -2148,7 +2337,52 @@ mod tests {
 
         let out = answer_lines(r#"{"optionId":"a","steer":"","comp":".impeccable/mocks/decision/a.png"}"#);
         assert!(out.contains("CHOSEN COMP: the decision comp at that path is compositional option one."), "{out}");
+        assert!(out.contains("--decision-comp <that path>"), "{out}");
         assert!(!out.contains("APPROVED COMP"), "{out}");
+    }
+
+    #[test]
+    fn comp_round_pick_of_the_recorded_decision_comp_is_the_approval() {
+        let dir = std::env::temp_dir().join(format!("impeccable-sq-decision-{}-{}", std::process::id(), now_ms() as u64));
+        std::fs::create_dir_all(dir.join(".impeccable/build")).unwrap();
+        let slot = ".impeccable/mocks/decision/a.png";
+        let round: Vec<String> = vec![slot.into(), ".impeccable/mocks/comp-2.png".into(), ".impeccable/mocks/comp-3.png".into()];
+        let decision_page: Vec<String> = vec![slot.into(), ".impeccable/mocks/decision/b.png".into()];
+        let answer = |raw: &str, served: &[String]| {
+            let (mut io, cap) = Io::captured("", dir.clone(), Env::new());
+            print_answer(&mut io, raw, served);
+            let out = String::from_utf8(cap.stdout.borrow().clone()).unwrap();
+            out
+        };
+        let state = |phase: &str| json!({ "phase": phase, "decisionComp": slot }).to_string();
+        std::fs::write(dir.join(".impeccable/build/state.json"), state("comps")).unwrap();
+        let out = answer(r#"{"optionId":"one","comp":"./.impeccable/mocks/decision/a.png"}"#, &round);
+        assert!(out.contains("APPROVED COMP") && !out.contains("CHOSEN COMP"), "{out}");
+        // Served again in the comp round, option one is this hand's comp, never stale.
+        std::fs::create_dir_all(dir.join(".impeccable/mocks/decision")).unwrap();
+        std::fs::write(dir.join(slot), b"png").unwrap();
+        let cwd = dir.to_string_lossy().to_string();
+        let options: Vec<Value> = round.iter().map(|c| json!({ "id": c, "comp": c })).collect();
+        let hand = new_hand(&cwd, &json!({ "options": options }));
+        assert!(comp_is_this_hands(&cwd, slot, Some(&hand)));
+        assert!(stale_comps(&cwd, &[slot.to_string()], Some(&hand)).is_empty());
+        // Option one is not a decision-round comp: no render-check directive for it.
+        std::fs::write(dir.join(format!("{slot}.json")), b"{}").unwrap();
+        assert!(!landed_decision_comps(&cwd, &round, Some(&hand)));
+        // A new direction round reusing that slot is not the comp round: the old image is stale there.
+        let options: Vec<Value> = decision_page.iter().map(|c| json!({ "id": c, "comp": c })).collect();
+        let hand = new_hand(&cwd, &json!({ "options": options }));
+        assert!(!comp_is_this_hands(&cwd, slot, Some(&hand)));
+        assert_eq!(stale_comps(&cwd, &[slot.to_string()], Some(&hand)), vec![slot.to_string()]);
+        let out = answer(r#"{"optionId":"one","comp":".impeccable/mocks/decision/a.png"}"#, &decision_page);
+        assert!(out.contains("CHOSEN COMP") && !out.contains("APPROVED COMP"), "{out}");
+        // Another decision comp, or the same one once the round closed, stays a decision pick.
+        let out = answer(r#"{"optionId":"b","comp":".impeccable/mocks/decision/b.png"}"#, &round);
+        assert!(out.contains("CHOSEN COMP") && !out.contains("APPROVED COMP"), "{out}");
+        std::fs::write(dir.join(".impeccable/build/state.json"), state("spec")).unwrap();
+        let out = answer(r#"{"optionId":"one","comp":".impeccable/mocks/decision/a.png"}"#, &round);
+        assert!(out.contains("CHOSEN COMP") && !out.contains("APPROVED COMP"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

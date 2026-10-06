@@ -103,7 +103,8 @@ pub fn widget_vendor(dom: &dyn Dom, el: ElId) -> Option<&'static str> {
 #[derive(Debug)]
 pub struct AdTechVendor {
     pub name: &'static str,
-    /// Substrings of the script URL the error was thrown from.
+    /// Hosts of the script URL the error was thrown from: the host itself or
+    /// any subdomain of it.
     pub sources: &'static [&'static str],
     /// Prefixes of the script's file name, for a library a site serves from
     /// its own host: the file is the vendor's, a directory named after it
@@ -131,6 +132,27 @@ pub const AD_TECH_VENDORS: &[AdTechVendor] = &[
         files: &[],
     },
 ];
+
+/// The lower-cased hosts of the script URLs in a page error's source, with
+/// any user info and port dropped.
+fn script_hosts(source: &str) -> Vec<String> {
+    source
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')')
+        .filter_map(|token| {
+            let rest = token.split_once("://")?.1;
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let host = authority.rsplit('@').next().unwrap_or("");
+            let host = host.split(':').next().unwrap_or("");
+            (!host.is_empty()).then(|| host.to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// Whether `host` is `domain` or a subdomain of it.
+fn host_is_or_under(host: &str, domain: &str) -> bool {
+    host == domain
+        || host.strip_suffix(domain).is_some_and(|head| head.ends_with('.'))
+}
 
 /// The lower-cased file names of the script URLs in a page error's source
 /// (`at fn, https://host/dir/file.js:12:34`): the last path segment, with
@@ -174,10 +196,10 @@ pub const AD_TECH_APIS: &[(&str, &str)] = &[
 /// its message names.
 pub fn ad_tech_vendor(message: &str, source: Option<&str>) -> Option<&'static str> {
     if let Some(source) = source {
-        let lower = source.to_ascii_lowercase();
+        let hosts = script_hosts(source);
         let files = script_file_names(source);
         for vendor in AD_TECH_VENDORS {
-            if vendor.sources.iter().any(|s| lower.contains(s))
+            if vendor.sources.iter().any(|s| hosts.iter().any(|h| host_is_or_under(h, s)))
                 || vendor.files.iter().any(|p| files.iter().any(|f| f.starts_with(p)))
             {
                 return Some(vendor.name);
@@ -234,6 +256,20 @@ mod tests {
         let other = d.add(Some(body), "div");
         d.set_attr(other, "class", "swiper-like-thing");
         assert_eq!(widget_vendor(&d, other), None);
+    }
+
+    #[test]
+    fn ad_tech_hosts_match_whole_host_names() {
+        let msg = "Uncaught TypeError: x is not a function";
+        assert_eq!(
+            ad_tech_vendor(msg, Some("at f, https://example.com/assets/googletagmanager.com-helper.js:1:2")),
+            None
+        );
+        assert_eq!(ad_tech_vendor(msg, Some("at f, https://notgoogletagmanager.com/app.js:1:2")), None);
+        assert_eq!(
+            ad_tech_vendor(msg, Some("at f, https://securepubads.g.doubleclick.net:443/tag/js/gpt.js:3:4")),
+            Some("Google Ads")
+        );
     }
 
     #[test]

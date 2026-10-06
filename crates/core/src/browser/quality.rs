@@ -8,7 +8,7 @@
 #![allow(unused_imports)]
 use super::dom::{
     closest_or_none, direct_text, has_direct_text_longer_than, matches_or_false, pf0, safe_id,
-    style_px, tag_lower, Dom, ElId, Rect,
+    renders_no_text, style_px, tag_lower, Dom, DomChild, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
 use crate::checks::measures::{
@@ -26,7 +26,7 @@ use crate::checks::text_rules::{
     tracking_is_crushed, ALL_CAPS_LONG_RUN, LEADING_BOLD_TITLE_WEIGHT, SMALLPRINT_TEXT_FLOOR_PX,
     UI_TEXT_FLOOR_PX,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
+    LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
     SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
@@ -478,25 +478,169 @@ fn rendered_line_widths(dom: &dyn Dom, el: ElId) -> Option<Vec<f64>> {
     )
 }
 
-/// Elements whose text is in `textContent` and never on a line.
-const UNRENDERED_TEXT_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
-
 static COMBINING_OR_FORMAT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[\p{M}\p{Cf}]").expect("COMBINING_OR_FORMAT_RE"));
 
-/// The `textContent` of each topmost descendant of `el` that renders no
-/// text: a `<style>`, `<script>`, `<noscript>` or `<template>`, and a
-/// `display: none` box. Document order.
-fn unrendered_text_runs(dom: &dyn Dom, el: ElId, out: &mut Vec<String>) {
-    for child in dom.children(el) {
-        let tag = tag_lower(dom, child);
-        if UNRENDERED_TEXT_TAGS.contains(&tag.as_str()) || dom.style(child, "display") == "none" {
-            let text = dom.text_content(child);
-            if !text.is_empty() {
-                out.push(text);
+/// The running count of [`rendered_text_len`], fed one text node at a time.
+///
+/// White space is held back until a character that is not white space
+/// follows it, so a leading run is dropped and a trailing run never counts:
+/// the ends are trimmed as `String.prototype.trim` trims them, wherever the
+/// node boundaries fall. A run of collapsible white space counts once, and it
+/// runs on across node boundaries, the way `a <b> b</b>` renders one space.
+#[derive(Default)]
+struct RenderedTextCount {
+    count: usize,
+    /// White space seen since the last counted character.
+    pending: usize,
+    /// The last white space seen was collapsible, so more of it joins that run.
+    in_collapsible_run: bool,
+    /// Count white space that cannot collapse (preserved, or a no-break
+    /// space) where it stands, edges included. Set for an atomic inline's
+    /// contents, whose edges trim only collapsible white space.
+    keep_fixed_spaces: bool,
+    /// Preserved spaces before the first character, after the last line
+    /// break ahead of it: indentation on the first line.
+    lead: usize,
+    /// Preserved spaces after the last character, before any line break,
+    /// under `pre` or `break-spaces`, where they take room on the line.
+    tail: usize,
+    /// No line break has come since the last counted character, so a kept
+    /// trailing space is still on that character's line.
+    tail_open: bool,
+}
+
+impl RenderedTextCount {
+    /// Feeds one text node. `preserved` is whether its `white-space` keeps
+    /// its spaces (`pre`, `pre-wrap`, `break-spaces`); `hangs` is whether
+    /// spaces at the end of a line hang rather than take room (`pre-wrap`).
+    /// Preserved white space renders where it sits on a line: indentation
+    /// before the first word and, unless they hang, spaces after the last.
+    /// Only the line breaks around the text, and the blank lines they open,
+    /// are on no line of it.
+    fn feed(&mut self, text: &str, preserved: bool, hangs: bool) {
+        let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
+        let line_break = |c: char| matches!(c, '\n' | '\r' | '\u{c}');
+        let mut buf = [0u8; 4];
+        for c in text.chars() {
+            if collapsible(c) && !preserved {
+                if !self.in_collapsible_run {
+                    self.pending += 1;
+                    self.in_collapsible_run = true;
+                }
+                continue;
             }
+            if js::is_js_whitespace(c) && !self.keep_fixed_spaces {
+                if preserved && self.count == 0 {
+                    if line_break(c) {
+                        self.lead = 0;
+                    } else if collapsible(c) {
+                        self.lead += 1;
+                    }
+                } else if preserved && line_break(c) {
+                    self.tail_open = false;
+                } else if preserved && !hangs && collapsible(c) && self.tail_open {
+                    self.tail += 1;
+                }
+                self.pending += 1;
+                self.in_collapsible_run = false;
+                continue;
+            }
+            // A mark is not on the line; it neither ends a run of white space
+            // nor counts as a character.
+            if COMBINING_OR_FORMAT_RE.is_match(c.encode_utf8(&mut buf)) {
+                continue;
+            }
+            if self.count > 0 {
+                self.count += self.pending;
+            } else {
+                self.count += self.lead;
+            }
+            self.pending = 0;
+            self.lead = 0;
+            self.tail = 0;
+            self.tail_open = true;
+            self.in_collapsible_run = false;
+            self.count += 1;
+        }
+    }
+
+    /// The count, with the kept spaces that end the last line.
+    fn total(&self) -> usize {
+        if self.count > 0 {
+            self.count + self.tail
         } else {
-            unrendered_text_runs(dom, child, out);
+            0
+        }
+    }
+
+    /// Takes in an atomic inline (an image, an inline-block) whose own
+    /// contents counted `inner` characters. The box sits in the line like a
+    /// character, so a collapsible space on each side of it renders: the run
+    /// ends at the box. Its contents were counted in a count of their own,
+    /// because they are laid out in their own formatting context: their edge
+    /// collapsible white space is trimmed there and never joins the outer
+    /// run, while preserved and no-break spaces at the edges still render.
+    fn add_atomic_inline(&mut self, inner: usize) {
+        self.in_collapsible_run = false;
+        if inner == 0 {
+            return;
+        }
+        if self.count > 0 {
+            self.count += self.pending;
+        } else {
+            self.count += self.lead;
+        }
+        self.pending = 0;
+        self.lead = 0;
+        self.tail = 0;
+        self.tail_open = true;
+        self.count += inner;
+    }
+}
+
+/// Replaced elements, which lay out as atomic inlines in a line of text.
+const REPLACED_TAGS: [&str; 11] =
+    ["img", "svg", "video", "canvas", "iframe", "object", "embed", "input", "select", "textarea", "button"];
+
+/// An atomic inline box: a replaced element or an `inline-*` display.
+fn is_atomic_inline(dom: &dyn Dom, el: ElId) -> bool {
+    REPLACED_TAGS.contains(&tag_lower(dom, el).as_str())
+        || js::to_lower_case(&dom.style(el, "display")).trim().starts_with("inline-")
+}
+
+/// Feeds the text nodes under `el` in document order, each under its own
+/// parent's `white-space`, skipping every descendant that renders no text
+/// ([`renders_no_text`]: unrendered tags, `display: none`, and the contents
+/// of a `content-visibility: hidden` box). `Dom::text_line_rects` skips the
+/// same subtrees, so the count and the line widths it is divided among
+/// always describe the same text.
+fn feed_rendered_text(dom: &dyn Dom, el: ElId, out: &mut RenderedTextCount) {
+    let mut preserved: Option<(bool, bool)> = None;
+    for child in dom.child_nodes(el) {
+        match child {
+            DomChild::Text(text) => {
+                let (preserved, hangs) = *preserved.get_or_insert_with(|| {
+                    let white_space = dom.style(el, "whiteSpace");
+                    (
+                        white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces",
+                        white_space == "pre-wrap",
+                    )
+                });
+                out.feed(&text, preserved, hangs);
+            }
+            DomChild::Element(child) => {
+                if renders_no_text(dom, child) {
+                    continue;
+                }
+                if is_atomic_inline(dom, child) {
+                    let mut inner = RenderedTextCount { keep_fixed_spaces: true, ..Default::default() };
+                    feed_rendered_text(dom, child, &mut inner);
+                    out.add_atomic_inline(inner.count);
+                } else {
+                    feed_rendered_text(dom, child, out);
+                }
+            }
         }
     }
 }
@@ -512,76 +656,16 @@ fn unrendered_text_runs(dom: &dyn Dom, el: ElId, out: &mut Vec<String>) {
 /// sits on its base and advances nothing, is charged as a character of its
 /// own: a third of a Devanagari paragraph is marks.
 ///
-/// So: the text with its unrendered descendants cut out, collapsible white
-/// space folded to one space unless the element preserves it, and combining
-/// marks and format characters (zero-width joiners, soft hyphens) left out.
+/// So the count is built from the text nodes themselves, in order: the
+/// unrendered descendants are never visited, each node's collapsible white
+/// space is folded to one space unless the element it sits in preserves it
+/// (a `pre-wrap` span inside a normal paragraph keeps its spaces, which are
+/// on the line), and combining marks and format characters (zero-width
+/// joiners, soft hyphens) are left out.
 fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
-    let full = dom.text_content(el);
-    let mut cuts = Vec::new();
-    unrendered_text_runs(dom, el, &mut cuts);
-    let mut text = String::with_capacity(full.len());
-    let mut rest = full.as_str();
-    // The runs are in document order and each is a substring of what is
-    // left, so cutting the first occurrence of each walks the text once.
-    for cut in &cuts {
-        if let Some(at) = rest.find(cut.as_str()) {
-            text.push_str(&rest[..at]);
-            rest = &rest[at + cut.len()..];
-        }
-    }
-    text.push_str(rest);
-
-    let white_space = dom.style(el, "whiteSpace");
-    let preserved = white_space == "pre" || white_space == "pre-wrap" || white_space == "break-spaces";
-    let collapsible = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}');
-    // Preserved white space renders where it sits on a line: indentation
-    // before the first word and, under `pre` and `break-spaces`, spaces after
-    // the last (under `pre-wrap` they hang). Only the line breaks around the
-    // text, and the blank lines they open, are on no line of it.
-    let source: &str = if white_space == "pre-wrap" {
-        let start = text
-            .char_indices()
-            .take_while(|(_, c)| collapsible(*c))
-            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{c}'))
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        text[start..].trim_end_matches(collapsible)
-    } else if preserved {
-        let start = text
-            .char_indices()
-            .take_while(|(_, c)| collapsible(*c))
-            .filter(|(_, c)| matches!(c, '\n' | '\r' | '\u{c}'))
-            .last()
-            .map_or(0, |(i, c)| i + c.len_utf8());
-        let body = &text[start..];
-        let content_end = body.trim_end_matches(collapsible).len();
-        let end = body[content_end..]
-            .find(['\n', '\r', '\u{c}'])
-            .map_or(body.len(), |i| content_end + i);
-        &body[..end]
-    } else {
-        js::trim(&text)
-    };
-    let mut count = 0usize;
-    let mut pending_space = false;
-    let mut buf = [0u8; 4];
-    for c in source.chars() {
-        if collapsible(c) && !preserved {
-            // Leading white space is dropped, a run counts once, and a
-            // trailing run never gets counted because nothing follows it.
-            pending_space = count > 0;
-            continue;
-        }
-        if COMBINING_OR_FORMAT_RE.is_match(c.encode_utf8(&mut buf)) {
-            continue;
-        }
-        if pending_space {
-            count += 1;
-            pending_space = false;
-        }
-        count += 1;
-    }
-    count
+    let mut count = RenderedTextCount::default();
+    feed_rendered_text(dom, el, &mut count);
+    count.total()
 }
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
@@ -761,16 +845,16 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
 /// design system wraps heading copy in). A reading block nested inside a
 /// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
 /// keeps the floor.
-pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+pub fn is_heading_text(dom: &dyn Dom, el: ElId) -> bool {
     if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
         return true;
     }
     let Some(heading) = closest_or_none(dom, el, LEADING_HEADING_CONTEXT) else {
         return false;
     };
-    if LEADING_HEADING_TEXT_TAGS.contains(&tag) {
-        return true;
-    }
+    // An inline tag (an anchor, a span) is heading text too, by the same
+    // walk: no reading block sits between it and the heading. One inside a
+    // `p` nested in the heading is that paragraph's body copy.
     let mut cur = Some(el);
     while let Some(c) = cur {
         if c == heading {
@@ -1679,7 +1763,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 if wraps
                     && !is_non_rendered_text(dom, el, tag)
                     && !is_visually_hidden(dom, el)
-                    && !is_heading_text(dom, el, tag)
+                    && !is_heading_text(dom, el)
                     && !bold_title()
                 {
                     findings.push(fine_print_hit(RuleHit::new(
@@ -3476,6 +3560,14 @@ mod tests {
             vec!["line-height 1.10x (need >=1.3)"],
             "paragraph nested in a heading"
         );
+        // And so is an inline run inside that paragraph.
+        let nested_p = d.add(Some(h3), "p");
+        let nested_run = wrapped(&mut d, nested_p, "span", "16px", 17.6);
+        assert_eq!(
+            leading(&d, nested_run),
+            vec!["line-height 1.10x (need >=1.3)"],
+            "span in a paragraph nested in a heading"
+        );
 
         // line-height: 1.3 on 18px computes to 23.4px, and 23.4 / 18 lands
         // just under 1.3 in binary floats.
@@ -4895,5 +4987,163 @@ mod rendered_text_tests {
             line_length(&d, p).as_deref(),
             Some("~100 chars on 2 of 2 rendered lines (aim for <80)")
         );
+    }
+
+    /// Each text node keeps or folds its white space by the `white-space` it
+    /// inherits, not the paragraph's. A `pre-wrap` span inside a normal
+    /// paragraph keeps its runs of spaces on the line, so it counts the same
+    /// as a `pre-wrap` paragraph and flags the same long lines.
+    #[test]
+    fn a_preserving_span_inside_a_normal_paragraph_keeps_its_spaces() {
+        let text = "word    ".repeat(22);
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.set_text_lines(p, &[(100.0, 272.0, 640.0, 24.0), (100.0, 300.0, 640.0, 24.0)]);
+        d.add_text(p, "An opening line ");
+        let span = d.add(Some(p), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre-wrap");
+        d.add_text(span, &text);
+        assert_eq!(rendered_text_len(&d, p), "An opening line ".len() + 22 * 8 - 4);
+
+        let whole = two_line_p(&mut d, body);
+        d.set_text_lines(whole, &[(100.0, 272.0, 640.0, 24.0), (100.0, 300.0, 640.0, 24.0)]);
+        d.set_style(whole, "whiteSpace", "pre-wrap");
+        d.add_text(whole, &format!("An opening line {text}"));
+        assert_eq!(rendered_text_len(&d, whole), rendered_text_len(&d, p));
+        assert_eq!(line_length(&d, p), line_length(&d, whole));
+        assert_eq!(
+            line_length(&d, p).as_deref(),
+            Some("~94 chars on 2 of 2 rendered lines (aim for <80)")
+        );
+
+        // The reverse: a normal span inside a pre-wrap paragraph folds its
+        // own runs, and a collapsible run carries on across the boundary of
+        // an inline child the way `a <b> b</b>` renders one space.
+        let q = two_line_p(&mut d, body);
+        d.set_style(q, "whiteSpace", "pre-wrap");
+        d.add_text(q, "a  b");
+        let normal = d.add(Some(q), "span");
+        d.set_style(normal, "display", "inline");
+        d.set_style(normal, "whiteSpace", "normal");
+        d.add_text(normal, "   c   d");
+        assert_eq!(rendered_text_len(&d, q), "a  b c d".len());
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "a ");
+        let b = d.add(Some(r), "b");
+        d.set_style(b, "display", "inline");
+        d.add_text(b, " b");
+        assert_eq!(rendered_text_len(&d, r), "a b".len());
+    }
+
+    /// The text of a hidden child is skipped where it sits, so a hidden run
+    /// of white space never takes a visible space with it.
+    #[test]
+    fn a_hidden_child_is_skipped_where_it_sits() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, "one two");
+        let hidden = d.add(Some(p), "span");
+        d.set_style(hidden, "display", "none");
+        d.add_text(hidden, " ");
+        assert_eq!(rendered_text_len(&d, p), "one two".len());
+
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "one two three four");
+        for _ in 0..3 {
+            let hidden = d.add(Some(q), "span");
+            d.set_style(hidden, "display", "none");
+            d.add_text(hidden, " ");
+            d.add_text(q, "x");
+        }
+        assert_eq!(rendered_text_len(&d, q), "one two three fourxxx".len());
+    }
+
+    /// A `content-visibility: hidden` child lays out its box and renders none
+    /// of its contents, so its text is on no line. A DOM that cannot say
+    /// (no `contentVisibility` value) counts it.
+    #[test]
+    fn a_content_visibility_hidden_child_is_skipped() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let p = two_line_p(&mut d, body);
+        d.add_text(p, "Before ");
+        let skipped = d.add(Some(p), "span");
+        d.set_style(skipped, "display", "inline-block");
+        d.set_style(skipped, "contentVisibility", "hidden");
+        d.add_text(skipped, &"unrendered ".repeat(30));
+        d.add_text(p, "after");
+        assert_eq!(rendered_text_len(&d, p), "Before after".len());
+
+        let q = two_line_p(&mut d, body);
+        d.add_text(q, "Before ");
+        let unknown = d.add(Some(q), "span");
+        d.set_style(unknown, "display", "inline");
+        d.add_text(unknown, "kept ");
+        d.add_text(q, "after");
+        assert_eq!(rendered_text_len(&d, q), "Before kept after".len());
+
+        // content-visibility does not apply to a plain inline box or to
+        // display: contents, so their text renders and counts.
+        for display in ["inline", "contents"] {
+            let r = two_line_p(&mut d, body);
+            d.add_text(r, "Before ");
+            let inline = d.add(Some(r), "span");
+            d.set_style(inline, "display", display);
+            d.set_style(inline, "contentVisibility", "hidden");
+            d.add_text(inline, "shown ");
+            d.add_text(r, "after");
+            assert_eq!(rendered_text_len(&d, r), "Before shown after".len(), "{display}");
+        }
+    }
+
+    /// An image or an inline-block is an atomic inline: the space on each
+    /// side of it renders, so the pair does not fold into one, and a
+    /// populated box's own edge white space is trimmed inside it.
+    #[test]
+    fn spaces_around_an_atomic_inline_both_count() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        for (tag, display) in [("img", "inline"), ("span", "inline-block")] {
+            let r = two_line_p(&mut d, body);
+            d.add_text(r, "word ");
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            d.add_text(r, " word");
+            assert_eq!(rendered_text_len(&d, r), "word  word".len(), "{tag}");
+        }
+
+        // A populated box trims its own edge white space in its own
+        // formatting context: none of it joins the spaces outside.
+        for (tag, display) in [("span", "inline-block"), ("button", "inline-block")] {
+            let r = two_line_p(&mut d, body);
+            d.add_text(r, "word ");
+            let boxed = d.add(Some(r), tag);
+            d.set_style(boxed, "display", display);
+            d.add_text(boxed, "\n      word\n    ");
+            d.add_text(r, " word");
+            assert_eq!(rendered_text_len(&d, r), "word word word".len(), "{tag}");
+        }
+
+        // Edge spaces that cannot collapse render inside the box: preserved
+        // ones under white-space: pre, and no-break spaces.
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "word ");
+        let pre = d.add(Some(r), "span");
+        d.set_style(pre, "display", "inline-block");
+        d.set_style(pre, "whiteSpace", "pre");
+        d.add_text(pre, " word ");
+        d.add_text(r, " word");
+        assert_eq!(rendered_text_len(&d, r), "word  word  word".len());
+
+        let r = two_line_p(&mut d, body);
+        d.add_text(r, "word ");
+        let nbsp = d.add(Some(r), "span");
+        d.set_style(nbsp, "display", "inline-block");
+        d.add_text(nbsp, "\u{a0}word\u{a0}");
+        d.add_text(r, " word");
+        assert_eq!(rendered_text_len(&d, r), "word _word_ word".len());
     }
 }

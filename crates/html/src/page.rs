@@ -144,13 +144,13 @@ static SHADOW_CLASS_RE: Lazy<Regex> = Lazy::new(|| {
 static BOX_SHADOW_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)box-shadow").expect("BOX_SHADOW_RE"));
 /// A utility class that draws a border on every side: `border`, `border-2`,
-/// `border-[3px]`, with any variant prefix (`md:border`) or `!`. A side
-/// utility (`border-t`, `border-b-[4px]`, `border-x`) draws one or two edges,
-/// and a colour or style utility (`border-black`, `border-dashed`) draws none,
-/// so neither makes a card. The ASCII `\b` this replaces matched all of them,
+/// `border-px`, `border-[3px]`, with any variant prefix (`md:border`) or `!`.
+/// A side utility (`border-t`, `border-b-[4px]`, `border-x`) draws one or two
+/// edges, and a colour or style utility (`border-black`, `border-dashed`)
+/// draws none, so neither makes a card. The ASCII `\b` this replaces matched all of them,
 /// since `-` is a word boundary.
 static BORDER_CLASS_TOKEN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^border(?:-[0-9]+|-\[[0-9.]+(?:px|rem|em)\])?$").expect("BORDER_CLASS_TOKEN_RE")
+    Regex::new(r"^border(?:-[0-9]+|-px|-\[[0-9.]+(?:px|rem|em)\])?$").expect("BORDER_CLASS_TOKEN_RE")
 });
 
 fn class_draws_four_sided_border(cls: &str) -> bool {
@@ -654,4 +654,19 @@ pub fn check_cream_palette(doc: &StaticDocument) -> Vec<RuleHit> {
         }
     }
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::class_draws_four_sided_border;
+
+    #[test]
+    fn only_all_sided_width_utilities_draw_a_card_border() {
+        for cls in ["border", "card border-2", "md:border", "!border", "border-px", "rounded border-[3px]"] {
+            assert!(class_draws_four_sided_border(cls), "{cls}");
+        }
+        for cls in ["border-t", "border-b-[4px]", "border-x", "border-black", "border-dashed", "border-t-px"] {
+            assert!(!class_draws_four_sided_border(cls), "{cls}");
+        }
+    }
 }

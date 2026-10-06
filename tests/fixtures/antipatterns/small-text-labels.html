@@ -19,6 +19,10 @@
     .meta { display: block; font-size: 10px; line-height: 14px; font-family: ui-monospace, monospace; letter-spacing: 0.8px; }
     .cmd { display: inline-block; font-size: 11px; line-height: 16px; font-family: ui-monospace, monospace; white-space: pre-wrap; }
     .tracked { display: block; font-size: 14px; line-height: 20px; letter-spacing: 0.2em; margin: 0; }
+    /* The eyebrow stays on one line on every platform: tracked at 0.2em it
+       fits the 520px case in San Francisco and wraps in the wider DejaVu Sans
+       a Linux runner sets system-ui in, and a wrapped run is not a label. */
+    .eyebrow { white-space: nowrap; }
     .link-label { display: inline-block; font-size: 12px; line-height: 40px; font-weight: 700; letter-spacing: 0.08em; color: #1c1c24; text-decoration: none; }
     .stamp { display: block; width: 148px; font-size: 9px; line-height: 9.5px; color: #9ca3af; margin: 0; }
   </style>
@@ -33,7 +37,7 @@
     <section aria-label="Should pass">
       <div class="case"><span class="meta" id="pass-typed-caps-meta" data-expect="pass" data-case="Pass Typed Caps Meta">ANIMATION · CINEMATIC 3D · 20S</span></div>
       <div class="case"><span class="cmd" id="pass-terminal-command" data-expect="pass" data-case="Pass Terminal Command">npx @stroq/cli replay --last --verbose</span></div>
-      <div class="case"><p class="tracked" id="pass-typed-caps-eyebrow" data-expect="pass" data-case="Pass Typed Caps Eyebrow">SCHEDULE AND CREATE 100 SOCIAL VIDEOS IN 20 MINS</p></div>
+      <div class="case"><p class="tracked eyebrow" id="pass-typed-caps-eyebrow" data-expect="pass" data-case="Pass Typed Caps Eyebrow">SCHEDULE AND CREATE 100 SOCIAL VIDEOS IN 20 MINS</p></div>
       <div class="case"><a class="link-label" href="#instagram" id="pass-link-label" data-expect="pass" data-case="Pass Tracked Link Label">日本女子プロゴルフ協会（JLPGA）Instagram</a></div>
     </section>
   </main>

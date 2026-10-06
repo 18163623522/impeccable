@@ -51,7 +51,12 @@
     .word { display: inline-block; font-size: 20px; line-height: 40px; color: #8a8f98; white-space: nowrap; }
     .word-clip { position: absolute; left: 240px; top: 0; width: 300px; height: 40px; overflow: hidden; }
     .word-track { position: absolute; top: 0; white-space: nowrap; }
-    .sliver-word { display: inline-block; font-size: 20px; line-height: 40px; color: #b0a3a8; white-space: nowrap; }
+    /* Monospace, so the sliver is a sliver whatever font a platform maps the
+       family to: 18 characters at 20px run 198px (Consolas) to 217px (Menlo,
+       DejaVu Sans Mono), and the track parks all but 8 to 27px of them. In a
+       proportional face the word ran 170px on macOS and 210px on Linux, a
+       third of it in view there. */
+    .sliver-word { display: inline-block; font: 20px/40px monospace; color: #b0a3a8; white-space: nowrap; }
 
     .truncate { position: absolute; left: 20px; top: 0; width: 150px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .trunc-word { font-size: 16px; color: #9a8f7f; }
@@ -110,7 +115,7 @@
   <p class="label">A word with a sliver inside its clip</p>
   <div class="row">
     <div class="word-clip">
-      <div class="word-track" style="left: -140px;"><span id="pass-sliver-copy" class="sliver-word">Archive of seasons</span></div>
+      <div class="word-track" style="left: -190px;"><span id="pass-sliver-copy" class="sliver-word">Archive of seasons</span></div>
     </div>
   </div>
 

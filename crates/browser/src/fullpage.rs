@@ -98,8 +98,8 @@ pub struct Geometry {
     pub document_width: f64,
     /// `max(html scrollHeight, body scrollHeight, innerHeight)`.
     pub document_height: f64,
-    /// Set when the document does not scroll but an element covering most of
-    /// the viewport does.
+    /// Set when the document scrolls less than a quarter viewport and an
+    /// element covering most of the viewport scrolls further.
     pub scroller: Option<Scroller>,
     /// The furthest left the document scrolls, in document coordinates: 0,
     /// or negative when the document scrolls from the right (a right-to-left
@@ -186,9 +186,14 @@ const GEOMETRY_JS: &str = r#"(() => {
     if (window.scrollX !== sx) window.scrollTo({ left: sx, top: sy, behavior: 'instant' });
   }
   try { delete window.__impeccableShotScroller; } catch (e) {}
-  if (se && se.scrollHeight > vh + 1) return out;
+  // A document that scrolls a viewport's quarter or more is the page. One
+  // that scrolls a few rows (a body margin around a 100vh shell, a URL-bar
+  // gap) may still keep its content in a frame, which then has to hold more
+  // than the document does.
+  const documentExtra = se ? se.scrollHeight - vh : 0;
+  if (documentExtra > vh * 0.25) return out;
   let best = null;
-  let extra = 1;
+  let extra = Math.max(1, documentExtra);
   // Open shadow trees included: an app shell rendered inside a custom
   // element scrolls a frame the document's own query never reaches.
   const all = [];

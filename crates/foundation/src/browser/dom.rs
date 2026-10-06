@@ -231,9 +231,12 @@ pub trait Dom {
     }
     /// Whether the probe reads open shadow trees ([`Dom::flat_parent`]), so
     /// that an element with no assigned slot is not slotted anywhere. A
-    /// snapshot recorded before shadow trees were captured answers `false`.
+    /// snapshot recorded before shadow trees were captured answers `false`,
+    /// and so does the default, which goes with the default `flat_parent`: a
+    /// probe that walks the light tree alone (the live page's `JsDom`) never
+    /// sees a fill a component paints in its shadow tree.
     fn shadow_trees_recorded(&self) -> bool {
-        true
+        false
     }
     /// The rows the element's rendered text occupies: one rect per line box,
     /// top to bottom. `None` when this DOM cannot say where the lines are.
@@ -499,5 +502,70 @@ pub struct ElStyle<'a> {
 impl crate::css::measures::StyleMap for ElStyle<'_> {
     fn prop(&self, name: &str) -> Option<String> {
         Some(self.dom.style(self.el, name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A probe that overrides nothing it need not, as the live page's
+    /// `JsDom` does.
+    struct LightTreeOnly;
+
+    #[rustfmt::skip]
+    impl Dom for LightTreeOnly {
+    fn document_element(&self) -> Option<ElId> { None }
+        fn body(&self) -> Option<ElId> { None }
+        fn query_all(&self, _: Option<ElId>, _: &str) -> Result<Vec<ElId>, SelectorError> { Ok(Vec::new()) }
+        fn query_one(&self, _: Option<ElId>, _: &str) -> Result<Option<ElId>, SelectorError> { Ok(None) }
+        fn inner_width(&self) -> f64 { 0.0 }
+        fn inner_height(&self) -> f64 { 0.0 }
+        fn scroll_x(&self) -> f64 { 0.0 }
+        fn scroll_y(&self) -> f64 { 0.0 }
+        fn hostname(&self) -> String { String::new() }
+        fn element_from_point(&self, _: f64, _: f64) -> Option<ElId> { None }
+        fn elements_from_point(&self, _: f64, _: f64) -> Vec<ElId> { Vec::new() }
+        fn css_escape(&self, s: &str) -> String { s.to_string() }
+        fn keyframes(&self, _: &str) -> Option<Vec<KeyframeFrame>> { None }
+        fn document_html_for_patterns(&self) -> String { String::new() }
+        fn tag_name(&self, _: ElId) -> String { String::new() }
+        fn namespace_uri(&self, _: ElId) -> String { String::new() }
+        fn parent(&self, _: ElId) -> Option<ElId> { None }
+        fn children(&self, _: ElId) -> Vec<ElId> { Vec::new() }
+        fn previous_element_sibling(&self, _: ElId) -> Option<ElId> { None }
+        fn next_element_sibling(&self, _: ElId) -> Option<ElId> { None }
+        fn contains(&self, _: ElId, _: ElId) -> bool { false }
+        fn matches(&self, _: ElId, _: &str) -> Result<bool, SelectorError> { Ok(false) }
+        fn closest(&self, _: ElId, _: &str) -> Result<Option<ElId>, SelectorError> { Ok(None) }
+        fn attr(&self, _: ElId, _: &str) -> Option<String> { None }
+        fn id_prop(&self, _: ElId) -> Option<String> { None }
+        fn class_name_prop(&self, _: ElId) -> Option<String> { None }
+        fn text_content(&self, _: ElId) -> String { String::new() }
+        fn inner_text(&self, _: ElId) -> Option<String> { None }
+        fn direct_text_nodes(&self, _: ElId) -> Vec<String> { Vec::new() }
+        fn is_content_editable(&self, _: ElId) -> bool { false }
+        fn hidden_prop(&self, _: ElId) -> bool { false }
+        fn style(&self, _: ElId, _: &str) -> String { String::new() }
+        fn pseudo_style(&self, _: ElId, _: &str, _: &str) -> Option<String> { None }
+        fn rect(&self, _: ElId) -> Rect { Rect::default() }
+        fn client_width(&self, _: ElId) -> f64 { 0.0 }
+        fn client_height(&self, _: ElId) -> f64 { 0.0 }
+        fn client_left(&self, _: ElId) -> f64 { 0.0 }
+        fn scroll_width(&self, _: ElId) -> f64 { 0.0 }
+        fn scroll_left(&self, _: ElId) -> f64 { 0.0 }
+        fn offset_width(&self, _: ElId) -> f64 { 0.0 }
+        fn offset_height(&self, _: ElId) -> f64 { 0.0 }
+        fn check_visibility(&self, _: ElId) -> Option<bool> { None }
+        fn direct_text_rect(&self, _: ElId) -> Option<Rect> { None }
+    }
+
+    /// The default `flat_parent` walks the light tree, so the default must
+    /// not claim shadow trees were read: a probe that cannot see them keeps
+    /// the custom-element fallback for a surface hidden in one.
+    #[test]
+    fn a_light_tree_probe_records_no_shadow_trees() {
+        assert!(!LightTreeOnly.shadow_trees_recorded());
+        assert_eq!(LightTreeOnly.flat_parent(3), None);
     }
 }

@@ -16,7 +16,7 @@ use impeccable_core::checks::rules::RuleHit;
 use impeccable_core::checks::text_rules::{
     is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
+    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR,
 };
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
@@ -156,13 +156,16 @@ pub fn is_visually_hidden(el: &StaticElement<'_>, style: &StyleValues) -> bool {
 /// design system wraps heading copy in). A reading block nested inside a
 /// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
 /// keeps the floor.
-pub fn is_heading_text(el: &StaticElement<'_>, tag: &str) -> bool {
+pub fn is_heading_text(el: &StaticElement<'_>) -> bool {
     let Some(found) = el.closest(LEADING_HEADING_CONTEXT) else {
         return false;
     };
-    if found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag) {
+    if found.node.id() == el.node.id() {
         return true;
     }
+    // An inline tag (an anchor, a span) is heading text too, by the same
+    // walk: no reading block sits between it and the heading. One inside a
+    // `p` nested in the heading is that paragraph's body copy.
     let mut cur = Some(*el);
     while let Some(c) = cur {
         if c.node.id() == found.node.id() {
@@ -593,7 +596,7 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     && shown < 1.3
                     && !is_non_rendered_text(el, tag, Some(style))
                     && !is_visually_hidden(el, style)
-                    && !is_heading_text(el, tag)
+                    && !is_heading_text(el)
                 {
                     findings.push(RuleHit::new(
                         "tight-leading",

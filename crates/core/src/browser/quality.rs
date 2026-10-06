@@ -24,7 +24,7 @@ use crate::checks::text_rules::{
     average_glyph_advance_em_at, is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed,
     ALL_CAPS_LONG_RUN,
     JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
-    LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
+    LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
     SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
@@ -454,16 +454,16 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
 /// design system wraps heading copy in). A reading block nested inside a
 /// heading (a `p`, an `li`, and whatever sits inside one) is body copy and
 /// keeps the floor.
-pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+pub fn is_heading_text(dom: &dyn Dom, el: ElId) -> bool {
     if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
         return true;
     }
     let Some(heading) = closest_or_none(dom, el, LEADING_HEADING_CONTEXT) else {
         return false;
     };
-    if LEADING_HEADING_TEXT_TAGS.contains(&tag) {
-        return true;
-    }
+    // An inline tag (an anchor, a span) is heading text too, by the same
+    // walk: no reading block sits between it and the heading. One inside a
+    // `p` nested in the heading is that paragraph's body copy.
     let mut cur = Some(el);
     while let Some(c) = cur {
         if c == heading {
@@ -1166,7 +1166,7 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 if wraps
                     && !is_non_rendered_text(dom, el, tag)
                     && !is_visually_hidden(dom, el)
-                    && !is_heading_text(dom, el, tag)
+                    && !is_heading_text(dom, el)
                 {
                     findings.push(RuleHit::new(
                         "tight-leading",
@@ -2295,6 +2295,14 @@ mod tests {
             leading(&d, nested),
             vec!["line-height 1.10x (need >=1.3)"],
             "paragraph nested in a heading"
+        );
+        // And so is an inline run inside that paragraph.
+        let nested_p = d.add(Some(h3), "p");
+        let nested_run = wrapped(&mut d, nested_p, "span", "16px", 17.6);
+        assert_eq!(
+            leading(&d, nested_run),
+            vec!["line-height 1.10x (need >=1.3)"],
+            "span in a paragraph nested in a heading"
         );
 
         // line-height: 1.3 on 18px computes to 23.4px, and 23.4 / 18 lands

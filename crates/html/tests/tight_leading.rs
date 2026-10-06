@@ -109,6 +109,13 @@ fn heading_exemption_follows_the_ancestor() {
         &format!("<h3><p>{COPY}</p></h3>"),
     ));
     assert_eq!(nested.len(), 1, "paragraph nested in a heading still flags: {nested:?}");
+
+    // So is an inline run inside that paragraph.
+    let run = scan(&page(
+        "h3 { font-size: 16px; } p { width: 300px; } span { font-size: 16px; line-height: 17.6px; }",
+        &format!("<h3><p><span>{COPY}</span></p></h3>"),
+    ));
+    assert_eq!(run.len(), 1, "span in a paragraph nested in a heading still flags: {run:?}");
 }
 
 #[test]

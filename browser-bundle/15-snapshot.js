@@ -21,14 +21,15 @@
 // lists agree).
 const __SNAP_STYLE_PROPS = [
   "animationIterationCount", "animationName", "animationTimingFunction",
-  "backdropFilter", "background", "backgroundClip", "backgroundColor",
-  "backgroundImage", "backgroundPosition", "backgroundSize", "blockSize",
-  "borderBottomColor", "borderBottomWidth", "borderBottomStyle",
+  "aspectRatio", "backdropFilter", "background", "backgroundClip",
+  "backgroundColor", "backgroundImage", "backgroundPosition", "backgroundSize",
+  "blockSize", "borderBottomColor", "borderBottomWidth", "borderBottomStyle",
   "borderLeftColor", "borderLeftWidth", "borderLeftStyle", "borderRadius",
   "borderRightColor", "borderRightWidth", "borderRightStyle",
   "borderTopColor", "borderTopWidth", "borderTopStyle", "bottom", "boxShadow",
-  "clip", "clip-path", "clipPath", "color", "content", "contentVisibility",
-  "cssFloat", "display", "filter", "float", "fontFamily", "fontSize",
+  "clip", "clip-path", "clipPath", "color", "colorScheme", "contain", "content",
+  "contentVisibility", "cssFloat", "direction", "display", "filter", "float",
+  "fontFamily", "fontSize",
   "fontStyle", "fontVariant", "fontVariantCaps", "fontWeight", "height",
   "hyphens", "inlineSize", "inset", "insetBlock", "insetBlockEnd",
   "insetBlockStart", "insetInline", "insetInlineEnd", "insetInlineStart",
@@ -37,12 +38,15 @@ const __SNAP_STYLE_PROPS = [
   "mixBlendMode", "objectFit", "objectPosition", "opacity", "outline",
   "outlineColor", "outlineOffset", "outlineStyle", "outlineWidth", "overflow",
   "overflowX", "overflowY", "paddingBottom", "paddingLeft", "paddingRight",
-  "paddingTop", "pointerEvents", "position", "right", "textAlign",
+  "paddingTop", "perspective", "pointerEvents", "position", "right", "rotate",
+  "scale", "textAlign",
   "textDecoration", "textDecorationLine", "textIndent", "textOverflow",
   "textShadow", "textTransform", "top", "transform", "transitionDuration",
-  "transitionProperty", "transitionTimingFunction", "verticalAlign",
+  "transitionProperty", "transitionTimingFunction", "translate", "unicodeBidi",
+  "verticalAlign",
   "visibility", "webkitBackgroundClip", "webkitClipPath", "webkitHyphens",
-  "webkitTextFillColor", "whiteSpace", "width", "wordBreak", "zIndex",
+  "webkitTextFillColor", "whiteSpace", "width", "willChange", "wordBreak",
+  "zIndex",
 ];
 // `::before` / `::after` properties, recorded where `content` is set.
 const __SNAP_PSEUDO_PROPS = [
@@ -633,6 +637,7 @@ const __impeccableSnapshot = {
         __snapNum(el.clientWidth), __snapNum(el.clientHeight), __snapNum(el.clientLeft),
         __snapNum(el.scrollWidth), __snapNum(el.scrollLeft),
         __snapNum(el.offsetWidth), __snapNum(el.offsetHeight),
+        __snapNum(el.scrollHeight),
       ];
       rec.v = typeof el.checkVisibility === 'function'
         ? (el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true }) ? 1 : 0)

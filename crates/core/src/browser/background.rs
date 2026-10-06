@@ -62,6 +62,19 @@ fn alpha_gt(bg: &Rgba, t: f64) -> bool {
 
 /// JS: checks.mjs#resolveBackgroundInfo(el, win, customPropMap) in browser mode.
 pub fn resolve_background_info(dom: &dyn Dom, el: ElId) -> BackgroundInfo {
+    resolve_background_info_skipping_images(dom, el, &|_| false)
+}
+
+/// [`resolve_background_info`] with the background images of the boxes
+/// `skip_image` names read as `none`. The SAFE_TAGS text path uses it for an
+/// icon on the link or its list item: the walk gives up on any raster image,
+/// and an external-link mark or an arrow bullet is not the surface the words
+/// are read against.
+pub fn resolve_background_info_skipping_images(
+    dom: &dyn Dom,
+    el: ElId,
+    skip_image: &dyn Fn(ElId) -> bool,
+) -> BackgroundInfo {
     let mut current = Some(el);
     let mut overlays: Vec<Rgba> = Vec::new();
     let flatten = |overlays: &Vec<Rgba>, base: Rgba| -> Rgba {
@@ -72,7 +85,11 @@ pub fn resolve_background_info(dom: &dyn Dom, el: ElId) -> BackgroundInfo {
         acc
     };
     while let Some(cur) = current {
-        let bg_image = dom.style(cur, "backgroundImage");
+        let bg_image = if skip_image(cur) {
+            String::from("none")
+        } else {
+            dom.style(cur, "backgroundImage")
+        };
         let has_gradient_or_url = !bg_image.is_empty()
             && bg_image != "none"
             && (GRADIENT_RE.is_match(&bg_image) || URL_RE.is_match(&bg_image));

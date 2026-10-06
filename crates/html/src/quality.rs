@@ -9,10 +9,15 @@ use crate::background::{sv, sv_opt};
 use crate::cascade::StyleValues;
 use crate::dom::{ChildNode, StaticElement};
 use impeccable_core::checks::measures::{
-    colors_nearly_match, css_color_is_transparent, resolve_length_px,
+    chars_per_line, colors_nearly_match, css_color_is_transparent, is_capitalized_run,
+    resolve_length_px, TRACKED_LABEL_MAX_CHARS,
 };
 use impeccable_core::checks::rules::RuleHit;
-use impeccable_core::checks::text_rules::{NON_RENDERED_TAGS, SR_ONLY_SELECTOR};
+use impeccable_core::checks::text_rules::{
+    is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
+    JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
+    LEADING_HEADING_TEXT_TAGS, NON_RENDERED_TAGS, SR_ONLY_SELECTOR,
+};
 use impeccable_core::js::{self, number_to_string, parse_float, to_fixed};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -98,7 +103,16 @@ pub fn has_visible_background_boundary(style: &StyleValues, el: &StaticElement<'
         }
         parent = p.parent_element();
     }
-    true
+    // Nothing in the chain paints, so the ground is the canvas: a white box
+    // on an unpainted light page draws no edge. A page that asks for a dark
+    // scheme gets a dark canvas, and there a white box is an edge.
+    if !impeccable_core::browser::quality::canvas_is_light(sv(style, "colorScheme")) {
+        return true;
+    }
+    !colors_nearly_match(
+        Some(bg),
+        Some(impeccable_core::browser::quality::CANVAS_BACKGROUND),
+    )
 }
 
 /// JS: checks.mjs#isVisuallyHidden(el, style)
@@ -136,6 +150,17 @@ pub fn is_visually_hidden(el: &StaticElement<'_>, style: &StyleValues) -> bool {
     false
 }
 
+/// Whether this element carries heading text, for the tight-leading floor:
+/// the element is a heading (or takes the ARIA role), or it is one of the
+/// inline tags a heading's text sits in. A block of body copy nested inside a
+/// heading is not heading text and keeps the floor.
+pub fn is_heading_text(el: &StaticElement<'_>, tag: &str) -> bool {
+    match el.closest(LEADING_HEADING_CONTEXT) {
+        None => false,
+        Some(found) => found.node.id() == el.node.id() || LEADING_HEADING_TEXT_TAGS.contains(&tag),
+    }
+}
+
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
 pub fn is_non_rendered_text(
     el: &StaticElement<'_>,
@@ -157,6 +182,114 @@ pub fn is_non_rendered_text(
         if vis == Some("hidden") || vis == Some("collapse") {
             return true;
         }
+    }
+    false
+}
+
+/// How far up the tree the measure lookup walks before giving up. A column
+/// width is declared on the text block or on the wrapper a few levels above
+/// it; past that the walk is paying for nothing.
+const MEASURE_ANCESTOR_LIMIT: usize = 12;
+
+/// The measure an element's lines can occupy, from the nearest declared
+/// `width` on the element or an ancestor. `None` when nothing on the chain
+/// declares one, and a caller that needs a measure then has none to judge:
+/// this engine has no layout, which is why `line-length` does not fire here
+/// either. The static cascade carries `width` and not `max-width`, and a
+/// percentage is relative to a containing block it cannot size, so both of
+/// those read as undeclared.
+fn declared_measure_px(el: &StaticElement<'_>, font_size: f64) -> Option<f64> {
+    let mut cur = Some(*el);
+    for _ in 0..MEASURE_ANCESTOR_LIMIT {
+        let e = cur?;
+        let raw = sv(e.style(), "width");
+        if !raw.ends_with('%') {
+            if let Some(px) = resolve_length_px(Some(raw), font_size) {
+                if px > 0.0 {
+                    return Some(px);
+                }
+            }
+        }
+        cur = e.parent_element();
+    }
+    None
+}
+
+/// Whether the `hidden` attribute takes an element out of layout. The static
+/// cascade carries author CSS and no UA stylesheet, so it cannot turn
+/// `hidden` into `display: none` on its own, and this reads the attribute.
+///
+/// The UA's `[hidden] { display: none }` is the weakest rule on the page, so
+/// any author `display` beats it: `<div hidden class="reveal">` with
+/// `.reveal { display: block }` renders, and is scored. `hidden="until-found"`
+/// is different. That content is laid out with `content-visibility: hidden`
+/// until find-in-page or a fragment link reveals it, which no author
+/// `display` undoes, so a browser measures a zero-size rect there and a
+/// browser scan reports nothing.
+fn hidden_by_attribute(el: &StaticElement<'_>) -> bool {
+    let Some(value) = el.get_attribute("hidden") else {
+        return false;
+    };
+    if value.trim().eq_ignore_ascii_case("until-found") {
+        return true;
+    }
+    let display = sv_opt(el.style(), "display").map_or("", str::trim);
+    display.is_empty() || display == "none"
+}
+
+/// Whether a closed `<details>` hides `child`. Until the element opens,
+/// everything in it but its first `<summary>` is slotted out of sight, so a
+/// link in the disclosed panel is markup a reader cannot see.
+fn hidden_by_closed_details(details: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
+    if details.tag_lower() != "details" || details.get_attribute("open").is_some() {
+        return false;
+    }
+    let summary = details
+        .children()
+        .into_iter()
+        .find(|c| c.tag_lower() == "summary");
+    summary.map_or(true, |s| s.id() != child.id())
+}
+
+/// Markup a browser lays out nowhere, at any viewport: a `<template>`'s
+/// content, a `<noscript>` (inert whenever scripting is on, which is what a
+/// scanning browser does), anything under `<head>`, a `[hidden]` subtree no
+/// author `display` reveals, and the panel of a closed `<details>`. The
+/// static tree carries all of it (html5ever hands template fragments back as
+/// ordinary descendants of the template element), so a `*` element rule
+/// walks the markup of every unmounted component on the page and scores it
+/// as though it were on screen. A browser scan cannot produce those
+/// findings, and a rule that judges what a reader reads should not either.
+///
+/// Every fact read here is a fact about markup, and so the walk goes to the
+/// root: a `<template>` twenty levels up hides this element as surely as its
+/// parent does. The only style it reads is an author `display` on a
+/// `hidden` element, and only to let it reveal the element. The static
+/// cascade descends `@media` blocks unconditionally, so a winning
+/// `display: none` is some narrow viewport's answer and not the one a reader
+/// sees: gating on it would delete the coverage this engine has always had
+/// of the `.desktop-only` sections a `max-width` query collapses on phones.
+/// `display: none` therefore stays out of this, and so does `visibility`,
+/// which `check_element_colors` reads on the element itself the way it
+/// always has.
+pub fn is_in_non_rendered_markup(el: &StaticElement<'_>, tag: &str) -> bool {
+    let tag = js::to_lower_case(tag);
+    if NON_RENDERED_TAGS.contains(&tag.as_str()) || hidden_by_attribute(el) {
+        return true;
+    }
+    // A closed `<details>`'s own direct text sits in the hidden panel too.
+    if tag == "details" && el.get_attribute("open").is_none() {
+        return true;
+    }
+    let mut child = *el;
+    while let Some(p) = child.parent_element() {
+        if NON_RENDERED_TAGS.contains(&p.tag_lower().as_str())
+            || hidden_by_attribute(&p)
+            || hidden_by_closed_details(&p, &child)
+        {
+            return true;
+        }
+        child = p;
     }
     false
 }
@@ -199,6 +332,44 @@ fn side_len(style: &StyleValues, key: &str, font_size: Option<f64>) -> Option<f6
         Some(fs) => Some(at(fs)),
         // Unknown only when the side depends on the font size (em, %).
         None => (at(0.0) == at(1.0)).then(|| at(0.0)),
+    }
+}
+
+const PAD_KEYS: [&str; 4] = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+const MARGIN_KEYS: [&str; 4] = ["marginTop", "marginRight", "marginBottom", "marginLeft"];
+/// How far below a container's own child the inset may sit and still count.
+/// A scroll wrapper around a table reaches its padded cells in four steps
+/// (`table` > `tbody` > `tr` > `td`).
+const MAX_INSULATE_DEPTH: usize = 4;
+
+/// Whether `el` keeps the container's text off side `s`.
+///
+/// An element that holds one element and no text of its own is a pass-through
+/// (`<h3>` around a padded `<button>`, `<a>` around a padded card), so the
+/// question goes to what it wraps: the padding that insets the text often sits
+/// a step or two below the container's own child. Where it holds several
+/// children the question stops, because any one of them can reach the edge on
+/// its own and the padding of another says nothing about it. The browser rule
+/// measures where the glyphs land and needs none of this; the static scan has
+/// no layout, so it reads the declarations that would move them.
+fn insulates_side(el: &StaticElement<'_>, s: usize, font_size: Option<f64>, depth: usize) -> bool {
+    const CHILD_INSULATE_THRESHOLD: f64 = 4.0;
+    let style = el.style();
+    // A side this engine cannot resolve (an unresolved var(), or an em or %
+    // length on an unknown font size) may well insulate, so it does.
+    let insulates = |key: &str| {
+        side_len(style, key, font_size).is_none_or(|v| v >= CHILD_INSULATE_THRESHOLD)
+    };
+    if insulates(PAD_KEYS[s]) || insulates(MARGIN_KEYS[s]) {
+        return true;
+    }
+    if depth == 0 || el.has_direct_text_longer_than(4) {
+        return false;
+    }
+    let children = el.children();
+    match children.as_slice() {
+        [only] => insulates_side(only, s, font_size, depth - 1),
+        _ => false,
     }
 }
 
@@ -314,31 +485,11 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                     side_len(style, "paddingLeft", font_size),
                 ];
                 const PAD_THRESHOLD: f64 = 2.0;
-                const CHILD_INSULATE_THRESHOLD: f64 = 4.0;
                 let mut children_insulate = [false; 4];
-                for child in &children {
-                    let cs = child.style();
-                    let child_pad = [
-                        side_len(cs, "paddingTop", font_size),
-                        side_len(cs, "paddingRight", font_size),
-                        side_len(cs, "paddingBottom", font_size),
-                        side_len(cs, "paddingLeft", font_size),
-                    ];
-                    let child_margin = [
-                        side_len(cs, "marginTop", font_size),
-                        side_len(cs, "marginRight", font_size),
-                        side_len(cs, "marginBottom", font_size),
-                        side_len(cs, "marginLeft", font_size),
-                    ];
-                    for s in 0..4 {
-                        if child_pad[s].is_none()
-                            || child_margin[s].is_none()
-                            || child_pad[s].is_some_and(|v| v >= CHILD_INSULATE_THRESHOLD)
-                            || child_margin[s].is_some_and(|v| v >= CHILD_INSULATE_THRESHOLD)
-                        {
-                            children_insulate[s] = true;
-                        }
-                    }
+                for s in 0..4 {
+                    children_insulate[s] = children
+                        .iter()
+                        .any(|c| insulates_side(c, s, font_size, MAX_INSULATE_DEPTH));
                 }
                 let side_names = ["top", "right", "bottom", "left"];
                 let mut flush_sides: Vec<&str> = Vec::new();
@@ -411,9 +562,18 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     // --- Tight line height ---
     if q.has_direct_text && text_len > 50 && !is_heading {
         if let (Some(lh), Some(font_size)) = (q.line_height_px, font_size) {
-            if font_size > 0.0 {
+            if font_size > 0.0 && font_size < LEADING_DISPLAY_TYPE_PX {
                 let ratio = lh / font_size;
-                if ratio > 0.0 && ratio < 1.3 {
+                // Compare on the ratio the snippet prints, so a page that sets
+                // line-height: 1.3 exactly is never flagged for hitting the floor
+                // (46.8 / 36 is 1.2999999999999998 in binary floats).
+                let shown = js::math_round(ratio * 100.0) / 100.0;
+                if ratio > 0.0
+                    && shown < 1.3
+                    && !is_non_rendered_text(el, tag, Some(style))
+                    && !is_visually_hidden(el, style)
+                    && !is_heading_text(el, tag)
+                {
                     findings.push(RuleHit::new(
                         "tight-leading",
                         format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
@@ -424,7 +584,12 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- Justified text (without hyphens) ---
-    if q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") {
+    // Only a narrow column stretches word spaces far enough to open rivers,
+    // and only in a script that justifies on word spaces at all.
+    // An unresolved font size gives no measure to judge the column by.
+    if let Some(font_size) = font_size
+        .filter(|fs| q.has_direct_text && sv_opt(style, "textAlign") == Some("justify") && *fs > 0.0)
+    {
         let hyphens = {
             let a = sv(style, "hyphens");
             if !a.is_empty() {
@@ -433,7 +598,9 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
                 sv(style, "webkitHyphens")
             }
         };
-        if hyphens != "auto" {
+        let narrow = declared_measure_px(el, font_size)
+            .is_some_and(|w| chars_per_line(w, font_size) <= JUSTIFY_NARROW_CHARS_PER_LINE);
+        if hyphens != "auto" && narrow && !justifies_without_word_spaces_text(&el.direct_text()) {
             findings.push(RuleHit::new(
                 "justified-text",
                 "text-align: justify without hyphens: auto".to_string(),
@@ -508,33 +675,45 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
     }
 
     // --- All-caps body text ---
-    if q.has_direct_text
-        && text_len > 30
-        && sv_opt(style, "textTransform") == Some("uppercase")
-        && !is_heading
-    {
-        findings.push(RuleHit::new(
-            "all-caps-body",
-            format!(
-                "text-transform: uppercase on {} chars of body text",
-                text_len
-            ),
-        ));
+    // Uppercase on a short run is a convention, not a defect: a button, a nav
+    // item, a kicker or an eyebrow is taken in as a shape. The cost lands when
+    // the run is long enough to be read as a sentence. The run is the
+    // element's own text, so a bar or a form control whose children hold the
+    // labels is not one long run, however its subtree adds up.
+    if q.has_direct_text && sv_opt(style, "textTransform") == Some("uppercase") && !is_heading {
+        let own_len = utf16_len(js::trim(&collapse_ws(&el.direct_text())));
+        if own_len >= ALL_CAPS_LONG_RUN {
+            findings.push(RuleHit::new(
+                "all-caps-body",
+                format!("text-transform: uppercase on {} chars of body text", own_len),
+            ));
+        }
     }
 
     // --- Wide letter spacing on body text ---
-    if q.has_direct_text && text_len > 20 && sv_opt(style, "textTransform") != Some("uppercase") {
+    if q.has_direct_text && text_len > 20 {
         if let (Some(ls), Some(font_size)) = (q.letter_spacing_px, font_size) {
             if ls > 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_em > 0.05 {
-                    findings.push(RuleHit::new(
-                        "wide-tracking",
-                        format!(
-                            "letter-spacing: {}em on body text",
-                            to_fixed(tracking_em, 2)
-                        ),
-                    ));
+                    // Wide tracking is the standard treatment for an
+                    // uppercase eyebrow, label or button. `text-transform`
+                    // says so outright; capitals typed into the markup do
+                    // not, so that reading is held to label size. This
+                    // engine has no layout, so a run inside the label length
+                    // counts as one line.
+                    let caps_label = sv_opt(style, "textTransform") == Some("uppercase")
+                        || (text_len <= TRACKED_LABEL_MAX_CHARS
+                            && is_capitalized_run(js::trim(&el.text_content())));
+                    if !caps_label {
+                        findings.push(RuleHit::new(
+                            "wide-tracking",
+                            format!(
+                                "letter-spacing: {}em on body text",
+                                to_fixed(tracking_em, 2)
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -545,17 +724,19 @@ pub fn check_quality(q: &QualityInput<'_, '_>) -> Vec<RuleHit> {
         if let (Some(ls), Some(font_size)) = (q.letter_spacing_px, font_size) {
             if ls < 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
-                if tracking_em <= -0.05 {
-                    let excerpt =
-                        slice_utf16_prefix(&collapse_ws(js::trim(&el.text_content())), 40);
-                    findings.push(RuleHit::new(
-                        "extreme-negative-tracking",
-                        format!(
-                            "letter-spacing: {}em — \"{}\"",
-                            to_fixed(tracking_em, 2),
-                            excerpt
-                        ),
-                    ));
+                if tracking_is_crushed(tracking_em, font_size) {
+                    let text = collapse_ws(js::trim(&el.text_content()));
+                    if !is_cjk_text(&text) {
+                        findings.push(RuleHit::new(
+                            "extreme-negative-tracking",
+                            format!(
+                                "letter-spacing: {}em at {}px — \"{}\"",
+                                to_fixed(tracking_em, 2),
+                                number_to_string(font_size),
+                                slice_utf16_prefix(&text, 40)
+                            ),
+                        ));
+                    }
                 }
             }
         }

@@ -13,7 +13,7 @@
 use crate::color::{self, Rgba};
 use crate::js::{self, ci, math_max, math_max3, parse_float, WS, WS_CHARS};
 use crate::js_ext_b::num_truthy;
-use crate::rules::types::D;
+use crate::rules::types::{Corners, D};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,105 @@ pub fn parse_radius_to_px(value: Option<&str>, width_px: f64) -> Option<f64> {
         return Some(num);
     }
     Some(num)
+}
+
+/// One `border-radius` token in px, or `None` when it is not a length this
+/// can resolve: a `calc()`, an unresolved `var()`, a keyword, a unit whose
+/// px value depends on something not in hand. Percentages resolve against
+/// `width_px` the way [`parse_radius_to_px`] resolves them; `em` resolves
+/// against `em_px`, the element's font size, and `rem` against the 16px root
+/// default. Unit matching is case-insensitive: CSS units are, and a
+/// stylesheet carrying `0.5REM` still describes a rounded corner.
+fn radius_token_px(token: &str, width_px: f64, em_px: f64) -> Option<f64> {
+    let token = js::trim(token);
+    let num = parse_radius_to_px(Some(token), width_px)?;
+    let unit = token.trim_start_matches(|c: char| !c.is_ascii_alphabetic() && c != '%');
+    match js::to_lower_case(unit).as_str() {
+        "px" | "%" => Some(num),
+        "em" => Some(num * em_px),
+        "rem" => Some(num * ROOT_FONT_SIZE_PX),
+        // A bare `0` is the one unitless radius CSS allows.
+        "" if num == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+/// The root font size `rem` resolves against, and the `em` default for a
+/// caller that has no font size in hand.
+pub const ROOT_FONT_SIZE_PX: f64 = 16.0;
+
+/// One `border-radius` token in px, `em` read against the element's font
+/// size. `None` on the terms [`parse_radius_corners`] documents.
+pub fn parse_radius_token_px(token: &str, width_px: f64, em_px: f64) -> Option<f64> {
+    radius_token_px(token, width_px, em_px)
+}
+
+/// The corners of a `border-radius` shorthand, in px. Reads the horizontal
+/// radii (the half before any `/`) and fills the 1-, 2- and 3-value forms out
+/// the way the shorthand does. `None` when the declaration is missing, empty
+/// or carries a token this cannot resolve: a caller that cannot see the
+/// corners should keep reporting rather than read the box as square.
+pub fn parse_radius_corners(value: Option<&str>, width_px: f64) -> Option<Corners> {
+    parse_radius_corners_em(value, width_px, ROOT_FONT_SIZE_PX)
+}
+
+/// [`parse_radius_corners`] with `em` read against `em_px`, the element's
+/// font size.
+pub fn parse_radius_corners_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<Corners> {
+    re!(WS_SPLIT, format!("{}+", WS));
+    let horizontal = value?.split('/').next().unwrap_or("");
+    let trimmed = js::trim(horizontal);
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parts: Vec<f64> = WS_SPLIT
+        .split(trimmed)
+        .filter(|t| !t.is_empty())
+        .map(|t| radius_token_px(t, width_px, em_px))
+        .collect::<Option<Vec<f64>>>()?;
+    let at = |i: usize| parts.get(i).copied().unwrap_or(0.0);
+    Some(match parts.len() {
+        0 => return None,
+        1 => Corners {
+            top_left: at(0),
+            top_right: at(0),
+            bottom_right: at(0),
+            bottom_left: at(0),
+        },
+        2 => Corners {
+            top_left: at(0),
+            top_right: at(1),
+            bottom_right: at(0),
+            bottom_left: at(1),
+        },
+        3 => Corners {
+            top_left: at(0),
+            top_right: at(1),
+            bottom_right: at(2),
+            bottom_left: at(1),
+        },
+        _ => Corners {
+            top_left: at(0),
+            top_right: at(1),
+            bottom_right: at(2),
+            bottom_left: at(3),
+        },
+    })
+}
+
+/// One `border-<corner>-radius` longhand in px: its horizontal radius, the
+/// half a stripe runs along. `None` on the same terms as
+/// [`parse_radius_corners`].
+pub fn parse_radius_corner_px(value: Option<&str>, width_px: f64) -> Option<f64> {
+    parse_radius_corner_px_em(value, width_px, ROOT_FONT_SIZE_PX)
+}
+
+/// [`parse_radius_corner_px`] with `em` read against `em_px`.
+pub fn parse_radius_corner_px_em(value: Option<&str>, width_px: f64, em_px: f64) -> Option<f64> {
+    re!(WS_SPLIT_ONE, format!("{}+", WS));
+    let trimmed = js::trim(value?);
+    let first = WS_SPLIT_ONE.split(trimmed).find(|t| !t.is_empty())?;
+    radius_token_px(first, width_px, em_px)
 }
 
 /// The custom-property lookup `resolveVarRefs` reads (`customPropMap.get`).
@@ -263,6 +362,13 @@ pub fn resolve_length_px(value: Option<&str>, font_size_px: f64) -> Option<f64> 
     Some(num * font_size_px)
 }
 
+/// Characters that fit on one line at a given measure: an average glyph runs
+/// about half the font size wide. The estimate `line-length` reports and the
+/// one `justified-text` reads to tell a narrow column from a long measure.
+pub fn chars_per_line(width_px: f64, font_size_px: f64) -> f64 {
+    width_px / (font_size_px * 0.5)
+}
+
 /// JS: checks.mjs#cssColorIsTransparent.
 pub fn css_color_is_transparent(value: Option<&str>) -> bool {
     re!(
@@ -327,6 +433,48 @@ pub struct GradientStop {
     pub transparent: bool,
 }
 
+/// The byte index of the `)` closing the `(` at `open`, or `None` when the
+/// value never closes it.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// One stop argument read the way `parseRadialGradientStops` reads it: the
+/// first color token, `transparent` or a near-zero alpha as a transparent
+/// stop, and an unparseable token as a stop with no color.
+fn spotlight_stop_from_arg(arg: &str) -> GradientStop {
+    re!(TRANSPARENT_ONLY, format!("^{}$", ci("transparent")));
+    let Some(tok) = SPOTLIGHT_COLOR_TOKEN_RE.find(arg) else {
+        return GradientStop {
+            color: None,
+            transparent: false,
+        };
+    };
+    if TRANSPARENT_ONLY.is_match(tok.as_str()) {
+        return GradientStop {
+            color: None,
+            transparent: true,
+        };
+    }
+    let c = color::parse_any_color(Some(tok.as_str()));
+    let transparent = matches!(c, Some(c) if c.alpha_or_one() <= 0.05);
+    GradientStop {
+        color: c,
+        transparent,
+    }
+}
+
 /// JS: checks.mjs#parseRadialGradientStops. The ordered stops of the FIRST
 /// non-repeating radial-gradient in a background value, or `None` when
 /// there is no plain radial-gradient to read.
@@ -336,7 +484,6 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
         GRAD_RE,
         format!(r"({}-)?{}\(", ci("repeating"), ci("radial-gradient"))
     );
-    re!(TRANSPARENT_ONLY, format!("^{}$", ci("transparent")));
     let value = value?;
     if value.is_empty() || !HAS_RADIAL.is_match(value) {
         return None;
@@ -351,20 +498,7 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
             Some(i) => start + i,
             None => return None,
         };
-        let mut depth = 0i32;
-        let mut end: Option<usize> = None;
-        for (i, &b) in bytes.iter().enumerate().skip(open) {
-            if b == b'(' {
-                depth += 1;
-            } else if b == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i);
-                    break;
-                }
-            }
-        }
-        let Some(end) = end else { return None };
+        let end = matching_paren(bytes, open)?;
         let args = color::split_top_level_commas(&value[open + 1..end]);
         let stop_args: Vec<&String> = args
             .iter()
@@ -376,30 +510,43 @@ pub fn parse_radial_gradient_stops(value: Option<&str>) -> Option<Vec<GradientSt
         return Some(
             stop_args
                 .iter()
-                .map(|a| {
-                    let Some(tok) = SPOTLIGHT_COLOR_TOKEN_RE.find(a) else {
-                        return GradientStop {
-                            color: None,
-                            transparent: false,
-                        };
-                    };
-                    if TRANSPARENT_ONLY.is_match(tok.as_str()) {
-                        return GradientStop {
-                            color: None,
-                            transparent: true,
-                        };
-                    }
-                    let c = color::parse_any_color(Some(tok.as_str()));
-                    let transparent = matches!(c, Some(c) if c.alpha_or_one() <= 0.05);
-                    GradientStop {
-                        color: c,
-                        transparent,
-                    }
-                })
+                .map(|a| spotlight_stop_from_arg(a))
                 .collect(),
         );
     }
     None
+}
+
+/// The color stops of one gradient image layer (`linear-gradient(...)`,
+/// `radial-gradient(...)`, `conic-gradient(...)` or a repeating form) in
+/// declaration order, `transparent` included. Unlike
+/// [`parse_radial_gradient_stops`] it takes any gradient function and a
+/// single stop, and reads a named color (`white`, `navy`) as a stop. `None`
+/// when the layer is not a gradient or no argument names a color.
+pub fn parse_gradient_layer_stops(layer: &str) -> Option<Vec<GradientStop>> {
+    re!(GRADIENT_FN, format!(r"{}\(", ci("gradient")));
+    let m = GRADIENT_FN.find(layer)?;
+    let open = m.end() - 1;
+    let end = matching_paren(layer.as_bytes(), open)?;
+    let mut stops = Vec::new();
+    for arg in color::split_top_level_commas(&layer[open + 1..end]) {
+        if SPOTLIGHT_COLOR_TOKEN_RE.is_match(&arg) {
+            stops.push(spotlight_stop_from_arg(&arg));
+            continue;
+        }
+        let first = arg.split_ascii_whitespace().next().unwrap_or("");
+        if let Some(c) = color::parse_any_color(Some(first)) {
+            stops.push(GradientStop {
+                color: Some(c),
+                transparent: c.alpha_or_one() <= 0.05,
+            });
+        }
+    }
+    if stops.is_empty() {
+        None
+    } else {
+        Some(stops)
+    }
 }
 
 /// A `{ id, snippet }` finding as the pure checks return them.
@@ -428,6 +575,20 @@ pub struct RadialSpotlightInput<'a> {
     pub height: f64,
     #[serde(borrow)]
     pub label: Option<&'a str>,
+}
+
+/// What `checkRadialSpotlight`'s declaration test cannot see: how much of the
+/// glow actually reaches the page. The adapters measure it per element.
+/// Whether the glow sits behind copy is the third measurement and the
+/// expensive one, so it travels to the gate as a closure rather than a field.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RadialGlowProminence {
+    /// The painting element's effective opacity: its own `opacity` times
+    /// every ancestor's.
+    pub opacity: f64,
+    /// The surface the glow paints over, `None` when the cascade cannot
+    /// resolve one (an image or an unreadable stack underneath).
+    pub backdrop: Option<Rgba>,
 }
 
 /// JS: checks.mjs#TAILWIND_BG_HEX (insertion order preserved).
@@ -527,11 +688,55 @@ fn split_shadow_layers(s: &str) -> Vec<&str> {
     out
 }
 
+/// Whether a computed `box-shadow` draws anything: some layer with a visible
+/// color and a non-zero offset, blur or spread. Tailwind's ring and shadow
+/// variables compute to `rgba(0, 0, 0, 0) 0px 0px 0px 0px` layers, and a
+/// fully zero layer paints nothing even in an opaque color.
+pub fn box_shadow_paints(box_shadow: &str) -> bool {
+    re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
+    re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    let box_shadow = box_shadow.trim();
+    if box_shadow.is_empty() || box_shadow == "none" {
+        return false;
+    }
+    split_shadow_layers(box_shadow).into_iter().any(|layer| {
+        if shadow_layer_alpha(layer) <= 0.0 {
+            return false;
+        }
+        let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        let cleaned = WORD_RE.replace_all(&cleaned, " ");
+        NUM_RE
+            .find_iter(&cleaned)
+            .any(|m| parse_float(m.as_str()) != 0.0)
+    })
+}
+
 /// JS: checks.mjs#shadowMaxBlurPx. Largest blur radius across the layers
 /// whose color alpha is at least `min_alpha` (JS default 0).
 pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    shadow_max_blur_px_among(box_shadow, min_alpha, false)
+}
+
+/// Largest blur radius across the layers drawn outside the box: not `inset`,
+/// with a color alpha of at least `min_alpha`. An inset layer is a well
+/// pressed into the surface rather than an elevation under it, so it is never
+/// the halo around a card. Offsets are read by nothing here: every step of
+/// every mainstream elevation scale casts a y-offset, so a shadow lit from
+/// above is the common case rather than the exception.
+pub fn shadow_max_outer_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f64 {
+    shadow_max_blur_px_among(box_shadow, min_alpha, true)
+}
+
+/// The one box-shadow parse behind [`shadow_max_blur_px`] and
+/// [`shadow_max_outer_blur_px`]; `outer_only` skips `inset` layers.
+fn shadow_max_blur_px_among(
+    box_shadow: Option<&str>,
+    min_alpha: Option<f64>,
+    outer_only: bool,
+) -> f64 {
     re!(WORD_RE, r"(?-u:\b)[a-zA-Z]+(?-u:\b)");
     re!(NUM_RE, format!(r"-?{d}*\.?{d}+", d = D));
+    re!(INSET_RE, r"(?i)(?-u:\b)inset(?-u:\b)");
     let min_alpha = min_alpha.unwrap_or(0.0);
     let Some(box_shadow) = box_shadow else {
         return 0.0;
@@ -545,6 +750,9 @@ pub fn shadow_max_blur_px(box_shadow: Option<&str>, min_alpha: Option<f64>) -> f
             continue;
         }
         let cleaned = CSS_COLOR_TOKEN_RE.replace_all(layer, " ");
+        if outer_only && INSET_RE.is_match(&cleaned) {
+            continue;
+        }
         let cleaned = WORD_RE.replace_all(&cleaned, " ");
         let nums: Vec<f64> = NUM_RE
             .find_iter(&cleaned)
@@ -817,9 +1025,162 @@ pub struct ContentHiddenInput {
     pub hidden_samples: Vec<String>,
 }
 
+// ─── Background images drawn as icons ───────────────────────────────────────
+
+/// The largest an icon is drawn, per axis: an external-link mark, an arrow
+/// bullet, a chevron. A background image no larger than this sits beside the
+/// text it decorates and cannot be the picture that text is read against.
+pub const ICON_MAX_PX: f64 = 32.0;
+
+/// Decodes `%XX` escapes, leaving anything malformed as it was.
+fn percent_decode(s: &str) -> String {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolves CSS escapes: `\\` and a hex code point (with its optional
+/// trailing space), or `\\` and any other character, which stands for itself.
+/// A serializer writes an unquoted `url()` this way, `width=\\'10\\'`.
+fn css_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let mut hex = String::new();
+        while hex.len() < 6 && chars.peek().map_or(false, |h| h.is_ascii_hexdigit()) {
+            hex.push(chars.next().unwrap_or_default());
+        }
+        if hex.is_empty() {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if chars.peek().map_or(false, |w| *w == ' ') {
+            chars.next();
+        }
+        out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).unwrap_or('\u{fffd}'));
+    }
+    out
+}
+
+/// The payload of the single `url()` in a background-image value, quotes
+/// stripped and CSS escapes resolved; `None` where the value holds no `url()`
+/// or more than one.
+fn single_url(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if lower.matches("url(").count() != 1 {
+        return None;
+    }
+    let start = lower.find("url(")? + 4;
+    let rest = value[start..].trim_start();
+    let quote = rest.chars().next()?;
+    let (body, close) = if quote == '"' || quote == '\'' {
+        (&rest[1..], quote)
+    } else {
+        (rest, ')')
+    };
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == close {
+            return Some(css_unescape(body[..i].trim_end()));
+        }
+    }
+    None
+}
+
+re!(SVG_OPEN_TAG_RE, r"(?i)<svg(?:\s[^>]*)?>");
+re!(
+    SVG_DIMENSION_RE,
+    r#"(?i)\s(width|height)\s*=\s*["']?\s*([0-9]*\.?[0-9]+)\s*(?:px)?\s*["']?"#
+);
+re!(
+    SVG_VIEWBOX_RE,
+    r#"(?i)\sviewbox\s*=\s*["']\s*-?[0-9.]+[\s,]+-?[0-9.]+[\s,]+([0-9.]+)[\s,]+([0-9.]+)"#
+);
+
+/// The intrinsic size of a background image written as an inline SVG data
+/// URI, read off its root `<svg>` element's `width` and `height` (or, lacking
+/// those, its `viewBox`). A value with no `url()`, more than one, a remote
+/// file, or a base64 payload has no size this can read, because the pixels
+/// are not in the computed style, and answers `None`.
+pub fn data_svg_intrinsic_size(background_image: &str) -> Option<(f64, f64)> {
+    let url = single_url(background_image)?;
+    let (header, payload) = url.split_once(',')?;
+    let header = header.to_ascii_lowercase();
+    if !header.starts_with("data:image/svg+xml") || header.contains(";base64") {
+        return None;
+    }
+    let svg = percent_decode(payload);
+    let tag = SVG_OPEN_TAG_RE.find(&svg)?.as_str();
+    let mut width = None;
+    let mut height = None;
+    for caps in SVG_DIMENSION_RE.captures_iter(tag) {
+        let v = parse_float(&caps[2]);
+        if caps[1].eq_ignore_ascii_case("width") {
+            width = width.or(Some(v));
+        } else {
+            height = height.or(Some(v));
+        }
+    }
+    if let (Some(w), Some(h)) = (width, height) {
+        if w > 0.0 && h > 0.0 {
+            return Some((w, h));
+        }
+    }
+    let caps = SVG_VIEWBOX_RE.captures(tag)?;
+    let (w, h) = (parse_float(&caps[1]), parse_float(&caps[2]));
+    (w > 0.0 && h > 0.0).then_some((w, h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_svg_intrinsic_size_reads_the_root_svg() {
+        let icon = "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='12'%3E%3Crect width='100' height='100'/%3E%3C/svg%3E\")";
+        assert_eq!(data_svg_intrinsic_size(icon), Some((10.0, 12.0)));
+        let viewbox = "url('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\"><path stroke-width=\"900\"/></svg>')";
+        assert_eq!(data_svg_intrinsic_size(viewbox), Some((16.0, 16.0)));
+        // The static cascade serializes an unquoted `url()` with escapes.
+        let escaped = "url(data:image/svg+xml,%3Csvg\\ xmlns=\\'http://www.w3.org/2000/svg\\'\\ width=\\'10\\'\\ height=\\'8\\'%3E%3Cpath\\ d=\\'M0\\ 0h10v10\\'/%3E%3C/svg%3E)no-repeat right center";
+        assert_eq!(data_svg_intrinsic_size(escaped), Some((10.0, 8.0)));
+        assert_eq!(data_svg_intrinsic_size("url(\"/img/external.png\")"), None);
+        assert_eq!(
+            data_svg_intrinsic_size("url(\"data:image/svg+xml;base64,PHN2Zz4=\")"),
+            None
+        );
+        assert_eq!(data_svg_intrinsic_size("none"), None);
+        assert_eq!(
+            data_svg_intrinsic_size(
+                "url(\"data:image/svg+xml,%3Csvg width='8' height='8'%3E%3C/svg%3E\"), url(\"hero.jpg\")"
+            ),
+            None,
+            "two layers are not one icon"
+        );
+    }
 
     // Expected values below were produced by running the JS functions in Node.
 
@@ -830,6 +1191,110 @@ mod tests {
             vec!["0 1px 2px rgba(0,0,0,0.3)", " 0 0 30px hsl(1, 2%, 3%)"]
         );
         assert_eq!(split_shadow_layers("none"), vec!["none"]);
+    }
+
+    #[test]
+    fn box_shadow_paints_cases() {
+        assert!(!box_shadow_paints("none"));
+        assert!(!box_shadow_paints(""));
+        // Tailwind's ring and shadow variables at rest.
+        assert!(!box_shadow_paints(
+            "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px"
+        ));
+        assert!(!box_shadow_paints("rgb(0, 0, 0) 0px 0px 0px 0px"));
+        assert!(!box_shadow_paints("rgba(0, 0, 0, 0) 0px 4px 6px 0px"));
+        assert!(box_shadow_paints("rgb(229, 231, 235) 0px 1px 0px 0px"));
+        assert!(box_shadow_paints(
+            "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0.1) 0px 0px 0px 1px"
+        ));
+        assert!(box_shadow_paints("0 2px 4px"));
+    }
+
+    #[test]
+    fn radius_corner_shorthand_cases() {
+        let c = |v: &str| parse_radius_corners(Some(v), 200.0).expect(v);
+        assert_eq!(
+            c("8px"),
+            Corners {
+                top_left: 8.0,
+                top_right: 8.0,
+                bottom_right: 8.0,
+                bottom_left: 8.0,
+            }
+        );
+        assert_eq!(
+            c("8px 2px"),
+            Corners {
+                top_left: 8.0,
+                top_right: 2.0,
+                bottom_right: 8.0,
+                bottom_left: 2.0,
+            }
+        );
+        assert_eq!(
+            c("1px 2px 3px"),
+            Corners {
+                top_left: 1.0,
+                top_right: 2.0,
+                bottom_right: 3.0,
+                bottom_left: 2.0,
+            }
+        );
+        assert_eq!(
+            c("0px 10px 10px 0px"),
+            Corners {
+                top_left: 0.0,
+                top_right: 10.0,
+                bottom_right: 10.0,
+                bottom_left: 0.0,
+            }
+        );
+        // The vertical half after `/` is not what a stripe runs along.
+        assert_eq!(c("12px / 4px").top_left, 12.0);
+        // rem and em read against the 16px root default; % against the box.
+        assert_eq!(c("0.375rem").top_left, 6.0);
+        assert_eq!(c("0.5em").bottom_right, 8.0);
+        // Units are case-insensitive in CSS.
+        assert_eq!(c("0.5REM").top_left, 8.0);
+        assert_eq!(c("10PX").top_left, 10.0);
+        assert_eq!(c("50%").top_right, 100.0);
+        assert_eq!(c("0").top_left, 0.0);
+        assert_eq!(c("0 10px 10px 0").bottom_left, 0.0);
+        // `em` reads against the element's font size, `rem` against the root.
+        let em = |v: &str, font: f64| parse_radius_corners_em(Some(v), 200.0, font).expect(v);
+        assert!((em("0.3em", 12.0).top_left - 3.6).abs() < 1e-9);
+        assert_eq!(em("0.5rem", 12.0).top_left, 8.0);
+        assert_eq!(
+            parse_radius_corner_px_em(Some("0.5em"), 200.0, 24.0),
+            Some(12.0)
+        );
+    }
+
+    #[test]
+    fn radius_corners_unreadable_values_are_unknown() {
+        let c = |v: Option<&str>| parse_radius_corners(v, 200.0);
+        // A radius this cannot resolve is unknown, not zero: the caller keeps
+        // reporting rather than reading the box as square.
+        assert_eq!(c(Some("calc(0.5rem)")), None);
+        assert_eq!(c(Some("var(--radius)")), None);
+        assert_eq!(c(Some("0px calc(8px + 2px)")), None);
+        assert_eq!(c(Some("1vw")), None);
+        assert_eq!(c(Some("")), None);
+        assert_eq!(c(Some("   ")), None);
+        assert_eq!(c(None), None);
+    }
+
+    #[test]
+    fn radius_corner_longhand_cases() {
+        let c = |v: &str| parse_radius_corner_px(Some(v), 200.0);
+        assert_eq!(c("10px"), Some(10.0));
+        assert_eq!(c("0.5rem"), Some(8.0));
+        // A longhand may carry both radii; a stripe runs along the first.
+        assert_eq!(c("10px 4px"), Some(10.0));
+        assert_eq!(c("50%"), Some(100.0));
+        assert_eq!(c("calc(1rem)"), None);
+        assert_eq!(c(""), None);
+        assert_eq!(parse_radius_corner_px(None, 200.0), None);
     }
 
     #[test]

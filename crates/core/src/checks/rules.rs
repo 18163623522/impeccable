@@ -3,6 +3,7 @@
 //! opts objects become structs whose `Option` fields mirror the JS
 //! `undefined` / `null` distinctions the source relies on.
 
+use crate::checks::text_rules::NON_RENDERED_TAGS;
 use crate::color::{
     color_to_hex, composite_color_over, contrast_ratio, get_hue, has_chroma, is_gray_ink,
     is_neutral_color, relative_luminance, Rgba,
@@ -30,6 +31,271 @@ macro_rules! re {
 }
 
 const SIDE_NAMES: [&str; 4] = ["Top", "Right", "Bottom", "Left"];
+
+/// How much corner radius a box needs before it reads as a rounded card.
+/// Under this the corners look square at reading distance.
+pub const SIDE_ACCENT_MIN_RADIUS_PX: f64 = 4.0;
+
+/// Whether a stripe on side `[Top, Right, Bottom, Left][i]` sits on a rounded
+/// box. A side accent is the AI card tell only on a rounded card; the square
+/// version is an older convention (a callout's severity rule, a pull quote, a
+/// table row marker) and says nothing. The corners that decide it are the two
+/// the stripe does not touch, so a box rounded only along the stripe
+/// (`border-radius: 8px 0 0 8px` under a left rule) still reads as square.
+/// `None` is unknown, not square: a caller that could not read the corners
+/// (a radius the engine cannot resolve, a snapshot without the column, the
+/// recorded call vectors) keeps its finding.
+pub fn is_rounded_away_from_side(corners: Option<&Corners>, i: usize) -> bool {
+    let Some(corners) = corners else {
+        return true;
+    };
+    let (a, b) = corners.away_from(i);
+    a >= SIDE_ACCENT_MIN_RADIUS_PX && b >= SIDE_ACCENT_MIN_RADIUS_PX
+}
+
+/// The box a text-only reader assumes when a radius is a percentage: no
+/// element is in hand, and any percentage an author writes rounds a card
+/// visibly at card size.
+pub const NOMINAL_CARD_WIDTH_PX: f64 = 1000.0;
+
+/// Corner radii gathered from authored declarations, for the producers that
+/// read source text rather than a computed style: the CSS-text stripe scans
+/// and the regex engine's side accent matchers. Declarations apply in source
+/// order, so a later shorthand resets an earlier longhand and a later
+/// longhand overrides one corner of an earlier shorthand. A corner is `None`
+/// when a declaration that set it could not be resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeclaredCorners {
+    /// `[top-left, top-right, bottom-right, bottom-left]`.
+    corners: [Option<f64>; 4],
+    declared: bool,
+}
+
+/// No declaration yet: every corner at the cascade's `0`.
+impl Default for DeclaredCorners {
+    fn default() -> Self {
+        DeclaredCorners {
+            corners: [Some(0.0); 4],
+            declared: false,
+        }
+    }
+}
+
+impl DeclaredCorners {
+    /// Every corner at once, the way the `border-radius` shorthand sets them.
+    pub fn set_all(&mut self, corners: Option<Corners>) {
+        self.declared = true;
+        self.corners = match corners {
+            Some(c) => [
+                Some(c.top_left),
+                Some(c.top_right),
+                Some(c.bottom_right),
+                Some(c.bottom_left),
+            ],
+            None => [None; 4],
+        };
+    }
+
+    /// One corner, `[top-left, top-right, bottom-right, bottom-left][i]`.
+    pub fn set_corner(&mut self, i: usize, px: Option<f64>) {
+        self.declared = true;
+        self.corners[i] = px;
+    }
+
+    /// One corner raised to at least `px`: a conditional class (`md:rounded-lg`)
+    /// can round the card, so it never squares one off.
+    pub fn raise_corner(&mut self, i: usize, px: Option<f64>) {
+        self.declared = true;
+        self.corners[i] = match (self.corners[i], px) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+    }
+
+    /// Every corner raised to at least `other`'s, an unknown corner staying
+    /// unknown: the largest radius any of several declarations can give each
+    /// corner. Nothing happens when `other` declared nothing.
+    pub fn raise_to(&mut self, other: &DeclaredCorners) {
+        if !other.declared {
+            return;
+        }
+        for i in 0..4 {
+            self.raise_corner(i, other.corners[i]);
+        }
+    }
+
+    /// A box whose corners the reader cannot see: every corner unknown, so a
+    /// side accent on it keeps its finding until a later literal radius
+    /// replaces them.
+    pub fn unknown() -> Self {
+        let mut corners = DeclaredCorners::default();
+        corners.set_unknown();
+        corners
+    }
+
+    /// Every corner unknown from here on: what a construct the reader cannot
+    /// see through does to the corners (a mixin call, a spread, a bare
+    /// interpolation). A later literal declaration still replaces them.
+    pub fn set_unknown(&mut self) {
+        self.set_all(None);
+    }
+
+    /// The corners in px when every one is known, the cascade default `0`
+    /// where nothing declared one.
+    pub fn to_corners(&self) -> Option<Corners> {
+        Some(Corners {
+            top_left: self.corners[0]?,
+            top_right: self.corners[1]?,
+            bottom_right: self.corners[2]?,
+            bottom_left: self.corners[3]?,
+        })
+    }
+
+    /// Apply one declaration when it names a radius: the `border-radius`
+    /// shorthand, a physical or logical corner longhand, in CSS spelling or
+    /// the camelCase a style object uses. A bare number on a camelCase
+    /// property is px, the way a React style object reads it. Returns whether
+    /// the property was a radius.
+    pub fn apply(&mut self, prop: &str, value: &str, width_px: f64) -> bool {
+        let camel = !prop.contains('-') && prop.chars().any(|c| c.is_ascii_uppercase());
+        let key: String = prop
+            .chars()
+            .filter(|c| *c != '-')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let corner = match key.as_str() {
+            "borderradius" => None,
+            "bordertopleftradius" | "borderstartstartradius" => Some(0),
+            "bordertoprightradius" | "borderstartendradius" => Some(1),
+            "borderbottomrightradius" | "borderendendradius" => Some(2),
+            "borderbottomleftradius" | "borderendstartradius" => Some(3),
+            _ => return false,
+        };
+        re!(IMPORTANT_TAIL, format!(r"(?i){WS}*!{WS}*important{WS}*$"));
+        re!(BARE_NUMBER, r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$".to_string());
+        let unquoted = js::trim(value).trim_matches(|c| c == '"' || c == '\'' || c == '`');
+        let cleaned = IMPORTANT_TAIL.replace(js::trim(unquoted), "");
+        let mut v = js::trim(&cleaned).to_string();
+        if camel && BARE_NUMBER.is_match(&v) {
+            v.push_str("px");
+        }
+        match corner {
+            None => self.set_all(crate::checks::measures::parse_radius_corners(
+                Some(&v),
+                width_px,
+            )),
+            Some(i) => self.set_corner(
+                i,
+                crate::checks::measures::parse_radius_corner_px(Some(&v), width_px),
+            ),
+        }
+        true
+    }
+
+    /// Whether any radius declaration was seen at all.
+    pub fn declared(&self) -> bool {
+        self.declared
+    }
+
+    /// The source-text reading of [`is_rounded_away_from_side`]. A box with
+    /// no radius declaration is square, the way the cascade defaults it. A
+    /// corner some declaration set to a value the reader could not resolve
+    /// is unknown, and an unknown corner keeps the finding.
+    pub fn is_rounded_away_from_side(&self, i: usize) -> bool {
+        if !self.declared {
+            return false;
+        }
+        let (a, b) = match i {
+            0 => (self.corners[3], self.corners[2]),
+            1 => (self.corners[0], self.corners[3]),
+            2 => (self.corners[0], self.corners[1]),
+            _ => (self.corners[1], self.corners[2]),
+        };
+        match (a, b) {
+            (Some(a), Some(b)) => a >= SIDE_ACCENT_MIN_RADIUS_PX && b >= SIDE_ACCENT_MIN_RADIUS_PX,
+            _ => true,
+        }
+    }
+}
+
+re!(
+    TW_ROUNDED_CLASS_RE,
+    r"^rounded(?:-(tl|tr|br|bl|ss|se|ee|es|t|r|b|l|s|e))?(?:-([a-z0-9-]+|\[[^\]]*\]|\([^)]*\)))?$"
+        .to_string()
+);
+re!(TW_CLASS_SPLIT_RE, r#"[\s"'`{}]+"#.to_string());
+
+/// The corners a run of utility classes gives a box. `rounded-*` classes set
+/// every corner, then the side classes (`rounded-r-lg`), then the corner
+/// classes (`rounded-tr-lg`), the order the framework emits them in, so
+/// `rounded-lg rounded-r-none` squares the right corners off. A class behind
+/// a variant (`md:rounded-xl`) can only round a corner. A size the scale
+/// does not name (a theme key, a `(--var)`) is unknown.
+pub fn tailwind_declared_corners(scope: &str) -> DeclaredCorners {
+    let mut base: Vec<(u8, &'static [usize], Option<f64>)> = Vec::new();
+    let mut variants: Vec<(&'static [usize], Option<f64>)> = Vec::new();
+    for raw in TW_CLASS_SPLIT_RE.split(scope) {
+        let token = raw.trim_matches('!');
+        let bracket = token.find('[').unwrap_or(token.len());
+        let (variant, class) = match token[..bracket].rfind(':') {
+            Some(i) => (true, token[i + 1..].trim_start_matches('!')),
+            None => (false, token),
+        };
+        let Some(c) = TW_ROUNDED_CLASS_RE.captures(class) else {
+            continue;
+        };
+        let (group, corners): (u8, &'static [usize]) = match c.get(1).map(|m| m.as_str()) {
+            None => (0, &[0, 1, 2, 3]),
+            Some("t") => (1, &[0, 1]),
+            Some("r") | Some("e") => (1, &[1, 2]),
+            Some("b") => (1, &[2, 3]),
+            Some("l") | Some("s") => (1, &[0, 3]),
+            Some("tl") | Some("ss") => (2, &[0]),
+            Some("tr") | Some("se") => (2, &[1]),
+            Some("br") | Some("ee") => (2, &[2]),
+            _ => (2, &[3]),
+        };
+        let px = match c.get(2).map(|m| m.as_str()) {
+            // `rounded` is 4px; `rounded-sm` is 2px in v3 and 4px in v4, and
+            // the larger reading keeps the finding.
+            None | Some("sm") => Some(4.0),
+            Some("none") => Some(0.0),
+            Some("xs") => Some(2.0),
+            Some("md") => Some(6.0),
+            Some("lg") => Some(8.0),
+            Some("xl") => Some(12.0),
+            Some("2xl") => Some(16.0),
+            Some("3xl") => Some(24.0),
+            Some("4xl") => Some(32.0),
+            Some("full") => Some(9999.0),
+            Some(arbitrary) if arbitrary.starts_with('[') => {
+                crate::checks::measures::parse_radius_corner_px(
+                    Some(&arbitrary[1..arbitrary.len() - 1].replace('_', " ")),
+                    NOMINAL_CARD_WIDTH_PX,
+                )
+            }
+            Some(_) => None,
+        };
+        if variant {
+            variants.push((corners, px));
+        } else {
+            base.push((group, corners, px));
+        }
+    }
+    base.sort_by_key(|entry| entry.0);
+    let mut declared = DeclaredCorners::default();
+    for (_, corners, px) in base {
+        for &i in corners {
+            declared.set_corner(i, px);
+        }
+    }
+    for (corners, px) in variants {
+        for &i in corners {
+            declared.raise_corner(i, px);
+        }
+    }
+    declared
+}
 
 /// JS: checks.mjs#checkBorders
 pub fn check_borders(
@@ -69,6 +335,9 @@ pub fn check_borders(
             if span_badge {
                 continue;
             }
+            if !is_rounded_away_from_side(opts.corners.as_ref(), i) {
+                continue;
+            }
             if radius > 0.0 {
                 findings.push(RuleHit::new(
                     "side-tab",
@@ -83,6 +352,10 @@ pub fn check_borders(
                 format!("border-{sn}: {w_s}px + border-radius: {r_s}px"),
             ));
         } else if !opts.tab_context && w >= 3.0 && w <= 12.0 {
+            // A square top or bottom band still reports. The rounded-card
+            // gate above covers the left and right accent the corpus judged;
+            // the square horizontal band was never judged, and silencing it
+            // here would drop findings on no evidence.
             findings.push(RuleHit::new("side-tab", format!("border-{sn}: {w_s}px")));
         }
     }
@@ -182,21 +455,70 @@ fn is_heading_123(tag: &str) -> bool {
     matches!(tag, "h1" | "h2" | "h3")
 }
 
+/// Whether a SAFE_TAGS element paints a surface of its own and so earns the
+/// full `check_colors` pass: the filled pill, the solid button, the gradient
+/// chip. Everything else in those tags is bare text.
+fn is_styled_control(opts: &ColorOpts, bg_image: &str) -> bool {
+    let own_bg = opts
+        .bg_color
+        .map_or(false, |c| c.a.map_or(false, |a| a > 0.5));
+    let own_gradient = !bg_image.is_empty() && GRADIENT_CI.is_match(bg_image);
+    opts.has_direct_text && (own_bg || own_gradient) && opts.font_size >= 9.0
+}
+
+/// Whether `check_colors` answers from `safe_tag_text_contrast` rather than
+/// from the full pass, which is the set of findings the per-page dedupe
+/// owns.
+fn scores_safe_tag_text(opts: &ColorOpts) -> bool {
+    set_has(SAFE_TAGS, opts.tag.as_str())
+        && !is_styled_control(opts, opts.bg_image.as_deref().unwrap_or(""))
+}
+
+/// The colour pairs a page has already reported from the SAFE_TAGS text
+/// path, threaded through one document's element loop the way `DesignSeen`
+/// is. One washed-out link colour used on fifty links is one finding, not
+/// fifty; the first element carrying it is the one that reports.
+#[derive(Debug, Default)]
+pub struct SafeTagTextSeen {
+    reported: Vec<(String, String)>,
+}
+
+impl SafeTagTextSeen {
+    /// Drops every hit whose rule and snippet this page has already
+    /// reported from this path, and every hit `keep` rejects.
+    ///
+    /// A hit the caller rejects never claims the page's one report of its
+    /// colour pair. That ordering is the point of the callback: the engines
+    /// waive findings after the rule runs — an inline
+    /// `data-impeccable-ignore` on one link, a text layer the background
+    /// walk cannot read under another — and registering the pair before
+    /// those verdicts would let a single waived element silence every other
+    /// element on the page wearing the same colour. `keep` is called at most
+    /// once per hit, and only for a hit whose pair the page has not reported
+    /// yet: a duplicate the dedupe drops anyway costs no engine work, so an
+    /// engine may put real work behind the callback.
+    pub fn keep_first(&mut self, hits: &mut Vec<RuleHit>, keep: &mut dyn FnMut(&RuleHit) -> bool) {
+        hits.retain(|h| {
+            let key = (h.id.clone(), h.snippet.clone());
+            if self.reported.contains(&key) {
+                return false;
+            }
+            if !keep(h) {
+                return false;
+            }
+            self.reported.push(key);
+            true
+        });
+    }
+}
+
 /// JS: checks.mjs#checkColors
 pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     let tag = opts.tag.as_str();
     let bg_image = opts.bg_image.as_deref().unwrap_or("");
     let bg_clip = opts.bg_clip.as_deref().unwrap_or("");
-    if set_has(SAFE_TAGS, tag) {
-        let own_bg = opts
-            .bg_color
-            .map_or(false, |c| c.a.map_or(false, |a| a > 0.5));
-        let own_gradient = !bg_image.is_empty() && GRADIENT_CI.is_match(bg_image);
-        let is_styled_control =
-            opts.has_direct_text && (own_bg || own_gradient) && opts.font_size >= 9.0;
-        if !is_styled_control {
-            return Vec::new();
-        }
+    if set_has(SAFE_TAGS, tag) && !is_styled_control(opts, bg_image) {
+        return safe_tag_text_contrast(opts);
     }
     let mut findings = Vec::new();
 
@@ -263,6 +585,101 @@ pub fn check_colors(opts: &ColorOpts) -> Vec<RuleHit> {
     }
 
     findings
+}
+
+/// `check_colors` with the per-page dedupe the SAFE_TAGS text path owes.
+/// Each document's element loop threads one `SafeTagTextSeen` through this
+/// so a colour the page repeats on every link is reported where it first
+/// appears and nowhere else.
+///
+/// `keep` is the engine's own verdict on a hit this path produced, asked
+/// before the pair is registered: the inline-ignore filter, and whatever
+/// else the engine knows that the rule does not. It is never called for the
+/// findings of the full `check_colors` pass, which the dedupe does not own.
+pub fn check_colors_deduped(
+    opts: &ColorOpts,
+    seen: &mut SafeTagTextSeen,
+    keep: &mut dyn FnMut(&RuleHit) -> bool,
+) -> Vec<RuleHit> {
+    let mut hits = check_colors(opts);
+    if scores_safe_tag_text(opts) {
+        seen.keep_first(&mut hits, keep);
+    }
+    hits
+}
+
+/// Contrast for a SAFE_TAGS element that paints its own text without
+/// painting its own surface: a link, a nav label, a table cell, a span of
+/// small print. The tag gate above exists to keep surface-shaped rules off
+/// elements that carry no surface, but the glyphs are still glyphs, and
+/// these tags hold most of a page's small text — skipping them reports the
+/// heading and passes the fifty links below it set in the same washed-out
+/// colour. Only the WCAG verdict travels. `gray-on-color` is a text-vs-
+/// surface verdict too, but its precision on bare text has never been
+/// measured, and the class-list heuristics beside it (gradient, palette)
+/// read the surface rather than the text, so both stay behind the gate
+/// until someone measures them.
+fn safe_tag_text_contrast(opts: &ColorOpts) -> Vec<RuleHit> {
+    if !opts.paints_own_text || !opts.has_direct_text || opts.is_emoji_only {
+        return Vec::new();
+    }
+    // The same floor the styled-control gate uses: under 9px the text is a
+    // decorative mark, and `undersized-ui-text` owns it.
+    if opts.font_size < 9.0 {
+        return Vec::new();
+    }
+    if set_has(NON_RENDERED_TAGS, opts.tag.as_str()) {
+        return Vec::new();
+    }
+    // Gradient-clipped text paints the gradient, not `color`.
+    if opts.bg_clip.as_deref() == Some("text") {
+        return Vec::new();
+    }
+    let Some(text_color) = opts.text_color else {
+        return Vec::new();
+    };
+    if resolved_bg_matches_text(opts, &text_color) {
+        return Vec::new();
+    }
+    contrast_findings(opts, &text_color)
+        .into_iter()
+        .filter(|h| h.id == "low-contrast")
+        .collect()
+}
+
+/// Whether the surface the text would be scored against is the text colour
+/// itself. Nothing is painted in exactly its own background, so this is the
+/// background walk landing on the page's own fill through an image, a video
+/// or a positioned shape it cannot see — white label over a hero photo
+/// reported as `1.0:1 — text #ffffff on #ffffff`. The walk's blind spots
+/// are their own problem; a report that is self-evidently wrong to anyone
+/// who opens the page is not worth printing while they are fixed.
+///
+/// What it hides, stated plainly: text that really is painted in its own
+/// background colour, which is invisible and a genuine 1:1 failure. That
+/// shape is rare, and when an author writes it deliberately it is usually
+/// `<p>` or `<div>` markup, which never reaches here: this guard covers
+/// only the SAFE_TAGS text path, and every other tag still reports the
+/// `1.0:1`. It is exact equality on the resolved hex, not a near-match, so
+/// a link one shade off its surface still reports.
+///
+/// Narrowing it means knowing whether the walk resolved a surface or gave
+/// up and fell through to the page fill, which the check cannot see from
+/// `ColorOpts` alone. That is why this guard is written as a hex
+/// coincidence rather than as a verdict about the walk: the browser engine
+/// asks the real question one layer out, where it has layout, and drops a
+/// hit from this path whose text reads over a picture
+/// (`resolved_surface_is_under_text`). Here the coincidence is all there is to go
+/// on, and it covers the static engine, which has no layout to test.
+fn resolved_bg_matches_text(opts: &ColorOpts, text_color: &Rgba) -> bool {
+    let text_hex = color_to_hex(Some(text_color));
+    let same = |bg: &Rgba| color_to_hex(Some(bg)) == text_hex;
+    if let Some(bg) = opts.effective_bg.as_ref() {
+        return same(bg);
+    }
+    opts.effective_bg_stops
+        .as_deref()
+        .map_or(false, |stops| stops.iter().any(same))
 }
 
 /// The contrast scoring `check_colors` and `check_placeholder_colors`
@@ -855,7 +1272,67 @@ pub fn check_motion(opts: &MotionOpts) -> Vec<RuleHit> {
     findings
 }
 
-fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHit> {
+/// The light a glow layer has to put out before it is worth reporting: the
+/// blur radius scaled by how much of the shadow's ink lands (its color alpha
+/// times the element's own opacity), in px.
+///
+/// Measured on the site corpus: every glow both judges could find in the
+/// screenshot scores 3.0 or more, and every one they called invisible tops
+/// out at 2.1 (a 3x23px typing caret at 38% alpha on a half-faded element;
+/// 20px blurs at 6 to 10% alpha on cards).
+pub const GLOW_MIN_STRENGTH_PX: f64 = 3.0;
+
+/// How far out of scale with its element a glow may be. A halo covering more
+/// than twice the element's own area is the light of an indicator (a 6px
+/// status dot, a 5x8px pulse travelling a connector, a typing caret), not a
+/// glow treatment on a surface. In the same corpus the glows judges read as a
+/// treatment reach 1.8x; the ones they read as an indicator start at 2.2x.
+pub const GLOW_MAX_AREA_RATIO: f64 = 2.0;
+
+/// How far one shadow layer's light reaches outside its element's box: a CSS
+/// blur fades over roughly half its radius to each side, and the spread grows
+/// the box the blur is applied to (or, when negative, eats into the blur).
+fn glow_extent_px(blur: f64, spread: f64) -> f64 {
+    blur / 2.0 + spread
+}
+
+/// Whether one qualifying shadow layer renders as a glow a reader can see.
+/// `element_opacity` and `element_size` are `None` on the engines with no
+/// layout, which leaves the blur and the alpha to carry the decision.
+pub(crate) fn glow_is_perceptible(
+    blur: f64,
+    spread: f64,
+    alpha: f64,
+    element_opacity: Option<f64>,
+    element_size: Option<(f64, f64)>,
+) -> bool {
+    let extent = glow_extent_px(blur, spread);
+    if extent <= 0.0 {
+        // A negative spread that swallows the blur keeps the light in the box.
+        return false;
+    }
+    if blur * alpha * element_opacity.unwrap_or(1.0) < GLOW_MIN_STRENGTH_PX {
+        return false;
+    }
+    let Some((width, height)) = element_size else {
+        return true;
+    };
+    let element_area = width * height;
+    if element_area <= 0.0 {
+        // Nothing is painted, so nothing glows.
+        return false;
+    }
+    let lit_area = (width + 2.0 * extent) * (height + 2.0 * extent) - element_area;
+    lit_area <= element_area * GLOW_MAX_AREA_RATIO
+}
+
+fn glow_scan(
+    value: Option<&str>,
+    prop: &str,
+    on_dark_bg: bool,
+    element_opacity: Option<f64>,
+    element_size: Option<(f64, f64)>,
+) -> Option<RuleHit> {
     let value = match value {
         None | Some("") | Some("none") => return None,
         Some(v) => v,
@@ -874,6 +1351,15 @@ fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHi
         }
         let vals = extract_shadow_lengths(layer, Some((info.start, info.end)));
         if vals.len() < 3 || vals[2] <= 4.0 {
+            continue;
+        }
+        if !glow_is_perceptible(
+            vals[2],
+            vals.get(3).copied().unwrap_or(0.0),
+            color.alpha_or_one(),
+            element_opacity,
+            element_size,
+        ) {
             continue;
         }
         if vals[0] == 0.0 && vals[1] == 0.0 {
@@ -896,13 +1382,30 @@ fn glow_scan(value: Option<&str>, prop: &str, on_dark_bg: bool) -> Option<RuleHi
     None
 }
 
-/// JS: checks.mjs#checkGlow
+/// JS: checks.mjs#checkGlow, plus the perceptibility floor (a layer under
+/// `GLOW_MIN_STRENGTH_PX`, or out of scale with its element, is passed over).
 pub fn check_glow(opts: &GlowOpts) -> Vec<RuleHit> {
     let on_dark_bg = opts
         .effective_bg
         .map_or(false, |bg| relative_luminance(&bg) < 0.1);
-    let found = glow_scan(opts.box_shadow.as_deref(), "box-shadow", on_dark_bg)
-        .or_else(|| glow_scan(opts.text_shadow.as_deref(), "text-shadow", on_dark_bg));
+    let opacity = opts.element_opacity;
+    let size = opts.element_size;
+    let found = glow_scan(
+        opts.box_shadow.as_deref(),
+        "box-shadow",
+        on_dark_bg,
+        opacity,
+        size,
+    )
+    .or_else(|| {
+        glow_scan(
+            opts.text_shadow.as_deref(),
+            "text-shadow",
+            on_dark_bg,
+            opacity,
+            size,
+        )
+    });
     match found {
         Some(f) => vec![f],
         None => Vec::new(),
@@ -1020,6 +1523,73 @@ pub fn check_flat_type_hierarchy_samples(samples: &[TypeSample]) -> Vec<RuleHit>
 mod tests {
     use super::*;
 
+    #[test]
+    fn declared_corners_apply_in_order() {
+        let mut c = DeclaredCorners::default();
+        assert!(!c.declared());
+        assert!(!c.is_rounded_away_from_side(3));
+        assert!(!c.apply("padding", "12px", NOMINAL_CARD_WIDTH_PX));
+        assert!(c.apply("border-radius", "12px", NOMINAL_CARD_WIDTH_PX));
+        assert!(c.is_rounded_away_from_side(3));
+        assert!(c.apply("border-top-right-radius", "0", NOMINAL_CARD_WIDTH_PX));
+        assert!(!c.is_rounded_away_from_side(3));
+        // The far corners of a right stripe are still round.
+        assert!(c.is_rounded_away_from_side(1));
+        // camelCase with a bare number is px; quotes and !important strip.
+        let mut js = DeclaredCorners::default();
+        js.apply("borderRadius", "12", NOMINAL_CARD_WIDTH_PX);
+        assert!(js.is_rounded_away_from_side(3));
+        let mut quoted = DeclaredCorners::default();
+        quoted.apply("borderRadius", "'2px'", NOMINAL_CARD_WIDTH_PX);
+        assert!(!quoted.is_rounded_away_from_side(3));
+        let mut important = DeclaredCorners::default();
+        important.apply("border-radius", "8px !important", NOMINAL_CARD_WIDTH_PX);
+        assert!(important.is_rounded_away_from_side(3));
+        // Logical longhands map onto the physical corners (LTR).
+        let mut logical = DeclaredCorners::default();
+        logical.apply("border-start-end-radius", "8px", NOMINAL_CARD_WIDTH_PX);
+        logical.apply("border-end-end-radius", "8px", NOMINAL_CARD_WIDTH_PX);
+        assert!(logical.is_rounded_away_from_side(3));
+        // Unresolvable is unknown, and unknown keeps the finding.
+        let mut unknown = DeclaredCorners::default();
+        unknown.apply("border-radius", "$radius", NOMINAL_CARD_WIDTH_PX);
+        assert!(unknown.is_rounded_away_from_side(3));
+        // A conditional class only ever rounds.
+        let mut raised = DeclaredCorners::default();
+        raised.set_all(Some(Corners::default()));
+        raised.raise_corner(1, Some(8.0));
+        raised.raise_corner(2, Some(8.0));
+        raised.raise_corner(0, Some(0.0));
+        assert!(raised.is_rounded_away_from_side(3));
+        assert!(!raised.is_rounded_away_from_side(1));
+    }
+
+    #[test]
+    fn declared_corners_stay_unknown_until_a_literal_replaces_them() {
+        let mut c = DeclaredCorners::unknown();
+        assert!(c.declared());
+        assert!(c.is_rounded_away_from_side(3));
+        assert_eq!(c.to_corners(), None);
+        c.apply("border-radius", "0", NOMINAL_CARD_WIDTH_PX);
+        assert!(!c.is_rounded_away_from_side(3));
+        assert_eq!(c.to_corners(), Some(Corners::default()));
+        // A mixin after the literal makes the corners unknown again.
+        c.set_unknown();
+        assert!(c.is_rounded_away_from_side(1));
+        // No declaration at all is the cascade's square default.
+        assert_eq!(
+            DeclaredCorners::default().to_corners(),
+            Some(Corners::default())
+        );
+        // Utility classes: a known size resolves, an unknown one stays unknown.
+        assert_eq!(
+            tailwind_declared_corners("rounded-none").to_corners(),
+            Some(Corners::default())
+        );
+        assert_eq!(tailwind_declared_corners("rounded-card").to_corners(), None);
+        assert!(!tailwind_declared_corners("p-4 border-l-4").declared());
+    }
+
     // Expected values below were produced by running the JS functions in
     // Node against the same inputs.
 
@@ -1067,6 +1637,63 @@ mod tests {
             large[0].snippet,
             ":hover state 2.6:1 (need 3:1) — text #a0a0a0 on #ffffff"
         );
+    }
+
+    #[test]
+    fn glow_needs_to_be_perceptible() {
+        let glow = |shadow: &str, opacity: f64, size: Option<(f64, f64)>| {
+            check_glow(&GlowOpts {
+                box_shadow: Some(shadow.to_string()),
+                text_shadow: None,
+                effective_bg: Some(Rgba::new(17.0, 24.0, 39.0, 1.0)),
+                element_opacity: Some(opacity),
+                element_size: size,
+            })
+        };
+        // A 24px halo at 60% alpha around a 197x40 button: the treatment the
+        // rule is for.
+        assert_eq!(
+            glow("rgba(0, 169, 255, 0.6) 0px 0px 24px 0px", 1.0, Some((197.0, 40.0))).len(),
+            1
+        );
+        // 10% alpha over 20px of blur is 2.0px of light on a 393x42 card.
+        assert!(glow("rgba(149, 100, 255, 0.1) 0px 4px 20px 0px", 1.0, Some((393.0, 42.0)))
+            .is_empty());
+        // A 3x23px typing caret, caught mid-blink at 56% opacity.
+        assert!(glow(
+            "rgba(155, 123, 232, 0.38) 0px 0px 9.9px 1.5px",
+            0.56,
+            Some((3.0, 23.0))
+        )
+        .is_empty());
+        // The same caret at full opacity clears the strength floor, but its
+        // halo covers seven times the caret: an indicator, not a treatment.
+        assert!(glow(
+            "rgba(155, 123, 232, 0.38) 0px 0px 9.9px 1.5px",
+            1.0,
+            Some((3.0, 23.0))
+        )
+        .is_empty());
+        // A 6px status LED with an 8px halo.
+        assert!(glow("rgba(92, 189, 104, 0.5) 0px 0px 8px 0px", 1.0, Some((6.0, 6.0))).is_empty());
+        // A negative spread that swallows the blur: no light leaves the box.
+        assert!(
+            glow("rgba(52, 211, 153, 0.4) 0px 0px 40px -22px", 1.0, Some((280.0, 147.0)))
+                .is_empty()
+        );
+        // An element with nothing painted.
+        assert!(glow("rgba(0, 169, 255, 0.6) 0px 0px 24px 0px", 1.0, Some((0.0, 0.0))).is_empty());
+        // Without layout the blur and the alpha decide on their own.
+        assert_eq!(
+            glow("rgba(92, 189, 104, 0.5) 0px 0px 8px 0px", 1.0, None).len(),
+            1
+        );
+        // A stacked elevation ramp reports the layer that carries the light,
+        // not the faint one it happens to reach first.
+        let ramp = "rgba(64, 120, 168, 0.37) 0px 0.7px 0.7px -0.67px, \
+                    rgba(64, 120, 168, 0.31) 0px 6.87px 6.87px -2.67px, \
+                    rgba(64, 120, 168, 0.247) 0px 13.65px 13.65px -3.33px";
+        assert_eq!(glow(ramp, 1.0, Some((96.0, 96.0))).len(), 1);
     }
 
     #[test]

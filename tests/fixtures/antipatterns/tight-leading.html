@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tight Leading — Should Flag vs Should Pass</title>
+  <!--
+    The 1.3 leading floor is a reading-comfort floor for body copy: text a
+    visitor reads at body scale, over more than one line. The should-pass
+    column is reduced from real pages reviewed against the rule, where the
+    floor was applied to type that is not body copy (display sizes and heading
+    text set on p / div / span), to text that renders one line, and to source
+    text that is never typeset at all.
+
+    Explicit pixel sizes and widths throughout: the static engine does no
+    layout, and the widths are what make the flag cases wrap in a browser.
+  -->
+  <style>
+    body { font-family: system-ui, sans-serif; background: #fafafa; padding: 24px; margin: 0; color: #1a1a1a; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; max-width: 1200px; margin: 0 auto; }
+    .col h2 { font-size: 14px; line-height: 20px; text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 16px; color: #475569; }
+    .col h3 { font-size: 11px; line-height: 16px; text-transform: uppercase; letter-spacing: 0.05em; margin: 24px 0 8px; color: #64748b; }
+
+    /* Should flag: multi-line reading copy under the floor. */
+    .card-blurb { width: 240px; font-size: 16px; line-height: 20px; margin: 0; }
+    .accordion-answer { width: 320px; font-size: 18px; line-height: 21.6px; margin: 0; }
+    .footer-legal { width: 260px; font-size: 12px; line-height: 14px; }
+    .story-excerpt { width: 420px; font-size: 22px; line-height: 25px; margin: 0; padding-left: 20px; }
+    .nested-desc { width: 300px; font-size: 16px; line-height: 17.6px; margin: 0; text-transform: none; letter-spacing: normal; }
+    .card-heading { font-size: 16px; margin: 0; text-transform: none; letter-spacing: normal; }
+
+    /* Should pass: display type, heading text, single lines, non-rendered. */
+    .display-statement { width: 560px; font-size: 32px; line-height: 36px; margin: 0; }
+    .headline-link { font-size: 30px; line-height: 34px; text-decoration: none; color: #1a1a1a; }
+    .card-title-role { font-size: 22px; line-height: 28px; font-weight: 600; display: block; width: 320px; }
+    .at-the-floor { width: 300px; font-size: 18px; line-height: 23.4px; margin: 0; }
+    .mobile-only-blurb { display: none; width: 240px; font-size: 14px; line-height: 15px; }
+    .sr-only-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0px, 0px, 0px, 0px); font-size: 12px; line-height: 12px; }
+    .single-line-note { display: block; width: 900px; white-space: nowrap; font-size: 12px; line-height: 13.8px; }
+  </style>
+  <!-- SHOULD PASS: stylesheet source is text the browser never typesets. -->
+  <style id="theme-overrides">
+    /* This comment is long enough to clear the fifty-character text gate the
+       leading check applies before it measures anything at all. */
+    .theme-dark { background: #0f172a; color: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <div class="grid">
+
+    <div class="col" data-col="flag">
+      <h2>Should flag</h2>
+
+      <h3>Card blurb wrapping four lines at 1.25</h3>
+      <p class="card-blurb">This card description wraps to four lines in a narrow column, and every line sits closer to the next than reading copy at this size can carry.</p>
+
+      <h3>Accordion answer wrapping three lines at 1.20</h3>
+      <p class="accordion-answer">The answer paragraph inside this accordion runs to three lines, and at eighteen pixels the lines press together instead of separating.</p>
+
+      <h3>Footer legal block at 1.17</h3>
+      <div class="footer-legal">This footer legal block is the smallest reading copy on the page and still wraps to several lines, so the lines end up nearly touching each other.</div>
+
+      <h3>Story excerpt bullet at 1.14</h3>
+      <ul><li class="story-excerpt">The excerpt under the lead story runs to two lines of reading copy, and the descenders of the first line reach into the second.</li></ul>
+
+      <h3>Card description nested inside a heading at 1.10</h3>
+      <!-- A paragraph of reading copy nested in an h3 is body copy, not
+           heading text: the heading exemption must not reach a block. -->
+      <h3 class="card-heading"><p class="nested-desc">The service card puts its whole description paragraph inside the card heading, and it still wraps to several lines of reading copy.</p></h3>
+    </div>
+
+    <div class="col" data-col="pass">
+      <h2>Should pass</h2>
+
+      <h3>Display statement set on a paragraph</h3>
+      <!-- SHOULD PASS: 32px display type, where tight leading is craft. The
+           page builder that produced it named the class "body-text". -->
+      <p class="display-statement">A statement set at display size carries its own leading, and a ratio under the body floor is exactly what the size wants.</p>
+
+      <h3>Headline text inside a heading link</h3>
+      <!-- SHOULD PASS: the heading owns the leading, the anchor owns the text
+           node, so the exemption has to follow the ancestor. -->
+      <h4><a class="headline-link" href="/news/story">The heading puts its text in a child anchor, which is how most cards and most news fronts are marked up.</a></h4>
+
+      <h3>Card title carrying the heading role</h3>
+      <!-- SHOULD PASS: a card title marked with role=heading rather than a
+           heading tag is still heading-scale type. -->
+      <div><span class="card-title-role" role="heading" aria-level="3">A testimonial card title set as a span with the heading role, wrapping to two lines of title type.</span></div>
+
+      <h3>Paragraph set at exactly the floor</h3>
+      <!-- SHOULD PASS: line-height 1.3 on 18px computes to 23.4px, and
+           23.4 / 18 lands just under 1.3 in binary floats. -->
+      <p class="at-the-floor">This paragraph sets its leading at exactly the floor the rule asks for, so it must never be reported for hitting it.</p>
+
+      <h3>Mobile variant that is not displayed</h3>
+      <!-- SHOULD PASS: display:none, so nothing of it is ever typeset. -->
+      <p class="mobile-only-blurb">The mobile copy of this card blurb is switched off at this width and paints nothing at all for the visitor.</p>
+
+      <h3>Screen-reader description clipped to a pixel</h3>
+      <!-- SHOULD PASS: the clip-rect pattern a video player uses for its
+           screen-reader text. -->
+      <p class="sr-only-description">This description belongs to the video player and is clipped to a single pixel box for assistive technology only.</p>
+
+      <h3>Analytics payload inside an inline script</h3>
+      <!-- SHOULD PASS: script source is not typeset text. -->
+      <script>window.__PAGE__ = { id: "tight-leading-fixture", section: "quality", locale: "en-us", experiments: [] };</script>
+
+      <h3>Tag manager fallback inside noscript</h3>
+      <!-- SHOULD PASS: noscript markup source is not typeset text either. -->
+      <noscript>&lt;iframe src="https://example.test/tag-manager" height="0" width="0" style="display:none;visibility:hidden"&gt;&lt;/iframe&gt;</noscript>
+
+      <h3>Single line that never wraps (browser engine only)</h3>
+      <!-- SHOULD PASS in the browser engine: the line box is the whole text
+           box, so there is no gap between lines to crowd. The static engine
+           has no layout and cannot see that, so it still reports this one;
+           the wrap test is pinned by the unit tests in crates/core. -->
+      <span class="single-line-note">This utility class sets tight leading on a label that renders as one single line.</span>
+    </div>
+
+  </div>
+</body>
+</html>

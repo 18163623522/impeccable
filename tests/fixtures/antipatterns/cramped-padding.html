@@ -90,6 +90,16 @@
     .pass-button-std { padding: 8px 16px; background: #3b82f6; color: white; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }
     .pass-input-std { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 16px; width: 100%; box-sizing: border-box; }
 
+    /* ── FLAG: fixed-height box whose text really does fill it ── */
+    .flag-tight-band { width: 260px; height: 36px; display: flex; align-items: center; padding: 0; background: #f1f5f9; border-radius: 4px; font-size: 16px; line-height: 18px; }
+
+    /* ── PASS: the label is centred by the layout, not by padding ── */
+    .pass-centred-cta { display: inline-flex; align-items: center; justify-content: center; height: 40px; padding: 0 32px; background: #2563eb; color: white; border: 0; border-radius: 6px; font-size: 14px; line-height: 20px; text-decoration: none; }
+    .pass-centred-band { display: flex; align-items: center; justify-content: center; width: 420px; height: 40px; padding: 0; background: #111827; color: #f9fafb; font-size: 14px; line-height: 20px; }
+
+    /* ── PASS: the only side boundary is a transparent focus-ring border ── */
+    .pass-transparent-border-row { width: 420px; padding: 20px 0; border: 1px solid transparent; background: transparent; font-size: 18px; line-height: 26px; }
+
     /* ── PASS: big text with proportional padding ── */
     .pass-heading-good { padding: 16px; background: #f1f5f9; border-radius: 8px; font-size: 24px; font-weight: 600; line-height: 1.2; }
     .pass-hero-good { padding: 20px 32px; background: #f1f5f9; border-radius: 8px; font-size: 32px; font-weight: 700; line-height: 1.2; }
@@ -136,6 +146,12 @@
       <div class="case">
         <span class="case-label">32px hero, 6px vertical / 16px horizontal padding</span>
         <div class="flag-hero-tight">Hero Section With Tight Vertical Padding</div>
+      </div>
+
+      <h3>Fixed-height box the text fills</h3>
+      <div class="case">
+        <span class="case-label">260x36px flex row, padding 0, 16px text on an 18px line box: two lines run edge to edge</span>
+        <div class="flag-tight-band">Two full lines of label text inside a 36px band</div>
       </div>
 
       <h3>Cramped multi-line code block</h3>
@@ -210,6 +226,22 @@
       <div class="case">
         <span class="case-label">form input: 16px font, 8px / 12px padding</span>
         <input type="text" class="pass-input-std" value="Standard input with adequate padding">
+      </div>
+
+      <h3>Labels centred by the layout</h3>
+      <div class="case">
+        <span class="case-label">40px-tall inline-flex CTA, padding 0 32px: the 14px label keeps 12px of air on both sides</span>
+        <a class="pass-centred-cta" href="#">Book a free consultation</a>
+      </div>
+      <div class="case">
+        <span class="case-label">420x40px announcement band, padding 0: the 14px line is centred on both axes</span>
+        <div class="pass-centred-band">We are hiring across every engineering team</div>
+      </div>
+
+      <h3>Transparent focus-ring border</h3>
+      <div class="case">
+        <span class="case-label">420px accordion trigger, padding 20px 0, border 1px solid transparent: no side edge is drawn</span>
+        <div class="pass-transparent-border-row">What does the free plan include?</div>
       </div>
 
       <h3>Big text with proportional padding</h3>

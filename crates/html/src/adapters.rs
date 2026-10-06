@@ -6,33 +6,42 @@
 //! and the computed style and hands plain data over.
 
 use crate::background::{
-    a_ge, a_gt, read_own_background_color, resolve_background, resolve_background_info,
-    resolve_border_radius_px, resolve_gradient_stops, sv, sv_opt, CustomPropMap,
+    a_ge, a_gt, read_cascade_background_color, read_own_background_color, resolve_background,
+    resolve_background_info, resolve_background_info_skipping_images, resolve_border_radius_px,
+    resolve_gradient_stops, resolve_side_accent_corners, sv, sv_opt, CustomPropMap,
 };
 use crate::cascade::StyleValues;
+use crate::layer::picture_under_text;
 use crate::dom::{StaticDocument, StaticElement};
-use crate::quality::{collapse_ws, pf0, resolve_font_size_px};
+use crate::quality::{
+    collapse_ws, is_in_non_rendered_markup, is_visually_hidden, pf0, resolve_font_size_px,
+};
 use impeccable_core::checks::css_scan::css_length_to_px;
 use impeccable_core::checks::measures::{
-    self, border_colors_from_style, border_widths_from_style, check_gpt_thin_border_wide_shadow,
-    check_oversized_h1, check_radial_spotlight, positioned_style_implies_escape, resolve_length_px,
-    GptBorderShadowInput, OversizedH1Input, RadialSpotlightInput, StyleMap,
+    self, border_colors_from_style, border_widths_from_style, check_oversized_h1,
+    data_svg_intrinsic_size, gpt_border_shadow_halo_blur_px, gpt_border_shadow_lengths_close,
+    gpt_border_shadow_row_finding, gpt_border_shadow_row_size, gpt_thin_border_wide_shadow_pair,
+    positioned_style_implies_escape_axis, resolve_length_px, GptBorderShadowInput,
+    GptBorderShadowRowTree, OversizedH1Input, StyleMap, ICON_MAX_PX,
 };
 use impeccable_core::checks::rules::{
-    check_borders, check_colors, check_glow, check_hero_eyebrow, check_hover_contrast,
+    check_borders, check_colors_deduped, check_glow, check_hero_eyebrow, check_hover_contrast,
     check_icon_tile, check_italic_serif, check_kicker_above_heading, check_motion,
-    check_placeholder_colors, check_stripe_child, is_emoji_only_text, is_heading_tag,
-    resolve_hero_heading_size_px,
-    BorderOpts, ColorOpts, GlowOpts, HeroEyebrowOpts, HoverContrastOpts, IconTileOpts,
-    ItalicSerifOpts, KickerCandidate, MotionOpts, RuleHit, Sides,
+    check_placeholder_colors, check_stripe_child, is_emoji_only_text, is_glyph_only_text,
+    is_heading_tag, resolve_hero_heading_size_px, BorderOpts, ColorOpts, GlowOpts,
+    HeroEyebrowOpts, HoverContrastOpts, IconTileOpts, ItalicSerifOpts, KickerCandidate,
+    MotionOpts, RuleHit, SafeTagTextSeen, Sides,
 };
 use impeccable_core::checks::text_rules::{
     check_numbered_section_labels, is_kicker_candidate, is_numbered_section_label_candidate,
     parse_numbered_label_text, KickerCandidateInput, NumberedLabelCandidate,
     NumberedLabelCandidateInput, HEADING_TAGS, KICKER_CARD_CONTEXT_SELECTOR, KICKER_SKIP_SELECTOR,
-    POSITIONED_CHILD_INTERACTIVE_SELECTOR,
+    POPOVER_LAYER_SELECTOR, POSITIONED_CHILD_INTERACTIVE_SELECTOR,
 };
-use impeccable_core::color::{composite_color_over, parse_any_color, parse_rgb};
+use impeccable_core::color::{
+    composite_color_over, is_no_paint_color_value, parse_any_color, parse_rgb, Rgba,
+};
+use impeccable_core::constants::SAFE_TAGS;
 use impeccable_core::js::{self, parse_float, parse_int};
 use impeccable_core::js_ext_a::num_truthy;
 use impeccable_core::js_ext_b::slice_utf16_prefix;
@@ -412,19 +421,119 @@ fn spotlight_label(el: &StaticElement<'_>) -> String {
     el.tag_lower()
 }
 
-/// JS: checks.mjs#checkElementRadialSpotlight(el, style, tag, window)
+/// How far up the tree the copy a glow sits behind may live.
+const GLOW_ANCESTOR_DEPTH: usize = 8;
+
+/// The element's own opacity times its ancestors': what the glow's declared
+/// alpha is actually multiplied by. Mirrors `effectiveOpacityDOM`, the whole
+/// chain and the same floor, so both engines gate on the same number.
+fn static_effective_opacity(el: &StaticElement<'_>) -> f64 {
+    let mut acc = 1.0;
+    let mut current = Some(*el);
+    while let Some(cur) = current {
+        let v = parse_float(sv(cur.style(), "opacity"));
+        if v.is_finite() {
+            acc *= v.clamp(0.0, 1.0);
+        }
+        if acc <= 0.02 {
+            return 0.0;
+        }
+        current = cur.parent_element();
+    }
+    acc
+}
+
+fn has_text(el: &StaticElement<'_>) -> bool {
+    !collapse_ws(js::trim(&el.text_content())).is_empty()
+}
+
+/// A static page has no layout, so "the glow sits behind text" is read
+/// structurally: the glowing element carries copy itself, or it is an overlay
+/// layer inside a container that does. An in-flow element with no copy of its
+/// own takes its own band of the page and the copy around it sits above or
+/// below, which is why only an overlay may borrow an ancestor's text. The
+/// browser measures the rectangles instead and needs no such stand-in.
+fn static_glow_behind_text(el: &StaticElement<'_>, style: &StyleValues) -> bool {
+    if has_text(el) {
+        return true;
+    }
+    let position = sv(style, "position");
+    if position != "absolute" && position != "fixed" {
+        return false;
+    }
+    let mut current = el.parent_element();
+    let mut depth = 0;
+    while let Some(parent) = current {
+        if depth >= GLOW_ANCESTOR_DEPTH {
+            break;
+        }
+        if has_text(&parent) {
+            return true;
+        }
+        current = parent.parent_element();
+        depth += 1;
+    }
+    false
+}
+
+/// The surface a glow paints on. The glow element's own image layers beneath
+/// the glow and its background color come first, then each ancestor's images
+/// and color, translucent paint composited over the first opaque surface.
+/// `None` only when an image shows through or a color does not parse.
+fn static_glow_backdrop(el: &StaticElement<'_>, gradient_value: &str) -> Option<Rgba> {
+    let mut stack = measures::BackdropStack::default();
+    let mut image = Some(measures::radial_spotlight_layers_beneath(gradient_value));
+    let mut current = Some(*el);
+    while let Some(cur) = current {
+        let style = cur.style();
+        let background_image = image
+            .take()
+            .unwrap_or_else(|| sv(style, "backgroundImage").to_string());
+        let raw = sv(style, "backgroundColor");
+        let mut color = read_cascade_background_color(&cur, style, None);
+        if color.is_none() && js::trim(raw).eq_ignore_ascii_case("currentcolor") {
+            color = parse_any_color(sv_opt(style, "color"));
+        }
+        let declared = !is_no_paint_color_value(Some(raw));
+        match stack.paint_element(Some(&background_image), color, declared) {
+            measures::BackdropStep::Resolved(surface) => return Some(surface),
+            measures::BackdropStep::Unreadable => return None,
+            measures::BackdropStep::Continue => {}
+        }
+        current = cur.parent_element();
+    }
+    Some(stack.finish())
+}
+
+/// JS: checks.mjs#checkElementRadialSpotlight(el, style, tag, window): the
+/// declaration test, then the prominence gate, reporting the stop that passed.
 pub fn check_element_radial_spotlight(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
     let gradient_value = element_gradient_value(style, el);
     if gradient_value.is_empty() {
         return Vec::new();
     }
+    let stops = measures::radial_spotlight_stops(Some(&gradient_value));
+    let width = pf0(sv(style, "width"));
+    let height = pf0(sv(style, "height"));
+    if stops.is_empty() || !measures::radial_spotlight_fits(width, height) {
+        return Vec::new();
+    }
+    let prominence = measures::RadialGlowProminence {
+        opacity: static_effective_opacity(el),
+        backdrop: static_glow_backdrop(el, &gradient_value),
+    };
+    let Some(stop) = measures::radial_glow_prominent_stop(&stops, &prominence, || {
+        static_glow_behind_text(el, style)
+    }) else {
+        return Vec::new();
+    };
     let label = spotlight_label(el);
-    hits(check_radial_spotlight(&RadialSpotlightInput {
-        gradient_value: Some(&gradient_value),
-        width: pf0(sv(style, "width")),
-        height: pf0(sv(style, "height")),
-        label: Some(&label),
-    }))
+    hits(vec![measures::radial_spotlight_finding(
+        &stop,
+        width,
+        height,
+        Some(&label),
+    )])
 }
 
 // ─── Element adapters ───────────────────────────────────────────────────────
@@ -449,6 +558,12 @@ pub fn check_element_borders(
         left: Some(sv(style, "borderLeftColor")),
     };
     let own_bg = parse_any_color(sv_opt(style, "backgroundColor"));
+    // Only a left or right accent is gated on the corners.
+    let corners = if widths.right > 0.0 || widths.left > 0.0 {
+        resolve_side_accent_corners(el, style, pf0(sv(style, "width")))
+    } else {
+        None
+    };
     check_borders(
         tag,
         &widths,
@@ -458,8 +573,135 @@ pub fn check_element_borders(
             tab_context: is_tab_context_element(el),
             status_context: is_status_context_element(el),
             badge_like: own_bg.is_some_and(|c| c.alpha_or_one() > 0.1),
+            corners,
         },
     )
+}
+
+/// The element's `color`, custom properties resolved first as the colour
+/// checks read it.
+fn resolved_text_color(style: &StyleValues, custom_props: CustomPropMap<'_>) -> Option<Rgba> {
+    custom_props
+        .and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)))
+        .or_else(|| parse_rgb(sv_opt(style, "color")))
+}
+
+/// Whether an ancestor carrying direct text is one the contrast pass
+/// actually scores, so a descendant sharing its colour can stand down. A
+/// SAFE_TAG ancestor is only scored under the same predicate its
+/// descendant is, and an ancestor whose own text is an arrow or an icon
+/// glyph is not scored at all — `<a><span>Read more</span> →</a>` has to
+/// report the span, because nothing reports the anchor.
+fn ancestor_scores_its_text(el: &StaticElement<'_>, direct: &str) -> bool {
+    if is_emoji_only_text(direct) {
+        return false;
+    }
+    if !SAFE_TAGS.contains(&el.tag_lower().as_str()) {
+        return true;
+    }
+    !is_glyph_only_text(direct) && !is_visually_hidden(el, el.style())
+}
+
+/// Whether this element's `color` comes from an ancestor the contrast pass
+/// scores on its own, so repeating it here would report one washed-out
+/// colour twice. The walk stops at the first ancestor painting a different
+/// colour (nothing above it can be the source of this one), at the first
+/// one painting a surface of its own without text on it (above that the
+/// colour is judged against a different background, which is a different
+/// verdict), and at a fixed depth, so it costs a handful of parent hops.
+fn inherits_scored_text_color(
+    el: &StaticElement<'_>,
+    text_color: Option<Rgba>,
+    custom_props: CustomPropMap<'_>,
+) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        if resolved_text_color(c.style(), custom_props) != text_color {
+            return false;
+        }
+        let direct = c.direct_text();
+        if !js::trim(&direct).is_empty() {
+            return ancestor_scores_its_text(&c, &direct);
+        }
+        if read_own_background_color(&c, c.style()).map_or(false, |b| a_gt(&b, 0.0)) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
+/// An inactive control. WCAG 1.4.3 exempts them, and a ghost or transparent
+/// disabled button is exactly the shape the SAFE_TAGS text path would
+/// otherwise start reporting.
+const DISABLED_CONTROL_SELECTOR: &str = "[disabled], [aria-disabled=\"true\"]";
+
+/// Whether an ancestor clips its background to text, which makes this run's
+/// glyphs part of that ancestor's fill: `<p class="gradient"><span>Split</span>
+/// <span>word</span></p>`. What a reader sees there is the gradient, and the
+/// span's declared `color` is either painted over nothing (a transparent
+/// `-webkit-text-fill-color`, which the static cascade drops, so this engine
+/// cannot see it) or painted over the gradient's own glyph shapes. Either way
+/// the walk hands the check the gradient's stops as the surface, and the
+/// verdict is about a surface nobody reads the text against.
+///
+/// The static cascade does carry `background-clip`, so the ancestor is
+/// visible where the fill colour is not. The walk stops at an ancestor with
+/// an opaque background of its own, because a box painted normally inside
+/// the clipped one is a real surface again, and at a fixed depth.
+fn text_clipped_by_an_ancestor(el: &StaticElement<'_>) -> bool {
+    const MAX_ANCESTORS: usize = 12;
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { return false };
+        let style = c.style();
+        if js::trim(sv(style, "webkitBackgroundClip")) == "text"
+            || js::trim(sv(style, "backgroundClip")) == "text"
+        {
+            return true;
+        }
+        if read_own_background_color(&c, style).map_or(false, |b| b.alpha_or_one() >= 0.95) {
+            return false;
+        }
+        cur = c.parent_element();
+    }
+    false
+}
+
+/// Whether an element's background image is an icon beside its text: one
+/// inline SVG at most `ICON_MAX_PX` on both axes. The static cascade carries
+/// neither `background-size` nor `background-repeat`, so only a data URI,
+/// whose root `<svg>` states its size, can be read as one. A remote file has
+/// no size this engine can read and stays a picture.
+fn background_is_icon(el: &StaticElement<'_>) -> bool {
+    let image = sv(el.style(), "backgroundImage");
+    !js::to_lower_case(image).contains("gradient")
+        && data_svg_intrinsic_size(image).map_or(false, |(w, h)| w <= ICON_MAX_PX && h <= ICON_MAX_PX)
+}
+
+/// The boxes whose background image is an icon beside this element's text:
+/// the element itself (an external-link mark) and its nearest `li` (an arrow
+/// bullet).
+fn icon_hosts(el: &StaticElement<'_>) -> Vec<ego_tree::NodeId> {
+    const MAX_ANCESTORS: usize = 12;
+    let mut hosts = Vec::new();
+    if background_is_icon(el) {
+        hosts.push(el.id());
+    }
+    let mut cur = el.parent_element();
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { break };
+        if c.tag_lower() == "li" {
+            if background_is_icon(&c) {
+                hosts.push(c.id());
+            }
+            break;
+        }
+        cur = c.parent_element();
+    }
+    hosts
 }
 
 const STRIPE_CHILD_SKIP: &str = "nav, blockquote, pre, table, button, a, select, progress, meter, [role=\"progressbar\"], [role=\"slider\"], [role=\"scrollbar\"], [role=\"separator\"], [role=\"tablist\"]";
@@ -599,8 +841,17 @@ pub fn check_element_colors(
     style: &StyleValues,
     tag: &str,
     custom_props: CustomPropMap<'_>,
+    seen: &mut SafeTagTextSeen,
 ) -> Vec<RuleHit> {
     if sv_opt(style, "visibility") == Some("hidden") {
+        return Vec::new();
+    }
+    // Markup the browser never lays out: a `<template>`'s content, a
+    // `[hidden]` subtree, a `<noscript>`, anything under `<head>`. The static
+    // tree carries it and a browser scan cannot see it, so scoring it here is
+    // a false positive only this engine can produce. Nothing viewport-shaped
+    // belongs in that gate; see `is_in_non_rendered_markup`.
+    if is_in_non_rendered_markup(el, tag) {
         return Vec::new();
     }
     let mut eff_opacity = 1.0f64;
@@ -619,15 +870,40 @@ pub fn check_element_colors(
     }
     let direct_text = el.direct_text();
     let has_direct_text = !js::trim(&direct_text).is_empty();
-
-    let bg_info = resolve_background_info(el, custom_props);
-    let effective_bg = bg_info.color;
-    let mut text_color =
-        custom_props.and_then(|m| measures::parse_color_resolved(sv_opt(style, "color"), Some(m)));
-    if text_color.is_none() {
-        text_color = parse_rgb(sv_opt(style, "color"));
-    }
+    let text_color = resolved_text_color(style, custom_props);
     // hasAnchorInheritRule is always false in the static engine.
+
+    // Only the SAFE_TAGS gate in `check_colors` reads this, so the ancestor
+    // walk and the hidden-text selector run only for those tags.
+    let paints_own_text = has_direct_text
+        && SAFE_TAGS.contains(&tag)
+        && !is_emoji_only_text(&direct_text)
+        && !is_glyph_only_text(&direct_text)
+        && !is_visually_hidden(el, style)
+        // The browser path also stands down where `-webkit-text-fill-color`
+        // paints the glyphs in nothing. This engine cannot: the static
+        // cascade drops that property, and a recorded call vector pins it
+        // dropping it. The clip that property travels with is carried, so
+        // a run inside a gradient-clipped parent is caught by the clip.
+        && !text_clipped_by_an_ancestor(el)
+        && el.closest(DISABLED_CONTROL_SELECTOR).is_none()
+        && !inherits_scored_text_color(el, text_color, custom_props);
+
+    // The walk gives up on any raster image, so a link with an external-link
+    // mark, or one in a list item with an arrow bullet, reads as unresolved
+    // and goes unscored. On the SAFE_TAGS text path an icon is read as
+    // absent; everywhere else the walk is what it always was.
+    let icons = if paints_own_text {
+        icon_hosts(el)
+    } else {
+        Vec::new()
+    };
+    let bg_info = if icons.is_empty() {
+        resolve_background_info(el, custom_props)
+    } else {
+        resolve_background_info_skipping_images(el, custom_props, &|c| icons.contains(&c.id()))
+    };
+    let effective_bg = bg_info.color;
 
     let mut own_bg = custom_props
         .and_then(|m| measures::parse_color_resolved(sv_opt(style, "backgroundColor"), Some(m)))
@@ -686,12 +962,21 @@ pub fn check_element_colors(
         font_weight,
         has_direct_text,
         is_emoji_only: is_emoji_only_text(&direct_text),
+        paints_own_text,
         bg_clip: Some(bg_clip.to_string()),
         bg_image: Some(sv(style, "backgroundImage").to_string()),
         class_list: Some(el.class_name().to_string()),
         detector_is_browser: false,
     };
-    let mut findings = check_colors(&color_opts);
+    // The page's one report of a colour pair goes to an element that will
+    // actually print it, so an inline ignore on the first of fifty links
+    // waives that link and not the other forty-nine. A background photo laid
+    // under the text waives it too: this engine has no layout, so it reads
+    // the stretched, out-of-flow shape such a photo is written in
+    // (`picture_under_text`), where the browser path measures the layers.
+    let mut findings = check_colors_deduped(&color_opts, seen, &mut |h: &RuleHit| {
+        !scoped_ignore_active(el, &h.id) && !picture_under_text(el)
+    });
     if tag == "input" || tag == "textarea" {
         let placeholder = el.get_attribute("placeholder").unwrap_or("").trim();
         if !placeholder.is_empty() {
@@ -958,10 +1243,25 @@ pub fn check_element_glow(
     if box_shadow.is_empty() && text_shadow.is_empty() {
         return Vec::new();
     }
+    // Static HTML has no layout, so the element's size stays unknown and the
+    // perceptibility floor runs on the declaration and the opacity alone.
+    let opacity = match sv_opt(style, "opacity") {
+        Some(v) => {
+            let n = js::parse_float(v);
+            if n.is_nan() {
+                None
+            } else {
+                Some(n.clamp(0.0, 1.0))
+            }
+        }
+        None => None,
+    };
     check_glow(&GlowOpts {
         box_shadow: Some(box_shadow.to_string()),
         text_shadow: Some(text_shadow.to_string()),
         effective_bg,
+        element_opacity: opacity,
+        element_size: None,
     })
 }
 
@@ -1002,19 +1302,136 @@ pub fn check_element_oversized_h1(el: &StaticElement<'_>, tag: &str) -> Vec<Rule
     }))
 }
 
-/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
-pub fn check_element_gpt_border_shadow(style: &StyleValues) -> Vec<RuleHit> {
+/// The hairline-and-halo pair of one element, read off its resolved style.
+/// The halo is measured first: it is one string parse, where the hairlines
+/// cost four style reads and two allocations, and a sibling row walk asks
+/// this of every box it passes.
+fn gpt_border_shadow_pair(style: &StyleValues) -> Option<(f64, f64)> {
+    let box_shadow = sv(style, "boxShadow");
+    gpt_border_shadow_halo_blur_px(Some(box_shadow))?;
     let s = StyleRef(style);
     let widths = border_widths_from_style(&s);
     let colors: Vec<Option<String>> = border_colors_from_style(&s)
         .into_iter()
         .map(|c| if c.is_empty() { None } else { Some(c) })
         .collect();
-    hits(check_gpt_thin_border_wide_shadow(&GptBorderShadowInput {
+    gpt_thin_border_wide_shadow_pair(&GptBorderShadowInput {
         border_widths: &widths,
         border_colors: Some(&colors),
-        box_shadow: Some(sv(style, "boxShadow")),
-    }))
+        box_shadow: Some(box_shadow),
+    })
+}
+
+/// A declared pixel length (`width: 180px`), or `None` for anything a file
+/// scan cannot size without layout (`auto`, percentages, keywords).
+fn gpt_border_shadow_declared_px(style: &StyleValues, prop: &str) -> Option<f64> {
+    let value = sv(style, prop).trim();
+    if !value.ends_with("px") {
+        return None;
+    }
+    let px = parse_float(value);
+    (!px.is_nan()).then_some(px)
+}
+
+/// Whether a box shows at rest, as far as a file scan can tell without
+/// layout. It does not when it or an ancestor is closed (the `hidden`
+/// attribute or `display: none`), or when it is lifted out of the flow
+/// (absolute or fixed, itself or up to
+/// [`measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH`] wrappers up) and hidden
+/// by `visibility: hidden` or opacities that multiply down to nothing. An
+/// in-flow box hidden that way is content staged for a scroll reveal, which
+/// still shows. A transform that parks a box off the page needs layout to
+/// read, so a file scan does not.
+fn gpt_border_shadow_paints_at_rest(el: &StaticElement<'_>) -> bool {
+    let mut opacity = 1.0f64;
+    let mut hidden = false;
+    let mut out_of_flow = false;
+    let mut depth = 0usize;
+    let mut current = Some(el.clone());
+    while let Some(node) = current {
+        if node.get_attribute("hidden").is_some() {
+            return false;
+        }
+        let style = node.style();
+        if js::to_lower_case(sv(style, "display")) == "none" {
+            return false;
+        }
+        if depth <= measures::GPT_BORDER_SHADOW_MAX_WRAPPER_DEPTH {
+            let position = js::to_lower_case(sv(style, "position"));
+            out_of_flow |= position == "absolute" || position == "fixed";
+        }
+        let visibility = js::to_lower_case(sv(style, "visibility"));
+        hidden |= visibility == "hidden" || visibility == "collapse";
+        let own = parse_float(sv(style, "opacity"));
+        if own.is_finite() {
+            opacity *= own;
+        }
+        current = node.parent_element();
+        depth += 1;
+    }
+    !(out_of_flow && (hidden || opacity <= 0.02))
+}
+
+/// The tree a row walk reads in a file scan, which has no layout: wrappers of
+/// one kind share a tag, and two boxes are the same card when they share a
+/// tag and every pixel length both of them declare is comparable. A length
+/// only one of them declares, or neither, compares as unknown rather than as
+/// a mismatch.
+struct StaticRowTree<'a>(std::marker::PhantomData<StaticElement<'a>>);
+
+impl<'a> GptBorderShadowRowTree for StaticRowTree<'a> {
+    type El = StaticElement<'a>;
+    fn parent(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.parent_element()
+    }
+    fn previous_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.previous_element_sibling()
+    }
+    fn next_sibling(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.next_element_sibling()
+    }
+    fn first_child(&self, el: &StaticElement<'a>) -> Option<StaticElement<'a>> {
+        el.first_element_child()
+    }
+    fn same_cell(&self, cell: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        cell.tag_lower() == other.tag_lower()
+    }
+    fn same_card(&self, card: &StaticElement<'a>, other: &StaticElement<'a>) -> bool {
+        if card.tag_lower() != other.tag_lower() {
+            return false;
+        }
+        ["width", "height"].into_iter().all(|prop| {
+            match (
+                gpt_border_shadow_declared_px(card.style(), prop),
+                gpt_border_shadow_declared_px(other.style(), prop),
+            ) {
+                (Some(a), Some(b)) => gpt_border_shadow_lengths_close(a, b),
+                _ => true,
+            }
+        })
+    }
+    fn carries_pair(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_pair(el.style()).is_some()
+    }
+    fn paints_at_rest(&self, el: &StaticElement<'a>) -> bool {
+        gpt_border_shadow_paints_at_rest(el)
+    }
+}
+
+/// JS: checks.mjs#checkElementGptBorderShadow(el, style)
+pub fn check_element_gpt_border_shadow(
+    el: &StaticElement<'_>,
+    style: &StyleValues,
+) -> Vec<RuleHit> {
+    // The row walk is worth paying for only once this element carries the
+    // pair itself.
+    let Some(pair) = gpt_border_shadow_pair(style) else {
+        return Vec::new();
+    };
+    hits(gpt_border_shadow_row_finding(
+        pair,
+        gpt_border_shadow_row_size(&StaticRowTree(std::marker::PhantomData), el),
+    ))
 }
 
 // ─── Clipped overflow container ─────────────────────────────────────────────
@@ -1042,7 +1459,7 @@ static DECORATIVE_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
 static VIEWPORT_ROLE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?-u:\b)(carousel|slider)(?-u:\b)").expect("VIEWPORT_ROLE_RE"));
 static VIEWPORT_IDENT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|marquee|preview|scroller|slider|slideshow|split|viewport)(?-u:\b)")
+    Regex::new(r"(?-u:\b)(carousel|comparison|compare|fisheye|flickity|marquee|owl|preview|scroller|slider|slideshow|splide|split|swiper|ticker|viewport)(?-u:\b)")
         .expect("VIEWPORT_IDENT_RE")
 });
 static VIEWPORT_DEMO_RE: Lazy<Regex> = Lazy::new(|| {
@@ -1085,13 +1502,44 @@ fn positioned_child_is_decorative(child: &StaticElement<'_>) -> bool {
     false
 }
 
-/// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
-fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
-    let role_description =
-        js::to_lower_case(el.get_attribute("aria-roledescription").unwrap_or(""));
-    if VIEWPORT_ROLE_RE.is_match(&role_description) {
+/// JS `el.matches(selector)`: `closest` stops at the element itself, so a
+/// self match is the one it returns.
+fn element_matches(el: &StaticElement<'_>, selector: &str) -> bool {
+    el.closest(selector).is_some_and(|m| m.id() == el.id())
+}
+
+/// A layer the clip would really trap, whatever else it looks like. The layer
+/// itself counts, not only a descendant of it: an empty `role="menu"` is a
+/// menu.
+fn positioned_child_is_popover_layer(child: &StaticElement<'_>) -> bool {
+    element_matches(child, POPOVER_LAYER_SELECTOR)
+        || child.query_selector(POPOVER_LAYER_SELECTOR).is_some()
+}
+
+/// A positioned child that only paints: nothing to read, nothing to click,
+/// and either no content of its own, only media, no pointer target, or
+/// nothing visible at rest.
+fn positioned_child_is_ornament(child: &StaticElement<'_>) -> bool {
+    if positioned_child_has_substantive_content(child) {
+        return false;
+    }
+    let style = child.style();
+    if sv(style, "pointerEvents") == "none" {
         return true;
     }
+    // The child's own `opacity`, not the chain's, and a value that does not
+    // parse is not a transparent layer.
+    let opacity = parse_float(sv(style, "opacity"));
+    if opacity.is_finite() && opacity <= 0.05 {
+        return true;
+    }
+    if child.children().is_empty() {
+        return true;
+    }
+    child.query_selector("img,picture,svg,video,canvas").is_some()
+}
+
+fn ident_names_viewport(el: &StaticElement<'_>) -> bool {
     let ident = js::to_lower_case(&format!(
         "{} {}",
         el.get_attribute("class").unwrap_or(""),
@@ -1100,8 +1548,25 @@ fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
     VIEWPORT_IDENT_RE.is_match(&ident) || VIEWPORT_DEMO_RE.is_match(&ident)
 }
 
-/// JS: checks.mjs#checkClippedOverflow(el, style, getStyle) / checkElementClippedOverflow
-pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
+/// JS: checks.mjs#clippingContainerIsIntentionalViewport(el)
+fn clipping_container_is_intentional_viewport(el: &StaticElement<'_>) -> bool {
+    let role_description =
+        js::to_lower_case(el.get_attribute("aria-roledescription").unwrap_or(""));
+    if VIEWPORT_ROLE_RE.is_match(&role_description) {
+        return true;
+    }
+    if ident_names_viewport(el) {
+        return true;
+    }
+    // A marquee or a rail names the track that moves, not the window that
+    // clips it, so the same words count on the immediate scrolling child.
+    el.children().iter().any(ident_names_viewport)
+}
+
+/// The clipped axes of `el`, or `None` when it is not a clipping container
+/// at all (it scrolls, its overflow is visible, or `display: contents`
+/// leaves it without a box to clip with).
+fn clipped_axes(style: &StyleValues) -> Option<(bool, bool)> {
     let clips = |v: &str| v == "hidden" || v == "clip";
     let scrolls = |v: &str| v == "auto" || v == "scroll";
     let ox = sv(style, "overflowX");
@@ -1109,30 +1574,84 @@ pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValue
     let ov = sv(style, "overflow");
     let clip_x = clips(ox) || clips(ov);
     let clip_y = clips(oy) || clips(ov);
-    let any_clip = clip_x || clip_y;
-    let any_scroll = scrolls(ox) || scrolls(oy) || scrolls(ov);
-    if !any_clip || any_scroll {
-        return Vec::new();
+    if (!clip_x && !clip_y) || scrolls(ox) || scrolls(oy) || scrolls(ov) {
+        return None;
     }
-    if clipping_container_is_intentional_viewport(el) {
+    let display = sv(style, "display");
+    if display == "contents" || display == "none" {
+        return None;
+    }
+    Some((clip_x, clip_y))
+}
+
+/// Whether `el` may report a clipped child, its own or one it takes off a
+/// descendant container. `html` and `body` hold the page rather than any
+/// component in it: `overflow: hidden` there is the standard guard against
+/// sideways scrolling, and the browser engine never scans either, so a
+/// finding handed to one of them would not exist there at all.
+fn clip_container_can_own_finding(el: &StaticElement<'_>) -> bool {
+    let tag = el.tag_lower();
+    tag != "html" && tag != "body" && !clipping_container_is_intentional_viewport(el)
+}
+
+/// Nested clips repeat one decision about the same layer. The clip nearest
+/// the child is the one that cuts it first and the one whose component the
+/// layer belongs to, so an outer container defers to any clipping container
+/// between it and the child that traps the same layer.
+fn nearer_clip_traps_child(el: &StaticElement<'_>, child: &StaticElement<'_>) -> bool {
+    let mut current = child.parent_element();
+    while let Some(inner) = current {
+        if inner.id() == el.id() {
+            return false;
+        }
+        if let Some((clip_x, clip_y)) = clipped_axes(inner.style()) {
+            if clip_container_can_own_finding(&inner)
+                && positioned_style_implies_escape_axis(&StyleRef(child.style()), clip_x, clip_y)
+            {
+                return true;
+            }
+        }
+        current = inner.parent_element();
+    }
+    false
+}
+
+/// JS: checks.mjs#checkClippedOverflow(el, style, getStyle) / checkElementClippedOverflow
+pub fn check_element_clipped_overflow(el: &StaticElement<'_>, style: &StyleValues) -> Vec<RuleHit> {
+    let Some((clip_x, clip_y)) = clipped_axes(style) else {
+        return Vec::new();
+    };
+    if !clip_container_can_own_finding(el) {
         return Vec::new();
     }
     for child in el.query_selector_all("*") {
         let child_style = child.style();
         let pos = sv(child_style, "position");
-        if pos == "absolute" || pos == "fixed" {
-            if positioned_child_is_decorative(&child) {
-                continue;
-            }
-            // No layout statically: `positionedChildEscapesClip` is null.
-            if !positioned_style_implies_escape(&StyleRef(child_style)) {
-                continue;
-            }
-            return vec![RuleHit::new(
-                "clipped-overflow-container",
-                format!("{} clips a positioned child", class_selector(el)),
-            )];
+        if pos != "absolute" && pos != "fixed" {
+            continue;
         }
+        if positioned_child_is_decorative(&child) {
+            continue;
+        }
+        // No layout statically: `positionedChildEscapesClip` is null, and
+        // so is the transform offset of a masked reveal.
+        if !positioned_style_implies_escape_axis(&StyleRef(child_style), clip_x, clip_y) {
+            continue;
+        }
+        if !positioned_child_is_popover_layer(&child) && positioned_child_is_ornament(&child) {
+            continue;
+        }
+        if nearer_clip_traps_child(el, &child) {
+            continue;
+        }
+        return vec![RuleHit::new(
+            "clipped-overflow-container",
+            format!(
+                "{} clips positioned {}",
+                class_selector(el),
+                class_selector(&child)
+            ),
+        )];
     }
     Vec::new()
 }

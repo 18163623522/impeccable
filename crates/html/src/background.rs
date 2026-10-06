@@ -6,7 +6,11 @@
 
 use crate::cascade::StyleValues;
 use crate::dom::StaticElement;
-use impeccable_core::checks::measures::{parse_color_resolved, parse_radius_to_px, CustomProps};
+use impeccable_core::checks::measures::{
+    parse_color_resolved, parse_radius_corner_px_em, parse_radius_corners_em, parse_radius_to_px,
+    parse_radius_token_px, CustomProps, ROOT_FONT_SIZE_PX,
+};
+use impeccable_core::checks::rules::Corners;
 use impeccable_core::color::{
     composite_color_over, is_no_paint_color_value, parse_any_color, parse_gradient_colors,
     parse_rgb, split_top_level_commas, Rgba,
@@ -160,11 +164,28 @@ pub fn resolve_background_info(
     el: &StaticElement<'_>,
     custom_props: CustomPropMap<'_>,
 ) -> BackgroundInfo {
+    resolve_background_info_skipping_images(el, custom_props, &|_| false)
+}
+
+/// [`resolve_background_info`] with the background images of the boxes
+/// `skip_image` names read as `none`. The SAFE_TAGS text path uses it for an
+/// icon on the link or its list item: the walk gives up on any raster image,
+/// and an external-link mark or an arrow bullet is not the surface the words
+/// are read against.
+pub fn resolve_background_info_skipping_images(
+    el: &StaticElement<'_>,
+    custom_props: CustomPropMap<'_>,
+    skip_image: &dyn Fn(&StaticElement<'_>) -> bool,
+) -> BackgroundInfo {
     let mut current = Some(*el);
     let mut overlays: Vec<Rgba> = Vec::new();
     while let Some(cur) = current {
         let style = cur.style();
-        let bg_image = sv(style, "backgroundImage");
+        let bg_image = if skip_image(&cur) {
+            "none"
+        } else {
+            sv(style, "backgroundImage")
+        };
         let has_gradient_or_url = !bg_image.is_empty()
             && bg_image != "none"
             && (GRADIENT_RE.is_match(bg_image) || URL_CALL_RE.is_match(bg_image));
@@ -330,4 +351,96 @@ pub fn composite_gradient_stops(
 /// JS: checks.mjs#resolveBorderRadiusPx(el, style, widthPx, win)
 pub fn resolve_border_radius_px(style: &StyleValues, width_px: f64) -> f64 {
     parse_radius_to_px(sv_opt(style, "borderRadius"), width_px).unwrap_or(0.0)
+}
+
+/// The element's font size in px, what an `em` radius resolves against.
+fn em_px(style: &StyleValues) -> f64 {
+    let size = impeccable_core::js::parse_float(sv(style, "fontSize"));
+    if size.is_finite() && size > 0.0 {
+        size
+    } else {
+        ROOT_FONT_SIZE_PX
+    }
+}
+
+/// The radius the border snippet reports, in px: the first horizontal radius
+/// of the shorthand with `em` / `rem` converted, which is what the browser's
+/// computed style prints. A token that does not convert (a `calc()`) keeps
+/// [`resolve_border_radius_px`]'s unitless reading.
+pub fn resolve_border_radius_scalar_px(style: &StyleValues, width_px: f64) -> f64 {
+    let first = sv_opt(style, "borderRadius")
+        .and_then(|v| v.split('/').next())
+        .and_then(|h| h.split_whitespace().next());
+    first
+        .and_then(|token| parse_radius_token_px(token, width_px, em_px(style)))
+        .unwrap_or_else(|| resolve_border_radius_px(style, width_px))
+}
+
+/// The four corner radii in px, read from the `border-<corner>-radius`
+/// longhands. The cascade expands every `border-radius` shorthand into those
+/// longhands with the shorthand's own cascade order, so a longhand declared
+/// after the shorthand wins its corner and a shorthand declared after a
+/// longhand resets it, the way the browser resolves them. `None` when a
+/// corner carries a value the parser cannot resolve, so the caller keeps
+/// reporting instead of reading the box as square.
+///
+/// A shorthand built from `var()` cannot be split before it resolves, so the
+/// cascade hands every corner the whole value. A corner still carrying the
+/// resolved shorthand (its value equals `borderRadius`) reads its own
+/// position of it: `--r: 0 12px 12px 0` rounds the right corners only. The
+/// one case this misreads is a two-value longhand spelled exactly like the
+/// shorthand before it.
+pub fn resolve_border_radius_corners(style: &StyleValues, width_px: f64) -> Option<Corners> {
+    let em = em_px(style);
+    let shorthand = sv_opt(style, "borderRadius");
+    let whole = || parse_radius_corners_em(shorthand, width_px, em);
+    let corner = |prop: &str, pick: fn(&Corners) -> f64| {
+        let value = sv_opt(style, prop);
+        if value.is_some() && value == shorthand {
+            whole().map(|c| pick(&c))
+        } else {
+            parse_radius_corner_px_em(value, width_px, em)
+        }
+    };
+    Some(Corners {
+        top_left: corner("borderTopLeftRadius", |c| c.top_left)?,
+        top_right: corner("borderTopRightRadius", |c| c.top_right)?,
+        bottom_right: corner("borderBottomRightRadius", |c| c.bottom_right)?,
+        bottom_left: corner("borderBottomLeftRadius", |c| c.bottom_left)?,
+    })
+}
+
+/// The corners the side-accent gate reads for an element. The cascade is
+/// the answer only where it could see every radius that reaches the element,
+/// and everywhere else the corners are unknown, which keeps the finding:
+///
+/// - a radius the cascade could not apply may reach the element (a nested
+///   rule, a rule inside `@container` or an unknown at-rule, a selector the
+///   matcher refuses);
+/// - no applied declaration gave the element a radius, but its classes name
+///   one the page compiles at runtime (`rounded-lg` with no stylesheet rule
+///   for it): the utility classes decide, an unknown size stays unknown;
+/// - no applied declaration gave the element a radius and the page links a
+///   stylesheet the engine did not read.
+///
+/// Only a radius the engine reads, or the initial `0` of a box every
+/// stylesheet of which it read, silences a side accent.
+pub fn resolve_side_accent_corners(
+    el: &StaticElement<'_>,
+    style: &StyleValues,
+    width_px: f64,
+) -> Option<Corners> {
+    if el.radius_unseen() {
+        return None;
+    }
+    if !el.radius_declared() {
+        let classes = impeccable_core::checks::rules::tailwind_declared_corners(el.class_name());
+        if classes.declared() {
+            return classes.to_corners();
+        }
+        if el.page_has_unread_stylesheet() {
+            return None;
+        }
+    }
+    resolve_border_radius_corners(style, width_px)
 }

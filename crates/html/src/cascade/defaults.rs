@@ -46,6 +46,10 @@ pub const STATIC_INHERITED_PROPS: &[&str] = &[
     "textAlign",
     "hyphens",
     "webkitHyphens",
+    // color-scheme inherits in real CSS, and a page declares it once at the
+    // root: the canvas colour the flush check falls back to has to reach
+    // every element below it.
+    "colorScheme",
     // visibility inherits in real CSS, and the invisible-at-rest contrast skip
     // relies on descendants of a hidden container computing as hidden. A child
     // that declares `visibility: visible` still overrides the inherited value.
@@ -72,10 +76,22 @@ pub const STATIC_DEFAULT_STYLE: &[(&str, &str)] = &[
     ("borderBottomColor", "rgb(0, 0, 0)"),
     ("borderLeftColor", "rgb(0, 0, 0)"),
     ("borderRadius", "0px"),
+    // Past the JS table: the corner longhands a utility framework emits for
+    // `rounded-r-lg` and friends. A property with no default here is dropped
+    // by the cascade, and without these a card rounded only by longhands
+    // reads as square.
+    ("borderTopLeftRadius", "0px"),
+    ("borderTopRightRadius", "0px"),
+    ("borderBottomRightRadius", "0px"),
+    ("borderBottomLeftRadius", "0px"),
     ("outlineWidth", "0px"),
     ("outlineColor", "rgb(0, 0, 0)"),
     ("outlineStyle", "none"),
     ("boxShadow", "none"),
+    // Beyond the JS list: the browser paints the canvas from the used
+    // colour scheme, so a page that asks for a dark one grounds an unpainted
+    // chain in dark rather than white.
+    ("colorScheme", "normal"),
     // NOT in STATIC_INHERITED_PROPS even though text-shadow inherits in real
     // CSS: the glow check only needs to fire once, on the element that
     // declares the shadow, not on every descendant.
@@ -138,6 +154,10 @@ pub const STATIC_PROP_MAP: &[(&str, &str)] = &[
     ("background-clip", "backgroundClip"),
     ("-webkit-background-clip", "webkitBackgroundClip"),
     ("border-radius", "borderRadius"),
+    ("border-top-left-radius", "borderTopLeftRadius"),
+    ("border-top-right-radius", "borderTopRightRadius"),
+    ("border-bottom-right-radius", "borderBottomRightRadius"),
+    ("border-bottom-left-radius", "borderBottomLeftRadius"),
     ("border-top-width", "borderTopWidth"),
     ("border-right-width", "borderRightWidth"),
     ("border-bottom-width", "borderBottomWidth"),

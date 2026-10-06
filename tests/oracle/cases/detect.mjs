@@ -111,11 +111,15 @@ function Thumb({ url }: { url?: string }) {
       args: ['--no-config', '--json', 'locked.html'],
     },
     {
+      // The readable file carries a rounded card so it produces a finding:
+      // the point of the case is that a scanned target still reports next to
+      // the unreadable one's error.
       id: 'detect-unreadable-file-in-dir', verb: 'detect',
       setup: (ws) => {
-        fs.writeFileSync(path.join(ws, 'a.html'), '<div style="border-left: 4px solid #ff0000">x</div>\n');
+        const card = '<div style="border-left: 4px solid #ff0000; border-radius: 10px">x</div>\n';
+        fs.writeFileSync(path.join(ws, 'a.html'), card);
         const p = path.join(ws, 'b.html');
-        fs.writeFileSync(p, '<div style="border-left: 4px solid #ff0000">x</div>\n');
+        fs.writeFileSync(p, card);
         fs.chmodSync(p, 0o000);
       },
       args: ['--no-config', '--json', '.'],

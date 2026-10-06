@@ -319,6 +319,7 @@ pub fn apply_static_declaration<K: Hash + Eq>(
 ) {
     let map = specified.map.entry(node).or_default();
     let mut expanded = expand_static_declaration(prop, value);
+    expanded.extend(expand_border_radius_corners(prop, value));
     expanded.extend(internal_border_style_expansion(prop, value));
     expanded.extend(extra_specified_expansions(prop, value));
     for (expanded_prop, expanded_value) in expanded {
@@ -332,6 +333,44 @@ pub fn apply_static_declaration<K: Hash + Eq>(
             map.insert(expanded_prop, next);
         }
     }
+}
+
+/// The corner longhands a `border-radius` shorthand sets, entered into the
+/// specified store beside the shorthand itself (which the recorded
+/// `expandStaticDeclaration` still returns alone). Carrying the shorthand's
+/// cascade metadata onto each corner is what lets a later
+/// `border-top-right-radius: 0` win that corner and a later shorthand reset
+/// it. A value built from `var()` cannot be split before it resolves, so each
+/// corner carries the whole value, and `resolve_border_radius_corners` picks
+/// the corner's own position once the value has resolved.
+fn expand_border_radius_corners(prop: &str, value: &str) -> Vec<(String, String)> {
+    const CORNERS: [&str; 4] = [
+        "borderTopLeftRadius",
+        "borderTopRightRadius",
+        "borderBottomRightRadius",
+        "borderBottomLeftRadius",
+    ];
+    if js::to_lower_case(prop) != "border-radius" {
+        return Vec::new();
+    }
+    let v = js::trim(value);
+    if v.is_empty() {
+        return Vec::new();
+    }
+    let horizontal = v.split('/').next().unwrap_or("");
+    let tokens = super::values::split_css_tokens(horizontal);
+    if tokens.is_empty() || v.contains("var(") {
+        return CORNERS
+            .iter()
+            .map(|c| (c.to_string(), v.to_string()))
+            .collect();
+    }
+    let vals = super::shorthand::expand_static_box_values(&tokens);
+    CORNERS
+        .iter()
+        .zip(vals)
+        .map(|(c, val)| (c.to_string(), val))
+        .collect()
 }
 
 /// One declaration from a `style=""` attribute.

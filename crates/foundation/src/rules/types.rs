@@ -76,12 +76,41 @@ impl<T: Copy> Sides<T> {
     }
 }
 
+/// The four corner radii in px, in the order the `border-radius` shorthand
+/// lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Corners {
+    pub top_left: f64,
+    pub top_right: f64,
+    pub bottom_right: f64,
+    pub bottom_left: f64,
+}
+
+impl Corners {
+    /// The two corners at the far end of the side at `[Top, Right, Bottom,
+    /// Left][i]`: the pair a stripe on that side does not touch.
+    pub fn away_from(&self, i: usize) -> (f64, f64) {
+        match i {
+            0 => (self.bottom_left, self.bottom_right),
+            1 => (self.top_left, self.bottom_left),
+            2 => (self.top_left, self.top_right),
+            _ => (self.top_right, self.bottom_right),
+        }
+    }
+}
+
 /// JS `checkBorders` opts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BorderOpts {
     pub badge_like: bool,
     pub status_context: bool,
     pub tab_context: bool,
+    /// The element's four corner radii, when the caller could read them.
+    /// `None` means unknown, not square: a radius the engine cannot resolve
+    /// (a `calc()`, a snapshot missing the column) leaves a side accent
+    /// reported. The recorded call vectors predate the corner read and leave
+    /// this `None`, which replays the behavior they pin.
+    pub corners: Option<Corners>,
 }
 
 // ─── isEmojiOnlyText ────────────────────────────────────────────────────────
@@ -101,6 +130,29 @@ pub fn is_emoji_only_text(text: &str) -> bool {
     js::trim(&stripped).is_empty()
 }
 
+/// Text with no letter and no digit anywhere: an icon font's private-use
+/// glyph, an arrow, a bullet, a breadcrumb separator, a bare multiplication
+/// sign standing in for a close control. None of it is read, so WCAG text
+/// contrast is the wrong rule for it.
+pub fn is_glyph_only_text(text: &str) -> bool {
+    let trimmed = js::trim(text);
+    !trimmed.is_empty() && !trimmed.chars().any(char::is_alphanumeric)
+}
+
+/// Whether a computed `-webkit-text-fill-color` says the element's glyphs
+/// are not painted in its `color` at all. A gradient heading is written by
+/// clipping a background to the text and filling the text with nothing, so
+/// what a reader sees is the gradient and `color` is a value that renders
+/// nowhere. Scoring a colour nobody can see is how a legible heading gets
+/// reported at 1.1:1 against the gradient's own first stop.
+///
+/// An empty value is not an answer. The static cascade carries only the
+/// properties an author declared, so absence means unset, which is the
+/// initial `currentcolor` and not transparent.
+pub fn text_fill_is_transparent(value: &str) -> bool {
+    !js::trim(value).is_empty() && crate::css::measures::css_color_is_transparent(Some(value))
+}
+
 // ─── checkColors ────────────────────────────────────────────────────────────
 
 /// JS `checkColors` opts.
@@ -115,6 +167,14 @@ pub struct ColorOpts {
     pub font_weight: f64,
     pub has_direct_text: bool,
     pub is_emoji_only: bool,
+    /// The adapter's verdict that this element paints reading text of its
+    /// own that no already-scored ancestor carries: direct text that is not
+    /// an icon glyph, not visually hidden, and a `color` the nearest
+    /// text-bearing ancestor does not share. `check_colors` scores the
+    /// contrast of a SAFE_TAGS element on this alone; every other tag is
+    /// scored regardless. The recorded call vectors predate the field and
+    /// leave it false, which is the tag gate on its own.
+    pub paints_own_text: bool,
     pub bg_clip: Option<String>,
     pub bg_image: Option<String>,
     /// The element's class list, already joined with spaces (JS accepts a
@@ -307,9 +367,19 @@ pub fn extract_shadow_lengths(layer: &str, color_span: Option<(usize, usize)>) -
 }
 
 /// JS `checkGlow` opts.
+///
+/// `element_opacity` and `element_size` feed the perceptibility floor. Both
+/// are `None` on engines with no layout (the CSS-text scan, static HTML),
+/// where the floor falls back to what the declaration alone can say.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GlowOpts {
     pub box_shadow: Option<String>,
     pub text_shadow: Option<String>,
     pub effective_bg: Option<Rgba>,
+    /// The element's own computed `opacity`; `None` when it is unknown.
+    #[serde(default)]
+    pub element_opacity: Option<f64>,
+    /// The element's border-box size in CSS px; `None` without layout.
+    #[serde(default)]
+    pub element_size: Option<(f64, f64)>,
 }

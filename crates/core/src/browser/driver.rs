@@ -729,6 +729,105 @@ pub fn selector_nodes_for_live_dom(dom: &dyn Dom, selector: &str) -> Option<Vec<
     dom.query_all(None, &fallback).ok()
 }
 
+/// The page-level accent finding read off the stylesheet alone.
+const PURPLE_ACCENT_SNIPPET: &str = "Purple/violet accent colors detected";
+
+/// The stock violet hexes as sRGB, for the painted-color test below.
+static PURPLE_ACCENT_RGB: once_cell::sync::Lazy<Vec<crate::color::Rgba>> =
+    once_cell::sync::Lazy::new(|| {
+        crate::checks::html_patterns::PURPLE_ACCENT_HEXES
+            .iter()
+            .filter_map(|h| crate::color::parse_any_color(Some(&format!("#{h}"))))
+            .collect()
+    });
+
+/// Computed colors round-trip through the browser exactly for hex-declared
+/// values; the slack covers a token that reached the same color by another
+/// notation.
+fn is_stock_violet(c: &crate::color::Rgba) -> bool {
+    PURPLE_ACCENT_RGB.iter().any(|p| {
+        (p.r - c.r).abs() <= 8.0 && (p.g - c.g).abs() <= 8.0 && (p.b - c.b).abs() <= 8.0
+    })
+}
+
+/// Whether any element a visitor can see wears one of the stock violet
+/// hexes. A palette that only exists in a stylesheet is a dead token, not a
+/// design decision, so the page-level accent finding asks for paint first.
+/// Visibility is the rule's own model, the same one the element path uses,
+/// so a violet that only appears inside a scroll-reveal wrapper still counts
+/// as painted here.
+fn page_paints_stock_violet(dom: &dyn Dom) -> bool {
+    use super::element_checks::{ai_palette_is_visible, element_rect};
+    for el in dom.query_all(None, "*").unwrap_or_default() {
+        if element_rect(dom, el).is_none() || !ai_palette_is_visible(dom, el) {
+            continue;
+        }
+        if super::dom::has_direct_text_longer_than(dom, el, 0) {
+            if let Some(c) = crate::color::parse_any_color(Some(&dom.style(el, "color"))) {
+                if c.alpha_or_one() > 0.1 && is_stock_violet(&c) {
+                    return true;
+                }
+            }
+        }
+        if let Some(c) = crate::color::parse_any_color(Some(&dom.style(el, "backgroundColor"))) {
+            if c.alpha_or_one() > 0.1 && is_stock_violet(&c) {
+                return true;
+            }
+        }
+        let bg_image = dom.style(el, "backgroundImage");
+        if crate::color::parse_gradient_colors(Some(&bg_image))
+            .iter()
+            .any(|c| c.alpha_or_one() > 0.1 && is_stock_violet(c))
+        {
+            return true;
+        }
+        // A border, an outline or a shadow paints its colour too.
+        let painted = |c: Option<crate::color::Rgba>| c.is_some_and(|c| c.alpha_or_one() > 0.1 && is_stock_violet(&c));
+        for side in ["Top", "Right", "Bottom", "Left"] {
+            let width = crate::js::parse_float(&dom.style(el, &format!("border{side}Width")));
+            let style = dom.style(el, &format!("border{side}Style"));
+            if width > 0.0
+                && style != "none"
+                && style != "hidden"
+                && painted(crate::color::parse_any_color(Some(&dom.style(el, &format!("border{side}Color")))))
+            {
+                return true;
+            }
+        }
+        let outline = crate::js::parse_float(&dom.style(el, "outlineWidth"));
+        let outline_style = dom.style(el, "outlineStyle");
+        if outline > 0.0
+            && !outline_style.is_empty()
+            && outline_style != "none"
+            && painted(crate::color::parse_any_color(Some(&dom.style(el, "outlineColor"))))
+        {
+            return true;
+        }
+        // Each shadow layer, `rgb(...) x y blur spread`: one with no offset, no
+        // blur and no spread draws nothing outside the box it sits under.
+        let shadow = dom.style(el, "boxShadow");
+        if shadow != "none"
+            && SHADOW_COLOR_RE.captures_iter(&shadow).any(|c| {
+                let lengths = &c[2];
+                let draws = lengths
+                    .split_whitespace()
+                    .filter_map(|t| t.strip_suffix("px"))
+                    .any(|n| n.parse::<f64>().is_ok_and(|v| v != 0.0));
+                draws && painted(crate::color::parse_any_color(Some(&c[1])))
+            })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// One layer of a computed `box-shadow`: its colour (`rgb(...)` /
+/// `rgba(...)`, which the computed value puts first) and the lengths after it.
+static SHADOW_COLOR_RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"(rgba?\([^)]*\))([^,]*)").expect("SHADOW_COLOR_RE")
+});
+
 /// The regex-on-HTML pass of collectBrowserFindings: `checkHtmlPatterns` on
 /// the live document's HTML, selector-scoped filtering against the live DOM
 /// (a selector matching nothing drops the finding; a match under a
@@ -747,7 +846,23 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
     }
     let all = crate::checks::html_patterns::check_html_patterns(&html, Some(&corpora));
     let mut out = Vec::new();
+    // Computed lazily: the accent check below is the only caller and it is
+    // rare, so an unrelated page never pays for the sweep.
+    let mut paints_stock_violet: Option<bool> = None;
     for f in all {
+        if f.id == "ai-color-palette" && f.snippet == PURPLE_ACCENT_SNIPPET {
+            let painted = match paints_stock_violet {
+                Some(v) => v,
+                None => {
+                    let v = page_paints_stock_violet(dom);
+                    paints_stock_violet = Some(v);
+                    v
+                }
+            };
+            if !painted {
+                continue;
+            }
+        }
         if let Some(selector) = f.selector.as_deref().filter(|s| !s.is_empty()) {
             let Some(matches) = selector_nodes_for_live_dom(dom, selector) else {
                 continue;
@@ -757,6 +872,20 @@ pub fn scoped_html_pattern_findings(dom: &dyn Dom) -> Vec<BrowserFinding> {
             }
             if !matches.iter().any(|el| !scoped_ignore_active(dom, *el, &f.id)) {
                 continue;
+            }
+            // A left or right stripe from the style-text scans reports only
+            // on a card rounded away from it, read off the elements it paints.
+            if let Some(side) = crate::checks::css_scan::side_stripe_index(&f) {
+                let rounded = matches.iter().any(|&el| {
+                    let corners = crate::checks::measures::parse_radius_corners(
+                        Some(&dom.style(el, "borderRadius")),
+                        dom.rect(el).width,
+                    );
+                    crate::checks::rules::is_rounded_away_from_side(corners.as_ref(), side)
+                });
+                if !rounded {
+                    continue;
+                }
             }
         }
         let mut item = BrowserFinding::new(f.id.clone(), f.snippet.clone());
@@ -1303,6 +1432,31 @@ fn browser_value_ignored(f: &BrowserFinding, entries: &[(String, String)]) -> bo
     })
 }
 
+/// The elements the element-level scan visits. `document.body` and the
+/// document element hold the page rather than any component in it, and the
+/// overlay, live-mode and host-extension subtrees are not the page's own
+/// markup. Nothing outside this set can ever produce a finding, so a check
+/// that hands a finding to an ancestor has to ask this first.
+pub fn element_is_scanned(dom: &dyn Dom, el: ElId) -> bool {
+    if Some(el) == dom.body() || Some(el) == dom.document_element() {
+        return false;
+    }
+    if super::dom::closest_or_none(
+        dom,
+        el,
+        ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip",
+    )
+    .is_some()
+    {
+        return false;
+    }
+    let el_id = super::dom::safe_id(dom, el);
+    if el_id.starts_with("claude-") || el_id.starts_with("cic-") {
+        return false;
+    }
+    super::dom::closest_or_none(dom, el, "[id^=\"impeccable-live-\"]").is_none()
+}
+
 /// JS: index.mjs#collectBrowserFindings()
 pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> CollectResult {
     use super::element_checks as ec;
@@ -1329,37 +1483,23 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
     let rule_ok = |id: &str| disabled.is_empty() || !disabled.iter().any(|d| d == id);
     let design_system = browser_design_system_config(config);
     let mut design_seen = DesignSeen::default();
+    // One page, one set of already-reported SAFE_TAGS text colours.
+    let mut color_seen = crate::checks::rules::SafeTagTextSeen::default();
     // The AI palette is read over the whole page: neon ink on a near-black
     // ground waits here until a second tell hue turns up somewhere, so one
     // deliberate accent stays an accent (REN-405).
     let mut palette_tells: Vec<ec::TellHue> = Vec::new();
     let mut palette_ink: Vec<(ElId, BrowserFinding)> = Vec::new();
     let body = dom.body();
-    let root = dom.document_element();
     // JS `document.body` may be null on a bare document; every
     // `addBrowserFindings(groupMap, document.body, ...)` then keys on null.
     // Elements never equal null, so the page-level groups collapse under
     // handle 0 the same way they collapse under null.
     let body_key = body.unwrap_or(0);
 
+    let glow_text = ec::GlowTextRects::default();
     for el in dom.query_all(None, "*").unwrap_or_default() {
-        if super::dom::closest_or_none(
-            dom,
-            el,
-            ".impeccable-overlay, .impeccable-label, .impeccable-banner, .impeccable-tooltip",
-        )
-        .is_some()
-        {
-            continue;
-        }
-        let el_id = super::dom::safe_id(dom, el);
-        if el_id.starts_with("claude-") || el_id.starts_with("cic-") {
-            continue;
-        }
-        if super::dom::closest_or_none(dom, el, "[id^=\"impeccable-live-\"]").is_some() {
-            continue;
-        }
-        if Some(el) == body || Some(el) == root {
+        if !element_is_scanned(dom, el) {
             continue;
         }
 
@@ -1367,14 +1507,14 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
         findings.extend(hits(ec::check_element_borders_dom(dom, el)));
         findings.extend(hits(ec::check_element_pseudo_stripe_dom(dom, el)));
         findings.extend(hits(ec::check_element_stripe_child_dom(dom, el)));
-        findings.extend(hits(ec::check_element_colors_dom(dom, el)));
+        findings.extend(hits(ec::check_element_colors_dom(dom, el, &mut color_seen)));
         findings.extend(hits(ec::check_element_motion_dom(dom, el)));
         findings.extend(hits(ec::check_element_glow_dom(dom, el)));
         let palette = ec::check_element_ai_palette_dom(dom, el, design_system.as_ref());
         // An ignored subtree gets no vote in the page-wide reading. A cyan
         // tell inside `data-impeccable-ignore="ai-color-palette"` would
         // otherwise open the two-hue gate and charge neon ink somewhere else
-        // on the page that nobody waived — ignored content changing the
+        // on the page that nobody waived: ignored content changing the
         // result for content that was not ignored.
         if !scoped_ignore_active(dom, el, "ai-color-palette") {
             palette_tells.extend(palette.tells.iter().copied());
@@ -1383,7 +1523,11 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
             palette_ink.push((el, BrowserFinding::new(ink.id, ink.snippet)));
         }
         findings.extend(hits(palette.hits));
-        findings.extend(hits(ec::check_element_radial_spotlight_dom(dom, el)));
+        findings.extend(hits(ec::check_element_radial_spotlight_dom_with(
+            dom,
+            el,
+            &glow_text,
+        )));
         findings.extend(hits(ec::check_element_icon_tile_dom(dom, el)));
         findings.extend(hits(ec::check_element_italic_serif_dom(dom, el)));
         findings.extend(hits(q::check_element_quality_dom(dom, el, config)));
@@ -1398,6 +1542,11 @@ pub fn collect_browser_findings(dom: &dyn Dom, config: &BrowserConfig) -> Collec
             design_system.as_ref(),
             &mut design_seen,
         ));
+        // Text and raster measurements score what a visitor sees, so an
+        // element that is not painted at capture (a collapsed submenu, a
+        // scroller cell past its edge, a crossfade layer) has nothing for
+        // them to score.
+        super::painted::retain_painted(dom, el, &mut findings);
         // Rule-pack element rules run last, so the built-in findings for this
         // element keep their order and their position in the group.
         if let Some(pack) = config.rule_pack {
@@ -1514,6 +1663,45 @@ mod tests {
     use crate::browser::fake_dom::FakeDom;
     use serde_json::json;
 
+    /// The style-text stripe scans run in the browser too; a left or right
+    /// stripe reports only on an element rounded away from it.
+    #[test]
+    fn style_text_side_stripes_need_a_rounded_host() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        for (selector, radius) in [
+            (".sq", "0px"),
+            (".rd", "12px"),
+            (".sh", "0px"),
+            (".rs", "12px"),
+        ] {
+            let el = d.add(Some(body), "div");
+            d.add_selector(el, selector);
+            d.set_rect(el, 0.0, 0.0, 300.0, 120.0);
+            d.set_styles(el, &[("borderRadius", radius)]);
+        }
+        d.html_for_patterns = "<html><head><style>\
+.sq::before{position:absolute;width:4px;left:0;top:0;bottom:0;background:#3b82f6}\
+.rd::before{position:absolute;width:5px;left:0;top:0;bottom:0;background:#3b82f6}\
+.sh{box-shadow:inset 6px 0 0 #6366f1}\
+.rs{box-shadow:inset 7px 0 0 #6366f1}\
+</style></head><body><div class=\"sq\"></div><div class=\"rd\"></div><div class=\"sh\"></div><div class=\"rs\"></div></body></html>"
+            .to_string();
+        let mut details: Vec<String> = scoped_html_pattern_findings(&d)
+            .into_iter()
+            .filter(|f| f.type_ == "side-tab")
+            .map(|f| f.detail)
+            .collect();
+        details.sort();
+        assert_eq!(
+            details,
+            vec![
+                ".rd::before — absolute 5px pseudo-element stripe (left: 0)".to_string(),
+                ".rs — inset box-shadow 7px stripe (left)".to_string(),
+            ]
+        );
+    }
+
     fn ds_config(v: serde_json::Value) -> BrowserConfig {
         BrowserConfig {
             design_system: Some(v),
@@ -1615,6 +1803,106 @@ mod tests {
     }
 
     #[test]
+    fn text_rules_skip_what_is_not_painted() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        d.set_rect(html, 0.0, 0.0, 1280.0, 2000.0);
+        d.set_rect(body, 0.0, 0.0, 1280.0, 2000.0);
+        d.el_mut(html).scroll_width = 1280.0;
+        let label = |d: &mut FakeDom, parent: ElId, y: f64| {
+            let s = d.add(Some(parent), "span");
+            d.add_text(s, "Meta 12:00");
+            d.set_style(s, "fontSize", "9px");
+            d.set_rect(s, 40.0, y, 60.0, 12.0);
+            d.el_mut(s).check_visibility = Some(true);
+            s
+        };
+        let visible = label(&mut d, body, 100.0);
+        // The same label inside a submenu held at max-height: 0.
+        let submenu = d.add(Some(body), "ul");
+        d.set_styles(submenu, &[("overflowX", "hidden"), ("overflowY", "hidden")]);
+        d.set_rect(submenu, 0.0, 300.0, 390.0, 0.0);
+        let collapsed = label(&mut d, submenu, 300.0);
+
+        let out = collect_browser_findings(&d, &BrowserConfig::default());
+        let undersized_on = |el: ElId| {
+            out.groups
+                .iter()
+                .any(|g| g.el == el && g.findings.iter().any(|f| f.type_ == "undersized-ui-text"))
+        };
+        assert!(undersized_on(visible), "{:?}", out.groups);
+        assert!(!undersized_on(collapsed), "{:?}", out.groups);
+    }
+
+    #[test]
+    fn an_unpainted_link_does_not_spend_the_pages_contrast_report() {
+        let mut d = FakeDom::new();
+        let (html, body) = d.with_page();
+        for e in [html, body] {
+            d.set_styles(
+                e,
+                &[
+                    ("backgroundColor", "rgb(255, 255, 255)"),
+                    ("backgroundImage", "none"),
+                    ("opacity", "1"),
+                    ("display", "block"),
+                    ("visibility", "visible"),
+                ],
+            );
+            d.set_rect(e, 0.0, 0.0, 1280.0, 2000.0);
+        }
+        d.el_mut(html).scroll_width = 1280.0;
+        let link = |d: &mut FakeDom, parent: ElId, y: f64| {
+            let a = d.add(Some(parent), "a");
+            d.add_text(a, "Section");
+            d.set_rect(a, 40.0, y, 60.0, 20.0);
+            d.set_styles(
+                a,
+                &[
+                    ("opacity", "1"),
+                    ("display", "inline"),
+                    ("visibility", "visible"),
+                    ("backgroundImage", "none"),
+                    ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                    ("color", "rgb(170, 170, 170)"),
+                    ("fontSize", "14px"),
+                    ("fontWeight", "400"),
+                    ("webkitBackgroundClip", "border-box"),
+                ],
+            );
+            d.el_mut(a).check_visibility = Some(true);
+            a
+        };
+        // First in document order: the same colour in a submenu held at
+        // max-height: 0. It must not claim the page's one report of the pair.
+        let submenu = d.add(Some(body), "ul");
+        d.set_styles(
+            submenu,
+            &[
+                ("overflowX", "hidden"),
+                ("overflowY", "hidden"),
+                ("opacity", "1"),
+                ("display", "block"),
+                ("visibility", "visible"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("backgroundImage", "none"),
+            ],
+        );
+        d.set_rect(submenu, 0.0, 300.0, 390.0, 0.0);
+        let collapsed = link(&mut d, submenu, 300.0);
+        let shown = link(&mut d, body, 100.0);
+
+        let out = collect_browser_findings(&d, &BrowserConfig::default());
+        let contrast_on = |el: ElId| {
+            out.groups
+                .iter()
+                .any(|g| g.el == el && g.findings.iter().any(|f| f.type_ == "low-contrast"))
+        };
+        assert!(!contrast_on(collapsed), "{:?}", out.groups);
+        assert!(contrast_on(shown), "{:?}", out.groups);
+    }
+
+    #[test]
     fn google_font_sources() {
         let mut d = FakeDom::new();
         let (html, _body) = d.with_page();
@@ -1677,6 +1965,87 @@ mod tests {
         assert!(is_likely_hashed_class("a1b2c3"));
         assert!(!is_likely_hashed_class("hero"));
         assert!(!is_likely_hashed_class("abcdefg"));
+    }
+
+    /// A page whose stylesheet declares a stock violet accent on `.accent`,
+    /// with one paragraph wearing that class inside a wrapper the test can
+    /// switch off. Returns `(dom, wrapper, paragraph)`.
+    fn stock_violet_page() -> (FakeDom, ElId, ElId) {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.html_for_patterns =
+            "<style>.accent { font-weight: 600; color: #8b5cf6; }</style>\
+             <p class=\"accent\">Start free</p>"
+                .to_string();
+        let wrapper = d.add(Some(body), "div");
+        d.set_rect(wrapper, 0.0, 0.0, 200.0, 24.0);
+        let p = d.add(Some(wrapper), "p");
+        d.set_attr(p, "class", "accent");
+        d.add_selector(p, ".accent");
+        d.add_text(p, "Start free");
+        d.set_rect(p, 0.0, 0.0, 200.0, 24.0);
+        d.set_style(p, "color", "rgb(17, 17, 17)");
+        (d, wrapper, p)
+    }
+
+    fn purple_accent_reported(d: &FakeDom) -> bool {
+        scoped_html_pattern_findings(d)
+            .iter()
+            .any(|f| f.type_ == "ai-color-palette" && f.detail == PURPLE_ACCENT_SNIPPET)
+    }
+
+    #[test]
+    fn purple_accent_needs_an_element_that_paints_it() {
+        // Declared in the stylesheet, worn by nothing: a dead token.
+        let (mut d, _wrapper, p) = stock_violet_page();
+        assert!(!purple_accent_reported(&d));
+
+        // The same page once the paragraph actually wears the hex.
+        d.set_style(p, "color", "rgb(139, 92, 246)");
+        assert!(purple_accent_reported(&d));
+
+        // A background or a gradient stop counts as paint too.
+        d.set_style(p, "color", "rgb(17, 17, 17)");
+        d.set_style(p, "backgroundColor", "rgb(124, 58, 237)");
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "backgroundColor", "rgba(0, 0, 0, 0)");
+        d.set_style(
+            p,
+            "backgroundImage",
+            "linear-gradient(90deg, rgb(102, 126, 234), rgb(255, 176, 5))",
+        );
+        assert!(purple_accent_reported(&d));
+
+        // So does a border, an outline or a shadow in it.
+        d.set_style(p, "backgroundImage", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("borderLeftWidth", "2px"), ("borderLeftStyle", "solid"), ("borderLeftColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "borderLeftStyle", "none");
+        assert!(!purple_accent_reported(&d));
+        d.set_styles(p, &[("outlineWidth", "2px"), ("outlineStyle", "solid"), ("outlineColor", "rgb(139, 92, 246)")]);
+        assert!(purple_accent_reported(&d));
+        d.set_style(p, "outlineStyle", "none");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 0px 0px 0px");
+        assert!(!purple_accent_reported(&d), "a shadow that draws nothing");
+        d.set_style(p, "boxShadow", "rgba(139, 92, 246, 0.5) 0px 4px 12px 0px");
+        assert!(purple_accent_reported(&d));
+    }
+
+    #[test]
+    fn purple_accent_uses_the_rules_own_visibility_model() {
+        let (mut d, reveal, p) = stock_violet_page();
+        d.set_style(p, "color", "rgb(139, 92, 246)");
+
+        // A scroll-reveal wrapper is captured at opacity 0 and its content is
+        // exactly what the visitor sees, so the accent still counts.
+        d.set_style(reveal, "opacity", "0");
+        assert!(purple_accent_reported(&d));
+
+        // `visibility: hidden` hides it for good.
+        d.set_style(reveal, "opacity", "1");
+        d.set_style(reveal, "visibility", "hidden");
+        assert!(!purple_accent_reported(&d));
     }
 
     /// REN-405. Northwind's Slate system: near-black ground, light ink, one
@@ -1906,10 +2275,12 @@ mod tests {
                 ],
             );
             d.el_mut(label).check_visibility = Some(true);
+            d.set_rect(label, 24.0, 24.0, 60.0, 20.0);
             let second = d.add(Some(panel), "span");
             d.add_text(second, "Status");
             d.set_styles(second, &[("color", second_color), ("fontFamily", "Inter, sans-serif")]);
             d.el_mut(second).check_visibility = Some(true);
+            d.set_rect(second, 100.0, 24.0, 60.0, 20.0);
             d
         };
         let types = |out: &CollectResult| -> Vec<String> {
@@ -2033,6 +2404,8 @@ mod tests {
             d.set_style(cyan, "color", "rgb(34, 238, 238)");
             d.set_style(cyan, "backgroundColor", "rgba(0, 0, 0, 0)");
             d.el_mut(cyan).check_visibility = Some(true);
+            d.set_rect(demo, 0.0, 0.0, 600.0, 60.0);
+            d.set_rect(cyan, 24.0, 20.0, 160.0, 20.0);
 
             // Somewhere else on the page, and waived by nobody.
             let card = d.add(Some(body), "div");
@@ -2042,6 +2415,8 @@ mod tests {
             d.set_style(purple, "color", "rgb(180, 60, 245)");
             d.set_style(purple, "backgroundColor", "rgba(0, 0, 0, 0)");
             d.el_mut(purple).check_visibility = Some(true);
+            d.set_rect(card, 0.0, 100.0, 600.0, 60.0);
+            d.set_rect(purple, 24.0, 120.0, 160.0, 20.0);
             d
         };
         let charged = |d: &FakeDom| -> Vec<String> {

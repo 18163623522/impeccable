@@ -11,6 +11,7 @@ use super::dom::{
 };
 use super::element_checks::parse_rgb_or_any;
 use crate::color::{contrast_ratio, parse_gradient_colors, parse_rgb, Rgba};
+use impeccable_foundation::css::measures::{data_svg_intrinsic_size, ICON_MAX_PX};
 use crate::constants::{SAFE_TAGS, WCAG_LARGE_BOLD_TEXT_PX, WCAG_LARGE_TEXT_PX};
 use crate::js::{self, math_max, math_min, math_round, number_to_string, parse_float, parse_int, to_fixed, WS};
 use crate::js_ext_a::{num_truthy, split_ws};
@@ -203,6 +204,604 @@ pub fn collect_visual_contrast_reasons(dom: &dyn Dom, el: ElId) -> Vec<String> {
     reasons
 }
 
+/// Replaced boxes that paint a picture rather than a colour.
+const MEDIA_TAGS: &[&str] = &["img", "picture", "video", "canvas"];
+
+/// Bounds on [`layer_under_text`]. The test runs only for an element the rule
+/// failed whose colour pair the page has not reported yet, so a page pays for
+/// a handful of them, and the node budget caps the most expensive one.
+const LAYER_MAX_LEVELS: usize = 32;
+const LAYER_MAX_SIBLINGS: usize = 32;
+const LAYER_MAX_DEPTH: usize = 6;
+const LAYER_MAX_CHILDREN: usize = 64;
+const LAYER_MAX_NODES: usize = 1024;
+
+/// The largest tile, per axis, a raster background can be drawn at and still
+/// count as a texture over its element's own colour.
+const TEXTURE_MAX_TILE_PX: f64 = 256.0;
+
+/// How far apart, summed over the three channels, a surface the background
+/// walk never read and the one it resolved may be and still be one surface.
+const SAME_SURFACE_DISTANCE: f64 = 24.0;
+
+/// In-flow boxes paint above negative `z-index` and below positioned boxes,
+/// so they sit between the two on this coarse scale.
+const FLOW_LAYER: f64 = -0.5;
+
+/// A background colour nothing behind it shows through.
+fn paints_opaque_color(dom: &dyn Dom, node: ElId) -> Option<Rgba> {
+    parse_rgb_or_any(&dom.style(node, "backgroundColor")).filter(|c| c.alpha_or_one() >= 0.95)
+}
+
+/// The size a box's single background image is drawn at, where the computed
+/// style says it: explicit pixel sizes, or the intrinsic size of an inline SVG
+/// data URI where the size is `auto`. A remote file drawn at `auto`, `cover`,
+/// `contain` or a percentage has no size this can read.
+fn drawn_image_size(dom: &dyn Dom, node: ElId) -> Option<(f64, f64)> {
+    let size = js::to_lower_case(&dom.style(node, "backgroundSize"));
+    let first = size.split(',').next().unwrap_or("");
+    let tokens: Vec<&str> = first.split_ascii_whitespace().collect();
+    let intrinsic = || data_svg_intrinsic_size(&dom.style(node, "backgroundImage"));
+    let px = |t: &str| {
+        t.ends_with("px")
+            .then(|| parse_float(t))
+            .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    match tokens.as_slice() {
+        [] | ["auto"] | ["auto", "auto"] => intrinsic(),
+        ["auto", h] => {
+            let h = px(h)?;
+            let (iw, ih) = intrinsic()?;
+            Some((h * iw / ih, h))
+        }
+        [w] | [w, "auto"] => {
+            let w = px(w)?;
+            let (iw, ih) = intrinsic()?;
+            Some((w, w * ih / iw))
+        }
+        [w, h] => Some((px(w)?, px(h)?)),
+        _ => None,
+    }
+}
+
+/// Whether an element's raster background is a small repeating tile: a
+/// noise, grain or dot texture laid over the element's own colour. The
+/// tile's pixels are not in the computed style, so "faint" cannot be
+/// measured; what can be measured is the shape a photograph is almost never
+/// drawn in. `no-repeat`, a size this cannot read (a remote file at `auto`,
+/// `cover`, `contain`, a percentage), or a tile larger than
+/// [`TEXTURE_MAX_TILE_PX`] is a picture.
+fn raster_tiles_as_texture(dom: &dyn Dom, node: ElId) -> bool {
+    if js::to_lower_case(&dom.style(node, "background")).contains("no-repeat") {
+        return false;
+    }
+    drawn_image_size(dom, node)
+        .map_or(false, |(w, h)| w <= TEXTURE_MAX_TILE_PX && h <= TEXTURE_MAX_TILE_PX)
+}
+
+/// Whether a box's background image is an icon rather than a picture: one
+/// `no-repeat` image at most [`ICON_MAX_PX`] on both axes, at a size the
+/// computed style states.
+fn background_is_icon(dom: &dyn Dom, node: ElId) -> bool {
+    let image = dom.style(node, "backgroundImage");
+    if GRADIENT_RE.is_match(&image) || js::to_lower_case(&image).matches("url(").count() != 1 {
+        return false;
+    }
+    if !js::to_lower_case(&dom.style(node, "background")).contains("no-repeat") {
+        return false;
+    }
+    drawn_image_size(dom, node).map_or(false, |(w, h)| w <= ICON_MAX_PX && h <= ICON_MAX_PX)
+}
+
+/// The boxes whose background image is an icon beside this element's text:
+/// the element itself (an external-link mark) and its nearest `li` (an arrow
+/// bullet). The background walk and the layer test both read those images
+/// as absent.
+pub fn icon_hosts(dom: &dyn Dom, el: ElId) -> Vec<ElId> {
+    const MAX_ANCESTORS: usize = 12;
+    let mut hosts = Vec::new();
+    if background_is_icon(dom, el) {
+        hosts.push(el);
+    }
+    let mut cur = dom.parent(el);
+    for _ in 0..MAX_ANCESTORS {
+        let Some(c) = cur else { break };
+        if tag_lower(dom, c) == "li" {
+            if background_is_icon(dom, c) {
+                hosts.push(c);
+            }
+            break;
+        }
+        cur = dom.parent(c);
+    }
+    hosts
+}
+
+/// What one box paints, in the terms the layer test needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Paint {
+    /// A raster image, or a replaced media element.
+    Picture,
+    /// Its own opaque background colour.
+    Fill(Rgba),
+    /// An opaque colour drawn by its `::before` or `::after`.
+    PseudoFill(Rgba),
+    /// Paint the background walk cannot turn into a colour: a translucent or
+    /// gradient pseudo-element over the box, a gradient drawn larger than it.
+    Unmodelled,
+}
+
+/// A `::before` or `::after` stretched over at least the text and painting
+/// something. A small pseudo (an underline, a bullet, a badge dot) is not a
+/// surface, and neither is one laid out inline.
+fn pseudo_paint(dom: &dyn Dom, node: ElId, text: &Rect) -> Option<Paint> {
+    for which in ["::before", "::after"] {
+        let get = |prop: &str| dom.pseudo_style(node, which, prop).unwrap_or_default();
+        let content = get("content");
+        let content = js::trim(&content);
+        if content.is_empty() || content == "none" || content == "normal" {
+            continue;
+        }
+        if get("display") == "none" || get("visibility") == "hidden" {
+            continue;
+        }
+        let opacity = get("opacity");
+        if !js::trim(&opacity).is_empty() && parse_float(&opacity) < 0.1 {
+            continue;
+        }
+        let position = get("position");
+        if position != "absolute" && position != "fixed" {
+            continue;
+        }
+        let (w, h) = (parse_float(&get("width")), parse_float(&get("height")));
+        if !(w >= text.width - 4.0 && h >= text.height - 4.0) {
+            continue;
+        }
+        let image = get("backgroundImage");
+        if URL_RE.is_match(&image) {
+            return Some(Paint::Picture);
+        }
+        if GRADIENT_RE.is_match(&image) {
+            return Some(Paint::Unmodelled);
+        }
+        if let Some(c) = parse_rgb_or_any(&get("backgroundColor")) {
+            if c.alpha_or_one() >= 0.9 {
+                return Some(Paint::PseudoFill(c));
+            }
+            if c.alpha_or_one() > 0.1 {
+                return Some(Paint::Unmodelled);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a gradient background is drawn larger than its box, so the part
+/// under the text is a slice of the stops and not all of them: the animated
+/// button that sweeps a `200% 200%` gradient across itself shows one colour
+/// at a time, and scoring every stop names colours nobody sees there.
+fn gradient_drawn_larger_than_box(dom: &dyn Dom, node: ElId) -> bool {
+    if !GRADIENT_RE.is_match(&dom.style(node, "backgroundImage")) {
+        return false;
+    }
+    let rect = dom.rect(node);
+    let largest = math_max(rect.width, rect.height);
+    js::to_lower_case(&dom.style(node, "backgroundSize"))
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .any(|t| {
+            (t.ends_with('%') && parse_float(t) > 100.5)
+                || (t.ends_with("px") && parse_float(t) > largest + 1.0)
+        })
+}
+
+/// What a box paints under text above it, pseudo-elements first because they
+/// paint over the box's own background. `body` and `html` paint the document
+/// itself, and their images are not a layer over it. `icon_host` says this
+/// box's background image is an icon beside the text.
+fn own_paint(
+    dom: &dyn Dom,
+    node: ElId,
+    text: &Rect,
+    document_surface: bool,
+    icon_host: bool,
+) -> Option<Paint> {
+    if let Some(paint) = pseudo_paint(dom, node, text) {
+        return Some(paint);
+    }
+    let fill = paints_opaque_color(dom, node);
+    if !document_surface
+        && URL_RE.is_match(&dom.style(node, "backgroundImage"))
+        && !(icon_host && background_is_icon(dom, node))
+        && !(fill.is_some() && raster_tiles_as_texture(dom, node))
+    {
+        return Some(Paint::Picture);
+    }
+    if !document_surface && gradient_drawn_larger_than_box(dom, node) {
+        return Some(Paint::Unmodelled);
+    }
+    fill.map(Paint::Fill)
+}
+
+/// Whether `outer` covers `inner`, give or take a pixel of rounding.
+fn rect_covers(outer: &Rect, inner: &Rect) -> bool {
+    const SLACK: f64 = 1.0;
+    outer.width > 0.0
+        && outer.height > 0.0
+        && inner.width > 0.0
+        && inner.height > 0.0
+        && outer.left <= inner.left + SLACK
+        && outer.top <= inner.top + SLACK
+        && outer.left + outer.width >= inner.left + inner.width - SLACK
+        && outer.top + outer.height >= inner.top + inner.height - SLACK
+}
+
+/// A box's place in paint order, coarsely: `context` is the `z-index` of a
+/// stacking context it opens (an opacity below 1 or a transform opens one at
+/// 0), `positioned` whether it paints with the positioned boxes.
+#[derive(Debug, Clone, Copy)]
+struct BoxLayer {
+    context: Option<f64>,
+    positioned: bool,
+}
+
+fn box_layer(dom: &dyn Dom, node: ElId) -> BoxLayer {
+    let position = dom.style(node, "position");
+    let position = js::trim(&position);
+    let positioned = !position.is_empty() && position != "static";
+    let z_applies = positioned
+        || dom.parent(node).map_or(false, |p| {
+            let display = dom.style(p, "display");
+            display.contains("flex") || display.contains("grid")
+        });
+    let z_raw = dom.style(node, "zIndex");
+    let z_raw = js::trim(&z_raw);
+    let z = (z_applies && !z_raw.is_empty() && z_raw != "auto")
+        .then(|| parse_float(z_raw))
+        .filter(|z| z.is_finite());
+    let context = z.or_else(|| {
+        let opacity = dom.style(node, "opacity");
+        let translucent = !js::trim(&opacity).is_empty() && parse_float(&opacity) < 1.0;
+        let transform = dom.style(node, "transform");
+        let transform = js::trim(&transform);
+        let transformed = !transform.is_empty() && transform != "none";
+        (translucent || transformed).then_some(0.0)
+    });
+    BoxLayer {
+        context,
+        positioned,
+    }
+}
+
+/// The layer the text paints in, seen one ancestor further out: the
+/// outermost stacking context wins, and a positioned box lifts in-flow text
+/// to the positioned layer.
+fn outer_layer(inner: f64, b: BoxLayer) -> f64 {
+    match b.context {
+        Some(z) => z,
+        None if b.positioned && inner == FLOW_LAYER => 0.0,
+        None => inner,
+    }
+}
+
+/// The layer a descendant of a sibling paints in, one level further in. Once
+/// a stacking context is met, everything inside it paints at its `z-index`.
+fn inner_layer(outer: (f64, bool), b: BoxLayer) -> (f64, bool) {
+    let (layer, locked) = outer;
+    if locked {
+        return outer;
+    }
+    match b.context {
+        Some(z) => (z, true),
+        None if b.positioned && layer == FLOW_LAYER => (0.0, false),
+        None => outer,
+    }
+}
+
+/// Whether a box at `layer` paints beneath text at `text_layer`.
+///
+/// A later sibling has to prove it: only a strictly lower layer puts it under
+/// the text, the `z-index: -1` photo after the content or the section laid
+/// under a `z-index: 1` header. An earlier sibling is beneath unless it opens
+/// a positive `z-index` above the text, which is what a modal or a popover
+/// does. The strict order would put an earlier `position: relative;
+/// z-index: 0` media box over in-flow text, and on real pages that text is
+/// visible over the picture (a component's own styles the snapshot cannot
+/// express), so an earlier box at layer 0 or below counts as underneath.
+fn paints_beneath(layer: f64, text_layer: f64, earlier: bool) -> bool {
+    if earlier {
+        layer <= text_layer.max(0.0)
+    } else {
+        layer < text_layer
+    }
+}
+
+/// Whether a box lets its children paint outside its own rect. A
+/// `display: contents` element has no box, so its `overflow` clips nothing.
+fn overflow_visible(dom: &dyn Dom, node: ElId) -> bool {
+    if dom.style(node, "display") == "contents" {
+        return true;
+    }
+    let overflow = dom.style(node, "overflow");
+    let overflow = js::trim(&overflow);
+    overflow.is_empty() || overflow == "visible"
+}
+
+/// Whether a child is worth looking inside for paint under the text: its own
+/// rect covers the text, or it has no box of its own (zero size, or
+/// `display: contents`) and so says nothing about where its children lie.
+/// A slide parked beside the viewport, or a card elsewhere on the page, is
+/// skipped without spending the budget.
+fn may_reach_text(dom: &dyn Dom, child: ElId, text: &Rect) -> bool {
+    let rect = dom.rect(child);
+    rect_covers(&rect, text)
+        || rect.width <= 0.0
+        || rect.height <= 0.0
+        || dom.style(child, "display") == "contents"
+}
+
+/// The paint a sibling box, or something inside it, puts under the text,
+/// looked at the way a reader looks down through it: its children topmost
+/// first, then its own background. Only a box that covers the text rect can
+/// decide, and only where it paints beneath the text. A box that does not
+/// cover it is still looked inside where nothing clips its children: a
+/// zero-height wrapper around an absolutely positioned photo, a
+/// `display: contents` section, a carousel track narrower than its slides.
+/// Below the sibling itself, only children that may reach the text are
+/// visited ([`may_reach_text`]).
+#[allow(clippy::too_many_arguments)]
+fn layer_in_box(
+    dom: &dyn Dom,
+    node: ElId,
+    text: &Rect,
+    text_layer: f64,
+    earlier: bool,
+    depth: usize,
+    outer: (f64, bool),
+    budget: &mut usize,
+) -> Option<Paint> {
+    if *budget == 0 {
+        return None;
+    }
+    *budget -= 1;
+    if dom.style(node, "visibility") == "hidden" || parse_float(&dom.style(node, "opacity")) < 0.05
+    {
+        return None;
+    }
+    let layer = inner_layer(outer, box_layer(dom, node));
+    let beneath = paints_beneath(layer.0, text_layer, earlier);
+    let covers = rect_covers(&dom.rect(node), text);
+    if covers && beneath && MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+        return Some(Paint::Picture);
+    }
+    if depth < LAYER_MAX_DEPTH && (covers || overflow_visible(dom, node)) {
+        let children = dom.children(node);
+        let reaching = children
+            .iter()
+            .rev()
+            .filter(|&&child| may_reach_text(dom, child, text))
+            .take(LAYER_MAX_CHILDREN);
+        for &child in reaching {
+            if let Some(paint) =
+                layer_in_box(dom, child, text, text_layer, earlier, depth + 1, layer, budget)
+            {
+                return Some(paint);
+            }
+        }
+    }
+    if covers && beneath {
+        own_paint(dom, node, text, false, false)
+    } else {
+        None
+    }
+}
+
+/// What paints under a run of text, as far as layout can say, next to the
+/// answer the background walk already gave.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LayerUnder {
+    /// An image, a video, a canvas or a raster background under the whole run.
+    Picture,
+    /// An opaque surface that is nobody's ancestor fill: a sibling panel, a
+    /// section a later box lays beneath the text, a pseudo-element's colour.
+    /// The walk reads ancestor fills only, so it never saw this one.
+    Detached(Rgba),
+    /// Paint under the text the walk cannot turn into a colour.
+    Unmodelled,
+    /// The first opaque surface under the text is an ancestor's own fill,
+    /// which is the surface the walk answers with.
+    Ancestor,
+    /// Nothing decided it.
+    Undecided,
+}
+
+impl From<Paint> for LayerUnder {
+    fn from(paint: Paint) -> Self {
+        match paint {
+            Paint::Picture => LayerUnder::Picture,
+            Paint::Fill(c) | Paint::PseudoFill(c) => LayerUnder::Detached(c),
+            Paint::Unmodelled => LayerUnder::Unmodelled,
+        }
+    }
+}
+
+/// The siblings of `node` that may paint beneath the text, topmost first:
+/// the higher layer first, and at one layer the later box first.
+fn sibling_layer(
+    dom: &dyn Dom,
+    parent: ElId,
+    node: ElId,
+    text: &Rect,
+    text_layer: f64,
+    budget: &mut usize,
+) -> Option<LayerUnder> {
+    let siblings = dom.children(parent);
+    let index = siblings.iter().position(|&s| s == node)?;
+    let earlier = (0..index).rev().take(LAYER_MAX_SIBLINGS).map(|i| (i, true));
+    let later = (index + 1..siblings.len())
+        .take(LAYER_MAX_SIBLINGS)
+        .map(|i| (i, false));
+    let mut candidates: Vec<(f64, usize, bool)> = earlier
+        .chain(later)
+        .map(|(i, is_earlier)| {
+            let layer = inner_layer((FLOW_LAYER, false), box_layer(dom, siblings[i])).0;
+            (layer, i, is_earlier)
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.1.cmp(&a.1))
+    });
+    for (_, i, is_earlier) in candidates {
+        let outer = (FLOW_LAYER, false);
+        if let Some(paint) =
+            layer_in_box(dom, siblings[i], text, text_layer, is_earlier, 0, outer, budget)
+        {
+            return Some(paint.into());
+        }
+    }
+    None
+}
+
+/// The hit-test answer, for a page the geometric climb could not decide or
+/// that ends at an opaque `body` or `html`, which is the surface the walk
+/// falls back to and not proof that nothing paints above it. Only points in
+/// the viewport can be asked, so this runs where a live browser answers and
+/// is silent below the fold and in a replayed capture that did not record the
+/// point. Each point reads the stack under the text down to the first opaque
+/// box. A picture needs every answered point, the same whole-run test the
+/// climb makes, so a run half over a photo and half over the page is scored
+/// on the page. `None` when no point was answered.
+fn hit_test_layer(dom: &dyn Dom, el: ElId, text: &Rect) -> Option<LayerUnder> {
+    let vw = dom.inner_width();
+    let vh = dom.inner_height();
+    let y = text.top + text.height / 2.0;
+    let xs = [
+        text.left + text.width / 2.0,
+        text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.25)),
+        text.left + math_min(text.width - 1.0, math_max(1.0, text.width * 0.75)),
+    ];
+    let mut answers = Vec::new();
+    for x in xs {
+        if x < 0.0 || y < 0.0 || x > vw || y > vh {
+            continue;
+        }
+        let stack = dom.elements_from_point(x, y);
+        let Some(self_index) = stack
+            .iter()
+            .position(|&n| n == el || dom.contains(el, n) || dom.contains(n, el))
+        else {
+            continue;
+        };
+        let mut answer = LayerUnder::Undecided;
+        for &node in &stack[self_index + 1..] {
+            if dom.contains(node, el) {
+                if paints_opaque_color(dom, node).is_some() {
+                    answer = LayerUnder::Ancestor;
+                    break;
+                }
+                continue;
+            }
+            if MEDIA_TAGS.contains(&tag_lower(dom, node).as_str()) {
+                answer = LayerUnder::Picture;
+                break;
+            }
+            if let Some(paint) = own_paint(dom, node, text, false, false) {
+                answer = paint.into();
+                break;
+            }
+        }
+        answers.push(answer);
+    }
+    if answers.is_empty() {
+        return None;
+    }
+    if answers.iter().all(|a| *a == LayerUnder::Picture) {
+        return Some(LayerUnder::Picture);
+    }
+    answers
+        .iter()
+        .copied()
+        .find(|a| matches!(a, LayerUnder::Detached(_) | LayerUnder::Unmodelled))
+        .or_else(|| {
+            answers
+                .contains(&LayerUnder::Ancestor)
+                .then_some(LayerUnder::Ancestor)
+        })
+}
+
+/// What paints under this element's text, which says whether the surface
+/// `resolve_background_info` returned is the one a reader sees.
+///
+/// The background walk reads the ancestor chain and answers with the first
+/// opaque colour on it, so it is blind in several directions: an ancestor that
+/// paints a raster image or a pseudo-element over its own colour, a positioned
+/// sibling (hero photo, video, canvas, a dark section) that is nobody's
+/// ancestor, and a gradient drawn larger than its box. Each answers with a
+/// fill that is not under the text, which is how white text over a
+/// photograph is reported as `1.1:1 on #f7f8f9`.
+///
+/// The test is geometric, so it works at any scroll position without a hit
+/// test. It climbs from the element and at each level asks two things in
+/// paint order: the box's own paint (pseudo-elements, then its background),
+/// then its siblings that paint beneath the text, earlier ones at the text's
+/// layer or below and later ones strictly below it (a `z-index: -1` photo
+/// after the content, or a section laid under a `z-index: 1` header). A
+/// sibling, or a box a few levels inside it, that covers the text rect decides
+/// it. The first opaque ancestor fill ends the climb with
+/// [`LayerUnder::Ancestor`]: the card on the hero photo is what the link on it
+/// is read against. A solid colour carrying a small tiled texture of a size
+/// the style states is such a surface, and an icon on the text's own element
+/// or its `li` is not a picture at all. Where the climb reaches an opaque
+/// `body` or `html`, or a transparent document, the hit-test stack answers
+/// instead, and a page nothing decides is [`LayerUnder::Undecided`].
+///
+/// A gradient under the text is not a picture. The walk scores it against
+/// its stops.
+pub fn layer_under_text(dom: &dyn Dom, el: ElId) -> LayerUnder {
+    let text = dom.direct_text_rect(el).unwrap_or_else(|| dom.rect(el));
+    let hosts = icon_hosts(dom, el);
+    let mut budget = LAYER_MAX_NODES;
+    let mut text_layer = FLOW_LAYER;
+    let mut node = el;
+    for _ in 0..LAYER_MAX_LEVELS {
+        let tag = tag_lower(dom, node);
+        let document_surface = tag == "body" || tag == "html";
+        text_layer = outer_layer(text_layer, box_layer(dom, node));
+        match own_paint(dom, node, &text, document_surface, hosts.contains(&node)) {
+            Some(Paint::Fill(_)) if document_surface => {
+                return hit_test_layer(dom, el, &text).unwrap_or(LayerUnder::Ancestor);
+            }
+            Some(Paint::Fill(_)) => return LayerUnder::Ancestor,
+            Some(paint) => return paint.into(),
+            None => {}
+        }
+        let Some(parent) = dom.parent(node) else {
+            break;
+        };
+        if let Some(layer) = sibling_layer(dom, parent, node, &text, text_layer, &mut budget) {
+            return layer;
+        }
+        node = parent;
+    }
+    hit_test_layer(dom, el, &text).unwrap_or(LayerUnder::Undecided)
+}
+
+/// Whether the surface the background walk resolved is the one under this
+/// element's text, so a contrast verdict against it is about something a
+/// reader sees. A picture, or paint the walk cannot model, is not; a surface
+/// the walk never read is only where its colour is the one the walk named.
+pub fn resolved_surface_is_under_text(dom: &dyn Dom, el: ElId, resolved: Option<Rgba>) -> bool {
+    match layer_under_text(dom, el) {
+        LayerUnder::Picture | LayerUnder::Unmodelled => false,
+        LayerUnder::Detached(surface) => resolved.map_or(false, |bg| {
+            (bg.r - surface.r).abs() + (bg.g - surface.g).abs() + (bg.b - surface.b).abs()
+                <= SAME_SURFACE_DISTANCE
+        }),
+        LayerUnder::Ancestor | LayerUnder::Undecided => true,
+    }
+}
+
 /// JS: index.mjs#collectVisualContrastCandidates(options)
 pub fn collect_visual_contrast_candidates(dom: &dyn Dom, options: &Value) -> Vec<Value> {
     let max_candidates = match options.get("maxCandidates") {
@@ -338,6 +937,45 @@ pub fn blend_rgba(fg: Option<&Rgba>, bg: Option<&Rgba>) -> Option<Rgba> {
         b: clamp_byte(fg.b * alpha + bg.b * (1.0 - alpha)),
         a: Some(1.0),
     })
+}
+
+/// A background-color this translucent paints nothing worth reading; the
+/// walk keeps going for what is under it (`sampleCssBackground`'s own cut-off).
+const MIN_PAINTED_ALPHA: f64 = 0.05;
+/// How far two opaque stops of one gradient may sit apart before the answer
+/// depends on where in the box the text is.
+const GRADIENT_STOP_SPREAD: f64 = 2.0;
+
+/// What the analytic pass can say about a gradient it cannot position.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradientVerdict {
+    /// Every stop agrees: the worst of them stands for the surface.
+    Color(Rgba),
+    /// The stops disagree, so which one is behind the glyphs decides the
+    /// answer and nothing here knows which. Rendered pixels have to say.
+    Unresolved,
+}
+
+/// JS: the gradient branch of `sampleCssBackground`, made answerable. A
+/// translucent stop (`rgba(171, 171, 171, 0)` is how a browser serializes the
+/// transparent end of a glow, and `from-primary/10` is a wash, not a slab)
+/// composites differently at every point of the box, and two opaque stops far
+/// apart pick out different verdicts at each end. `None` when the value
+/// carries no stop at all.
+pub fn analytic_gradient_verdict(text_color: &Rgba, colors: &[Rgba]) -> Option<GradientVerdict> {
+    if colors.is_empty() {
+        return None;
+    }
+    if colors.iter().any(|c| c.a.unwrap_or(1.0) < 0.95) {
+        return Some(GradientVerdict::Unresolved);
+    }
+    let ratios: Vec<f64> = colors.iter().map(|c| contrast_ratio(text_color, c)).collect();
+    let lo = ratios.iter().copied().fold(f64::INFINITY, math_min);
+    let hi = ratios.iter().copied().fold(0.0, math_max);
+    if lo > 0.0 && hi >= lo * GRADIENT_STOP_SPREAD {
+        return Some(GradientVerdict::Unresolved);
+    }
+    pick_worst_contrast_color(text_color, colors).map(GradientVerdict::Color)
 }
 
 /// JS: index.mjs#pickWorstContrastColor(textColor, colors)
@@ -675,6 +1313,12 @@ pub fn stack_nodes(dom: &dyn Dom, el: ElId, x: f64, y: f64, depth: f64) -> Resul
                 "img"
             } else if tag == "canvas" || tag == "video" {
                 "raster"
+            } else if tag == "svg" {
+                // Vector paint (an avatar circle, an inline illustration) is
+                // opaque to this walk: its fills live on children no CSS
+                // background read can see. Reading through it would report the
+                // surface behind the artwork as the text's background.
+                "unreadable"
             } else {
                 "css"
             };
@@ -684,6 +1328,30 @@ pub fn stack_nodes(dom: &dyn Dom, el: ElId, x: f64, y: f64, depth: f64) -> Resul
             }
         })
         .collect())
+}
+
+/// The walk's stop when it reaches paint it cannot read (`unreadable` stack
+/// nodes). `stop` ends the walk: what is under this node is not what the text
+/// sits on, so the nodes below it must not answer for it.
+pub fn unreadable_stack_sample(dom: &dyn Dom, node: ElId) -> Value {
+    json!({ "status": "unresolved", "reason": format!("{} paint", tag_lower(dom, node)), "stop": true })
+}
+
+/// An unresolved sample that ends the walk rather than passing it down.
+pub fn sample_ends_walk(sample: &Value) -> bool {
+    sample.get("stop").and_then(Value::as_bool) == Some(true)
+}
+
+/// The walk's compositing fold: `pending` is the translucent surfaces it
+/// passed through, topmost first, and `ground` the opaque sample under them.
+/// Each is blended into the one below, so the topmost surface names the
+/// method (`...+alpha`), as the old pairwise recursion did.
+pub fn composite_stack(pending: &[Value], ground: &Value) -> Value {
+    let mut out = ground.clone();
+    for sample in pending.iter().rev() {
+        out = alpha_composite(sample.clone(), &out);
+    }
+    out
 }
 
 /// JS: index.mjs#sampleImageElement — painted rect + source point for the
@@ -773,10 +1441,18 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
         if GRADIENT_RE.is_match(&bg_image) {
             if let Some(tc) = text_color {
                 let colors = parse_gradient_colors(Some(&bg_image));
-                if let Some(color) = pick_worst_contrast_color(tc, &colors) {
-                    return CssPlan::Sample {
-                        sample: json!({ "status": "sampled", "color": color, "method": "analytic-gradient" }),
-                    };
+                match analytic_gradient_verdict(tc, &colors) {
+                    Some(GradientVerdict::Color(color)) => {
+                        return CssPlan::Sample {
+                            sample: json!({ "status": "sampled", "color": color, "method": "analytic-gradient" }),
+                        };
+                    }
+                    Some(GradientVerdict::Unresolved) => {
+                        return CssPlan::Sample {
+                            sample: json!({ "status": "unresolved", "reason": "gradient stops disagree", "stop": true }),
+                        };
+                    }
+                    None => {}
                 }
             } else {
                 // JS-PARITY: contrastRatio(null, c) throws in the JS when
@@ -802,7 +1478,7 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
     }
     let bg = parse_rgb_or_any(&dom.style(node, "backgroundColor"));
     if let Some(bg) = bg {
-        if bg.a.unwrap_or(f64::NAN) > 0.05 {
+        if bg.a.unwrap_or(f64::NAN) > MIN_PAINTED_ALPHA {
             return CssPlan::Sample {
                 sample: json!({ "status": "sampled", "color": bg, "method": "solid-background" }),
             };
@@ -1046,6 +1722,167 @@ pub fn finish_analysis(candidate: &Value, text_color: &Rgba, samples: &[Value], 
     )
 }
 
+// ─── the screenshot pixel pass ──────────────────────────────────────────────
+//
+// `screenshot-contrast` diffs two clipped screenshots of the same box, one
+// with the text painted and one with it transparent, and measures every pixel
+// the text changed. The decisions below say which of those pixels describe the
+// text's own background and when the set is too unlike text to answer at all.
+
+/// One pixel the text paints on: `delta` is the summed channel change between
+/// the two frames (how much of the pixel the glyph covers), `ratio` the WCAG
+/// ratio measured there, `ground` the luminance left when the text is hidden,
+/// `darkened` says the text made that pixel darker than that ground, and
+/// `off_color` that what the text painted there is not the color the text
+/// declares.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlyphPixel {
+    pub delta: f64,
+    pub ratio: f64,
+    pub ground: f64,
+    pub darkened: bool,
+    pub off_color: bool,
+}
+
+/// How far a well covered pixel may drift from the declared text color,
+/// relative to the distance between that color and the ground: a pixel two
+/// thirds covered by the glyph sits a third of the way back toward the ground.
+const PAINTED_COLOR_DRIFT: f64 = 0.5;
+
+/// Whether the pixel the text painted looks like the color the text declares.
+/// It should, wherever the glyph covers most of the pixel: `painted` is that
+/// pixel in the frame with the text, `ground` the same pixel in the frame
+/// without it. Only worth asking where the pass claims the CSS color as the
+/// foreground — `preferRenderedForeground` makes the painted value the
+/// foreground, and then there is nothing to check.
+pub fn painted_is_text_color(painted: [f64; 3], text: [f64; 3], ground: [f64; 3]) -> bool {
+    let drift: f64 = (0..3).map(|i| (painted[i] - text[i]).abs()).sum();
+    let span: f64 = (0..3).map(|i| (text[i] - ground[i]).abs()).sum();
+    drift <= span * PAINTED_COLOR_DRIFT
+}
+
+/// What the pixel pass concluded: a ratio it stands behind, or the reason it
+/// could not read the text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PixelContrastOutcome {
+    Verdict {
+        measured: f64,
+        median: f64,
+        core_pixels: usize,
+    },
+    Unresolved(&'static str),
+}
+
+/// Below this many pixels the diff is noise, not a glyph.
+pub const GLYPH_MIN_PIXELS: usize = 8;
+/// A pixel counts as fully painted at this share of the strongest change in
+/// the box. Anything below it is an antialiased edge: mostly background, so
+/// its ratio tends to 1:1 no matter how legible the text is.
+const GLYPH_CORE_COVERAGE: f64 = 0.75;
+/// Text covers a fraction of its own box. When most of the clip changed, the
+/// page repainted between the two screenshots (a video, a carousel, a reveal
+/// animation) and no pixel pair is a glyph over its background.
+const GLYPH_CHURN_SHARE: f64 = 0.55;
+/// Hiding text moves every pixel it painted the same way: toward the surface
+/// under it. A box where a large minority moved the other way holds something
+/// that arrived or left between the captures — text mid-animation leaves its
+/// old position and its new one in the same diff — so no pair is a glyph over
+/// its background.
+const GLYPH_DIRECTION_MINORITY: f64 = 0.25;
+/// How far the verdict may sit below the median of every measured pixel
+/// before the sample is judged bimodal rather than a reading of one surface.
+const VERDICT_MEDIAN_DIVERGENCE: f64 = 3.0;
+/// How far the surface the glyphs sit on may stand apart from the surface
+/// beside them in the same box. A page that paints its own text twice (a
+/// duplicate layer behind it for a glow) leaves the second copy where the
+/// glyphs were, and the pass would read that copy as the background.
+const GROUND_DISAGREEMENT: f64 = 2.0;
+
+/// WCAG ratio between two luminances.
+fn luminance_ratio(a: f64, b: f64) -> f64 {
+    (math_max(a, b) + 0.05) / (math_min(a, b) + 0.05)
+}
+
+/// The sorted-array percentile the visual pass uses everywhere.
+fn percentile(sorted: &[f64], pct: f64) -> f64 {
+    let n = sorted.len();
+    let idx = ((pct / 100.0) * n as f64).floor();
+    sorted[math_min((n - 1) as f64, math_max(0.0, idx)) as usize]
+}
+
+/// Reasons whose rendered pixels do not say what the text sits on. A filter or
+/// backdrop-filter paints the surface from something the diff cannot attribute
+/// (the video or image under a glass panel reads as the panel's own ground),
+/// and `background-clip: text` paints the glyphs from the background the
+/// pass would score them against. Both resolve to unresolved, never to a
+/// failure.
+pub fn pixel_contrast_blocked(reasons: &[String]) -> Option<String> {
+    reasons
+        .iter()
+        .find(|r| {
+            matches!(
+                r.as_str(),
+                "background-clip text" | "filter" | "backdrop filter"
+            )
+        })
+        .cloned()
+}
+
+/// The verdict over the pixels the text painted on. `clip_pixels` is the size
+/// of the compared box and `surround_ground` the mean luminance of the pixels
+/// in it the text did not touch, when there are enough of them to mean
+/// anything.
+pub fn pixel_contrast_verdict(
+    pixels: &[GlyphPixel],
+    clip_pixels: usize,
+    surround_ground: Option<f64>,
+) -> PixelContrastOutcome {
+    if pixels.len() < GLYPH_MIN_PIXELS {
+        return PixelContrastOutcome::Unresolved("too few glyph pixels");
+    }
+    if clip_pixels > 0 && pixels.len() as f64 > clip_pixels as f64 * GLYPH_CHURN_SHARE {
+        return PixelContrastOutcome::Unresolved("box repainted between captures");
+    }
+    let darkened = pixels.iter().filter(|p| p.darkened).count();
+    let minority = darkened.min(pixels.len() - darkened);
+    if minority as f64 > pixels.len() as f64 * GLYPH_DIRECTION_MINORITY {
+        return PixelContrastOutcome::Unresolved("text moved between captures");
+    }
+    let strongest = pixels.iter().fold(0.0f64, |m, p| math_max(m, p.delta));
+    let core_floor = strongest * GLYPH_CORE_COVERAGE;
+    let core_pixels: Vec<&GlyphPixel> = pixels.iter().filter(|p| p.delta >= core_floor).collect();
+    if core_pixels.len() < GLYPH_MIN_PIXELS {
+        return PixelContrastOutcome::Unresolved("too few fully painted glyph pixels");
+    }
+    if core_pixels.iter().filter(|p| p.off_color).count() * 2 > core_pixels.len() {
+        return PixelContrastOutcome::Unresolved("the text is painted by something else");
+    }
+    if let Some(surround) = surround_ground {
+        let under: f64 =
+            core_pixels.iter().map(|p| p.ground).sum::<f64>() / core_pixels.len() as f64;
+        if luminance_ratio(under, surround) >= GROUND_DISAGREEMENT {
+            return PixelContrastOutcome::Unresolved("the hidden text is still painted");
+        }
+    }
+    let mut core: Vec<f64> = core_pixels.iter().map(|p| p.ratio).collect();
+    let mut all: Vec<f64> = pixels.iter().map(|p| p.ratio).collect();
+    core.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let measured = percentile(&core, 50.0);
+    let median = percentile(&all, 50.0);
+    if !measured.is_finite() || measured <= 0.0 {
+        return PixelContrastOutcome::Unresolved("no readable glyph pixels");
+    }
+    if median > measured * VERDICT_MEDIAN_DIVERGENCE {
+        return PixelContrastOutcome::Unresolved("verdict disagrees with its own median");
+    }
+    PixelContrastOutcome::Verdict {
+        measured,
+        median,
+        core_pixels: core.len(),
+    }
+}
+
 /// JS: analyzeVisualContrast — retry a candidate after scrolling it into view
 /// only when the first pass failed for being outside the viewport.
 pub fn needs_scroll_retry(result: &Value) -> bool {
@@ -1142,6 +1979,170 @@ mod tests {
         let nodes = stack_nodes(&d, p, 10.0, 10.0, 0.0).unwrap();
         assert_eq!(nodes[0].el, p);
         assert_eq!(nodes[0].kind, "css");
+    }
+
+    /// `n` pixels at one coverage / ratio pair, all darkening their ground.
+    fn px(n: usize, delta: f64, ratio: f64) -> Vec<GlyphPixel> {
+        vec![GlyphPixel { delta, ratio, ground: 1.0, darkened: true, off_color: false }; n]
+    }
+
+    #[test]
+    fn pixel_verdict_reads_the_painted_glyph_not_its_edges() {
+        // kraflio.com "LinkedIn": white bold 16px on a near-black card. The
+        // painted pixels read 18:1; the antialiased edges read near 1:1 and
+        // outnumber them, which is how the old tenth percentile reported 1.3:1
+        // under a 10.2:1 median.
+        let mut pixels = px(40, 705.0, 18.4);
+        pixels.extend(px(120, 70.0, 1.1));
+        match pixel_contrast_verdict(&pixels, 4000, None) {
+            PixelContrastOutcome::Verdict { measured, median, core_pixels } => {
+                assert_eq!(core_pixels, 40);
+                assert!((measured - 18.4).abs() < 1e-9);
+                assert!((median - 1.1).abs() < 1e-9);
+            }
+            other => panic!("{other:?}"),
+        }
+        // aisupply.framer.website collapsed accordion trigger: pale grey on
+        // white through an opacity stack. Painted pixels really are 2.2:1.
+        let mut faint = px(40, 240.0, 2.2);
+        faint.extend(px(90, 60.0, 1.3));
+        match pixel_contrast_verdict(&faint, 4000, None) {
+            PixelContrastOutcome::Verdict { measured, .. } => assert!((measured - 2.2).abs() < 1e-9),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixel_verdict_refuses_what_it_cannot_read() {
+        assert_eq!(
+            pixel_contrast_verdict(&px(4, 700.0, 1.2), 4000, None),
+            PixelContrastOutcome::Unresolved("too few glyph pixels")
+        );
+        // adant.ai "60%": a video band inside the clip changes between the two
+        // captures harder than the glyphs do, so the fully painted set is the
+        // churn and the median of everything measured disagrees with it.
+        let mut churn = px(30, 700.0, 1.4);
+        churn.extend(px(200, 300.0, 16.2));
+        assert_eq!(
+            pixel_contrast_verdict(&churn, 4000, None),
+            PixelContrastOutcome::Unresolved("verdict disagrees with its own median")
+        );
+        // A scroll-reveal mid-fade repaints the whole box, not a glyph.
+        assert_eq!(
+            pixel_contrast_verdict(&px(900, 120.0, 2.0), 1000, None),
+            PixelContrastOutcome::Unresolved("box repainted between captures")
+        );
+        // Text mid-animation leaves its old position and its new one in the
+        // same diff, so half the changed pixels moved the other way.
+        let mut moved = px(60, 700.0, 1.2);
+        moved.extend(px(60, 700.0, 16.0).into_iter().map(|p| GlyphPixel { darkened: false, ..p }));
+        assert_eq!(
+            pixel_contrast_verdict(&moved, 4000, None),
+            PixelContrastOutcome::Unresolved("text moved between captures")
+        );
+        // paymentkit.com's hero: the frame without the text still paints it
+        // (an animation left a copy behind), so what the glyphs painted is not
+        // the color they declare and the diff is text over text.
+        let mut ghost = px(40, 120.0, 1.1).into_iter().map(|p| GlyphPixel { off_color: true, ..p }).collect::<Vec<_>>();
+        ghost.extend(px(90, 30.0, 1.4));
+        assert_eq!(
+            pixel_contrast_verdict(&ghost, 4000, None),
+            PixelContrastOutcome::Unresolved("the text is painted by something else")
+        );
+        // paymentkit.com's headline: the frame without the text still holds a
+        // dim copy of it, so the surface under the glyphs is nothing like the
+        // surface beside them in the same box.
+        assert_eq!(
+            pixel_contrast_verdict(&px(40, 700.0, 2.6), 4000, Some(0.02)),
+            PixelContrastOutcome::Unresolved("the hidden text is still painted")
+        );
+        // The surface under the glyphs matching the one beside them answers.
+        assert!(matches!(
+            pixel_contrast_verdict(&px(40, 700.0, 2.6), 4000, Some(0.9)),
+            PixelContrastOutcome::Verdict { .. }
+        ));
+        // The same reading from a glyph that really is its declared color.
+        assert!(painted_is_text_color([252.0, 252.0, 252.0], [255.0, 255.0, 255.0], [20.0, 22.0, 28.0]));
+        assert!(!painted_is_text_color([52.0, 211.0, 153.0], [205.0, 205.0, 205.0], [160.0, 160.0, 160.0]));
+        // One stray full-coverage pixel over a wash of edges: nothing to stand
+        // behind.
+        let mut sparse = px(1, 700.0, 1.2);
+        sparse.extend(px(60, 60.0, 1.1));
+        assert_eq!(
+            pixel_contrast_verdict(&sparse, 4000, None),
+            PixelContrastOutcome::Unresolved("too few fully painted glyph pixels")
+        );
+    }
+
+    #[test]
+    fn blocked_reasons_and_gradient_verdicts() {
+        let blocked = ["opacity stack".to_string(), "backdrop filter".to_string()];
+        assert_eq!(pixel_contrast_blocked(&blocked).as_deref(), Some("backdrop filter"));
+        assert_eq!(
+            pixel_contrast_blocked(&["background-clip text".to_string()]).as_deref(),
+            Some("background-clip text")
+        );
+        assert_eq!(pixel_contrast_blocked(&["opacity stack".to_string()]), None);
+        let white = rgba(255.0, 255.0, 255.0, 1.0);
+        // framai.framer.website glow: the transparent end of the radial
+        // gradient is the stop with the worst contrast, and it is not a light
+        // grey surface. Nothing here knows where in the box the text sits.
+        let glow = [
+            rgba(133.0, 38.0, 254.0, 0.82),
+            rgba(171.0, 171.0, 171.0, 0.0),
+        ];
+        assert_eq!(pick_worst_contrast_color(&white, &glow).unwrap(), glow[1]);
+        assert_eq!(
+            analytic_gradient_verdict(&white, &glow),
+            Some(GradientVerdict::Unresolved)
+        );
+        // overdrive.health `from-primary/10`: a wash of the text's own color
+        // over the card, not a slab of it.
+        let wash = [rgba(55.0, 65.0, 81.0, 0.1), rgba(55.0, 65.0, 81.0, 0.1)];
+        assert_eq!(
+            analytic_gradient_verdict(&rgba(55.0, 65.0, 81.0, 1.0), &wash),
+            Some(GradientVerdict::Unresolved)
+        );
+        // A solid color written as a gradient still answers.
+        let solid = [rgba(62.0, 69.0, 204.0, 1.0), rgba(62.0, 69.0, 204.0, 1.0)];
+        assert_eq!(
+            analytic_gradient_verdict(&white, &solid),
+            Some(GradientVerdict::Color(solid[0]))
+        );
+        // Opaque ends far apart: which one is behind the glyphs decides.
+        let sweep = [rgba(20.0, 20.0, 24.0, 1.0), rgba(240.0, 240.0, 244.0, 1.0)];
+        assert_eq!(
+            analytic_gradient_verdict(&white, &sweep),
+            Some(GradientVerdict::Unresolved)
+        );
+        assert_eq!(analytic_gradient_verdict(&white, &[]), None);
+    }
+
+    #[test]
+    fn the_walk_composites_down_the_stack() {
+        let glass = json!({ "status": "sampled", "color": { "r": 255, "g": 255, "b": 255, "a": 0.1 }, "method": "solid-background" });
+        let scrim = json!({ "status": "sampled", "color": { "r": 0, "g": 0, "b": 0, "a": 0.5 }, "method": "analytic-gradient" });
+        let ground = json!({ "status": "sampled", "color": { "r": 200, "g": 200, "b": 200, "a": 1 }, "method": "canvas-video-underlay" });
+        let out = composite_stack(&[glass.clone(), scrim], &ground);
+        // 200 under a half-black scrim is 100, and a tenth of white over that
+        // is 116 — not the 255 the old self-compositing walk converged on.
+        assert_eq!(out["color"]["r"].as_f64(), Some(116.0));
+        assert_eq!(out["method"], "solid-background+alpha");
+        // Nothing translucent above it leaves the ground as it was.
+        assert_eq!(composite_stack(&[], &ground), ground);
+        assert!(sample_ends_walk(&json!({ "status": "unresolved", "stop": true })));
+        assert!(!sample_ends_walk(&json!({ "status": "unresolved" })));
+    }
+
+    #[test]
+    fn vector_paint_stops_the_walk() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let avatar = d.add(Some(body), "svg");
+        d.set_rect(avatar, 0.0, 0.0, 40.0, 40.0);
+        let nodes = stack_nodes(&d, avatar, 10.0, 10.0, 0.0).unwrap();
+        assert_eq!(nodes[0].kind, "unreadable");
+        assert_eq!(unreadable_stack_sample(&d, avatar)["reason"], "svg paint");
     }
 
     #[test]

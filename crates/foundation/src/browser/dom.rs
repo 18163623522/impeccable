@@ -125,6 +125,12 @@ pub trait Dom {
     fn children(&self, el: ElId) -> Vec<ElId>;
     fn previous_element_sibling(&self, el: ElId) -> Option<ElId>;
     fn next_element_sibling(&self, el: ElId) -> Option<ElId>;
+    /// `el.firstElementChild`. The default collects every child; an
+    /// implementation that can read the first one alone should, since a
+    /// bounded walk (first child, then next sibling) relies on it.
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        self.children(el).first().copied()
+    }
     /// `a.contains(b)` (true when `a === b`).
     fn contains(&self, a: ElId, b: ElId) -> bool;
     fn matches(&self, el: ElId, selector: &str) -> Result<bool, SelectorError>;
@@ -181,6 +187,11 @@ pub trait Dom {
     fn client_left(&self, el: ElId) -> f64;
     fn scroll_width(&self, el: ElId) -> f64;
     fn scroll_left(&self, el: ElId) -> f64;
+    /// `el.scrollHeight`; NaN when the probe cannot answer it (a snapshot
+    /// recorded before the capture measured it).
+    fn scroll_height(&self, _el: ElId) -> f64 {
+        f64::NAN
+    }
     fn offset_width(&self, el: ElId) -> f64;
     fn offset_height(&self, el: ElId) -> f64;
     /// `el.checkVisibility({ checkOpacity: false, checkVisibilityCSS: true })`;

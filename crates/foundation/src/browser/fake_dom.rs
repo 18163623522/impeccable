@@ -29,6 +29,8 @@ pub struct FakeEl {
     pub client_left: f64,
     pub scroll_width: f64,
     pub scroll_left: f64,
+    /// `scrollHeight`; `None` reads as NaN, a probe that did not measure it.
+    pub scroll_height: Option<f64>,
     pub offset_width: f64,
     pub offset_height: f64,
     pub is_content_editable: bool,
@@ -64,6 +66,14 @@ pub struct FakeDom {
     pub html_for_patterns: String,
 }
 
+/// Tag names a real parser only ever puts in the SVG namespace, so a test
+/// that builds an icon out of them gets the namespace a browser would give
+/// it. Anything not listed here is XHTML.
+const SVG_ONLY_TAGS: [&str; 12] = [
+    "svg", "text", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "g", "defs",
+    "use",
+];
+
 impl FakeDom {
     pub fn new() -> Self {
         FakeDom {
@@ -89,7 +99,7 @@ impl FakeDom {
         self.els.push(FakeEl {
             styles,
             tag: tag.to_string(),
-            ns: if tag == "svg" || tag == "text" || tag == "path" || tag == "rect" {
+            ns: if SVG_ONLY_TAGS.contains(&tag) {
                 "http://www.w3.org/2000/svg".to_string()
             } else {
                 "http://www.w3.org/1999/xhtml".to_string()
@@ -161,9 +171,8 @@ impl FakeDom {
         self.el_mut(id).rect = Rect::from_xywh(x, y, w, h);
         self
     }
-    /// The union rect of `id`'s direct text, and nothing about its lines:
-    /// a DOM that measured the text once, the way a page snapshot captured
-    /// before the lines were recorded did.
+    /// The union of the client rects of `id`'s own text nodes, as
+    /// `getDirectTextRect` reports it: the glyph box, not the line box.
     pub fn set_text_rect(&mut self, id: ElId, x: f64, y: f64, w: f64, h: f64) -> &mut Self {
         self.el_mut(id).direct_text_rect = Some(Rect::from_xywh(x, y, w, h));
         self
@@ -402,6 +411,15 @@ impl Dom for FakeDom {
         let i = sibs.iter().position(|&s| s == el)?;
         sibs.get(i + 1).copied()
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        self.els[el as usize]
+            .child_nodes
+            .iter()
+            .find_map(|n| match n {
+                FakeNode::El(id) => Some(*id),
+                _ => None,
+            })
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         let mut cur = Some(b);
         while let Some(c) = cur {
@@ -528,6 +546,9 @@ impl Dom for FakeDom {
     }
     fn scroll_left(&self, el: ElId) -> f64 {
         self.els[el as usize].scroll_left
+    }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        self.els[el as usize].scroll_height.unwrap_or(f64::NAN)
     }
     fn offset_width(&self, el: ElId) -> f64 {
         self.els[el as usize].offset_width

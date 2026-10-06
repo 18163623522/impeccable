@@ -11,10 +11,16 @@ use super::dom::{
     renders_no_text, style_px, tag_lower, Dom, DomChild, ElId, Rect,
 };
 use super::{BrowserConfig, BrowserFinding};
-use crate::checks::measures::{colors_nearly_match, css_color_is_transparent, resolve_length_px};
+use crate::checks::measures::{
+    chars_per_line, colors_nearly_match, css_color_is_transparent, is_capitalized_run,
+    resolve_length_px, text_wraps_to_multiple_lines, TRACKED_LABEL_MAX_CHARS,
+};
 use crate::checks::rules::RuleHit;
 use crate::checks::text_rules::{
-    NON_RENDERED_TAGS, QUALITY_TEXT_TAGS, SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
+    is_cjk_text, justifies_without_word_spaces_text, tracking_is_crushed, ALL_CAPS_LONG_RUN,
+    JUSTIFY_NARROW_CHARS_PER_LINE, LEADING_DISPLAY_TYPE_PX, LEADING_HEADING_CONTEXT,
+    LEADING_HEADING_TEXT_TAGS, LEADING_MIN_LINE_BOXES, NON_RENDERED_TAGS, QUALITY_TEXT_TAGS,
+    SR_ONLY_SELECTOR, TEXT_EDGE_TAGS,
 };
 use crate::js::{self, math_round, number_to_string, parse_float, to_fixed};
 use crate::js_ext_b::{slice_utf16_prefix, utf16_len};
@@ -69,8 +75,24 @@ fn matches_or_closest(dom: &dyn Dom, el: ElId, sel: &str) -> bool {
     matches_or_false(dom, el, sel) || closest_or_none(dom, el, sel).is_some()
 }
 
+/// The colour a browser paints behind a page that sets no background of its
+/// own, under the light colour scheme: a white box on an unpainted light page
+/// draws no edge.
+pub const CANVAS_BACKGROUND: &str = "rgb(255, 255, 255)";
+
+/// Whether the canvas under an unpainted chain is the light one
+/// [`CANVAS_BACKGROUND`] names. A page that asks for a dark scheme gets a dark
+/// canvas from the browser, and any value that mentions `dark` may resolve
+/// that way, so only a plainly light scheme lets the comparison run.
+pub fn canvas_is_light(scheme: &str) -> bool {
+    !js::to_lower_case(scheme).contains("dark")
+}
+
 /// JS: checks.mjs#hasVisibleBackgroundBoundary(style, el, win) — browser:
-/// `style` is `el`'s own computed style, `win` the live window.
+/// `style` is `el`'s own computed style, `win` the live window. The JS
+/// answered `true` when no ancestor painted; the canvas under an unpainted
+/// light chain is white, so a white box there is compared against it like any
+/// other ground.
 pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
     let bg = dom.style(el, "backgroundColor");
     if css_color_is_transparent(Some(&bg)) {
@@ -83,6 +105,80 @@ pub fn has_visible_background_boundary(dom: &dyn Dom, el: ElId) -> bool {
             return !colors_nearly_match(Some(&bg), Some(&parent_bg));
         }
         parent = dom.parent(p);
+    }
+    // `colorScheme` is inherited, so the element's own computed value is the
+    // page's.
+    if !canvas_is_light(&dom.style(el, "colorScheme")) {
+        return true;
+    }
+    !colors_nearly_match(Some(&bg), Some(CANVAS_BACKGROUND))
+}
+
+/// The part of `inner` that falls inside `outer`, or `None` when the two miss
+/// each other.
+///
+/// `direct_text_rect` is a font-metric box, not an ink box. A line box tighter
+/// than the font's ascent and descent pushes it out of the element's own
+/// border box, and so do the tall marks of Devanagari and Thai; no glyph lands
+/// out there. Only the part inside that box is what a reader gets, so every
+/// edge measurement clamps first.
+fn clamp_to(inner: &Rect, outer: &Rect) -> Option<Rect> {
+    let left = js::math_max(inner.left, outer.left);
+    let top = js::math_max(inner.top, outer.top);
+    let w = js::math_min(inner.right, outer.right) - left;
+    let h = js::math_min(inner.bottom, outer.bottom) - top;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some(Rect::from_xywh(left, top, w, h))
+}
+
+/// The space the element's own glyphs keep from each inner edge of its box
+/// (`[top, right, bottom, left]`), or `None` when it paints no direct text.
+///
+/// `direct_text_rect` is the union of the client rects of the element's own
+/// text nodes, so this is the room a reader sees rather than the room the
+/// stylesheet declares: a fixed-height flex or grid box centres its label
+/// with no padding at all, and half-leading adds space of its own.
+fn direct_text_insets(dom: &dyn Dom, el: ElId, rect: &Rect, border: &[f64; 4]) -> Option<[f64; 4]> {
+    let t = dom.direct_text_rect(el)?;
+    if t.width <= 0.0 || t.height <= 0.0 {
+        return None;
+    }
+    // Text that overruns its own box still reads as cramped: the clamped rect
+    // lands on the border, an inset of zero.
+    let t = clamp_to(&t, rect)?;
+    Some([
+        t.top - (rect.top + border[0]),
+        (rect.right - border[1]) - t.right,
+        (rect.bottom - border[2]) - t.bottom,
+        t.left - (rect.left + border[3]),
+    ])
+}
+
+/// Whether text laid out at `tr` survives the clipping between `node` and
+/// `el`. A panel held at `max-height: 0` and a drawer collapsed to zero width
+/// still lay their text out; none of it reaches the screen, so it cannot be
+/// flush against anything.
+fn text_rect_survives_clipping(dom: &dyn Dom, el: ElId, node: ElId, tr: &Rect) -> bool {
+    let mut cur = dom.parent(node);
+    while let Some(p) = cur {
+        let clips = |k: &str| {
+            let v = dom.style(p, k);
+            v == "hidden" || v == "clip" || v == "scroll" || v == "auto"
+        };
+        if clips("overflow") || clips("overflowX") || clips("overflowY") {
+            let cr = dom.rect(p);
+            let w = js::math_min(tr.right, cr.right) - js::math_max(tr.left, cr.left);
+            let h = js::math_min(tr.bottom, cr.bottom) - js::math_max(tr.top, cr.top);
+            if w < 1.0 || h < 1.0 {
+                return false;
+            }
+        }
+        if p == el {
+            break;
+        }
+        cur = dom.parent(p);
     }
     true
 }
@@ -251,11 +347,10 @@ fn rendered_text_len(dom: &dyn Dom, el: ElId) -> usize {
 
 /// JS: checks.mjs#textDescendantsFlushSides(el, rect) → [top, right, bottom, left]
 ///
-/// The side is flush when the *text* lands on it, not when a text-bearing box
-/// does. A `<td>` fills its table edge to edge and insets its own text by the
-/// cell padding; reading the cell's border box called that flush and charged a
-/// framed table for having no inset, when the reader sees the padding the
-/// cells declare (REN-403).
+/// Each candidate is measured by its own text rect, not by its border box: a
+/// padded button, a centred heading and a table cell all fill the box they sit
+/// in while their glyphs stay well inside it, and it is the glyphs a reader
+/// sees crowding the boundary.
 pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bool; 4] {
     let mut flush = [false; 4];
     const TEXT_EDGE_THRESHOLD: f64 = 4.0;
@@ -265,24 +360,50 @@ pub fn text_descendants_flush_sides(dom: &dyn Dom, el: ElId, rect: &Rect) -> [bo
         if !TEXT_EDGE_TAGS.contains(&tag_name.as_str()) || !has_meaningful_direct_text(dom, node) {
             continue;
         }
-        let nr = dom.direct_text_rect(node).unwrap_or_else(|| dom.rect(node));
-        if nr.width <= 0.0 || nr.height <= 0.0 {
+        let br = dom.rect(node);
+        if br.width <= 0.0 || br.height <= 0.0 {
             continue;
         }
-        if nr.bottom < rect.top || nr.top > rect.bottom || nr.right < rect.left || nr.left > rect.right {
+        if br.bottom < rect.top || br.top > rect.bottom || br.right < rect.left || br.left > rect.right {
             continue;
         }
-        if nr.top - rect.top <= TEXT_EDGE_THRESHOLD {
-            flush[0] = true;
+        // Glyphs a reader sees are inside the node's own box, so a box that
+        // reaches no edge of `el` has no text that reaches one. Rejecting on
+        // the box first keeps the text measurement, a range walk in the page,
+        // off the many candidates that sit well inside.
+        let box_sides = [
+            br.top - rect.top <= TEXT_EDGE_THRESHOLD,
+            rect.right - br.right <= TEXT_EDGE_THRESHOLD,
+            rect.bottom - br.bottom <= TEXT_EDGE_THRESHOLD,
+            br.left - rect.left <= TEXT_EDGE_THRESHOLD,
+        ];
+        if !box_sides.iter().any(|s| *s) {
+            continue;
         }
-        if rect.right - nr.right <= TEXT_EDGE_THRESHOLD {
-            flush[1] = true;
+        // A Dom that cannot measure text falls back to the box, the behaviour
+        // this rule had before, rather than going silent.
+        let nr = match dom.direct_text_rect(node) {
+            Some(t) if t.width > 0.0 && t.height > 0.0 => match clamp_to(&t, &br) {
+                Some(c) => c,
+                None => continue,
+            },
+            _ => br,
+        };
+        let sides = [
+            nr.top - rect.top <= TEXT_EDGE_THRESHOLD,
+            rect.right - nr.right <= TEXT_EDGE_THRESHOLD,
+            rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD,
+            nr.left - rect.left <= TEXT_EDGE_THRESHOLD,
+        ];
+        // The two remaining tests run only for text that reached an edge.
+        if !sides.iter().any(|s| *s) {
+            continue;
         }
-        if rect.bottom - nr.bottom <= TEXT_EDGE_THRESHOLD {
-            flush[2] = true;
+        if is_visually_hidden(dom, node) || !text_rect_survives_clipping(dom, el, node, &nr) {
+            continue;
         }
-        if nr.left - rect.left <= TEXT_EDGE_THRESHOLD {
-            flush[3] = true;
+        for s in 0..4 {
+            flush[s] |= sides[s];
         }
     }
     flush
@@ -320,6 +441,18 @@ pub fn is_visually_hidden(dom: &dyn Dom, el: ElId) -> bool {
         }
     }
     false
+}
+
+/// Whether this element carries heading text, for the tight-leading floor:
+/// the element is a heading (or takes the ARIA role), or it is one of the
+/// inline tags a heading's text sits in. A block of body copy nested inside a
+/// heading is not heading text and keeps the floor.
+pub fn is_heading_text(dom: &dyn Dom, el: ElId, tag: &str) -> bool {
+    if matches_or_false(dom, el, LEADING_HEADING_CONTEXT) {
+        return true;
+    }
+    LEADING_HEADING_TEXT_TAGS.contains(&tag)
+        && closest_or_none(dom, el, LEADING_HEADING_CONTEXT).is_some()
 }
 
 /// JS: checks.mjs#isNonRenderedText(el, tag, style)
@@ -473,7 +606,15 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
             spx("borderBottomWidth"),
             spx("borderLeftWidth"),
         ];
-        let border_count = borders.iter().filter(|w| **w > 0.0).count();
+        // A `border: 1px solid transparent` focus-ring placeholder draws no
+        // edge, so it bounds nothing.
+        let border_visible = [
+            borders[0] > 0.0 && !css_color_is_transparent(Some(&st("borderTopColor"))),
+            borders[1] > 0.0 && !css_color_is_transparent(Some(&st("borderRightColor"))),
+            borders[2] > 0.0 && !css_color_is_transparent(Some(&st("borderBottomColor"))),
+            borders[3] > 0.0 && !css_color_is_transparent(Some(&st("borderLeftColor"))),
+        ];
+        let border_count = border_visible.iter().filter(|v| **v).count();
         let has_bg = has_visible_background_boundary(dom, el);
         // The space the reader sees, not the space the stylesheet declares:
         // the inset between the rendered text and the inside of the border
@@ -483,45 +624,60 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         // nothing to charge on, and the text is measured only for the
         // elements that got this far: the probe builds a Range per call, and
         // a page has a great many boxes that are not bounded at all.
-        if let Some(text_rect) = (border_count >= 2 || has_bg)
-            .then(|| dom.direct_text_rect(el))
+        if let Some(insets) = (border_count >= 2 || has_bg)
+            .then(|| direct_text_insets(dom, el, rect, &borders))
             .flatten()
         {
-            let mut v_pads: Vec<f64> = Vec::new();
-            let mut h_pads: Vec<f64> = Vec::new();
-            if has_bg || borders[0] > 0.0 {
-                v_pads.push(text_rect.top - (rect.top + borders[0]));
+            let mut v_sides: Vec<usize> = Vec::new();
+            let mut h_sides: Vec<usize> = Vec::new();
+            if has_bg || border_visible[0] {
+                v_sides.push(0);
             }
-            if has_bg || borders[2] > 0.0 {
-                v_pads.push((rect.bottom - borders[2]) - text_rect.bottom);
+            if has_bg || border_visible[2] {
+                v_sides.push(2);
             }
-            if has_bg || borders[3] > 0.0 {
-                h_pads.push(text_rect.left - (rect.left + borders[3]));
+            if has_bg || border_visible[3] {
+                h_sides.push(3);
             }
-            if has_bg || borders[1] > 0.0 {
-                h_pads.push((rect.right - borders[1]) - text_rect.right);
+            if has_bg || border_visible[1] {
+                h_sides.push(1);
             }
-            let v_min = v_pads.iter().copied().fold(f64::INFINITY, js::math_min);
-            let h_min = h_pads.iter().copied().fold(f64::INFINITY, js::math_min);
+            let pad_names = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"];
+            let min_over = |sides: &[usize], f: &dyn Fn(usize) -> f64| {
+                sides.iter().map(|&s| f(s)).fold(f64::INFINITY, js::math_min)
+            };
+            let pad_of = |s: usize| spx(pad_names[s]);
+            let v_min = min_over(&v_sides, &pad_of);
+            let h_min = min_over(&h_sides, &pad_of);
             let v_thresh = js::math_max(4.0, font_size * 0.3);
             let h_thresh = js::math_max(8.0, font_size * 0.5);
+            // The measured inset decides and is what the finding reports. The
+            // declared padding has to be short as well: the text rect is a
+            // font-metric box, and a line box tighter than the face's ascent
+            // and descent pushes it toward the edge of a box whose padding is
+            // generous.
+            let inset_of = |s: usize| insets[s];
+            let v_inset = min_over(&v_sides, &inset_of);
+            let h_inset = min_over(&h_sides, &inset_of);
+            let v_cramped = v_min < v_thresh && v_inset < v_thresh;
+            let h_cramped = h_min < h_thresh && h_inset < h_thresh;
             let px = |v: f64| number_to_string(math_round(v * 10.0) / 10.0);
-            if v_min < v_thresh {
+            if v_cramped {
                 findings.push(RuleHit::new(
                     "cramped-padding",
                     format!(
                         "{}px of space above and below the text (need ≥{}px for {}px text)",
-                        px(v_min),
+                        px(v_inset),
                         to_fixed(v_thresh, 1),
                         number_to_string(font_size)
                     ),
                 ));
-            } else if h_min < h_thresh {
+            } else if h_cramped {
                 findings.push(RuleHit::new(
                     "cramped-padding",
                     format!(
                         "{}px of space beside the text (need ≥{}px for {}px text)",
-                        px(h_min),
+                        px(h_inset),
                         to_fixed(h_thresh, 1),
                         number_to_string(font_size)
                     ),
@@ -535,10 +691,15 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         let upper_tag = js::to_upper_case(tag);
         let el_position = st("position");
         let children = dom.children(el);
+        // A box with no area paints no boundary (a drawer collapsed to zero
+        // width), and an inline box's border-bottom is an underline: text
+        // sitting on it is the point of it, and padding would not move it.
+        let el_is_box = rect.width > 0.0 && rect.height > 0.0 && st("display") != "inline";
         if !FLUSH_SKIP_TAGS.contains(&upper_tag.as_str())
             && !has_direct_text
             && el_position != "fixed"
             && el_position != "absolute"
+            && el_is_box
             && !children.is_empty()
         {
             let border_w = [
@@ -769,11 +930,36 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     let is_heading = matches!(tag, "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
 
     // --- Tight line height ---
-    if has_direct_text && text_len > 50 && !is_heading {
+    // The 1.3 floor is a reading-comfort floor for body copy: text a visitor
+    // reads at body scale, over more than one line. Several things are not
+    // that.
+    // Display type sets its own leading, and 1.2 at 32px is craft, not
+    // crowding; headings routinely put their text in a child <a> or <span>,
+    // so the exemption reads the nearest heading ancestor rather than the
+    // element's own tag. Text that renders as a single line box has no gap
+    // between lines to crowd. And source text that is never typeset (script,
+    // style, noscript, head content, display:none, the sr-only clip patterns,
+    // an element with no box at all) has no leading to measure.
+    if has_direct_text
+        && text_len > 50
+        && !is_heading
+        && font_size > 0.0
+        && font_size < LEADING_DISPLAY_TYPE_PX
+    {
         if let Some(lh) = q.line_height_px {
-            if font_size > 0.0 {
-                let ratio = lh / font_size;
-                if ratio > 0.0 && ratio < 1.3 {
+            let ratio = lh / font_size;
+            // Compare on the ratio the snippet prints, so a page that sets
+            // line-height: 1.3 exactly is never flagged for hitting the floor
+            // (46.8 / 36 is 1.2999999999999998 in binary floats).
+            let shown = js::math_round(ratio * 100.0) / 100.0;
+            if ratio > 0.0 && shown < 1.3 {
+                let text_rect = dom.direct_text_rect(el).unwrap_or(*rect);
+                let wraps = text_rect.height >= lh * LEADING_MIN_LINE_BOXES;
+                if wraps
+                    && !is_non_rendered_text(dom, el, tag)
+                    && !is_visually_hidden(dom, el)
+                    && !is_heading_text(dom, el, tag)
+                {
                     findings.push(RuleHit::new(
                         "tight-leading",
                         format!("line-height {}x (need >=1.3)", to_fixed(ratio, 2)),
@@ -784,7 +970,9 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- Justified text (without hyphens) ---
-    if has_direct_text && st("textAlign") == "justify" {
+    // Only a narrow column stretches word spaces far enough to open rivers,
+    // and only in a script that justifies on word spaces at all.
+    if has_direct_text && st("textAlign") == "justify" && rect.width > 0.0 && font_size > 0.0 {
         let hyphens = {
             let a = st("hyphens");
             if !a.is_empty() {
@@ -793,7 +981,10 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 st("webkitHyphens")
             }
         };
-        if hyphens != "auto" {
+        if hyphens != "auto"
+            && chars_per_line(rect.width, font_size) <= JUSTIFY_NARROW_CHARS_PER_LINE
+            && !justifies_without_word_spaces_text(&direct_text(dom, el))
+        {
             findings.push(RuleHit::new(
                 "justified-text",
                 "text-align: justify without hyphens: auto".to_string(),
@@ -852,23 +1043,46 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
     }
 
     // --- All-caps body text ---
-    if has_direct_text && text_len > 30 && st("textTransform") == "uppercase" && !is_heading {
-        findings.push(RuleHit::new(
-            "all-caps-body",
-            format!("text-transform: uppercase on {} chars of body text", text_len),
-        ));
+    // Uppercase on a short run is a convention, not a defect: a button, a nav
+    // item, a kicker or an eyebrow is taken in as a shape, so losing word
+    // shapes costs nothing. The cost lands when the run is long enough to be
+    // read as a sentence. The run is the element's own text: a bar or a form
+    // control whose children hold the labels is not one long run, however its
+    // subtree adds up.
+    if has_direct_text && st("textTransform") == "uppercase" && !is_heading {
+        let own_len = utf16_len(js::trim(&collapse_ws(&direct_text(dom, el))));
+        if own_len >= ALL_CAPS_LONG_RUN {
+            findings.push(RuleHit::new(
+                "all-caps-body",
+                format!("text-transform: uppercase on {} chars of body text", own_len),
+            ));
+        }
     }
 
     // --- Wide letter spacing on body text ---
-    if has_direct_text && text_len > 20 && st("textTransform") != "uppercase" {
+    if has_direct_text && text_len > 20 {
         if let Some(ls) = q.letter_spacing_px {
             if ls > 0.0 && font_size > 0.0 {
                 let tracking_em = ls / font_size;
                 if tracking_em > 0.05 {
-                    findings.push(RuleHit::new(
-                        "wide-tracking",
-                        format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
-                    ));
+                    // Wide tracking is the standard treatment for an
+                    // uppercase eyebrow, label or button. `text-transform`
+                    // says so outright; capitals typed into the markup do
+                    // not, so that reading is held to label size on one
+                    // line and running text keeps the rule.
+                    let caps_label = st("textTransform") == "uppercase"
+                        || (text_len <= TRACKED_LABEL_MAX_CHARS
+                            && is_capitalized_run(js::trim(&dom.text_content(el)))
+                            && !text_wraps_to_multiple_lines(
+                                dom.direct_text_rect(el).map(|r| r.height).unwrap_or(0.0),
+                                q.line_height_px,
+                            ));
+                    if !caps_label {
+                        findings.push(RuleHit::new(
+                            "wide-tracking",
+                            format!("letter-spacing: {}em on body text", to_fixed(tracking_em, 2)),
+                        ));
+                    }
                 }
             }
         }
@@ -879,15 +1093,19 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
         if let Some(ls) = q.letter_spacing_px {
             if ls < 0.0 {
                 let tracking_em = ls / font_size;
-                if tracking_em <= -0.05 {
-                    let excerpt = slice_utf16_prefix(
-                        &collapse_ws(js::trim(&dom.text_content(el))),
-                        40,
-                    );
-                    findings.push(RuleHit::new(
-                        "extreme-negative-tracking",
-                        format!("letter-spacing: {}em — \"{}\"", to_fixed(tracking_em, 2), excerpt),
-                    ));
+                if tracking_is_crushed(tracking_em, font_size) {
+                    let text = collapse_ws(js::trim(&dom.text_content(el)));
+                    if !is_cjk_text(&text) {
+                        findings.push(RuleHit::new(
+                            "extreme-negative-tracking",
+                            format!(
+                                "letter-spacing: {}em at {}px — \"{}\"",
+                                to_fixed(tracking_em, 2),
+                                number_to_string(font_size),
+                                slice_utf16_prefix(&text, 40)
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1224,6 +1442,10 @@ mod tests {
                 ("borderRightWidth", "1px"),
                 ("borderBottomWidth", "1px"),
                 ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(220, 220, 220)"),
+                ("borderRightColor", "rgb(220, 220, 220)"),
+                ("borderBottomColor", "rgb(220, 220, 220)"),
+                ("borderLeftColor", "rgb(220, 220, 220)"),
                 ("paddingTop", "0px"),
                 ("paddingBottom", "0px"),
                 ("paddingLeft", "16px"),
@@ -1242,6 +1464,71 @@ mod tests {
             hits[0].snippet,
             "0.5px of space above and below the text (need ≥4.5px for 15px text)"
         );
+    }
+
+    /// A fixed-height flex row centres its label on zero padding: the padding
+    /// property says 0, the reader sees 12px. Only a box where the glyphs
+    /// really do crowd the edge is cramped.
+    #[test]
+    fn cramped_padding_reads_the_text_box_not_the_padding() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let btn = text_el(&mut d, body, "div", "Book a free consultation", "14px");
+        d.set_rect(btn, 0.0, 0.0, 240.0, 40.0);
+        d.set_styles(
+            btn,
+            &[
+                ("display", "flex"),
+                ("backgroundColor", "rgb(37, 99, 235)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "32px"),
+                ("paddingRight", "32px"),
+            ],
+        );
+        // 14px label centred in the 40px box: 12px of air above and below.
+        d.set_text_rect(btn, 32.0, 12.0, 160.0, 16.0);
+        assert!(check_element_quality_dom(&d, btn, &BrowserConfig::default()).is_empty());
+
+        // Same declared padding, but the label fills the box.
+        d.set_text_rect(btn, 32.0, 1.0, 160.0, 38.0);
+        let hits = check_element_quality_dom(&d, btn, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].snippet, "1px of space above and below the text (need ≥4.2px for 14px text)");
+    }
+
+    /// `border: 1px solid transparent` (a focus-ring placeholder) draws no
+    /// edge, so a full-width row with no side padding crowds nothing.
+    #[test]
+    fn cramped_padding_ignores_a_transparent_border() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let row = text_el(&mut d, body, "div", "What does the free plan include?", "18px");
+        d.set_rect(row, 0.0, 0.0, 640.0, 60.0);
+        d.set_styles(
+            row,
+            &[
+                ("paddingTop", "20px"),
+                ("paddingBottom", "20px"),
+                ("paddingLeft", "0px"),
+                ("paddingRight", "0px"),
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgba(0, 0, 0, 0)"),
+                ("borderRightColor", "rgba(0, 0, 0, 0)"),
+                ("borderBottomColor", "rgba(0, 0, 0, 0)"),
+                ("borderLeftColor", "rgba(0, 0, 0, 0)"),
+            ],
+        );
+        d.set_text_rect(row, 0.0, 21.0, 400.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
     }
 
     #[test]
@@ -1272,6 +1559,8 @@ mod tests {
                 ("fontSize", "16px"),
             ],
         );
+        // No text rect: a Dom that cannot measure glyphs keeps the boxes this
+        // rule read before.
         let p = text_el(&mut d, card, "p", "Hello there friend", "16px");
         d.set_rect(p, 0.0, 28.0, 400.0, 20.0);
         d.set_styles(p, &[("paddingTop", "0px"), ("paddingRight", "0px"), ("paddingBottom", "0px"), ("paddingLeft", "0px"), ("marginTop", "0px"), ("marginRight", "0px"), ("marginBottom", "0px"), ("marginLeft", "0px")]);
@@ -1280,6 +1569,221 @@ mod tests {
         assert_eq!(
             hits[0].snippet,
             "<section> \"card-frame\": children flush against border on right/left (no inset)"
+        );
+    }
+
+    /// The accordion row every component library emits: `div.border` >
+    /// `h3` > `button.py-4`. The direct child carries no padding, so the
+    /// insulation test sees nothing; the button's box fills the row; only
+    /// its text rect shows the 16px the reader gets.
+    fn accordion_row(d: &mut FakeDom) -> (ElId, ElId) {
+        let (_h, body) = d.with_page();
+        let row = d.add(Some(body), "div");
+        d.set_attr(row, "class", "border");
+        d.set_rect(row, 0.0, 0.0, 600.0, 58.0);
+        d.set_styles(
+            row,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("borderTopWidth", "1px"),
+                ("borderRightWidth", "1px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "1px"),
+                ("borderTopColor", "rgb(200, 200, 200)"),
+                ("borderRightColor", "rgb(200, 200, 200)"),
+                ("borderBottomColor", "rgb(200, 200, 200)"),
+                ("borderLeftColor", "rgb(200, 200, 200)"),
+                ("outlineWidth", "0px"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "24px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "24px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        let h3 = d.add(Some(row), "h3");
+        d.set_rect(h3, 24.0, 0.0, 552.0, 58.0);
+        let zero = [
+            ("paddingTop", "0px"),
+            ("paddingRight", "0px"),
+            ("paddingBottom", "0px"),
+            ("paddingLeft", "0px"),
+            ("marginTop", "0px"),
+            ("marginRight", "0px"),
+            ("marginBottom", "0px"),
+            ("marginLeft", "0px"),
+        ];
+        d.set_styles(h3, &zero);
+        let button = d.add(Some(h3), "button");
+        d.add_text(button, "Which games does it work with?");
+        d.set_rect(button, 24.0, 0.0, 552.0, 58.0);
+        d.set_styles(button, &zero);
+        (row, button)
+    }
+
+    #[test]
+    fn flush_children_measure_text_not_boxes() {
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        // The button's own padding puts its label 20px off both rules.
+        d.set_text_rect(button, 24.0, 20.0, 300.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+
+        // A row whose two-line label really does run into the rules.
+        d.set_text_rect(button, 24.0, 1.0, 300.0, 56.0);
+        let hits = check_element_quality_dom(&d, row, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"border\": children flush against border on top/bottom (no inset)"
+        );
+    }
+
+    #[test]
+    fn flush_ignores_hidden_and_clipped_text() {
+        let mut d = FakeDom::new();
+        let (row, button) = accordion_row(&mut d);
+        d.set_text_rect(button, 24.0, 20.0, 300.0, 18.0);
+
+        // A screen-reader-only heading at the box origin paints nothing.
+        let sr = d.add(Some(row), "h2");
+        d.add_text(sr, "Frequently asked questions");
+        d.set_rect(sr, 24.0, 0.0, 1.0, 1.0);
+        d.set_text_rect(sr, 24.0, 0.0, 200.0, 16.0);
+        d.add_selector(sr, SR_ONLY_SELECTOR);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+
+        // The collapsed answer panel lays its text out below the row and
+        // clips every pixel of it away.
+        let panel = d.add(Some(row), "div");
+        d.set_rect(panel, 24.0, 58.0, 552.0, 0.0);
+        d.set_styles(panel, &[("overflow", "hidden")]);
+        let answer = d.add(Some(panel), "p");
+        d.add_text(answer, "Any game with a public leaderboard.");
+        d.set_rect(answer, 24.0, 58.0, 552.0, 20.0);
+        d.set_text_rect(answer, 24.0, 59.0, 400.0, 18.0);
+        assert!(check_element_quality_dom(&d, row, &BrowserConfig::default()).is_empty());
+    }
+
+    /// White on an unpainted page draws no edge, so the page shell is not a
+    /// card whose text is flush against anything.
+    #[test]
+    fn white_on_the_canvas_is_not_a_boundary() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgba(0, 0, 0, 0)");
+        let shell = d.add(Some(body), "div");
+        d.set_attr(shell, "class", "wrapper");
+        d.set_rect(shell, 0.0, 0.0, 990.0, 400.0);
+        d.set_styles(
+            shell,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("backgroundColor", "rgb(255, 255, 255)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "0px"),
+                ("borderLeftWidth", "0px"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        assert!(!has_visible_background_boundary(&d, shell));
+        let p = text_el(&mut d, shell, "p", "Today's headlines, in full", "16px");
+        d.set_rect(p, 0.0, 0.0, 990.0, 20.0);
+        d.set_text_rect(p, 0.0, 2.0, 400.0, 16.0);
+        assert!(check_element_quality_dom(&d, shell, &BrowserConfig::default()).is_empty());
+
+        // A tinted card on the same page still bounds its text.
+        d.set_style(shell, "backgroundColor", "rgb(15, 23, 42)");
+        let hits = check_element_quality_dom(&d, shell, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"wrapper\": children flush against bg on top/left (no inset)"
+        );
+
+        // The same white shell on a page that asks for a dark scheme sits on
+        // the browser's dark canvas, where it is a strong edge.
+        d.set_style(shell, "backgroundColor", "rgb(255, 255, 255)");
+        d.set_style(shell, "colorScheme", "dark");
+        assert!(has_visible_background_boundary(&d, shell));
+        assert_eq!(
+            check_element_quality_dom(&d, shell, &BrowserConfig::default()).len(),
+            1
+        );
+    }
+
+    /// `direct_text_rect` is a font-metric box, not an ink box: half-leading
+    /// and scripts with tall marks push it out of the box that paints the
+    /// text, where no glyph can land. Measure the part inside that box.
+    #[test]
+    fn flush_clamps_text_to_the_box_that_paints_it() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.set_style(body, "backgroundColor", "rgb(255, 255, 255)");
+        let panel = d.add(Some(body), "div");
+        d.set_attr(panel, "class", "story-body");
+        d.set_rect(panel, 0.0, 0.0, 360.0, 120.0);
+        d.set_styles(
+            panel,
+            &[
+                ("position", "static"),
+                ("display", "block"),
+                ("backgroundColor", "rgba(0, 0, 0, 0)"),
+                ("borderTopWidth", "0px"),
+                ("borderRightWidth", "0px"),
+                ("borderBottomWidth", "1px"),
+                ("borderLeftWidth", "0px"),
+                ("borderBottomColor", "rgb(200, 200, 200)"),
+                ("outlineWidth", "0px"),
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("fontSize", "16px"),
+            ],
+        );
+        // A plain wrapper, so the paragraph below is not a direct child and
+        // the child-box insulation says nothing about it.
+        let inner = d.add(Some(panel), "div");
+        d.set_rect(inner, 0.0, 0.0, 360.0, 120.0);
+        let p = text_el(&mut d, inner, "p", "एक पूरी कहानी यहाँ पढ़ें", "16px");
+        d.set_styles(
+            p,
+            &[
+                ("paddingTop", "0px"),
+                ("paddingRight", "0px"),
+                ("paddingBottom", "0px"),
+                ("paddingLeft", "0px"),
+                ("marginTop", "0px"),
+                ("marginRight", "0px"),
+                ("marginBottom", "0px"),
+                ("marginLeft", "0px"),
+            ],
+        );
+        // The paragraph ends 10px above the rule; its metric box runs 15px
+        // past its own box and so past the rule.
+        d.set_rect(p, 0.0, 10.0, 360.0, 100.0);
+        d.set_text_rect(p, 0.0, 6.0, 340.0, 119.0);
+        assert!(check_element_quality_dom(&d, panel, &BrowserConfig::default()).is_empty());
+
+        // The shape the corpus confirms harmful: the label's own box overruns
+        // the panel and its glyphs come with it.
+        d.set_rect(p, 0.0, 10.0, 360.0, 115.0);
+        d.set_text_rect(p, 0.0, 12.0, 340.0, 108.0);
+        let hits = check_element_quality_dom(&d, panel, &BrowserConfig::default());
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(
+            hits[0].snippet,
+            "<div> \"story-body\": children flush against border-bottom on bottom (no inset)"
         );
     }
 
@@ -1359,7 +1863,7 @@ mod tests {
     fn typography_rules() {
         let mut d = FakeDom::new();
         let (_h, body) = d.with_page();
-        let text = "a".repeat(60);
+        let text = "a".repeat(90);
         let p = text_el(&mut d, body, "p", &text, "16px");
         d.set_rect(p, 40.0, 100.0, 300.0, 40.0);
         d.set_styles(p, &[("lineHeight", "16px"), ("textAlign", "justify"), ("hyphens", "manual"), ("letterSpacing", "2px")]);
@@ -1368,11 +1872,274 @@ mod tests {
         assert_eq!(ids, vec!["tight-leading", "justified-text", "wide-tracking"], "{hits:?}");
         assert_eq!(hits[0].snippet, "line-height 1.00x (need >=1.3)");
         assert_eq!(hits[2].snippet, "letter-spacing: 0.13em on body text");
-        d.set_styles(p, &[("lineHeight", "24px"), ("textAlign", "left"), ("letterSpacing", "-1px"), ("textTransform", "uppercase")]);
+        d.set_styles(p, &[("lineHeight", "24px"), ("textAlign", "left"), ("letterSpacing", "-1.6px"), ("textTransform", "uppercase")]);
+        // 90 characters of uppercase: past the length where a run is read.
         let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["all-caps-body", "extreme-negative-tracking"], "{hits:?}");
-        assert_eq!(hits[1].snippet, format!("letter-spacing: -0.06em — \"{}\"", "a".repeat(40)));
+        assert_eq!(hits[1].snippet, format!("letter-spacing: -0.10em at 16px — \"{}\"", "a".repeat(40)));
+    }
+
+    #[test]
+    fn crushed_tracking_is_size_scaled_and_latin_only() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let latin = "Tightened headline copy running past twenty characters";
+
+        let flags = |d: &FakeDom, el: ElId| {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .any(|h| h.id == "extreme-negative-tracking")
+        };
+
+        // Reading size: -0.05em (Tailwind's tracking-tighter) and -0.06em pass.
+        let p = text_el(&mut d, body, "p", latin, "16px");
+        d.set_rect(p, 40.0, 100.0, 300.0, 40.0);
+        for ls in ["-0.05em", "-0.06em"] {
+            d.set_styles(p, &[("letterSpacing", ls)]);
+            assert!(!flags(&d, p), "{ls} at 16px should pass");
+        }
+        d.set_styles(p, &[("letterSpacing", "-0.08em")]);
+        assert!(flags(&d, p), "-0.08em at 16px should flag");
+
+        // Display size: the same -0.08em is conventional optical tightening.
+        let h = text_el(&mut d, body, "h1", latin, "48px");
+        d.set_rect(h, 40.0, 200.0, 600.0, 60.0);
+        d.set_styles(h, &[("letterSpacing", "-0.08em")]);
+        assert!(!flags(&d, h), "-0.08em at 48px should pass");
+        d.set_styles(h, &[("letterSpacing", "-0.1em")]);
+        assert!(flags(&d, h), "-0.1em at 48px should flag");
+
+        // CJK glyphs are out of scope whatever the lang attribute says.
+        let cjk = text_el(&mut d, body, "p", "赓续长征精神奋进复兴征程福建守护红色家底新时代新征程", "18px");
+        d.set_rect(cjk, 40.0, 300.0, 300.0, 40.0);
+        d.set_styles(cjk, &[("letterSpacing", "-0.1em")]);
+        assert!(!flags(&d, cjk), "CJK text should pass");
+    }
+
+    /// The tight-leading floor is a body-copy floor. Reviewing the rule's
+    /// output on real pages found it applied to display type, to heading text
+    /// that sits in a child anchor or span, to text that renders one line, to
+    /// source text nothing typesets, and to pages that set the floor exactly.
+    #[test]
+    fn tight_leading_carve_outs() {
+        const COPY: &str = "This card description is comfortably longer than the fifty characters the leading check asks for.";
+
+        fn leading(d: &FakeDom, el: ElId) -> Vec<String> {
+            check_element_quality_dom(d, el, &BrowserConfig::default())
+                .into_iter()
+                .filter(|h| h.id == "tight-leading")
+                .map(|h| h.snippet)
+                .collect()
+        }
+        // Two wrapped lines of 16px copy on a 20px line box.
+        fn wrapped(d: &mut FakeDom, parent: ElId, tag: &str, font: &str, lh: f64) -> ElId {
+            let el = text_el(d, parent, tag, COPY, font);
+            d.set_style(el, "lineHeight", &format!("{lh}px"));
+            d.set_rect(el, 40.0, 100.0, 240.0, lh * 2.0);
+            d.el_mut(el).direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 240.0, lh * 2.0));
+            el
+        }
+
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+
+        // Body copy under the floor: the case the rule is for.
+        let copy = wrapped(&mut d, body, "p", "16px", 20.0);
+        assert_eq!(leading(&d, copy), vec!["line-height 1.25x (need >=1.3)"]);
+
+        // Display type carries its own leading.
+        let display = wrapped(&mut d, body, "p", "32px", 38.4);
+        assert!(leading(&d, display).is_empty(), "32px display type");
+        let boundary = wrapped(&mut d, body, "p", "22px", 26.0);
+        assert_eq!(
+            leading(&d, boundary),
+            vec!["line-height 1.18x (need >=1.3)"],
+            "22px is still reading copy"
+        );
+
+        // One line box: there is no gap between lines to crowd.
+        let one_line = wrapped(&mut d, body, "p", "16px", 20.0);
+        d.set_rect(one_line, 40.0, 100.0, 900.0, 20.0);
+        d.el_mut(one_line).direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 900.0, 20.0));
+        assert!(leading(&d, one_line).is_empty(), "single line box");
+
+        // Heading text in a child anchor, and a card title on the ARIA role.
+        let h3 = d.add(Some(body), "h3");
+        let link = wrapped(&mut d, h3, "a", "18px", 21.6);
+        assert!(leading(&d, link).is_empty(), "anchor inside a heading");
+        let titled = wrapped(&mut d, body, "span", "18px", 21.6);
+        d.add_selector(titled, "[role=\"heading\"]");
+        assert!(leading(&d, titled).is_empty(), "role=heading card title");
+        // A block of reading copy nested inside a heading is still body copy.
+        let nested = wrapped(&mut d, h3, "p", "16px", 17.6);
+        assert_eq!(
+            leading(&d, nested),
+            vec!["line-height 1.10x (need >=1.3)"],
+            "paragraph nested in a heading"
+        );
+
+        // line-height: 1.3 on 18px computes to 23.4px, and 23.4 / 18 lands
+        // just under 1.3 in binary floats.
+        let at_floor = wrapped(&mut d, body, "p", "18px", 23.4);
+        assert!(leading(&d, at_floor).is_empty(), "exactly at the floor");
+
+        // Source text nothing typesets, and text with no box at all.
+        let script = wrapped(&mut d, body, "script", "16px", 16.0);
+        assert!(leading(&d, script).is_empty(), "script source");
+        let hidden = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.set_style(hidden, "display", "none");
+        assert!(leading(&d, hidden).is_empty(), "display:none");
+        let sr = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.add_selector(sr, SR_ONLY_SELECTOR);
+        assert!(leading(&d, sr).is_empty(), "screen-reader-only copy");
+        let boxless = wrapped(&mut d, body, "p", "16px", 16.0);
+        d.set_rect(boxless, 0.0, 0.0, 0.0, 0.0);
+        d.el_mut(boxless).direct_text_rect = None;
+        assert!(leading(&d, boxless).is_empty(), "zero-area box");
+    }
+
+    #[test]
+    fn wide_tracking_exempts_short_capital_labels() {
+        // A tracked label: one line, capitals, inside the label length.
+        let label_text = "LIMITED EDITION RELEASE 2026";
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let s = text_el(&mut d, body, "span", label_text, "12px");
+        d.set_rect(s, 40.0, 100.0, 260.0, 18.0);
+        d.set_styles(s, &[("lineHeight", "18px"), ("letterSpacing", "2px")]);
+        d.els[s as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 260.0, 18.0));
+        assert!(check_element_quality_dom(&d, s, &BrowserConfig::default()).is_empty());
+
+        // The same label typed lowercase keeps the finding.
+        let mixed = text_el(&mut d, body, "span", "Fall 2026 technology preview", "12px");
+        d.set_rect(mixed, 40.0, 130.0, 260.0, 18.0);
+        d.set_styles(mixed, &[("lineHeight", "18px"), ("letterSpacing", "2px")]);
+        d.els[mixed as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 130.0, 260.0, 18.0));
+        let hits = check_element_quality_dom(&d, mixed, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+
+        // The same words declared uppercase were always exempt.
+        let up = text_el(&mut d, body, "span", "Fall 2026 technology preview", "12px");
+        d.set_rect(up, 40.0, 160.0, 260.0, 18.0);
+        d.set_styles(
+            up,
+            &[("lineHeight", "18px"), ("letterSpacing", "2px"), ("textTransform", "uppercase")],
+        );
+        d.els[up as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 160.0, 260.0, 18.0));
+        assert!(check_element_quality_dom(&d, up, &BrowserConfig::default()).is_empty());
+
+        // Typed capitals over two lines are no longer a label.
+        d.set_rect(s, 40.0, 100.0, 140.0, 36.0);
+        d.els[s as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 140.0, 36.0));
+        let hits = check_element_quality_dom(&d, s, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+
+        // Past the label length, one line or not, it is running text.
+        let long = text_el(
+            &mut d,
+            body,
+            "p",
+            "SUPPORT HOURS RUN MONDAY TO FRIDAY FROM NINE UNTIL SIX",
+            "16px",
+        );
+        d.set_rect(long, 40.0, 200.0, 600.0, 26.0);
+        d.set_styles(long, &[("lineHeight", "26px"), ("letterSpacing", "2px")]);
+        d.els[long as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 200.0, 600.0, 26.0));
+        let hits = check_element_quality_dom(&d, long, &BrowserConfig::default());
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
+        assert_eq!(hits[0].snippet, "letter-spacing: 0.13em on body text");
+    }
+
+    /// Uppercase costs reading only when the run is long enough to be read as
+    /// a sentence. A label keeps its capitals however narrow the viewport is,
+    /// and however much text the element's children hold.
+    #[test]
+    fn all_caps_body_needs_a_long_run() {
+        let caps = |text: &str| -> Vec<RuleHit> {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let el = text_el(&mut d, body, "span", text, "12px");
+            d.set_rect(el, 40.0, 100.0, 300.0, 18.0);
+            d.set_styles(el, &[("lineHeight", "18px"), ("textTransform", "uppercase")]);
+            check_element_quality_dom(&d, el, &BrowserConfig::default())
+        };
+        let flagged = |hits: &[RuleHit]| hits.iter().any(|h| h.id == "all-caps-body");
+
+        // A card CTA or an eyebrow: conventional at any width, so silent.
+        let label = "How Mintlify is scaling sales-led GTM";
+        assert!(!flagged(&caps(label)), "37-char label");
+
+        // Real sites run labels into the seventies; a sentence starts at 80.
+        let long = "Every order placed before noon ships the same day from our warehouse today";
+        assert_eq!(utf16_len(long), 74);
+        assert!(!flagged(&caps(long)), "74-char label");
+        let longer = format!("{long} or later");
+        assert_eq!(utf16_len(&longer), 83);
+        let hits = caps(&longer);
+        assert!(flagged(&hits), "83-char run: {hits:?}");
+        assert_eq!(
+            hits.iter().find(|h| h.id == "all-caps-body").unwrap().snippet,
+            "text-transform: uppercase on 83 chars of body text"
+        );
+
+        // The run is measured as rendered: markup whitespace collapses.
+        let spaced = format!("\n      {longer}\n    ");
+        let hits = caps(&spaced);
+        assert_eq!(
+            hits.iter().find(|h| h.id == "all-caps-body").unwrap().snippet,
+            "text-transform: uppercase on 83 chars of body text"
+        );
+
+        // A bar whose own label is short and whose child holds a second one:
+        // neither run is a sentence, so neither element is charged for both.
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        let bar = text_el(&mut d, body, "div", "Audit trail complete ", "13px");
+        d.set_rect(bar, 40.0, 100.0, 300.0, 20.0);
+        d.set_styles(bar, &[("lineHeight", "20px"), ("textTransform", "uppercase")]);
+        let badge_text = "immutable log of every configuration change your team makes";
+        let badge = text_el(&mut d, bar, "span", badge_text, "13px");
+        d.set_rect(badge, 40.0, 100.0, 300.0, 20.0);
+        d.set_styles(badge, &[("lineHeight", "20px"), ("textTransform", "uppercase")]);
+        // The subtree reaches the sentence length; neither run in it does.
+        assert_eq!(utf16_len(&d.text_content(bar)), 80);
+        assert_eq!(utf16_len(badge_text), 59);
+        for el in [bar, badge] {
+            let hits = check_element_quality_dom(&d, el, &BrowserConfig::default());
+            assert!(!flagged(&hits), "{hits:?}");
+        }
+    }
+
+    #[test]
+    fn justified_text_narrows_to_rivers() {
+        let latin = "word ".repeat(24);
+        let chinese = "永慶房屋於一九八八年成立專注本業堅持創新秉持先誠實再成交的精神".to_string();
+        let arabic = "يعتمد ضبط النص في الخط العربي على استطالة الحروف على السطر".to_string();
+        let thai = "การจัดวางข้อความแบบชิดขอบทั้งสองด้านในภาษาไทยไม่ได้ดึงช่องว่าง".to_string();
+        let justified = |text: &str, width: f64, hyphens: &str| {
+            let mut d = FakeDom::new();
+            let (_h, body) = d.with_page();
+            let p = text_el(&mut d, body, "p", text, "16px");
+            d.set_rect(p, 40.0, 100.0, width, 60.0);
+            d.set_styles(p, &[("lineHeight", "26px"), ("textAlign", "justify"), ("hyphens", hyphens)]);
+            let hits = check_element_quality_dom(&d, p, &BrowserConfig::default());
+            hits.iter().any(|h| h.id == "justified-text")
+        };
+
+        // 300px at 16px is ~37 chars/line; 800px is ~100.
+        assert!(justified(&latin, 300.0, "manual"));
+        assert!(!justified(&latin, 800.0, "manual"));
+        assert!(!justified(&latin, 300.0, "auto"));
+        // Scripts that justify without stretching word spaces.
+        assert!(!justified(&chinese, 300.0, "manual"));
+        assert!(!justified(&arabic, 300.0, "manual"));
+        assert!(!justified(&thai, 300.0, "manual"));
+        // A Latin paragraph carrying a few ideographs is still Latin.
+        assert!(justified(&format!("{latin} 永慶房屋"), 300.0, "manual"));
     }
 
     #[test]

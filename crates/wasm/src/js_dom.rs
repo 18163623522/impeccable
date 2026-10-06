@@ -57,6 +57,7 @@ extern "C" {
     fn client_left(el: u32) -> f64;
     fn scroll_width(el: u32) -> f64;
     fn scroll_left(el: u32) -> f64;
+    fn scroll_height(el: u32) -> f64;
     fn offset_width(el: u32) -> f64;
     fn offset_height(el: u32) -> f64;
     fn check_visibility(el: u32) -> i32;
@@ -216,6 +217,17 @@ impl Dom for JsDom {
     fn next_element_sibling(&self, el: ElId) -> Option<ElId> {
         opt(next_element_sibling(el))
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        // One bridge call per element per scan, then read from the cache
+        // without cloning the list.
+        CHILDREN_CACHE.with(|c| {
+            c.borrow_mut()
+                .entry(el)
+                .or_insert_with(|| children(el))
+                .first()
+                .copied()
+        })
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         contains(a, b)
     }
@@ -338,6 +350,9 @@ impl Dom for JsDom {
     }
     fn scroll_left(&self, el: ElId) -> f64 {
         scroll_left(el)
+    }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        scroll_height(el)
     }
     fn offset_width(&self, el: ElId) -> f64 {
         offset_width(el)

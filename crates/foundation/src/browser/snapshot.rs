@@ -61,6 +61,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "animationIterationCount",
     "animationName",
     "animationTimingFunction",
+    "aspectRatio",
     "backdropFilter",
     "background",
     "backgroundClip",
@@ -88,9 +89,12 @@ pub const STYLE_PROPS: &[&str] = &[
     "clip-path",
     "clipPath",
     "color",
+    "colorScheme",
+    "contain",
     "content",
     "contentVisibility",
     "cssFloat",
+    "direction",
     "display",
     "filter",
     "float",
@@ -137,9 +141,12 @@ pub const STYLE_PROPS: &[&str] = &[
     "paddingLeft",
     "paddingRight",
     "paddingTop",
+    "perspective",
     "pointerEvents",
     "position",
     "right",
+    "rotate",
+    "scale",
     "textAlign",
     "textDecoration",
     "textDecorationLine",
@@ -152,6 +159,8 @@ pub const STYLE_PROPS: &[&str] = &[
     "transitionDuration",
     "transitionProperty",
     "transitionTimingFunction",
+    "translate",
+    "unicodeBidi",
     "verticalAlign",
     "visibility",
     "webkitBackgroundClip",
@@ -160,6 +169,7 @@ pub const STYLE_PROPS: &[&str] = &[
     "webkitTextFillColor",
     "whiteSpace",
     "width",
+    "willChange",
     "wordBreak",
     "zIndex",
 ];
@@ -263,8 +273,9 @@ pub struct SnapNode {
     #[serde(rename = "r", default)]
     pub rect: Option<[f64; 4]>,
     /// `[clientWidth, clientHeight, clientLeft, scrollWidth, scrollLeft,
-    /// offsetWidth, offsetHeight]` (`null` → NaN, as `undefined` crosses
-    /// into a wasm f64).
+    /// offsetWidth, offsetHeight, scrollHeight]` (`null` → NaN, as
+    /// `undefined` crosses into a wasm f64). Captures older than
+    /// `scrollHeight` carry seven columns, and it reads as NaN.
     #[serde(rename = "m", default)]
     pub metrics: Vec<Option<f64>>,
     /// `checkVisibility`: 1 / 0, `-1` when the method is missing.
@@ -737,6 +748,9 @@ impl Dom for SnapshotDom {
     fn next_element_sibling(&self, el: ElId) -> Option<ElId> {
         self.snap.next_element_sibling(el)
     }
+    fn first_element_child(&self, el: ElId) -> Option<ElId> {
+        self.snap.node(el).children.first().copied()
+    }
     fn contains(&self, a: ElId, b: ElId) -> bool {
         if !self.valid(a) || !self.valid(b) {
             return false;
@@ -925,6 +939,9 @@ impl Dom for SnapshotDom {
     fn scroll_left(&self, el: ElId) -> f64 {
         metric(&self.snap.node(el).metrics, 4)
     }
+    fn scroll_height(&self, el: ElId) -> f64 {
+        metric(&self.snap.node(el).metrics, 7)
+    }
     fn offset_width(&self, el: ElId) -> f64 {
         metric(&self.snap.node(el).metrics, 5)
     }
@@ -1086,6 +1103,88 @@ mod tests {
             Some("rgb(187, 187, 187)")
         );
         assert_eq!(d.pseudo_style(2, "::placeholder", "color"), None);
+    }
+
+    /// A capture that records the full current `STYLE_PROPS` answers
+    /// `direction`, `unicodeBidi` and `aspectRatio` through `Dom::style`.
+    #[test]
+    fn bidi_and_aspect_ratio_round_trip() {
+        let props: Vec<&str> = STYLE_PROPS.to_vec();
+        for want in ["direction", "unicodeBidi", "aspectRatio"] {
+            assert!(props.contains(&want), "{want} missing from STYLE_PROPS");
+        }
+        // One interned value per column, so each element's `s` row is the
+        // column order itself and a read must land on its own property name.
+        let strings: Vec<String> = props.iter().map(|p| format!("v:{p}")).collect();
+        let cols: Vec<usize> = (0..props.len()).collect();
+        let json = serde_json::json!({
+            "v": 1,
+            "hostname": "example.test",
+            "innerWidth": 1280,
+            "innerHeight": 800,
+            "styleProps": props,
+            "pseudoProps": ["content"],
+            "strings": strings,
+            "documentElement": 1,
+            "body": 2,
+            "els": [
+                {"t": "HTML", "c": [2], "s": cols},
+                {"t": "BODY", "p": 1, "c": [], "s": cols},
+            ],
+        })
+        .to_string();
+        let d = snap(&json);
+        assert_eq!(d.style(2, "direction"), "v:direction");
+        assert_eq!(d.style(2, "unicodeBidi"), "v:unicodeBidi");
+        assert_eq!(d.style(2, "aspectRatio"), "v:aspectRatio");
+        // Every other column still lands on its own name.
+        assert_eq!(d.style(2, "display"), "v:display");
+        assert_eq!(d.style(2, "zIndex"), "v:zIndex");
+        assert!(d.unknown_style_props().is_empty());
+    }
+
+    /// A capture recorded before the three properties were added still parses
+    /// and reads them as unknown rather than panicking or shifting columns.
+    #[test]
+    fn older_capture_without_the_new_props_still_loads() {
+        let d = snap(SMALL);
+        assert_eq!(d.style(5, "display"), "inline");
+        assert_eq!(d.style(5, "direction"), "");
+        assert_eq!(d.style(5, "unicodeBidi"), "");
+        assert_eq!(d.style(5, "aspectRatio"), "");
+        assert_eq!(
+            d.unknown_style_props(),
+            vec![
+                "direction".to_string(),
+                "unicodeBidi".to_string(),
+                "aspectRatio".to_string()
+            ]
+        );
+    }
+
+    /// The containing-block properties and `scrollHeight` joined the capture
+    /// later: a recording without them reads the properties as empty and the
+    /// metric as NaN, which the paint gate takes as undecided.
+    #[test]
+    fn older_capture_without_containing_block_props_or_scroll_height() {
+        let d = snap(SMALL);
+        for prop in ["willChange", "contain", "translate", "scale", "rotate", "perspective"] {
+            assert_eq!(d.style(4, prop), "", "{prop}");
+            assert!(STYLE_PROPS.contains(&prop), "{prop} missing from STYLE_PROPS");
+        }
+        assert!(d.scroll_height(4).is_nan());
+        let json = r#"{
+          "v": 1, "hostname": "example.test", "innerWidth": 1280, "innerHeight": 800,
+          "styleProps": ["display"], "pseudoProps": ["content"], "strings": ["block"],
+          "documentElement": 1, "body": 2,
+          "els": [
+            {"t":"HTML","c":[2],"s":[0],"m":[1280,800,0,1280,0,1280,800,800]},
+            {"t":"BODY","p":1,"c":[],"s":[0],"m":[1280,2400,0,1280,0,1280,2400]}
+          ]
+        }"#;
+        let d = snap(json);
+        assert_eq!(d.scroll_height(1), 800.0);
+        assert!(d.scroll_height(2).is_nan());
     }
 
     #[test]

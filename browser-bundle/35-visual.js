@@ -107,32 +107,37 @@ function createVisualContrast(IO) {
     if (walk.unresolved) return walk.unresolved;
     const nodes = walk.nodes.map(n => ({ node: IO.node(n.el), kind: n.kind }));
     const unresolved = [];
+    // Translucent surfaces the walk passed through, topmost first. The walk
+    // keeps descending the same stack for the opaque ground under them: a
+    // surface's own parent sits below siblings that paint over it, so
+    // restarting the walk there would skip whatever those paint.
+    const pending = [];
 
     for (const { node, kind } of nodes) {
+      let sample;
       if (kind === 'img') {
-        const sample = await sampleImageElement(node, point);
-        if (sample.status === 'sampled') return sample;
-        unresolved.push(sample.reason);
-        continue;
-      }
-      if (kind === 'raster') {
+        sample = await sampleImageElement(node, point);
+      } else if (kind === 'raster') {
         const intrinsic = IO.intrinsicRaster(node);
         const sourcePoint = await core('vc_raster_source_point', IO.handle(node), intrinsic[0], intrinsic[1], point.x, point.y);
-        if (sourcePoint) {
-          const sample = await core('vc_raster_finish', IO.handle(node), __j(await sampleDrawablePixel(node, intrinsic, sourcePoint)));
-          if (sample.status === 'sampled') return sample;
-          unresolved.push(sample.reason);
+        // Outside the drawable: nothing sampled, nothing to say.
+        if (!sourcePoint) continue;
+        sample = await core('vc_raster_finish', IO.handle(node), __j(await sampleDrawablePixel(node, intrinsic, sourcePoint)));
+      } else if (kind === 'unreadable') {
+        // Paint this walk cannot read (vector artwork).
+        sample = await core('vc_unreadable_stack_sample', IO.handle(node));
+      } else {
+        sample = await sampleCssBackground(node, point, textColor);
+      }
+      if (sample.status === 'sampled') {
+        if (await IO.core('vc_sample_is_opaque', __j(sample))) {
+          return core('vc_composite_stack', __j(pending), __j(sample));
         }
+        pending.push(sample);
         continue;
       }
-      const sample = await sampleCssBackground(node, point, textColor);
-      if (sample.status === 'sampled') {
-        if (await IO.core('vc_sample_is_opaque', __j(sample))) return sample;
-        const parent = IO.parentOrBody(node);
-        const under = await sampleVisualBackgroundAtPoint(parent, point, textColor, depth + 1);
-        return core('vc_alpha_composite', __j(sample), __j(under));
-      }
       unresolved.push(sample.reason);
+      if (sample.stop === true) break;
     }
 
     return core('vc_unresolved_from_reasons', __j(unresolved));

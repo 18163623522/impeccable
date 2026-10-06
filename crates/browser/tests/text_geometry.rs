@@ -67,6 +67,19 @@ fn engine() -> Option<BrowserEngine> {
     Some(BrowserEngine::new(env))
 }
 
+/// Whether the browser has a Japanese face to set CJK text in. macOS and
+/// Windows ship one; on Linux it is whatever fontconfig lists.
+fn has_cjk_font() -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    std::process::Command::new("fc-list")
+        .args([":lang=ja", "family"])
+        .output()
+        .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// `(snippet, selector)` for each finding of `rule` on one fixture.
 fn findings(engine: &BrowserEngine, port: u16, fixture: &str, rule: &str) -> Vec<(String, String)> {
     let url = format!("http://127.0.0.1:{port}/{fixture}");
@@ -106,21 +119,42 @@ fn the_text_geometry_rules_measure_the_text() {
     // one-line note, the centred lines, the 16px CJK column and the narrow
     // measure are absent.
     let mut lines = findings(&engine, port, "line-length.html", "line-length");
-    lines.sort();
+    lines.sort_by(|a, b| a.1.cmp(&b.1));
+    let selectors: Vec<&str> = lines.iter().map(|(_, sel)| sel.as_str()).collect();
+    // The 12px CJK column is measured in a CJK face; a machine with none
+    // (a stock Ubuntu runner) sets it in fallback boxes of another width.
+    let cjk: &[&str] = if has_cjk_font() {
+        &["p.copy.cjk-wide"]
+    } else {
+        eprintln!("no CJK font installed: the CJK column is not asserted");
+        &[]
+    };
     assert_eq!(
-        lines,
-        vec![
-            ("~102 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.cjk-wide".to_string()),
-            ("~115 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.flag-mono".to_string()),
-            ("~119 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.flag-large-span".to_string()),
-            ("~141 chars on 2 of 2 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(3)".to_string()),
-            ("~141 chars on 2 of 3 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(2)".to_string()),
-            ("~141 chars on 3 of 3 rendered lines (aim for <80)".to_string(), "p.copy.wide:nth-of-type(1)".to_string()),
-        ],
+        selectors,
+        [cjk, &[
+            "p.copy.flag-large-span",
+            "p.copy.flag-mono",
+            "p.copy.wide:nth-of-type(1)",
+            "p.copy.wide:nth-of-type(2)",
+            "p.copy.wide:nth-of-type(3)",
+        ]]
+        .concat(),
         "the wide column, its inline-prose twin, its 2.4 line-height twin, the 12px CJK column, the \
          24px span across 1,200px and the monospace column; the 16px paragraph set in a 24px span \
-         and the 680px monospace column hold under 85 characters a line"
+         and the 680px monospace column hold under 85 characters a line: {lines:?}"
     );
+    // The measured count depends on the installed fonts (the fallback for
+    // Arial differs between Linux, macOS and Windows), so only its floor is
+    // pinned: every flagged paragraph sets over 85 characters a line.
+    for (snippet, selector) in &lines {
+        let chars: u32 = snippet
+            .strip_prefix('~')
+            .and_then(|rest| rest.split_once(" chars on "))
+            .and_then(|(n, _)| n.parse().ok())
+            .unwrap_or_else(|| panic!("{selector}: unexpected snippet {snippet:?}"));
+        assert!(chars >= 85, "{selector}: {snippet}");
+        assert!(snippet.ends_with("rendered lines (aim for <80)"), "{selector}: {snippet}");
+    }
 
     let edges = findings(&engine, port, "body-text-viewport-edge.html", "body-text-viewport-edge");
     let (page, edges): (Vec<_>, Vec<_>) = edges.into_iter().partition(|(_, sel)| sel == "body");

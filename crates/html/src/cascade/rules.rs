@@ -247,6 +247,50 @@ impl<K: Hash + Eq> SpecifiedStore<K> {
 /// Layout properties the stripe-child static adapter needs that are not in
 /// the frozen `expandStaticDeclaration` allowlist. Applied here so the
 /// recorded vectors stay byte-equal.
+/// The alignment values in a `place-*` shorthand, one per axis. An overflow
+/// keyword (`safe`, `unsafe`) belongs to the position after it and a
+/// `first`/`last` to the `baseline` after it, so `safe center` is one value
+/// and, alone, sets both axes.
+fn place_alignment_components(tokens: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for token in tokens {
+        let lower = js::to_lower_case(&token);
+        if matches!(lower.as_str(), "safe" | "unsafe" | "first" | "last") {
+            pending = Some(match pending.take() {
+                Some(p) => format!("{p} {token}"),
+                None => token,
+            });
+            continue;
+        }
+        out.push(match pending.take() {
+            Some(p) => format!("{p} {token}"),
+            None => token,
+        });
+    }
+    if let Some(p) = pending {
+        out.push(p);
+    }
+    out
+}
+
+#[cfg(test)]
+mod place_alignment_tests {
+    use super::*;
+
+    fn comps(v: &str) -> Vec<String> {
+        place_alignment_components(split_css_tokens(v))
+    }
+
+    #[test]
+    fn overflow_and_baseline_keywords_join_their_value() {
+        assert_eq!(comps("safe center"), vec!["safe center"]);
+        assert_eq!(comps("unsafe end safe start"), vec!["unsafe end", "safe start"]);
+        assert_eq!(comps("first baseline center"), vec!["first baseline", "center"]);
+        assert_eq!(comps("center start"), vec!["center", "start"]);
+    }
+}
+
 fn extra_specified_expansions(prop: &str, value: &str) -> Vec<Expanded> {
     let p = js::to_lower_case(prop);
     let v = js::trim(value);
@@ -295,7 +339,7 @@ fn extra_specified_expansions(prop: &str, value: &str) -> Vec<Expanded> {
         }
         // `place-items: <align> [<justify>]`, one value setting both.
         "place-items" => {
-            let tokens = split_css_tokens(v);
+            let tokens = place_alignment_components(split_css_tokens(v));
             match tokens.first() {
                 Some(align) => {
                     let justify = tokens.get(1).unwrap_or(align).clone();

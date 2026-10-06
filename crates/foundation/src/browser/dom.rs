@@ -71,6 +71,14 @@ pub struct KeyframeFrame {
     pub decls: Vec<(String, String)>,
 }
 
+/// One child of an element as [`Dom::child_nodes`] lists it: an element, or
+/// a text node's data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DomChild {
+    Element(ElId),
+    Text(String),
+}
+
 /// The DOM measurement surface. Element handles are opaque `u32`s.
 pub trait Dom {
     // ── document / window ─────────────────────────────────────────────
@@ -144,6 +152,20 @@ pub trait Dom {
     /// The `textContent` of every direct child text node (`nodeType === 3`),
     /// in order. Empty text nodes are included (they matter for `join(' ')`).
     fn direct_text_nodes(&self, el: ElId) -> Vec<String>;
+    /// `el.childNodes` reduced to its element children and its text nodes
+    /// (`nodeType === 3`), in document order. Comments and other node types
+    /// are left out.
+    ///
+    /// This is the one view that says where an element's own text sits among
+    /// its children, which a caller needs to rebuild the rendered text node
+    /// by node. The default lists the direct text nodes and then the element
+    /// children, which is the right order only when the element has one kind
+    /// or the other; every DOM in this workspace overrides it.
+    fn child_nodes(&self, el: ElId) -> Vec<DomChild> {
+        let mut out: Vec<DomChild> = self.direct_text_nodes(el).into_iter().map(DomChild::Text).collect();
+        out.extend(self.children(el).into_iter().map(DomChild::Element));
+        out
+    }
     /// `el.isContentEditable`.
     fn is_content_editable(&self, el: ElId) -> bool;
     /// `el.hidden` (the boolean IDL attribute).
@@ -209,9 +231,12 @@ pub trait Dom {
     }
     /// Whether the probe reads open shadow trees ([`Dom::flat_parent`]), so
     /// that an element with no assigned slot is not slotted anywhere. A
-    /// snapshot recorded before shadow trees were captured answers `false`.
+    /// snapshot recorded before shadow trees were captured answers `false`,
+    /// and so does the default, which goes with the default `flat_parent`: a
+    /// probe that walks the light tree alone (the live page's `JsDom`) never
+    /// sees a fill a component paints in its shadow tree.
     fn shadow_trees_recorded(&self) -> bool {
-        true
+        false
     }
     /// The rows the element's rendered text occupies: one rect per line box,
     /// top to bottom. `None` when this DOM cannot say where the lines are.
@@ -328,6 +353,53 @@ pub fn tag_lower(dom: &dyn Dom, el: ElId) -> String {
     crate::js::to_lower_case(&dom.tag_name(el))
 }
 
+/// Elements whose text is in `textContent` and never on a line.
+pub const UNRENDERED_TEXT_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
+
+/// A descendant whose text is on no line: a `<style>`, `<script>`,
+/// `<noscript>` or `<template>`, a `display: none` box, and a
+/// `content-visibility: hidden` box (the box lays out, its contents do not).
+/// `content-visibility` applies only where layout containment does, so a
+/// plain inline box, `display: contents`, and internal table and ruby boxes
+/// render their text whatever the property says
+/// ([`content_visibility_applies`]).
+///
+/// One definition for both sides of `line-length`: the characters it counts
+/// and the line rects it divides them among skip the same subtrees, so the
+/// two cannot disagree about which text rendered. A DOM that does not
+/// record `contentVisibility` answers `""` and the subtree is kept.
+pub fn renders_no_text(dom: &dyn Dom, el: ElId) -> bool {
+    UNRENDERED_TEXT_TAGS.contains(&tag_lower(dom, el).as_str())
+        || dom.style(el, "display") == "none"
+        || (crate::js::to_lower_case(&dom.style(el, "contentVisibility")) == "hidden"
+            && content_visibility_applies(&dom.style(el, "display")))
+}
+
+/// Displays whose box takes layout containment, which is the condition for
+/// `content-visibility` to have any effect (CSS Containment 2: containment
+/// does not apply to non-atomic inline boxes, internal table boxes other
+/// than table cells, or internal ruby boxes; `display: contents` makes no
+/// box at all). An unknown display (`""`) counts as applying.
+pub fn content_visibility_applies(display: &str) -> bool {
+    !matches!(
+        crate::js::to_lower_case(display).trim(),
+        "inline"
+            | "inline flow"
+            | "contents"
+            | "table-row"
+            | "table-row-group"
+            | "table-header-group"
+            | "table-footer-group"
+            | "table-column"
+            | "table-column-group"
+            | "ruby"
+            | "ruby-base"
+            | "ruby-text"
+            | "ruby-base-container"
+            | "ruby-text-container"
+    )
+}
+
 /// `el.getAttribute('class') || ''`.
 pub fn class_attr(dom: &dyn Dom, el: ElId) -> String {
     dom.attr(el, "class").unwrap_or_default()
@@ -430,5 +502,70 @@ pub struct ElStyle<'a> {
 impl crate::css::measures::StyleMap for ElStyle<'_> {
     fn prop(&self, name: &str) -> Option<String> {
         Some(self.dom.style(self.el, name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A probe that overrides nothing it need not, as the live page's
+    /// `JsDom` does.
+    struct LightTreeOnly;
+
+    #[rustfmt::skip]
+    impl Dom for LightTreeOnly {
+    fn document_element(&self) -> Option<ElId> { None }
+        fn body(&self) -> Option<ElId> { None }
+        fn query_all(&self, _: Option<ElId>, _: &str) -> Result<Vec<ElId>, SelectorError> { Ok(Vec::new()) }
+        fn query_one(&self, _: Option<ElId>, _: &str) -> Result<Option<ElId>, SelectorError> { Ok(None) }
+        fn inner_width(&self) -> f64 { 0.0 }
+        fn inner_height(&self) -> f64 { 0.0 }
+        fn scroll_x(&self) -> f64 { 0.0 }
+        fn scroll_y(&self) -> f64 { 0.0 }
+        fn hostname(&self) -> String { String::new() }
+        fn element_from_point(&self, _: f64, _: f64) -> Option<ElId> { None }
+        fn elements_from_point(&self, _: f64, _: f64) -> Vec<ElId> { Vec::new() }
+        fn css_escape(&self, s: &str) -> String { s.to_string() }
+        fn keyframes(&self, _: &str) -> Option<Vec<KeyframeFrame>> { None }
+        fn document_html_for_patterns(&self) -> String { String::new() }
+        fn tag_name(&self, _: ElId) -> String { String::new() }
+        fn namespace_uri(&self, _: ElId) -> String { String::new() }
+        fn parent(&self, _: ElId) -> Option<ElId> { None }
+        fn children(&self, _: ElId) -> Vec<ElId> { Vec::new() }
+        fn previous_element_sibling(&self, _: ElId) -> Option<ElId> { None }
+        fn next_element_sibling(&self, _: ElId) -> Option<ElId> { None }
+        fn contains(&self, _: ElId, _: ElId) -> bool { false }
+        fn matches(&self, _: ElId, _: &str) -> Result<bool, SelectorError> { Ok(false) }
+        fn closest(&self, _: ElId, _: &str) -> Result<Option<ElId>, SelectorError> { Ok(None) }
+        fn attr(&self, _: ElId, _: &str) -> Option<String> { None }
+        fn id_prop(&self, _: ElId) -> Option<String> { None }
+        fn class_name_prop(&self, _: ElId) -> Option<String> { None }
+        fn text_content(&self, _: ElId) -> String { String::new() }
+        fn inner_text(&self, _: ElId) -> Option<String> { None }
+        fn direct_text_nodes(&self, _: ElId) -> Vec<String> { Vec::new() }
+        fn is_content_editable(&self, _: ElId) -> bool { false }
+        fn hidden_prop(&self, _: ElId) -> bool { false }
+        fn style(&self, _: ElId, _: &str) -> String { String::new() }
+        fn pseudo_style(&self, _: ElId, _: &str, _: &str) -> Option<String> { None }
+        fn rect(&self, _: ElId) -> Rect { Rect::default() }
+        fn client_width(&self, _: ElId) -> f64 { 0.0 }
+        fn client_height(&self, _: ElId) -> f64 { 0.0 }
+        fn client_left(&self, _: ElId) -> f64 { 0.0 }
+        fn scroll_width(&self, _: ElId) -> f64 { 0.0 }
+        fn scroll_left(&self, _: ElId) -> f64 { 0.0 }
+        fn offset_width(&self, _: ElId) -> f64 { 0.0 }
+        fn offset_height(&self, _: ElId) -> f64 { 0.0 }
+        fn check_visibility(&self, _: ElId) -> Option<bool> { None }
+        fn direct_text_rect(&self, _: ElId) -> Option<Rect> { None }
+    }
+
+    /// The default `flat_parent` walks the light tree, so the default must
+    /// not claim shadow trees were read: a probe that cannot see them keeps
+    /// the custom-element fallback for a surface hidden in one.
+    #[test]
+    fn a_light_tree_probe_records_no_shadow_trees() {
+        assert!(!LightTreeOnly.shadow_trees_recorded());
+        assert_eq!(LightTreeOnly.flat_parent(3), None);
     }
 }

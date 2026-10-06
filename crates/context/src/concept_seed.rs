@@ -623,6 +623,10 @@ pub fn run(args: &[String], io: &mut Io) -> i32 {
     };
     match render_concept_seed(&env, &cwd, &mut budget, &seed) {
         Ok(text) => {
+            // A valid roll: the scope and re-roll round passed validation.
+            // serve-question reads the record to know a surface round when
+            // it serves one (`record_roll`).
+            crate::serve_question::record_roll(&cwd, seed.scope.as_deref().unwrap_or("surface"), &seed.key, seed.reroll as usize);
             io.out(&text);
             0
         }
@@ -888,5 +892,27 @@ mod tests {
         let (proj, skill) = fixture("present-ping", &[]);
         let (_, out) = seed(&proj, &skill, true, &["--kind", "assigned", "--from", "k1", "--scope", "direction"]);
         assert!(!out.contains("PRESENTATION"), "{out}");
+    }
+
+    #[test]
+    fn every_roll_records_its_scope_for_serve_question() {
+        let (proj, skill) = fixture("roll-record", &[]);
+        let record = proj.join(".impeccable/questions/roll.json");
+        let read = || serde_json::from_str::<Value>(&std::fs::read_to_string(&record).unwrap()).unwrap();
+        // Invalid arguments and telemetry pings are not rolls.
+        let (code, _) = seed(&proj, &skill, true, &["--scope", "world", "--from", "k1"]);
+        assert_eq!(code, 1);
+        seed(&proj, &skill, true, &["--chosen", "x", "--kind", "assigned", "--from", "k1", "--scope", "surface"]);
+        assert!(!record.exists());
+        // A surface roll, then a direction re-roll replacing it.
+        let (code, _) = seed(&proj, &skill, true, &["--scope", "surface", "--mode", "operate", "--from", "k1"]);
+        assert_eq!(code, 0);
+        let r = read();
+        assert_eq!((r["scope"].as_str(), r["key"].as_str(), r["reroll"].as_u64()), (Some("surface"), Some("k1"), Some(0)));
+        assert!(r["at"].as_f64().is_some_and(|at| (crate::util::now_ms() - at).abs() < 60_000.0), "{r}");
+        let (code, _) = seed(&proj, &skill, false, &["--scope", "direction", "--from", "k2", "--reroll", "1"]);
+        assert_eq!(code, 0);
+        let r = read();
+        assert_eq!((r["scope"].as_str(), r["key"].as_str(), r["reroll"].as_u64()), (Some("direction"), Some("k2"), Some(1)));
     }
 }

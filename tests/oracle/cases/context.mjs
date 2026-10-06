@@ -174,6 +174,31 @@ const MODE_RULES_SKILL = `${REPO}/tests/fixtures/mode-rules-skill`;
 const seedEnv = (extra = {}) => env({ IMPECCABLE_SKILL_DIR: MODE_RULES_SKILL, IMPECCABLE_CATALOG_DIR: CATALOG, IMPECCABLE_API_URL: 'http://127.0.0.1:9/api', IMPECCABLE_API_TIMEOUT: '300', ...extra });
 const degradedEnv = (extra = {}) => env({ IMPECCABLE_SKILL_DIR: MODE_RULES_SKILL, IMPECCABLE_CATALOG_DIR: `${WS}/no-such-catalog`, IMPECCABLE_API_URL: 'http://127.0.0.1:9/api', IMPECCABLE_API_TIMEOUT: '300', ...extra });
 
+// A direction round as the eval run wrote it: comp-led with image generation, canon card, no comps.
+const DIRECTION_NO_COMPS = {
+  title: 'Choose the visual world',
+  options: [
+    { id: 'assigned', label: 'Ledger', kicker: 'THE ROLL', thesis: 'One.' },
+    { id: 'model-pick', label: 'Folio', kicker: 'IMPECCABLE’S PICK', thesis: 'Two.' },
+    { id: 'challenger-a', label: 'Rail', verdict: 'competitive', thesis: 'Three.', hero: 'https://x/a-hero.webp' },
+    { id: 'challenger-b', label: 'Field', verdict: 'declined', thesis: 'Four.', hero: 'https://x/b-hero.webp' },
+  ],
+  reroll: { registers: ['safer', 'bolder'] },
+  buildPath: { value: 'comp', toggle: true },
+  canon: true,
+  canonCard: { label: 'The category standard', thesis: 'Five.' },
+};
+// A surface round on an established world: three dealt structures as full cards, comp-led with image generation, no canon, no comps.
+const SURFACE_NO_COMPS = {
+  title: 'Choose the structure',
+  options: [
+    { id: 'ledger', label: 'Ledger', kicker: 'THE ROLL', thesis: 'One.' },
+    { id: 'rail', label: 'Rail', thesis: 'Two.' },
+    { id: 'field', label: 'Field', thesis: 'Three.' },
+  ],
+  reroll: true,
+  buildPath: { value: 'comp', toggle: true },
+};
 const QUESTION_PAYLOAD = { title: 'Pick', options: [{ id: 'a', label: 'A', thesis: 'One.' }, { id: 'b', label: 'B', thesis: 'Two.' }] };
 
 const cases = [
@@ -743,12 +768,40 @@ const cases = [
   { id: 'question-update-comps-landed-no-next', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/' })); write(ws, '.impeccable/mocks/comp-a.png', 'png'); write(ws, '.impeccable/mocks/comp-b.png', 'png'); write(ws, 'payload.json', JSON.stringify({ title: 'Pick', options: [{ id: 'a', label: 'A', thesis: 'One.', comp: '.impeccable/mocks/comp-a.png' }, { id: 'b', label: 'B', thesis: 'Two.', comp: '.impeccable/mocks/comp-b.png' }] })); }, args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env() },
   // A comp-round pick (comp directly under .impeccable/mocks/) is the approved comp, not decision option one.
   { id: 'question-wait-answer-comp-round', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/', comps: ['.impeccable/mocks/comp-b-open-book.png'] })); write(ws, '.impeccable/mocks/comp-b-open-book.png', 'png'); write(ws, '.impeccable/mocks/comp-b-open-book.png.json', JSON.stringify({ prompt: 'b' })); write(ws, '.impeccable/questions/k1.answer.json', JSON.stringify({ optionId: 'b', steer: '', comp: '.impeccable/mocks/comp-b-open-book.png' })); }, args: ['--wait', '--key', 'k1', '--poll', '2'], env: env(), files: ['.impeccable/questions/**'] },
+  // In the comp round, a pick of the decision comp build-phase recorded as option one is the approval too.
+  { id: 'question-wait-answer-decision-comp-in-round', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/build/state.json', JSON.stringify({ phase: 'comps', decisionComp: '.impeccable/mocks/decision/a.png' })); write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/', comps: ['.impeccable/mocks/decision/a.png', '.impeccable/mocks/comp-2.png'] })); write(ws, '.impeccable/mocks/decision/a.png', 'png'); write(ws, '.impeccable/mocks/decision/a.png.json', JSON.stringify({ prompt: 'a' })); write(ws, '.impeccable/mocks/comp-2.png', 'png'); write(ws, '.impeccable/mocks/comp-2.png.json', JSON.stringify({ prompt: 'b' })); write(ws, '.impeccable/questions/k1.answer.json', JSON.stringify({ optionId: 'one', steer: '', comp: '.impeccable/mocks/decision/a.png' })); }, args: ['--wait', '--key', 'k1', '--poll', '2'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-stop-no-key', verb: 'serve-question', workspace: 'ctx-empty', args: ['--stop'], env: env() },
   { id: 'question-stop-nothing', verb: 'serve-question', workspace: 'ctx-empty', args: ['--stop', '--key', 'k1'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-stop-clears-files', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 2147483000, port: 1, url: 'x' })); write(ws, '.impeccable/questions/k1.answer.json', '{}'); write(ws, '.impeccable/questions/k1.log', 'log\n'); }, args: ['--stop', '--key', 'k1'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-update-no-key', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(QUESTION_PAYLOAD)), args: ['--update', '--payload', 'payload.json'], env: env() },
   { id: 'question-update-empty-options', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify({ options: [] })), args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
   { id: 'question-update-no-server', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(QUESTION_PAYLOAD)), args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
+  // A comp-led direction round with image generation (buildPath comp + toggle, canon exit present) owes a decision comp on every card, canon included, declined challengers excepted: --start refuses one that declares none before recording a hand or spawning a server, and --update refuses it before delivery.
+  { id: 'question-start-direction-missing-comps', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify(DIRECTION_NO_COMPS)), args: ['--start', '--no-open', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
+  { id: 'question-update-direction-missing-comps', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/' })); write(ws, 'payload.json', JSON.stringify({ ...DIRECTION_NO_COMPS, options: DIRECTION_NO_COMPS.options.map((o) => (o.id === 'assigned' ? { ...o, comp: '.impeccable/mocks/decision/assigned.png' } : o)) })); }, args: ['--update', '--key', 'k1', '--payload', 'payload.json'], env: env(), files: ['.impeccable/questions/**'] },
+  // A surface round carries no canon, so the payload alone cannot tell it from the comp round; concept-seed records every roll in .impeccable/questions/roll.json, and while the latest is a surface roll no decision page has taken, --start and --update refuse a comp-led surface hand that leaves a dealt card without a comp. The refusal leaves the roll record in place for the corrected rerun.
+  {
+    id: 'question-start-surface-missing-comps', verb: 'serve-question', workspace: 'ctx-product-only', setup: (ws) => write(ws, 'payload.json', JSON.stringify(SURFACE_NO_COMPS)), env: env(), files: ['.impeccable/questions/**'],
+    steps: [
+      { verb: 'concept-seed', args: ['--scope', 'surface', '--mode', 'operate', '--from', 'oracle-key-1'], env: degradedEnv() },
+      { args: ['--start', '--no-open', '--key', 'k1', '--payload', 'payload.json'] },
+    ],
+  },
+  {
+    id: 'question-update-surface-missing-comps', verb: 'serve-question', workspace: 'ctx-product-only', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/' })); write(ws, 'payload.json', JSON.stringify({ ...SURFACE_NO_COMPS, options: SURFACE_NO_COMPS.options.map((o) => (o.id === 'ledger' ? { ...o, comp: '.impeccable/mocks/decision/ledger.png' } : o)) })); }, env: env(), files: ['.impeccable/questions/**'],
+    steps: [
+      { verb: 'concept-seed', args: ['--scope', 'surface', '--mode', 'operate', '--from', 'oracle-key-1', '--reroll', '1'], env: degradedEnv() },
+      { args: ['--update', '--key', 'k1', '--payload', 'payload.json'] },
+    ],
+  },
+  // After a direction roll the same comp-less, canon-less hand is not a surface round (the comp round looks like this): --update delivers it, and the decision page takes the roll record.
+  {
+    id: 'question-update-surface-shape-after-direction-roll', verb: 'serve-question', workspace: 'ctx-product-only', setup: (ws) => { write(ws, '.impeccable/questions/k1.state.json', JSON.stringify({ pid: 1, port: 1, url: 'http://127.0.0.1:1/' })); write(ws, 'payload.json', JSON.stringify(SURFACE_NO_COMPS)); }, env: env(), files: ['.impeccable/questions/roll.json', '.impeccable/questions/k1.next.json'],
+    steps: [
+      { verb: 'concept-seed', args: ['--scope', 'direction', '--mode', 'persuade', '--from', 'oracle-key-1'], env: degradedEnv() },
+      { args: ['--update', '--key', 'k1', '--payload', 'payload.json'] },
+    ],
+  },
   { id: 'question-payload-no-options', verb: 'serve-question', workspace: 'ctx-empty', setup: (ws) => write(ws, 'payload.json', JSON.stringify({ title: 'no options' })), args: ['--payload', 'payload.json', '--no-open'], env: env(), files: ['.impeccable/questions/**'] },
 ];
 

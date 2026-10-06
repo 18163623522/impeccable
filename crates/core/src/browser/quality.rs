@@ -593,8 +593,10 @@ impl RenderedTextCount {
         }
         if self.count > 0 {
             self.count += self.pending;
-        } else {
-            self.count += self.lead;
+        } else if self.lead > 0 {
+            // Indentation, then any white space that followed it, as before
+            // a first character.
+            self.count += self.lead + self.pending;
         }
         self.pending = 0;
         self.lead = 0;
@@ -4983,6 +4985,17 @@ mod rendered_text_tests {
         d.add_text(span, "  ");
         d.add_text(p, " \n  hello");
         assert_eq!(rendered_text_len(&d, p), "   hello".len());
+        // The same when the first word sits in an inline-block.
+        let q = two_line_p(&mut d, body);
+        let span = d.add(Some(q), "span");
+        d.set_style(span, "display", "inline");
+        d.set_style(span, "whiteSpace", "pre");
+        d.add_text(span, "  ");
+        d.add_text(q, " ");
+        let word = d.add(Some(q), "span");
+        d.set_style(word, "display", "inline-block");
+        d.add_text(word, "hello");
+        assert_eq!(rendered_text_len(&d, q), "   hello".len());
     }
 
     /// A combining mark sits on its base and a zero-width joiner or soft

@@ -442,7 +442,8 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
     }
     // A known size has to be frame-sized. An unknown size (the static
     // adapter's, for a box without px dimensions) is no evidence, so a tilt
-    // then also needs the box drawn as a frame.
+    // then also needs the box drawn as a frame, and a scale, which an
+    // ordinary card takes too, does not count at all.
     let size = c.size();
     if size.is_some_and(|(w, h)| w < FRAME_MIN_WIDTH_PX || h < FRAME_MIN_HEIGHT_PX) {
         return false;
@@ -452,7 +453,7 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
         return size.is_some() || is_frame_box(c);
     }
     let scale = t.uniform_scale.filter(|s| (*s - 1.0).abs() > 0.001).or_else(|| scale_property(&c.style("scale")));
-    scale.is_some_and(|s| (FRAME_SCALE_MIN..=FRAME_SCALE_MAX).contains(&s)) && is_frame_box(c)
+    size.is_some() && scale.is_some_and(|s| (FRAME_SCALE_MIN..=FRAME_SCALE_MAX).contains(&s)) && is_frame_box(c)
 }
 
 /// Whether an element's text sits inside a framed HTML demo, read from
@@ -1245,6 +1246,14 @@ mod tests {
             .style("borderRadius", "12px")
             .style("boxShadow", "rgba(0, 0, 0, 0.12) 0px 8px 24px");
         assert!(in_framed_demo(&drawn.add("div").add("span").text("coldtea.ai")));
+        // A scaled card drawn as a frame needs a known size.
+        let (_t, body) = Tree::new();
+        let scaled_card = body
+            .add("div")
+            .style("transform", "matrix(0.7, 0, 0, 0.7, 0, 0)")
+            .style("borderRadius", "16px")
+            .style("boxShadow", "rgba(0, 0, 0, 0.1) 0px 20px 25px");
+        assert!(!in_framed_demo(&scaled_card.add("div").add("span").text("8:24 AM")));
 
         let (_t, body) = Tree::new();
         let scaled = body

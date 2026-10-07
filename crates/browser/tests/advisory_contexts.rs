@@ -163,7 +163,7 @@ fn fine_print_is_advisory_under_three_rules() {
 fn text_in_a_framed_demo_is_advisory() {
     let Some(f) = scan("mockup-structure.html") else { return };
     let rule = "undersized-ui-text";
-    for class in ["adv-dots", "adv-captioned", "adv-scaled", "adv-tilted"] {
+    for class in ["adv-dots", "adv-captioned", "adv-scaled", "adv-tilted", "adv-turned", "adv-wrapper"] {
         let hits: Vec<&str> = f
             .iter()
             .filter(|r| r.0 == rule && r.2.split(['.', ' ', '>']).any(|p| p == class))
@@ -182,6 +182,10 @@ fn text_in_a_framed_demo_is_advisory() {
         "fail-scale-90",
         "fail-slide",
         "fail-flipped",
+        "fail-polaroid",
+        "fail-slight-turn",
+        "fail-wrapper-plain",
+        "fail-wrapper-small",
     ] {
         assert_eq!(on(&f, rule, class), ["warning"], "{class}: {f:#?}");
     }
@@ -194,10 +198,17 @@ fn text_in_a_framed_demo_is_advisory() {
 fn nested_cards_in_a_mockup_are_advisory() {
     let Some(f) = scan("nested-cards-mockups.html") else { return };
     let rule = "nested-cards";
-    for id in ["#adv-window-inner", "#adv-tilted-inner", "#adv-window-itself", "#adv-picture-inner"] {
+    for id in ["#adv-window-inner", "#adv-tilted-inner", "#adv-window-itself", "#adv-scaled-window", "#adv-picture-inner"] {
         assert_eq!(on(&f, rule, id), ["advisory"], "{id}: {f:#?}");
     }
-    for id in ["#fail-panel-a", "#fail-panel-b", "#fail-panel-c", "#fail-two-dots-inner", "#fail-marked-inner"] {
+    for id in [
+        "#fail-panel-a",
+        "#fail-panel-b",
+        "#fail-panel-c",
+        "#fail-two-dots-inner",
+        "#fail-fanned-inner",
+        "#fail-marked-inner",
+    ] {
         assert_eq!(on(&f, rule, id), ["warning"], "{id}: {f:#?}");
     }
 }

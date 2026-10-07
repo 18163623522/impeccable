@@ -150,8 +150,13 @@ pub struct TransformRead {
     /// The box is tilted out of the page plane (`rotateX`, `rotateY`), by
     /// more than about one degree and not flipped flat on its back.
     pub tilt_3d: bool,
-    /// The box is scaled by one factor on both axes and not rotated.
+    /// The box is scaled by one factor on both axes, rotated in the page
+    /// plane or not.
     pub uniform_scale: Option<f64>,
+    /// The box's turn in the page plane, in radians (`rotate()`, or a
+    /// matrix that turns without skewing); 0 when it is not turned, or when
+    /// a skew or a 3D transform leaves the turn unread.
+    pub turn_rad: f64,
 }
 
 /// The sine of a tilt that counts: about 1.15 degrees. outreign.io's demo
@@ -161,6 +166,10 @@ pub const TILT_MIN_SIN: f64 = 0.02;
 /// `scale-90` and `scale-95` on a resting card are layout, not a picture;
 /// coachcall.ai's demo cards sit at 0.7 and 0.75.
 pub const FRAME_SCALE_MAX: f64 = 0.85;
+/// The sine of an in-plane rotation that turns a scaled frame into a
+/// picture of one: 3 degrees. suitemigration.com's hero deck turns its
+/// `app-screen` cards 12 degrees at a scale of 0.78.
+pub const ROTATION_MIN_SIN: f64 = 0.052;
 /// Below this the box is mid-reveal or hidden, not a frame.
 pub const FRAME_SCALE_MIN: f64 = 0.3;
 /// The smallest rendered box, in px, that can be a demo frame.
@@ -185,6 +194,11 @@ fn numbers(args: &str) -> Vec<f64> {
 
 /// The sine of an angle argument (`8deg`, `0.2rad`, `0.05turn`).
 fn angle_sin(arg: &str) -> f64 {
+    angle_rad(arg).map_or(0.0, f64::sin)
+}
+
+/// An angle argument in radians.
+fn angle_rad(arg: &str) -> Option<f64> {
     let a = arg.trim().to_ascii_lowercase();
     let (n, to_rad) = if let Some(n) = a.strip_suffix("deg") {
         (n, std::f64::consts::PI / 180.0)
@@ -197,7 +211,7 @@ fn angle_sin(arg: &str) -> f64 {
     } else {
         (a.as_str(), std::f64::consts::PI / 180.0)
     };
-    n.trim().parse::<f64>().map_or(0.0, |n| (n * to_rad).sin())
+    n.trim().parse::<f64>().ok().map(|n| n * to_rad).filter(|r| r.is_finite())
 }
 
 /// Read a `transform` value, computed (`matrix(...)`, `matrix3d(...)`) or as
@@ -206,6 +220,8 @@ pub fn read_transform(value: &str) -> TransformRead {
     let mut out = TransformRead::default();
     let mut scale: Option<(f64, f64)> = None;
     let mut rotated = false;
+    // The turn in the page plane, in radians, while nothing skews the box.
+    let mut angle: Option<f64> = Some(0.0);
     for c in TRANSFORM_FN_RE.captures_iter(value) {
         let name = c[1].to_ascii_lowercase();
         let n = numbers(&c[2]);
@@ -214,6 +230,7 @@ pub fn read_transform(value: &str) -> TransformRead {
                 if n[1].abs() > 0.01 || n[2].abs() > 0.01 {
                     rotated = true;
                 }
+                angle = plane_turn(angle, n[0], n[1], n[2], n[3]);
                 let (sx, sy) = (n[0].hypot(n[1]), n[2].hypot(n[3]));
                 scale = Some(scale.map_or((sx, sy), |(a, b)| (a * sx, b * sy)));
             }
@@ -229,10 +246,12 @@ pub fn read_transform(value: &str) -> TransformRead {
                     if n[1].abs() > 0.01 || n[4].abs() > 0.01 {
                         rotated = true;
                     }
+                    angle = plane_turn(angle, n[0], n[1], n[4], n[5]);
                     let (sx, sy) = (n[0].hypot(n[1]), n[4].hypot(n[5]));
                     scale = Some(scale.map_or((sx, sy), |(a, b)| (a * sx, b * sy)));
                 } else {
                     rotated = true;
+                    angle = None;
                 }
             }
             "rotatex" | "rotatey" => {
@@ -250,8 +269,10 @@ pub fn read_transform(value: &str) -> TransformRead {
                 }
             }
             "rotate" | "rotatez" | "skew" | "skewx" | "skewy" => {
-                if angle_sin(c[2].split(',').next().unwrap_or("")).abs() > 0.01 {
+                let rad = angle_rad(c[2].split(',').next().unwrap_or("")).unwrap_or(0.0);
+                if rad.sin().abs() > 0.01 {
                     rotated = true;
+                    angle = if name.starts_with("rotate") { angle.map(|a| a + rad) } else { None };
                 }
             }
             "scale" if !n.is_empty() => {
@@ -264,12 +285,50 @@ pub fn read_transform(value: &str) -> TransformRead {
             _ => {}
         }
     }
-    if let Some((sx, sy)) = scale {
-        if !rotated && !out.tilt_3d && (sx - sy).abs() < 0.02 {
-            out.uniform_scale = Some(sx);
+    // A turn in the page plane keeps the scale readable; a tilt or a skew
+    // does not.
+    let flat_turn = if rotated { angle.filter(|_| !out.tilt_3d) } else { Some(0.0) };
+    if let Some(turn) = flat_turn {
+        out.turn_rad = turn;
+        if let Some((sx, sy)) = scale {
+            if !out.tilt_3d && (sx - sy).abs() < 0.02 {
+                out.uniform_scale = Some(sx);
+            }
         }
     }
     out
+}
+
+/// The turn the standalone `rotate` property gives, in radians: `10deg`,
+/// or `z 10deg` / `0 0 1 10deg`. `None` for no turn in the page plane
+/// (`none`, a turn about x or y, which is not read here).
+fn rotate_property(value: &str) -> Option<f64> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    match parts.as_slice() {
+        [a] => angle_rad(a),
+        [axis, a] if axis.eq_ignore_ascii_case("z") => angle_rad(a),
+        [x, y, z, a] if x.parse::<f64>().ok() == Some(0.0) && y.parse::<f64>().ok() == Some(0.0) => {
+            let z: f64 = z.parse().ok()?;
+            angle_rad(a).map(|r| if z < 0.0 { -r } else { r })
+        }
+        _ => None,
+    }
+}
+
+/// The sine of the box's whole turn in the page plane: `transform` and the
+/// `rotate` property together.
+fn turn_sin(c: &impl ContextNode, t: &TransformRead) -> f64 {
+    (t.turn_rad + rotate_property(&c.style("rotate")).unwrap_or(0.0)).sin()
+}
+
+/// Add a 2D matrix's turn to `angle`, or `None` when the matrix skews
+/// (its columns are not one rotation at one scale).
+fn plane_turn(angle: Option<f64>, a: f64, b: f64, c: f64, d: f64) -> Option<f64> {
+    let angle = angle?;
+    if (b + c).abs() > 0.02 || (a - d).abs() > 0.02 {
+        return None;
+    }
+    Some(angle + b.atan2(a))
 }
 
 /// The standalone `scale` property (`0.7`, `0.7 0.7`), when uniform.
@@ -452,14 +511,52 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
     if t.tilt_3d {
         return size.is_some() || is_frame_box(c);
     }
-    let scale = t.uniform_scale.filter(|s| (*s - 1.0).abs() > 0.001).or_else(|| scale_property(&c.style("scale")));
-    size.is_some() && scale.is_some_and(|s| (FRAME_SCALE_MIN..=FRAME_SCALE_MAX).contains(&s)) && is_frame_box(c)
+    // A frame turned in the page plane counts only when it is also scaled
+    // down: a card fanned at full size (a polaroid testimonial stack) is
+    // content. A turn of under 3 degrees reads the scale as before.
+    let turn = turn_sin(c, &t).abs();
+    let turned = turn >= ROTATION_MIN_SIN;
+    let tilt_free = turn < 0.01 || turned;
+    size.is_some() && tilt_free && frame_scale(c, &t).is_some() && is_frame_box(c)
+}
+
+/// The box's own uniform scale, from `transform` or the `scale` property,
+/// when it is in the range a shrunken device frame takes.
+fn frame_scale(c: &impl ContextNode, t: &TransformRead) -> Option<f64> {
+    t.uniform_scale
+        .filter(|s| (*s - 1.0).abs() > 0.001)
+        .or_else(|| scale_property(&c.style("scale")))
+        .filter(|s| (FRAME_SCALE_MIN..=FRAME_SCALE_MAX).contains(s))
+}
+
+/// A wrapper that scales a frame drawn on a box under it: maritime.sh's
+/// demo windows sit in a `scale: 0.85` wrapper with no border of its own,
+/// ascenix.co's `.app` dashboard in a `pop__frame` at `matrix(0.5947, ...)`.
+/// Asked only after the walk up has passed a frame-sized frame box.
+fn is_scaled_wrapper(c: &impl ContextNode) -> bool {
+    if c.transform_running() {
+        return false;
+    }
+    let Some((w, h)) = c.size() else { return false };
+    if w < FRAME_MIN_WIDTH_PX || h < FRAME_MIN_HEIGHT_PX {
+        return false;
+    }
+    let t = read_transform(&c.style("transform"));
+    !t.tilt_3d && turn_sin(c, &t).abs() < 0.01 && frame_scale(c, &t).is_some()
+}
+
+/// A frame-sized box drawn as a frame, its size known.
+fn is_sized_frame_box(c: &impl ContextNode) -> bool {
+    c.size().is_some_and(|(w, h)| w >= FRAME_MIN_WIDTH_PX && h >= FRAME_MIN_HEIGHT_PX) && is_frame_box(c)
 }
 
 /// Whether an element's text sits inside a framed HTML demo, read from
 /// structure alone: an ancestor that is a window with three title-bar dots,
 /// a framed box under a preview caption, or a device frame that is scaled
-/// or tilted in 3D.
+/// (and maybe turned 3 degrees or more in the page plane) or tilted in 3D.
+/// The scale may sit on a wrapper above the frame: once the walk has passed
+/// a frame-sized frame box, an ancestor scaled into the frame range counts
+/// without a border of its own.
 ///
 /// Kept at its own severity: the preview caption itself (it speaks to the
 /// visitor), text in a control (a link that goes somewhere, a `button`, a
@@ -467,9 +564,13 @@ fn is_transformed_frame(c: &impl ContextNode) -> bool {
 /// carousel slide. Sentence-length copy is left to
 /// [`crate::checks::decorative_text::classify_decorative_text`].
 pub fn in_framed_demo<N: ContextNode>(el: &N) -> bool {
-    if is_preview_caption(&collapse(&el.text())) {
-        return false;
-    }
+    !is_preview_caption(&collapse(&el.text())) && framed_walk(el, false)
+}
+
+/// The walk up behind [`in_framed_demo`]. `passed_frame` says a frame-sized
+/// frame box already sits below the start, which [`is_demo_frame`] passes
+/// for a frame box asking about its own wrapper.
+fn framed_walk<N: ContextNode>(el: &N, mut passed_frame: bool) -> bool {
     let mut cur = Some(el.clone());
     let mut depth = 0usize;
     while let Some(c) = cur {
@@ -490,9 +591,12 @@ pub fn in_framed_demo<N: ContextNode>(el: &N) -> bool {
         }
         if depth > 0
             && !FRAME_SKIP_TAGS.contains(&tag.as_str())
-            && (is_transformed_frame(&c) || is_demo_window(&c))
+            && (is_transformed_frame(&c) || is_demo_window(&c) || (passed_frame && is_scaled_wrapper(&c)))
         {
             return true;
+        }
+        if depth > 0 && !FRAME_SKIP_TAGS.contains(&tag.as_str()) && is_sized_frame_box(&c) {
+            passed_frame = true;
         }
         depth += 1;
         if depth > 24 {
@@ -506,13 +610,18 @@ pub fn in_framed_demo<N: ContextNode>(el: &N) -> bool {
 /// Whether the box itself is a framed HTML demo by the structure
 /// [`in_framed_demo`] reads off an ancestor: a window with three title-bar
 /// dots, a framed box under a preview caption, or a device frame scaled or
-/// tilted in 3D. `nested-cards` asks it of an inner card, which can be the
+/// tilted in 3D, or a frame box under a wrapper scaled into the frame
+/// range. `nested-cards` asks it of an inner card, which can be the
 /// window itself (stroq.dev's editor window inside a card), as well as
 /// asking [`in_framed_demo`] (decision r6-t3-nested-cards-mockups).
 pub fn is_demo_frame<N: ContextNode>(el: &N) -> bool {
     !FRAME_SKIP_TAGS.contains(&el.tag().as_str())
         && !has_part(&el.class_list(), SLIDE_PARTS)
-        && (is_transformed_frame(el) || is_demo_window(el))
+        && (is_transformed_frame(el)
+            || is_demo_window(el)
+            // maritime.sh's window is the frame box; the scale sits on a
+            // wrapper above it.
+            || (is_sized_frame_box(el) && framed_walk(el, true)))
 }
 
 // ─── r5-p27: legal fine print ───────────────────────────────────────────────
@@ -1109,7 +1218,29 @@ mod tests {
         assert_eq!(read_transform("scale(0.75)").uniform_scale, Some(0.75));
         assert_eq!(read_transform("matrix(1, 0, 0, 1, -5.4, 0)").uniform_scale, Some(1.0));
         assert_eq!(read_transform("scale(0.7, 1)").uniform_scale, None);
-        assert_eq!(read_transform("rotate(-4deg) scale(0.7)").uniform_scale, None);
+        // A turn in the page plane keeps the scale; a skew does not.
+        let turned = read_transform("rotate(-4deg) scale(0.7)");
+        assert_eq!(turned.uniform_scale, Some(0.7));
+        assert!((turned.turn_rad - (-4f64).to_radians()).abs() < 1e-9);
+        // Composed turns add as angles, not as sines.
+        let composed = read_transform("rotate(100deg) rotate(78deg) scale(0.78)");
+        assert!((composed.turn_rad.sin() - 178f64.to_radians().sin()).abs() < 1e-9);
+        let deck = read_transform("matrix(0.762955, -0.162171, 0.162171, 0.762955, -466.4, 106)");
+        assert!((deck.uniform_scale.unwrap() - 0.78).abs() < 0.01);
+        assert!((deck.turn_rad - (-12f64).to_radians()).abs() < 0.01);
+        let flat = read_transform("matrix3d(0.762955, -0.162171, 0, 0, 0.162171, 0.762955, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)");
+        assert!((flat.uniform_scale.unwrap() - 0.78).abs() < 0.01);
+        assert_eq!(read_transform("matrix(0.7, 0, 0.3, 0.7, 0, 0)").uniform_scale, None);
+        assert_eq!(read_transform("rotate(10deg) skewX(10deg) scale(0.7)").uniform_scale, None);
+        assert_eq!(read_transform("perspective(900px) rotateX(8deg) rotate(10deg) scale(0.7)").uniform_scale, None);
+        assert_eq!(read_transform("scale(0.7)").turn_rad, 0.0);
+        // The turn is read without a scale in the same value.
+        assert!((read_transform("rotate(2deg)").turn_rad - 2f64.to_radians()).abs() < 1e-9);
+        assert_eq!(rotate_property("10deg"), Some(10f64.to_radians()));
+        assert_eq!(rotate_property("z 10deg"), Some(10f64.to_radians()));
+        assert_eq!(rotate_property("0 0 1 10deg"), Some(10f64.to_radians()));
+        assert_eq!(rotate_property("x 10deg"), None);
+        assert_eq!(rotate_property("none"), None);
         assert_eq!(read_transform("none"), TransformRead::default());
     }
 
@@ -1294,6 +1425,144 @@ mod tests {
         // The frame's own text is not inside a frame.
         let own = body.add("div").rect(0.0, 0.0, 400.0, 300.0).style("transform", "rotateY(12deg)").text("Tilted");
         assert!(!in_framed_demo(&own));
+    }
+
+    fn framed(n: N) -> N {
+        n.style("borderRadius", "14px")
+            .style("borderTopWidth", "1px")
+            .style("borderRightWidth", "1px")
+            .style("borderBottomWidth", "1px")
+            .style("borderLeftWidth", "1px")
+            .style("borderTopColor", "rgba(255, 255, 255, 0.25)")
+            .style("borderRightColor", "rgba(255, 255, 255, 0.25)")
+            .style("borderBottomColor", "rgba(255, 255, 255, 0.25)")
+            .style("borderLeftColor", "rgba(255, 255, 255, 0.25)")
+    }
+
+    #[test]
+    fn a_scale_on_a_wrapper_above_the_frame() {
+        // maritime.sh: a `scale: 0.85` wrapper with no border, two plain
+        // boxes down a bordered, rounded window with no transform.
+        let (_t, body) = Tree::new();
+        let wrapper = body.add("div").rect(77.0, 1176.0, 507.0, 323.0).style("scale", "0.85");
+        let stage = wrapper.add("div").rect(130.0, 1210.0, 400.0, 255.0);
+        let win = framed(stage.add("div").rect(322.0, 1366.0, 201.0, 99.0));
+        let bar = win.add("div").rect(323.0, 1367.0, 199.0, 31.0);
+        let url = bar.add("span").add("span").text("mail.google.com").font(10.5);
+        assert!(in_framed_demo(&url));
+        // nested-cards asks it of the window itself.
+        assert!(is_demo_frame(&win));
+        assert!(!is_demo_frame(&framed(body.add("div").rect(0.0, 0.0, 400.0, 300.0))));
+        // ascenix.co: the frame box sits right under the scaled wrapper.
+        let (_t, body) = Tree::new();
+        let pop = body.add("div").rect(349.0, 843.0, 583.0, 333.0).style("transform", "matrix(0.594738, 0, 0, 0.594738, 0, 0)");
+        let app = pop
+            .add("div")
+            .rect(349.0, 843.0, 583.0, 333.0)
+            .style("borderRadius", "20px")
+            .style("boxShadow", "rgba(11, 18, 32, 0.1) 0px 24px 60px 0px");
+        let foot = app.add("div").add("div").add("div").text("Previous period incidents: 0").font(10.5);
+        assert!(in_framed_demo(&foot));
+
+        // A scaled wrapper with no frame box under it, a frame box too small
+        // to be a window (ascenix.co's 174x65 metric card), a wrapper that is
+        // not in the frame range, one caught mid-animation, and a frame of
+        // unknown size keep their severity.
+        let (_t, body) = Tree::new();
+        let bare = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.85");
+        assert!(!in_framed_demo(&bare.add("div").rect(0.0, 0.0, 300.0, 200.0).add("span").text("Ready")));
+        let (_t, body) = Tree::new();
+        let small = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.6");
+        let card = framed(small.add("div").rect(0.0, 0.0, 174.0, 65.0));
+        assert!(!in_framed_demo(&card.add("span").text("Previous period")));
+        for (prop, value) in [("scale", "0.9"), ("transform", "matrix(0.95, 0, 0, 0.95, 0, 0)"), ("scale", "0.2")] {
+            let (_t, body) = Tree::new();
+            let w = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style(prop, value);
+            let f = framed(w.add("div").rect(0.0, 0.0, 400.0, 300.0));
+            assert!(!in_framed_demo(&f.add("span").text("Ready")), "{prop}: {value}");
+        }
+        let (_t, body) = Tree::new();
+        let moving = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.85").with(|r| r.running = true);
+        let f = framed(moving.add("div").rect(0.0, 0.0, 400.0, 300.0));
+        assert!(!in_framed_demo(&f.add("span").text("Ready")));
+        let (_t, body) = Tree::new();
+        let w = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.85");
+        let unknown = framed(w.add("div"));
+        assert!(!in_framed_demo(&unknown.add("span").text("Ready")));
+        // The frame box is the text's own box: not passed on the way up.
+        let (_t, body) = Tree::new();
+        let w = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.85");
+        let own = framed(w.add("div").rect(0.0, 0.0, 400.0, 300.0)).text("Starter plan");
+        assert!(!in_framed_demo(&own));
+        // A control and a carousel slide between the text and the wrapper.
+        let (_t, body) = Tree::new();
+        let w = body.add("div").rect(0.0, 0.0, 600.0, 400.0).style("scale", "0.8");
+        let slide = framed(w.add("div").class("swiper-slide").rect(0.0, 0.0, 400.0, 300.0));
+        assert!(!in_framed_demo(&slide.add("span").text("Jane Doe")));
+    }
+
+    #[test]
+    fn a_frame_turned_and_scaled_down() {
+        // suitemigration.com's hero deck: an `app-screen` card turned 12
+        // degrees at a scale of 0.78.
+        let deck = "matrix(0.762955, -0.162171, 0.162171, 0.762955, -466.4, 106)";
+        let (_t, body) = Tree::new();
+        let screen = body
+            .add("div")
+            .rect(-52.0, 640.0, 393.0, 343.0)
+            .style("transform", deck)
+            .style("borderRadius", "16px")
+            .style("boxShadow", "rgba(16, 24, 40, 0.38) 0px 26px 60px -28px");
+        let inner = framed(screen.add("div").rect(-44.0, 675.0, 384.0, 307.0).add("div").rect(-25.0, 706.0, 335.0, 186.0));
+        assert!(in_framed_demo(&inner));
+        assert!(is_demo_frame(&screen));
+        // A polaroid fanned at full size, a turned box not drawn as a frame,
+        // a turn under 3 degrees and a skewed card keep their severity.
+        for (transform, frame) in [
+            ("matrix(0.978148, -0.207912, 0.207912, 0.978148, 0, 0)", true),
+            ("rotate(-6deg)", true),
+            (deck, false),
+            ("rotate(2deg) scale(0.78)", true),
+            ("matrix(0.78, 0, 0.2, 0.78, 0, 0)", true),
+        ] {
+            let (_t, body) = Tree::new();
+            let card = body.add("div").rect(0.0, 0.0, 320.0, 360.0).style("transform", transform);
+            let card = if frame {
+                card.style("borderRadius", "12px").style("boxShadow", "rgba(0, 0, 0, 0.2) 0px 8px 24px")
+            } else {
+                card
+            };
+            let quote = card.add("p").text("Best tool we bought this year").font(10.0);
+            assert!(!in_framed_demo(&quote), "{transform}, framed: {frame}");
+        }
+        // The turn and the scale may come from `transform`, `rotate` and
+        // `scale` in any mix; the turn is read whole either way.
+        for (props, demo) in [
+            (&[("rotate", "10deg"), ("scale", "0.78")][..], true),
+            (&[("transform", "rotate(10deg)"), ("scale", "0.78")][..], true),
+            (&[("transform", "rotate(2deg)"), ("scale", "0.78")][..], false),
+            (&[("rotate", "2deg"), ("scale", "0.78")][..], false),
+            (&[("rotate", "1deg"), ("transform", "rotate(1.5deg) scale(0.78)")][..], false),
+        ] {
+            let (_t, body) = Tree::new();
+            let mut card = framed(body.add("div").rect(0.0, 0.0, 320.0, 360.0));
+            for (k, v) in props {
+                card = card.style(k, v);
+            }
+            let quote = card.add("p").text("Best tool we bought this year").font(10.0);
+            assert_eq!(in_framed_demo(&quote), demo, "{props:?}");
+        }
+        // A wrapper that turns as well as scales is not read as a stage.
+        for props in [&[("transform", "rotate(12deg)"), ("scale", "0.8")][..], &[("rotate", "12deg"), ("scale", "0.8")][..]] {
+            let (_t, body) = Tree::new();
+            let mut w = body.add("div").rect(0.0, 0.0, 600.0, 400.0);
+            for (k, v) in props {
+                w = w.style(k, v);
+            }
+            let win = framed(w.add("div").rect(0.0, 0.0, 400.0, 300.0));
+            assert!(!in_framed_demo(&win.add("span").text("Ready")), "{props:?}");
+            assert!(!is_demo_frame(&win), "{props:?}");
+        }
     }
 
     #[test]

@@ -1691,6 +1691,13 @@ pub fn check_element_colors_dom(
             }
         }
     }
+    // A disabled control is faded on purpose and asks nothing of the reader:
+    // its colours are not a contrast verdict (WCAG 1.4.3 exempts inactive
+    // controls). Its unfaded ink and fill were what got scored: lance.com.br's
+    // "Confirmar" sits at `disabled:opacity-50`.
+    if closest_or_none(dom, el, DISABLED_CONTROL_SELECTOR).is_some() {
+        findings.retain(|h| h.id != "low-contrast");
+    }
     findings
 }
 
@@ -4165,6 +4172,32 @@ mod tests {
                 ("backgroundImage", "none"),
             ],
         );
+    }
+
+    /// observations-42 row 6, lance.com.br: a disabled "Confirmar" button,
+    /// faded to half opacity, was scored on its unfaded white-on-green.
+    #[test]
+    fn a_disabled_control_takes_no_contrast_verdict() {
+        let (mut d, body) = page();
+        let btn = d.add(Some(body), "button");
+        visible(&mut d, btn);
+        d.add_text(btn, "Confirmar");
+        d.set_rect(btn, 189.0, 3156.0, 283.0, 40.0);
+        d.set_text_rect(btn, 298.0, 3167.0, 65.0, 18.0);
+        d.set_styles(
+            btn,
+            &[
+                ("backgroundColor", "rgb(22, 163, 74)"),
+                ("color", "rgb(255, 255, 255)"),
+                ("fontSize", "14px"),
+                ("fontWeight", "400"),
+                ("webkitBackgroundClip", "border-box"),
+            ],
+        );
+        assert!(colors(&d, btn).iter().any(|h| h.id == "low-contrast"), "{:?}", colors(&d, btn));
+        d.set_attr(btn, "disabled", "");
+        d.add_selector(btn, "[disabled], [aria-disabled=\"true\"]");
+        assert!(colors(&d, btn).iter().all(|h| h.id != "low-contrast"), "{:?}", colors(&d, btn));
     }
 
     #[test]

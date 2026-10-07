@@ -1192,6 +1192,11 @@ pub fn check_element_colors(
             }
         }
     }
+    // A disabled control is faded on purpose: its colours are not a contrast
+    // verdict (WCAG 1.4.3 exempts inactive controls).
+    if el.closest(DISABLED_CONTROL_SELECTOR).is_some() {
+        findings.retain(|h| h.id != "low-contrast");
+    }
     findings
 }
 

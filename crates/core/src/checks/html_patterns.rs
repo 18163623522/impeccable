@@ -6,7 +6,7 @@ use crate::checks::css_scan::{
     enclosing_css_selector, scan_css_text_for_buried_raster, scan_css_text_for_glow_with,
     scan_css_text_for_grid_background, scan_css_text_for_inset_stripe, scan_css_text_for_marquee,
     scan_css_text_for_organic_clip_path, scan_css_text_for_pseudo_stripe,
-    scan_css_text_for_pulsing_dot, scan_css_text_for_radial_halo_with, starts_css_property_token,
+    scan_css_text_for_pulsing_dot, scan_css_text_for_radial_halo_with,
     PatternFinding,
 };
 use crate::checks::rules::{RuleHit, ANY, B, BEZIER_RE, D, DOT, W};
@@ -315,31 +315,6 @@ re!(
 );
 re!(COMMA_WS_SPLIT_RE, format!(r"[,{WS_CHARS}]+"));
 re!(
-    TRANSITION_RE,
-    format!(
-        r"{transition}(?:-{property})?{WS}*:{WS}*([^;{{}}]+)",
-        transition = ci("transition"),
-        property = ci("property")
-    )
-);
-re!(ALL_WORD_RE, format!(r"{B}all{B}"));
-re!(
-    LAYOUT_PROP_RE,
-    format!(
-        r"{B}(?:(?:{max}|{min})-)?(?:{width}|{height}){B}|{B}{padding}(?:-(?:{top}|{right}|{bottom}|{left}))?{B}|{B}{margin}(?:-(?:{top}|{right}|{bottom}|{left}))?{B}",
-        max = ci("max"),
-        min = ci("min"),
-        width = ci("width"),
-        height = ci("height"),
-        padding = ci("padding"),
-        margin = ci("margin"),
-        top = ci("top"),
-        right = ci("right"),
-        bottom = ci("bottom"),
-        left = ci("left")
-    )
-);
-re!(
     REPEATING_GRADIENT_RE,
     format!(
         r"{repeating}-(?:{linear}|{radial}|{conic})-{gradient}{WS}*\(",
@@ -522,42 +497,6 @@ pub struct PatternContext {
     pub dark_page: Option<bool>,
 }
 
-/// The first `transition` / `transition-property` declaration in the style
-/// text that names a layout property: the one the page-level
-/// `layout-transition` form reports.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LayoutTransitionDeclaration {
-    /// The layout properties it names, lowercased, in declaration order.
-    pub properties: Vec<String>,
-    /// Byte offset of the declaration in the style text.
-    pub index: usize,
-}
-
-/// See [`LayoutTransitionDeclaration`]. A property token has to be a name of
-/// its own: `border-width`, `line-height`, `scroll-margin` and a custom
-/// property such as `--x-transition` are passed over.
-pub fn first_layout_transition(style_text: &str) -> Option<LayoutTransitionDeclaration> {
-    for tm in TRANSITION_RE.captures_iter(style_text) {
-        let start = tm.get(0).unwrap().start();
-        if !starts_css_property_token(style_text, start) {
-            continue;
-        }
-        let val = js::to_lower_case(&tm[1]);
-        if ALL_WORD_RE.is_match(&val) {
-            continue;
-        }
-        let properties: Vec<String> = LAYOUT_PROP_RE
-            .find_iter(&val)
-            .filter(|m| starts_css_property_token(&val, m.start()))
-            .map(|m| m.as_str().to_string())
-            .collect();
-        if !properties.is_empty() {
-            return Some(LayoutTransitionDeclaration { properties, index: start });
-        }
-    }
-    None
-}
-
 /// JS: checks.mjs#checkHtmlPatterns. `corpora` defaults to
 /// `buildHtmlPatternCorpora(html)`. Findings' `index` fields are byte
 /// offsets into `corpora.style_text`.
@@ -733,14 +672,6 @@ pub fn check_html_patterns_with(
             ));
             break;
         }
-    }
-
-    if let Some(declaration) = first_layout_transition(style_text) {
-        findings.push(pf(
-            "layout-transition",
-            format!("transition: {}", declaration.properties.join(", ")),
-            None,
-        ));
     }
 
     findings.extend(scan_css_text_for_pulsing_dot(style_text, Some(html)));
@@ -952,36 +883,6 @@ mod tests {
             None,
         );
         assert_eq!(out[0].snippet, "~8px used 11/11 times (100%)");
-    }
-
-    #[test]
-    fn layout_transition_names_only_layout_properties() {
-        let first = |s: &str| first_layout_transition(s).map(|d| d.properties);
-        assert_eq!(first(".a{transition:border-width .2s}"), None);
-        assert_eq!(first(".a{transition:line-height .2s, scroll-margin .2s}"), None);
-        assert_eq!(first(".a{--card-transition:height .2s}"), None);
-        assert_eq!(
-            first(".a{-webkit-transition:max-height .3s}"),
-            Some(vec!["max-height".to_string()])
-        );
-        assert_eq!(
-            first(".a{transition:border-width .2s}.b{transition:padding-top .2s, width .3s}"),
-            Some(vec!["padding-top".to_string(), "width".to_string()])
-        );
-        let css = ".x{color:red}.b{transition:height .3s}";
-        let declaration = first_layout_transition(css).unwrap();
-        assert_eq!(enclosing_css_selector(css, declaration.index).as_deref(), Some(".b"));
-        // The pattern pass reports the first real declaration.
-        let out = check_html_patterns(
-            "<style>.frame{transition:border-width .2s}.tray{transition:height .3s}</style>",
-            None,
-        );
-        let snippets: Vec<&str> = out
-            .iter()
-            .filter(|f| f.id == "layout-transition")
-            .map(|f| f.snippet.as_str())
-            .collect();
-        assert_eq!(snippets, vec!["transition: height"]);
     }
 
     /// Hover zoom on card imagery is a long-standing convention, so none of

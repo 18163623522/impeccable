@@ -1362,7 +1362,7 @@ fn dark_claim_stands(root_dark: Option<bool>, surfaces: &[Option<crate::color::R
 }
 
 /// The page-level forms of gradient-text, bounce-easing, dark-glow,
-/// radial-halo, layout-transition, marquee and side-tab, reconciled with the element
+/// radial-halo, marquee and side-tab, reconciled with the element
 /// findings already on the page. Other rules pass through unchanged.
 fn reconcile_page_level_forms(
     dom: &dyn Dom,
@@ -1398,10 +1398,6 @@ fn reconcile_page_level_forms(
                 dark_glow_page_form_stands(dom, &element_findings("dark-glow"), &item, style_text, root_dark)
             }
             "radial-halo" => radial_halo_page_form_stands(dom, &item, root_dark),
-            "layout-transition" => {
-                element_findings("layout-transition").is_empty()
-                    && layout_transition_page_form_stands(dom, style_text)
-            }
             "marquee" => marquee_page_form_stands(dom, &item, &mut marquees),
             "side-tab" => side_tab_page_form_stands(groups, &item),
             _ => true,
@@ -1754,39 +1750,6 @@ fn glow_keyframes_run_nowhere(dom: &dyn Dom, style_text: &str, prop: &str, hex: 
         running != "none"
             && running.split(',').map(crate::js::trim).any(|n| names.iter().any(|k| k == n))
             && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none()
-    })
-}
-
-/// The layout-transition page form carries no selector of its own, and the
-/// element form reads every element's computed `transition-property`. The
-/// form stands only where the declaration it names matches an element that
-/// is painted at capture and computes one of the properties it names; for a
-/// pseudo-element selector, whose transition the host does not compute, a
-/// painted host is enough. A declaration with no rule to name (a keyframe
-/// step, an inline `style` attribute) or whose rule matches nothing painted
-/// is not reported from the text alone.
-fn layout_transition_page_form_stands(dom: &dyn Dom, style_text: &str) -> bool {
-    let Some(declaration) = crate::checks::html_patterns::first_layout_transition(style_text) else {
-        return false;
-    };
-    let Some(selector) = crate::checks::css_scan::enclosing_css_selector(style_text, declaration.index)
-    else {
-        return false;
-    };
-    let Some(elements) = selector_nodes_for_live_dom(dom, &selector) else {
-        return false;
-    };
-    let pseudo = pseudo_element_host_selector(&selector).is_some();
-    elements.into_iter().any(|el| {
-        element_is_scanned(dom, el)
-            && !scoped_ignore_active(dom, el, "layout-transition")
-            && super::painted::unpainted_for(dom, el, super::painted::PaintGate::Box).is_none()
-            && (pseudo
-                || dom
-                    .style(el, "transitionProperty")
-                    .split(',')
-                    .map(|p| crate::js::to_lower_case(crate::js::trim(p)))
-                    .any(|p| declaration.properties.contains(&p)))
     })
 }
 
@@ -4435,43 +4398,6 @@ mod page_level_form_tests {
         assert!(!dark_claim_stands(Some(false), &[]));
         assert!(dark_claim_stands(Some(true), &[]));
         assert!(dark_claim_stands(None, &[]));
-    }
-
-    #[test]
-    fn layout_transition_text_form_needs_a_painted_element_that_computes_it() {
-        // The rule's element computes another transition: nothing to report.
-        let (mut d, body) = page(".tray{transition:height .3s ease}");
-        let tray = d.add(Some(body), "div");
-        d.add_selector(tray, ".tray");
-        d.set_rect(tray, 0.0, 0.0, 300.0, 200.0);
-        d.set_style(tray, "transitionProperty", "all");
-        assert!(details(&scan(&d), "layout-transition").is_empty());
-
-        // An element form on the page speaks for the rule.
-        d.set_style(tray, "transitionProperty", "height");
-        assert_eq!(
-            details(&scan(&d), "layout-transition"),
-            vec![(tray, "transition: height".to_string())]
-        );
-
-        // A link, which the motion check skips, paints and computes it.
-        let (mut d, body) = page(".more{transition:width .2s}");
-        let more = d.add(Some(body), "a");
-        d.add_selector(more, ".more");
-        d.set_rect(more, 0.0, 0.0, 120.0, 20.0);
-        d.set_style(more, "transitionProperty", "width");
-        assert_eq!(
-            details(&scan(&d), "layout-transition"),
-            vec![(body, "transition: width".to_string())]
-        );
-        // The same link collapsed to nothing is not painted.
-        d.set_rect(more, 0.0, 0.0, 0.0, 0.0);
-        assert!(details(&scan(&d), "layout-transition").is_empty());
-
-        // An inline style names no rule, and `border-width` is not `width`.
-        let (mut d, _body) = page(".frame{transition:border-width .2s}");
-        d.html_for_patterns.push_str("<span style=\"transition: max-height .4s\"></span>");
-        assert!(details(&scan(&d), "layout-transition").is_empty());
     }
 
     #[test]

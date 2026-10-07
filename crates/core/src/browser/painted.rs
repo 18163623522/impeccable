@@ -169,9 +169,9 @@ pub const TEXT_MIN_VISIBLE_SHARE: f64 = 0.25;
 /// is not rendered, a seek bar parked off the canvas, a loader at
 /// `display: none`, a closed flyout, a row still waiting to be revealed, a
 /// slide parked past its track's clip) is not where a visitor meets how it
-/// animates (`layout-transition`, `bounce-easing`), the glow around it
-/// (`dark-glow`) or the palette it paints (`ai-color-palette`).
-pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing", "dark-glow", "layout-transition"];
+/// animates (`bounce-easing`), the glow around it (`dark-glow`) or the
+/// palette it paints (`ai-color-palette`).
+pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing", "dark-glow"];
 
 /// The rules whose page-level CSS-text form names the rule a selector
 /// declared: such a finding reports only when at least one element the
@@ -3180,7 +3180,8 @@ mod tests {
     }
 
     /// The att.com tray at `max-height: 0`, the video.js volume panel and the
-    /// Flowplayer seek bar: boxes `layout-transition` reported unpainted.
+    /// Flowplayer seek bar: boxes a box rule (the retired `layout-transition`,
+    /// when this was written) reported unpainted.
     #[test]
     fn a_box_rule_skips_boxes_that_show_nothing() {
         let (mut d, body) = page();
@@ -3287,7 +3288,6 @@ mod tests {
             BrowserFinding::new("undersized-ui-text", "10px functional text"),
             BrowserFinding::new("gradient-text", "gradient"),
             BrowserFinding::new("low-contrast", "2.0:1"),
-            BrowserFinding::new("layout-transition", "transition: width"),
             BrowserFinding::new("bounce-easing", "animation: bounce"),
             BrowserFinding::new("dark-glow", "Colored box-shadow glow (#cdaca2) on dark background"),
             BrowserFinding::new("ai-color-palette", "Purple/violet gradient background"),
@@ -3311,7 +3311,8 @@ mod tests {
 
         assert_eq!(paint_gate("content-hidden-at-rest"), None);
         assert_eq!(paint_gate("gradient-text"), Some(PaintGate::Text));
-        assert_eq!(paint_gate("layout-transition"), Some(PaintGate::Box));
+        // A retired rule is ungated like any id the engine does not report.
+        assert_eq!(paint_gate("layout-transition"), None);
         assert_eq!(paint_gate("bounce-easing"), Some(PaintGate::Box));
         assert_eq!(paint_gate("dark-glow"), Some(PaintGate::Box));
         assert_eq!(paint_gate("ai-color-palette"), Some(PaintGate::Box));
@@ -3586,7 +3587,7 @@ mod tests {
         assert!(!page_form_painted(&d, "pulsing-dot", &[loader]));
         assert!(!page_form_painted(&d, "dark-glow", &[loader]));
         // Outside the list, and with nothing matched, base behavior stands.
-        assert!(page_form_painted(&d, "layout-transition", &[loader]));
+        assert!(page_form_painted(&d, "marquee", &[loader]));
         assert!(page_form_painted(&d, "bounce-easing", &[]));
         // A pseudo-element host with no box of its own still counts.
         let host = d.add(Some(body), "div");

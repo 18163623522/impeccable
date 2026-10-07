@@ -1426,7 +1426,6 @@ pub fn check_element_motion(tag: &str, style: &StyleValues) -> Vec<RuleHit> {
     .collect();
     check_motion(&MotionOpts {
         tag: tag.to_string(),
-        transition_property: Some(sv(style, "transitionProperty").to_string()),
         animation_name: Some(sv(style, "animationName").to_string()),
         timing_functions: Some(timing.join(" ")),
         class_list: Some(String::new()),

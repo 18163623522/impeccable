@@ -1659,26 +1659,6 @@ pub fn check_kicker_above_heading(candidates: &[KickerCandidate]) -> Vec<RuleHit
 
 // ─── checkMotion ────────────────────────────────────────────────────────────
 
-/// JS `LAYOUT_TRANSITION_PROPS`.
-pub const LAYOUT_TRANSITION_PROPS: &[&str] = &[
-    "width",
-    "height",
-    "padding",
-    "margin",
-    "max-height",
-    "max-width",
-    "min-height",
-    "min-width",
-    "padding-top",
-    "padding-right",
-    "padding-bottom",
-    "padding-left",
-    "margin-top",
-    "margin-right",
-    "margin-bottom",
-    "margin-left",
-];
-
 re!(
     BOUNCE_NAME,
     format!(
@@ -1730,21 +1710,6 @@ pub fn check_motion(opts: &MotionOpts) -> Vec<RuleHit> {
                     ));
                     break;
                 }
-            }
-        }
-    }
-    if let Some(tp) = opts.transition_property.as_deref() {
-        if !tp.is_empty() && tp != "all" && tp != "none" {
-            let layout_found: Vec<String> = tp
-                .split(',')
-                .map(|p| js::to_lower_case(js::trim(p)))
-                .filter(|p| set_has(LAYOUT_TRANSITION_PROPS, p))
-                .collect();
-            if !layout_found.is_empty() {
-                findings.push(RuleHit::new(
-                    "layout-transition",
-                    format!("transition: {}", layout_found.join(", ")),
-                ));
             }
         }
     }

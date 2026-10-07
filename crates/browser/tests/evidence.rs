@@ -257,7 +257,7 @@ fn the_rule_pass_skips_what_is_not_painted() {
         ("undersized-ui-text", "#flag-sr-twin-copy"),
         ("low-contrast", "#flag-sr-twin-copy"),
         ("tight-leading", "#flag-open-copy"),
-        ("layout-transition", "#flag-open-tray"),
+        ("bounce-easing", "#flag-open-tray"),
         ("clipped-overflow-container", "#flag-clip-menu-host"),
         // A fixed layer is clipped by a host that is its containing block.
         ("clipped-overflow-container", "#flag-clip-fixed-cb-host"),
@@ -274,9 +274,9 @@ fn the_rule_pass_skips_what_is_not_painted() {
         // A paragraph with no height that hides its overflow.
         ("tight-leading", "#pass-collapsed-copy"),
         // Motion on boxes that paint nothing.
-        ("layout-transition", "#pass-collapsed-tray"),
-        ("layout-transition", "#pass-hidden-volume"),
-        ("layout-transition", "#pass-parked-seek-bar"),
+        ("bounce-easing", "#pass-collapsed-tray"),
+        ("bounce-easing", "#pass-hidden-volume"),
+        ("bounce-easing", "#pass-parked-seek-bar"),
         // A menu that never renders, and a fixed layer the host cannot clip.
         ("clipped-overflow-container", "#pass-clip-hidden-menu-host"),
         ("clipped-overflow-container", "#pass-clip-fixed-host"),

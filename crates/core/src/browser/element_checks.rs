@@ -1976,7 +1976,6 @@ pub fn check_element_motion_dom(dom: &dyn Dom, el: ElId) -> Vec<RuleHit> {
     let animation_name = dom.style(el, "animationName");
     let mut hits = check_motion(&MotionOpts {
         tag,
-        transition_property: Some(dom.style(el, "transitionProperty")),
         animation_name: Some(animation_name.clone()),
         timing_functions: Some(timing.join(" ")),
         class_list: Some(class_attr(dom, el)),

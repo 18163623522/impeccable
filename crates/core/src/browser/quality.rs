@@ -1008,6 +1008,17 @@ fn typed_caps_label(dom: &dyn Dom, el: ElId, line_height_px: Option<f64>, every_
         && short_one_line_label(dom, el, line_height_px)
 }
 
+/// Whether `el`'s text is typed in capitals, every letter of it: a
+/// capitalized run ([`is_capitalized_run`]) with no letter that has no case,
+/// shorter than a sentence ([`ALL_CAPS_LONG_RUN`], where `all-caps-body`
+/// takes over a declared run but never sees a typed one).
+fn typed_caps_text(dom: &dyn Dom, el: ElId) -> bool {
+    let text = collapse_ws(js::trim(&dom.text_content(el)));
+    utf16_len(&text) < ALL_CAPS_LONG_RUN
+        && is_capitalized_run(&text)
+        && text.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase())
+}
+
 /// The height of one line box of an element's own box. An inline box that
 /// wraps reports the union of its fragments, two 21px highlight lines as one
 /// 43px box, while each fragment a reader sees is one line tall. Blocks, and
@@ -1940,16 +1951,24 @@ pub fn check_quality(dom: &dyn Dom, q: &QualityInput) -> Vec<RuleHit> {
                 if tracking_em > 0.05 {
                     // Wide tracking is the standard treatment for an
                     // uppercase eyebrow, label or button. `text-transform`
-                    // says so outright; capitals typed into the markup do
-                    // not, so that reading is held to label size on one
-                    // line and running text keeps the rule.
+                    // says so outright; capitals typed into the markup say
+                    // it as plainly and take the same exemption, at any
+                    // length and over any number of lines (mialight.app's
+                    // caption that wraps on a phone). Every letter has to be
+                    // a capital for that, so a CJK line with one Latin
+                    // acronym in it stays running text unless it is a short
+                    // label on one line.
                     // A link or button label is read at a glance too
                     // (lpga.or.jp's bold CJK "Instagram" link), held to the
                     // same size on one line.
                     let control_label = closest_or_none(dom, el, TRACKED_CONTROL_LABEL).is_some()
                         && short_one_line_label(dom, el, q.line_height_px);
+                    // `text-transform: lowercase` renders no
+                    // capitals, whatever the markup typed.
+                    let lowered = st("textTransform") == "lowercase";
                     let caps_label = st("textTransform") == "uppercase"
-                        || typed_caps_label(dom, el, q.line_height_px, false);
+                        || (!lowered
+                            && (typed_caps_text(dom, el) || typed_caps_label(dom, el, q.line_height_px, false)));
                     if !caps_label && !control_label {
                         findings.push(RuleHit::new(
                             "wide-tracking",
@@ -4427,24 +4446,57 @@ mod tests {
         d.els[up as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 160.0, 260.0, 18.0));
         assert!(check_element_quality_dom(&d, up, &BrowserConfig::default()).is_empty());
 
-        // Typed capitals over two lines are no longer a label.
+        // Typed capitals take the exemption `text-transform` does, over two
+        // lines (mialight.app's caption wrapping on a phone) and past the
+        // label length alike, short of a sentence.
         d.set_rect(s, 40.0, 100.0, 140.0, 36.0);
         d.els[s as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 100.0, 140.0, 36.0));
-        let hits = check_element_quality_dom(&d, s, &BrowserConfig::default());
-        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
-        assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");
-
-        // Past the label length, one line or not, it is running text.
+        assert!(check_element_quality_dom(&d, s, &BrowserConfig::default()).is_empty());
         let long = text_el(
             &mut d,
             body,
             "p",
-            "SUPPORT HOURS RUN MONDAY TO FRIDAY FROM NINE UNTIL SIX",
+            "NOW AVAILABLE IN THE US, CANADA & NEW ZEALAND AND AUSTRALIA",
             "16px",
         );
-        d.set_rect(long, 40.0, 200.0, 600.0, 26.0);
+        d.set_rect(long, 40.0, 240.0, 300.0, 52.0);
         d.set_styles(long, &[("lineHeight", "26px"), ("letterSpacing", "2px")]);
-        d.els[long as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 200.0, 600.0, 26.0));
+        d.els[long as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 240.0, 300.0, 52.0));
+        assert!(check_element_quality_dom(&d, long, &BrowserConfig::default()).is_empty());
+
+        // A sentence typed in capitals is running text, and so are capitals a
+        // transform lowers.
+        let sentence = text_el(
+            &mut d,
+            body,
+            "p",
+            "SUPPORT HOURS RUN MONDAY TO FRIDAY, FROM NINE IN THE MORNING UNTIL SIX IN THE EVENING",
+            "16px",
+        );
+        d.set_rect(sentence, 40.0, 400.0, 600.0, 52.0);
+        d.set_styles(sentence, &[("lineHeight", "26px"), ("letterSpacing", "2px")]);
+        d.els[sentence as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 400.0, 600.0, 52.0));
+        let ids: Vec<String> =
+            check_element_quality_dom(&d, sentence, &BrowserConfig::default()).into_iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec!["wide-tracking"]);
+        d.set_style(s, "textTransform", "lowercase");
+        let ids: Vec<String> =
+            check_element_quality_dom(&d, s, &BrowserConfig::default()).into_iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec!["wide-tracking"]);
+        d.set_style(s, "textTransform", "none");
+
+        // A long line of Hangul with one Latin acronym in capitals is running
+        // text: the short-label reading needs one line inside the label length.
+        let long = text_el(
+            &mut d,
+            body,
+            "p",
+            "고객센터 운영 시간은 월요일부터 금요일까지 오전 아홉 시부터 오후 여섯 시까지입니다 (KST)",
+            "16px",
+        );
+        d.set_rect(long, 40.0, 300.0, 600.0, 52.0);
+        d.set_styles(long, &[("lineHeight", "26px"), ("letterSpacing", "2px")]);
+        d.els[long as usize].direct_text_rect = Some(Rect::from_xywh(40.0, 300.0, 600.0, 52.0));
         let hits = check_element_quality_dom(&d, long, &BrowserConfig::default());
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
         assert_eq!(ids, vec!["wide-tracking"], "{hits:?}");

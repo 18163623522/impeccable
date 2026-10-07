@@ -178,7 +178,7 @@ pub const PAINT_GATED_BOX_RULES: &[&str] = &["ai-color-palette", "bounce-easing"
 /// selector matches is painted at capture. The match is tested on the base
 /// predicate alone, with no area test, because the selector may name a
 /// pseudo-element (`.node::after`) whose host has no box of its own.
-pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "gradient-text", "pulsing-dot"];
+pub const PAINT_GATED_PAGE_FORMS: &[&str] = &["bounce-easing", "dark-glow", "gradient-text", "pulsing-dot", "repeating-stripes-gradient"];
 
 /// Which gate a rule's findings pass through, or `None` for an ungated rule.
 pub fn paint_gate(rule_id: &str) -> Option<PaintGate> {

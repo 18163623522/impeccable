@@ -139,6 +139,15 @@ fn text_in_a_framed_demo_is_advisory_under_three_rules() {
     for label in ["847 results", "coldtea.ai", "Metadata mapping", "mail.google.com"] {
         assert_eq!(severities(&f, "undersized-ui-text", label), ["advisory"], "{label}");
     }
+    // r8-t1: a sample caption on the panel or beside it.
+    for label in ["Confidence", "Recommendation", "Falls by time of day"] {
+        assert_eq!(severities(&f, "undersized-ui-text", label), ["advisory"], "{label}");
+    }
+    // A sentence with the word in it, a label that is no sample claim, a
+    // button in a captioned panel, and the caption itself.
+    for label in ["Mapping fields", "Mono channel", "Approve", "Sample data"] {
+        assert_eq!(severities(&f, "undersized-ui-text", label), ["warning"], "{label}");
+    }
     for label in [
         "Ready",
         "Slide two",
@@ -208,8 +217,10 @@ fn nested_cards_in_a_mockup_are_advisory() {
     // inside a card, a `role="img"` subtree); three paseo.sh cards in a
     // plain panel, one under a two-dot bar, a card fanned at full size and
     // one under a mockup class keep failing.
-    assert_eq!(count(&f, "nested-cards", true), 5, "{f:#?}");
-    assert_eq!(count(&f, "nested-cards", false), 6, "{f:#?}");
+    // r8-t1 adds a panel with an illustrative footer note (advisory) and
+    // one whose footer is a sentence with the word "example" in it (fails).
+    assert_eq!(count(&f, "nested-cards", true), 6, "{f:#?}");
+    assert_eq!(count(&f, "nested-cards", false), 7, "{f:#?}");
 }
 
 #[test]

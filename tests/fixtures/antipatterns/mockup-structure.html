@@ -12,6 +12,13 @@
   that goes somewhere, a button and the preview caption itself keep failing. Every row
   reports; the column says at which severity.
 
+  Decision r8-t1-mockups-by-caption (narrow): a frame with no chrome at all
+  counts when a sample or illustrative caption sits on it (its first or last
+  child) or beside it. A sentence that works the word in, a label that is not
+  a sample claim, and a caption on a box not drawn as a frame say nothing.
+  Decision r8-t2-occlusion-stacked-mockup: text covered inside a recognised
+  mockup reports text-occlusion as advisory; covered page text keeps failing.
+
   No class here says mock, preview, terminal or code: those are exempt from
   two of the three rules already.
 -->
@@ -32,6 +39,16 @@
   .stage > .shot { margin: 0; }
   .small-shot { width: 100px; height: 60px; background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 12px; }
   .turned { margin: 48px 0; }
+  .head { width: 400px; height: 56px; background-color: #f1f3f5; }
+  .title { font-size: 14px; display: inline-block; padding: 18px 12px; }
+  .pill { font-size: 12px; float: right; margin: 16px 12px; padding: 2px 8px; border: 1px solid #d0d7de; border-radius: 999px; }
+  .strip { font-size: 12px; margin: 0; padding: 8px 12px; border-top: 1px solid #d0d7de; }
+  .set { width: 400px; margin: 0 0 24px; }
+  .set .shot { margin: 0 0 8px; }
+  .note { font-size: 12px; margin: 0; }
+  .stack { position: relative; height: 100px; }
+  .covered { position: absolute; top: 20px; left: 20px; width: 200px; margin: 0; font-size: 16px; }
+  .cover { position: absolute; top: 10px; left: 10px; width: 240px; height: 50px; background-color: #1f7a3d; border-radius: 8px; z-index: 5; }
 </style>
 </head>
 <body>
@@ -39,6 +56,13 @@
 <!-- ================= FAILS ================= -->
 <div class="col" id="fails">
   <h2>Fails</h2>
+
+  <!-- r8-t2: page text under an opaque box, outside any mockup. The two
+       covered rows lead their columns: the hit tests read the first
+       viewport. -->
+  <div class="plain">
+    <div class="stack"><p class="covered fail-covered-page">Needs attention</p><div class="cover" aria-hidden="true"></div></div>
+  </div>
 
   <!-- two dots are not a title bar -->
   <div class="shot">
@@ -90,11 +114,42 @@
        be a window -->
   <div class="stage" style="scale: 0.85"><div class="plain"><div class="pane"><span class="small fail-wrapper-plain">Synced</span></div></div></div>
   <div class="stage" style="scale: 0.85"><div class="small-shot"><span class="small fail-wrapper-small">Paid</span></div></div>
+
+  <!-- r8-t1: a sentence that works the word in is not a caption
+       (suitemigration.com) -->
+  <div class="shot">
+    <div class="pane"><span class="small fail-prose-example">Mapping fields</span></div>
+    <p class="strip">An example project mid-migration. Each stage shows how far the data has travelled.</p>
+  </div>
+
+  <!-- a label with the word in it that is not a sample claim -->
+  <div class="shot">
+    <div class="head"><span class="title">Recorder</span><span class="pill">Sample rate</span></div>
+    <div class="pane"><span class="small fail-sample-rate">Mono channel</span></div>
+  </div>
+
+  <!-- a sample caption on a box that is not drawn as a frame -->
+  <div class="plain">
+    <div class="pane"><span class="small fail-sample-unframed">Not synced</span></div>
+    <p class="strip">Sample data</p>
+  </div>
+
+  <!-- in a captioned panel: a button, and the caption itself -->
+  <div class="shot">
+    <div class="pane"><button type="button" class="small fail-sample-button">Approve</button></div>
+    <span class="small fail-sample-says">Sample data</span>
+  </div>
 </div>
 
 <!-- ================= ADVISORY ================= -->
 <div class="col" id="advisory">
   <h2>Advisory</h2>
+
+  <!-- r8-t2: text covered inside a mockup is covered on purpose -->
+  <div class="shot">
+    <div class="bar"><span class="lights"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span></div>
+    <div class="stack"><p class="covered adv-covered">Needs attention</p><div class="cover" aria-hidden="true"></div></div>
+  </div>
 
   <!-- a window with three title-bar dots: undersized-ui-text, tiny-text, low-contrast -->
   <div class="shot">
@@ -125,6 +180,24 @@
   <!-- a wrapper carries the scale, the frame under it carries no transform
        (maritime.sh) -->
   <div class="stage" style="scale: 0.85"><div class="shot"><div class="pane"><span class="small adv-wrapper">mail.google.com</span></div></div></div>
+
+  <!-- r8-t1: a panel with a sample caption on it: a pill in a header taller
+       than a title bar, and a footer note (getpaidlens.com) -->
+  <div class="shot">
+    <div class="head"><span class="title">Decision center</span><span class="pill">Illustrative</span></div>
+    <div class="pane"><span class="small adv-pill">Confidence</span></div>
+  </div>
+  <div class="shot">
+    <div class="pane"><span class="small adv-footnote">Recommendation</span></div>
+    <p class="strip">Illustrative example. Figures shown are not customer data.</p>
+  </div>
+
+  <!-- a sample caption beside the panel: it closes the set the panel sits
+       in (ascenix.co) -->
+  <div class="set">
+    <div class="tab"><div class="shot"><div class="pane"><span class="small adv-beside">Falls by time of day</span></div></div></div>
+    <p class="note">Sample data. No real resident information appears on this site.</p>
+  </div>
 </div>
 
 </body>

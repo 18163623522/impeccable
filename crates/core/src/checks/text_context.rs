@@ -9,7 +9,10 @@
 //!   3D-transformed. [...] Sentence-length copy inside still counts as
 //!   copy." It feeds the `Mockup` shape of
 //!   [`crate::checks::decorative_text`], so `low-contrast` picks it up, and
-//!   `undersized-ui-text` and `tiny-text` read the same shape.
+//!   `undersized-ui-text` and `tiny-text` read the same shape. Decision
+//!   r8-t1-mockups-by-caption (2026-10-07, "narrow") adds a frame with no
+//!   chrome at all that a sample caption names: "A panel with a sample or
+//!   illustrative caption on it or beside it is mock context."
 //! - **r5-p27, legal fine print** ([`is_fine_print`]): "Report text marked
 //!   as fine print (a legal, disclaimer, terms or footnote class, or a block
 //!   that opens with an asterisk or a footnote mark) as advisory under the
@@ -352,6 +355,150 @@ pub fn is_preview_caption(text: &str) -> bool {
     (1..=3).contains(&words.len()) && words.iter().any(|w| w == "preview")
 }
 
+/// Words that say a panel's content is made up when a data noun follows
+/// them: "Sample data" is the caption on ascenix.co and decent.com, and
+/// `placeholder` is the word ascenix.co's own markup uses for the same
+/// figures. Alone they name real content as often: "Sample" beside an audio
+/// clip (theagenticdatacompany.com), "Example" over a worked case (tavi.pet,
+/// vaultlykeep.com), "Demo" and "Mock test" on a call to action.
+const SAMPLE_WORDS: &[&str] = &["sample", "example", "demo", "mock", "dummy", "placeholder"];
+/// What the sample word has to be said of.
+const SAMPLE_NOUNS: &[&str] = &["data", "figures", "numbers", "values"];
+/// A sample caption is a label, maybe with one line of small print after
+/// it ("Sample data. No real resident information appears on this site.",
+/// ten words). Longer text is prose that happens to open with the word.
+const SAMPLE_CAPTION_MAX_WORDS: usize = 16;
+/// Tags a sample caption is read from: text boxes, never a control, a
+/// heading, a table cell, a list item or code.
+const SAMPLE_CAPTION_TAGS: &[&str] =
+    &["p", "span", "div", "small", "em", "i", "strong", "b", "figcaption"];
+/// How far above a frame a caption beside it is looked for. ascenix.co's
+/// "Sample data" note closes a tab set three wrappers above each panel.
+const SAMPLE_CAPTION_BESIDE_LEVELS: usize = 4;
+
+/// A caption that says the panel it sits on or beside shows sample content:
+/// its label, the text up to the first sentence end or separator, is at
+/// most three words and is one of two closed English phrases. Either one of
+/// the words is `illustrative` ("Illustrative" and "Illustrative example" on
+/// getpaidlens.com, "Illustrative example" on veeza.ai, "Illustrative
+/// markdown" on context.dev, "Illustrative report only" on decent.com), or
+/// the label is a sample word and a data noun, with `only` after them or not
+/// ("Sample data", "Example figures only", "Demo data"). Words are compared
+/// whole, so "Sample", "Sample rate", "Example response", "Book a demo" and
+/// a caption in another language are not one, and neither is a sentence
+/// that works the word in ("An example project mid-migration.").
+pub fn is_sample_caption(text: &str) -> bool {
+    let all: Vec<&str> = text.split_whitespace().collect();
+    if all.len() > SAMPLE_CAPTION_MAX_WORDS {
+        return false;
+    }
+    // The label ends at the first word that closes a sentence or carries a
+    // separator. A mark inside a word ("example.com/pricing") closes nothing.
+    const ENDS: &[char] = &['.', '!', '?', ':', ';', '。', '：'];
+    const SEPARATORS: &[&str] = &["·", "•", "|", "—", "–", "-"];
+    let mut words: Vec<String> = Vec::new();
+    for raw in all {
+        if SEPARATORS.contains(&raw) {
+            break;
+        }
+        let word = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if !word.is_empty() {
+            words.push(word);
+        }
+        if raw.ends_with(ENDS) {
+            break;
+        }
+    }
+    if !(1..=3).contains(&words.len()) {
+        return false;
+    }
+    if words.iter().any(|w| w == "illustrative") {
+        return true;
+    }
+    words.len() >= 2
+        && SAMPLE_WORDS.contains(&words[0].as_str())
+        && SAMPLE_NOUNS.contains(&words[1].as_str())
+        && words.get(2).is_none_or(|w| w == "only")
+}
+
+/// The element is a sample caption: a text box of its own (no element
+/// children, and no text beside it in its parent, so a bold "Example" that
+/// opens a paragraph is not one), outside code, with a sample label.
+fn is_sample_caption_node<N: ContextNode>(n: &N) -> bool {
+    if !SAMPLE_CAPTION_TAGS.contains(&n.tag().as_str())
+        || n.attr("role").is_some()
+        || !n.children().is_empty()
+        || !is_sample_caption(&collapse(&n.direct_text()))
+    {
+        return false;
+    }
+    let mut up = n.parent();
+    for depth in 0..3 {
+        let Some(p) = up else { break };
+        let tag = p.tag();
+        if matches!(tag.as_str(), "code" | "pre" | "kbd" | "samp" | "a" | "button" | "label" | "summary")
+            || is_heading(&p)
+            || p.attr("role").is_some_and(|r| DEMO_CONTROL_ROLES.contains(&r.trim().to_lowercase().as_str()))
+            || (depth == 0 && !collapse(&p.direct_text()).is_empty())
+        {
+            return false;
+        }
+        up = p.parent();
+    }
+    true
+}
+
+/// A sample caption on the panel: in its first or its last child (or its
+/// one wrapper's), which is where a header pill ("Illustrative", getpaidlens.com) and a footer note
+/// ("Illustrative example. Figures shown are not customer data.") sit.
+fn has_sample_caption_on<N: ContextNode>(panel: &N) -> bool {
+    // A panel that holds one wrapper has its header and footer inside it.
+    let mut kids = panel.children();
+    for _ in 0..3 {
+        if kids.len() != 1 {
+            break;
+        }
+        kids = kids[0].children();
+    }
+    if kids.len() < 2 {
+        return false;
+    }
+    [kids[0].clone(), kids[kids.len() - 1].clone()].into_iter().any(|edge| {
+        let mut level = vec![edge];
+        let mut visited = 0usize;
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for n in &level {
+                visited += 1;
+                if visited > 40 {
+                    return false;
+                }
+                if is_sample_caption_node(n) {
+                    return true;
+                }
+                next.extend(n.children());
+            }
+            level = next;
+        }
+        false
+    })
+}
+
+/// A sample caption beside the box: the sibling before or after it, or the
+/// first or the last child of its parent. Children of the page's own shell
+/// (`body`, `main`) are not beside anything.
+fn has_sample_caption_beside<N: ContextNode>(c: &N) -> bool {
+    let Some(parent) = c.parent() else { return false };
+    if FRAME_STOP_TAGS.contains(&parent.tag().as_str()) {
+        return false;
+    }
+    let (prev, next, all) = siblings(c);
+    [prev, next, all.first().cloned(), all.last().cloned()]
+        .into_iter()
+        .flatten()
+        .any(|s| s.key() != c.key() && is_sample_caption_node(&s))
+}
+
 /// Class or id parts that name a carousel slide. Sliders scale and tilt
 /// their resting slides (a coverflow), and a slide holds real content.
 const SLIDE_PARTS: &[&str] = &[
@@ -558,25 +705,52 @@ fn is_sized_frame_box(c: &impl ContextNode) -> bool {
 /// a frame-sized frame box, an ancestor scaled into the frame range counts
 /// without a border of its own.
 ///
-/// Kept at its own severity: the preview caption itself (it speaks to the
-/// visitor), text in a control (a link that goes somewhere, a `button`, a
+/// A frame-sized frame box with no title bar, scale or tilt counts when a
+/// sample caption says what it is (decision r8-t1-mockups-by-caption,
+/// "narrow": "A panel with a sample or illustrative caption on it or beside
+/// it is mock context"): [`is_sample_caption`] on the panel's first or last
+/// child, or beside the panel or a wrapper up to four levels above it.
+///
+/// Kept at its own severity: the preview or sample caption itself (it speaks
+/// to the visitor), text in a control (a link that goes somewhere, a `button`, a
 /// `label`, a control role), text under a `figcaption`, and anything in a
 /// carousel slide. Sentence-length copy is left to
 /// [`crate::checks::decorative_text::classify_decorative_text`].
 pub fn in_framed_demo<N: ContextNode>(el: &N) -> bool {
-    !is_preview_caption(&collapse(&el.text())) && framed_walk(el, false)
+    let text = collapse(&el.text());
+    if is_preview_caption(&text) {
+        return false;
+    }
+    match framed_walk(el, false) {
+        Some(Frame::Chrome) => true,
+        // The caption that names the panel speaks to the visitor.
+        Some(Frame::Captioned) => !is_sample_caption(&text),
+        None => false,
+    }
+}
+
+/// What the walk up recognised a framed demo by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// Window chrome or a device frame: title-bar dots, a preview caption
+    /// in a title bar, a scale or a tilt.
+    Chrome,
+    /// A frame box a sample caption sits on or beside (r8-t1).
+    Captioned,
 }
 
 /// The walk up behind [`in_framed_demo`]. `passed_frame` says a frame-sized
 /// frame box already sits below the start, which [`is_demo_frame`] passes
 /// for a frame box asking about its own wrapper.
-fn framed_walk<N: ContextNode>(el: &N, mut passed_frame: bool) -> bool {
+fn framed_walk<N: ContextNode>(el: &N, mut passed_frame: bool) -> Option<Frame> {
     let mut cur = Some(el.clone());
     let mut depth = 0usize;
+    // Levels climbed since the last frame-sized frame box.
+    let mut above_frame = 0usize;
     while let Some(c) = cur {
         let tag = c.tag();
         if FRAME_STOP_TAGS.contains(&tag.as_str()) || tag == "figcaption" {
-            return false;
+            return None;
         }
         // A control inside the frame is still a control: adant.ai's tab
         // buttons in its terminal card are clicked.
@@ -584,34 +758,47 @@ fn framed_walk<N: ContextNode>(el: &N, mut passed_frame: bool) -> bool {
             || DEMO_CONTROL_TAGS.contains(&tag.as_str())
             || c.attr("role").is_some_and(|r| DEMO_CONTROL_ROLES.contains(&r.trim().to_lowercase().as_str()))
         {
-            return false;
+            return None;
         }
         if has_part(&c.class_list(), SLIDE_PARTS) {
-            return false;
+            return None;
         }
         if depth > 0
             && !FRAME_SKIP_TAGS.contains(&tag.as_str())
             && (is_transformed_frame(&c) || is_demo_window(&c) || (passed_frame && is_scaled_wrapper(&c)))
         {
-            return true;
+            return Some(Frame::Chrome);
         }
         if depth > 0 && !FRAME_SKIP_TAGS.contains(&tag.as_str()) && is_sized_frame_box(&c) {
+            // r8-t1: the panel carries a sample caption.
+            if has_sample_caption_on(&c) {
+                return Some(Frame::Captioned);
+            }
             passed_frame = true;
+            above_frame = 0;
+        }
+        // r8-t1: a sample caption beside the panel, or beside a wrapper a
+        // few levels above it.
+        if passed_frame {
+            if above_frame <= SAMPLE_CAPTION_BESIDE_LEVELS && has_sample_caption_beside(&c) {
+                return Some(Frame::Captioned);
+            }
+            above_frame += 1;
         }
         depth += 1;
         if depth > 24 {
-            return false;
+            return None;
         }
         cur = c.parent();
     }
-    false
+    None
 }
 
 /// Whether the box itself is a framed HTML demo by the structure
 /// [`in_framed_demo`] reads off an ancestor: a window with three title-bar
 /// dots, a framed box under a preview caption, or a device frame scaled or
 /// tilted in 3D, or a frame box under a wrapper scaled into the frame
-/// range. `nested-cards` asks it of an inner card, which can be the
+/// range, or a frame box with a sample caption on it or beside it. `nested-cards` asks it of an inner card, which can be the
 /// window itself (stroq.dev's editor window inside a card), as well as
 /// asking [`in_framed_demo`] (decision r6-t3-nested-cards-mockups).
 pub fn is_demo_frame<N: ContextNode>(el: &N) -> bool {
@@ -621,7 +808,7 @@ pub fn is_demo_frame<N: ContextNode>(el: &N) -> bool {
             || is_demo_window(el)
             // maritime.sh's window is the frame box; the scale sits on a
             // wrapper above it.
-            || (is_sized_frame_box(el) && framed_walk(el, true)))
+            || (is_sized_frame_box(el) && (has_sample_caption_on(el) || framed_walk(el, true).is_some())))
 }
 
 // ─── r5-p27: legal fine print ───────────────────────────────────────────────
@@ -1352,6 +1539,169 @@ mod tests {
         assert!(is_preview_caption("PREVIEW"));
         assert!(!is_preview_caption("Previews"));
         assert!(!is_preview_caption("Preview the next release"));
+    }
+
+    #[test]
+    fn sample_captions_are_a_closed_set_of_labels() {
+        for yes in [
+            "Sample data. No real resident information appears on this site.",
+            "Illustrative example. Figures shown are not customer data.",
+            "Illustrative",
+            "ILLUSTRATIVE REPORT ONLY",
+            "Illustrative markdown",
+            "Sample data",
+            "Example figures only",
+            "Placeholder values",
+            "Demo data",
+            "Sample data: updated hourly",
+            "Sample data · 3 homes",
+        ] {
+            assert!(is_sample_caption(yes), "{yes}");
+        }
+        for no in [
+            // suitemigration.com: a sentence that works the word in.
+            "An example project mid-migration. Each stage shows how far one customer's data has travelled, not which features SuiteMigration has shipped.",
+            "An example project mid-migration.",
+            "Sample",
+            "Example",
+            "Mockup",
+            "Sample data sheet",
+            "Sample rate",
+            "Sample output",
+            "Example response",
+            "Samples",
+            "Examples",
+            "Demo",
+            "Book a demo",
+            "Mock test",
+            "Preview",
+            // context.dev: a mark inside a word closes no label.
+            "example.com/pricing",
+            "Sample-rate converter",
+            "Exemple",
+            "Beispiel",
+            "サンプル",
+            "",
+            "Sample data. This note runs on past the single line of small print a caption carries, into a paragraph of ordinary copy.",
+        ] {
+            assert!(!is_sample_caption(no), "{no}");
+        }
+    }
+
+    /// A panel drawn as a frame, 600 by 400, with a header and a body; the
+    /// label in the body is what the rules ask about.
+    fn panel(parent: &N) -> (N, N, N) {
+        let frame = framed(parent.add("div").rect(0.0, 0.0, 600.0, 400.0));
+        let head = frame.add("div").rect(0.0, 0.0, 600.0, 120.0);
+        head.add("span").text("Decision Center");
+        let body = frame.add("div").rect(0.0, 120.0, 600.0, 240.0);
+        let label = body.add("span").text("Confidence");
+        (frame, head, label)
+    }
+
+    #[test]
+    fn a_sample_caption_on_the_panel() {
+        // getpaidlens.com: an "Illustrative" pill in a 129px header, and a
+        // footer note as the last child.
+        let (_t, body) = Tree::new();
+        let (frame, head, label) = panel(&body);
+        assert!(!in_framed_demo(&label), "no caption, no mockup");
+        assert!(!is_demo_frame(&frame));
+        let pill = head.add("span").text("Illustrative");
+        assert!(in_framed_demo(&label));
+        assert!(is_demo_frame(&frame));
+        assert!(!in_framed_demo(&pill), "the caption speaks to the visitor");
+
+        let (_t, body) = Tree::new();
+        let (frame, _head, label) = panel(&body);
+        let note = frame.add("div").text("Illustrative example. Figures shown are not customer data.");
+        assert!(in_framed_demo(&label));
+        assert!(!in_framed_demo(&note));
+
+        // A panel whose header and footer sit in its one wrapper.
+        let (_t2, body2) = Tree::new();
+        let inner = framed(body2.add("div").rect(0.0, 0.0, 600.0, 400.0)).add("div").add("div");
+        inner.add("div").add("span").text("Decision Center");
+        let wrapped = inner.add("div").add("span").text("Confidence");
+        assert!(!in_framed_demo(&wrapped));
+        inner.add("p").text("Illustrative example. Figures shown are not customer data.");
+        assert!(in_framed_demo(&wrapped));
+
+        // A control in the panel keeps its severity.
+        let button = frame.children()[1].add("button").text("Approve");
+        assert!(!in_framed_demo(&button));
+
+        // The word in a heading, a link, a sentence or a paragraph's bold
+        // lead-in is not a caption.
+        for build in [
+            (|head: &N| { head.add("h3").text("Sample data"); }) as fn(&N),
+            |head| { head.add("a").attr("href", "/demo").text("Sample data"); },
+            |head| { head.add("p").text("An example project mid-migration."); },
+            |head| { head.add("p").text("shows what a report holds.").add("b").text("Sample data"); },
+            |head| { head.add("pre").add("span").text("Sample data"); },
+            |head| { head.add("div").attr("role", "button").add("span").text("Sample data"); },
+        ] {
+            let (_t, body) = Tree::new();
+            let (frame, head, label) = panel(&body);
+            build(&head);
+            assert!(!in_framed_demo(&label));
+            assert!(!is_demo_frame(&frame));
+        }
+
+        // A caption on a box that is not drawn as a frame says nothing.
+        let (_t, body) = Tree::new();
+        let plain = body.add("div").rect(0.0, 0.0, 600.0, 400.0);
+        plain.add("div").add("span").text("Illustrative");
+        let label = plain.add("div").add("span").text("Confidence");
+        assert!(!in_framed_demo(&label));
+    }
+
+    #[test]
+    fn a_sample_label_in_a_window_is_part_of_the_picture() {
+        // A frame recognised by its chrome needs no caption, so a label in
+        // it that happens to read as one is mock context like the rest.
+        let (_t, body) = Tree::new();
+        let (_win, _bar, results) = window(&body);
+        let label = results.parent().unwrap().add("span").text("Sample data");
+        assert!(in_framed_demo(&label));
+    }
+
+    #[test]
+    fn a_sample_caption_beside_the_panel() {
+        // ascenix.co: the note closes the tab set, three wrappers above
+        // each panel.
+        let (_t, body) = Tree::new();
+        let wrap = body.add("div");
+        let heading = wrap.add("h2").text("One layer over your records");
+        let pane = wrap.add("div");
+        let (frame, _head, label) = panel(&pane.add("article").add("div"));
+        let outside = wrap.add("div").add("span").text("Ask us the rest");
+        assert!(!in_framed_demo(&label));
+        let note = wrap.add("p").text("Sample data. No real resident information appears on this site.");
+        assert!(in_framed_demo(&label));
+        assert!(is_demo_frame(&frame));
+        assert!(!in_framed_demo(&note));
+        assert!(!in_framed_demo(&heading), "text outside every frame is the page's own");
+        assert!(!in_framed_demo(&outside));
+
+        // Directly after the panel.
+        let (_t, body) = Tree::new();
+        let pair = body.add("div");
+        let (_frame, _head, label) = panel(&pair);
+        pair.add("p").text("Sample data");
+        assert!(in_framed_demo(&label));
+
+        // Too far above the panel, or a child of the page shell.
+        let (_t, body) = Tree::new();
+        let wrap = body.add("div");
+        let deep = wrap.add("div").add("div").add("div").add("div").add("div").add("div");
+        let (_frame, _head, label) = panel(&deep);
+        wrap.add("p").text("Sample data");
+        assert!(!in_framed_demo(&label));
+        let (_t, body) = Tree::new();
+        let (_frame, _head, label) = panel(&body);
+        body.add("p").text("Sample data");
+        assert!(!in_framed_demo(&label));
     }
 
     #[test]

@@ -151,6 +151,30 @@ const __impeccableDom = {
     }
     return undefined;
   },
+  // JSON `["0%, 35%", "to", ...]`: the selector of each frame keyframes(name)
+  // returns, in the same order (the same walk, the same frames skipped);
+  // undefined when no rule has that name.
+  keyframe_keys(name) {
+    if (!name) return undefined;
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules || sheet.rules; } catch { continue; }
+      if (!rules) continue;
+      const stack = [...rules];
+      while (stack.length) {
+        const rule = stack.shift();
+        if (rule.cssRules && rule.type !== 7) { stack.push(...rule.cssRules); continue; }
+        if (rule.type !== 7 || rule.name !== name) continue;
+        const keys = [];
+        for (const frame of rule.cssRules || []) {
+          if (!frame.style) continue;
+          keys.push(String(frame.keyText || ''));
+        }
+        return JSON.stringify(keys);
+      }
+    }
+    return undefined;
+  },
   linked_stylesheet_text() {
     // The CSSOM walk lives in 15-snapshot.js so the standalone snapshot
     // producer carries it too; both routes read the same corpus.

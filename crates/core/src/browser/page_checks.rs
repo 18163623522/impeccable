@@ -2282,7 +2282,10 @@ fn closed_controlled_ids(dom: &dyn Dom) -> std::collections::HashSet<String> {
 ///   `aria-expanded="false"`, the accordion that names no `aria-controls`
 ///   (the wrapper is a heading or holds nothing but the trigger);
 /// - the box itself is a drawer parked beside the page: `position: fixed`
-///   and wholly left or right of the viewport.
+///   and wholly left or right of the viewport;
+/// - the box or an ancestor is a drawer slid off the page
+///   ([`slid_off_drawer`]): hse.de's mobile menu, `position: absolute`
+///   inside a panel translated a viewport width to the left.
 ///
 /// A tab panel (by role or by a tab class) that its tab marks selected
 /// ([`tab_panel_marked_open`]) is not closed by its own role or class: it is
@@ -2335,6 +2338,9 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
         if tag_lower(dom, a) == "nav" || CLOSED_NAV_ROLES.contains(&role(a).as_str()) {
             return true;
         }
+        if slid_off_drawer(dom, a) {
+            return true;
+        }
         if dom.attr(a, "inert").is_some() {
             return true;
         }
@@ -2347,6 +2353,33 @@ fn closed_container(dom: &dyn Dom, el: ElId, closed_ids: &std::collections::Hash
         }
     }
     false
+}
+
+/// Whether `el` is a drawer slid off the page: positioned (`absolute` or
+/// `fixed`), moved by a `transform` other than the identity that it
+/// transitions, and with its box wholly left or right of the viewport. That
+/// is an off-canvas panel at rest in its closed position, which its trigger
+/// slides in; Tailwind's `-translate-x-full transition-transform` is the
+/// usual spelling. A box parked off the page with no transform, or one that
+/// does not animate its transform, is left to the other tests.
+fn slid_off_drawer(dom: &dyn Dom, el: ElId) -> bool {
+    let position = js::to_lower_case(&dom.style(el, "position"));
+    if position != "absolute" && position != "fixed" {
+        return false;
+    }
+    let transform = js::trim(&dom.style(el, "transform")).replace(' ', "");
+    if transform.is_empty() || transform == "none" || super::element_checks::is_identity_matrix(&transform) {
+        return false;
+    }
+    if !super::painted::declares_transition_of(dom, el, "transform") {
+        return false;
+    }
+    let rect = dom.rect(el);
+    let viewport_width = dom.inner_width();
+    rect.all_finite()
+        && rect.width > 0.0
+        && viewport_width > 0.0
+        && (rect.right <= 0.0 || rect.left >= viewport_width)
 }
 
 /// The topmost box from `el` up to, but not including, `start` that holds
@@ -2478,6 +2511,11 @@ pub fn measure_hidden_text_dom(dom: &dyn Dom) -> HiddenTextMeasure {
                         // the page sits at the top, where this is measured,
                         // and shows it to a visitor who scrolls: its text is
                         // content they read.
+                        HiddenState::Visible
+                    } else if !by_visibility && super::painted::opacity_animation_shows(dom, el) {
+                        // A timed animation running on the box fades it in,
+                        // or loops it through a visible phase: the capture
+                        // caught a frame at 0, and a visitor reads the text.
                         HiddenState::Visible
                     } else if unstarted_slider(dom, el, sliders) {
                         HiddenState::Unstarted
@@ -6143,5 +6181,112 @@ mod tests {
         let f = check_cream_palette(&d);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].snippet, "cream/beige page background (Tailwind bg-amber-50)");
+    }
+
+    /// hse.de (287847, 287911): the mobile menu at opacity 0, `position:
+    /// absolute` inside a panel translated a viewport width to the left with
+    /// `transition: transform 0.3s`.
+    #[test]
+    fn hidden_text_measure_leaves_out_a_drawer_slid_off_the_page() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.inner_width = 1280.0;
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        let panel = hidden_box(
+            &mut d,
+            body,
+            "div",
+            &[
+                ("position", "absolute"),
+                ("transform", "matrix(1, 0, 0, 1, -1280, 0)"),
+                ("transitionProperty", "transform"),
+                ("transitionDuration", "0.3s"),
+            ],
+            "",
+        );
+        d.set_rect(panel, -1280.0, 0.0, 1280.0, 800.0);
+        let menu = hidden_box(&mut d, panel, "div", &[("opacity", "0"), ("position", "absolute")], "Mode Schmuck");
+        d.set_rect(menu, -1280.0, 0.0, 1280.0, 0.0);
+        mark_body_descendants(&mut d);
+        let m = measure_hidden_text_dom(&d);
+        assert_eq!((m.total_chars, m.hidden_chars), (12.0, 0.0));
+
+        // Each of these leaves the panel content that never showed.
+        for (prop, value) in [
+            ("transitionDuration", "0s"),
+            ("transform", "none"),
+            ("transform", "matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)"),
+            ("position", "static"),
+        ] {
+            d.set_style(panel, prop, value);
+            let m = measure_hidden_text_dom(&d);
+            assert_eq!(m.hidden_chars, 12.0, "{prop}: {value}");
+            d.set_styles(
+                panel,
+                &[
+                    ("position", "absolute"),
+                    ("transform", "matrix(1, 0, 0, 1, -1280, 0)"),
+                    ("transitionDuration", "0.3s"),
+                ],
+            );
+        }
+        // On the page, translated by a little: content.
+        d.set_rect(panel, -40.0, 0.0, 1280.0, 800.0);
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 12.0);
+    }
+
+    /// A box at 0 that a timed animation running on it shows counts as
+    /// shown: a loop through a visible phase, or a fade-in that holds its
+    /// end. A recording without the fill mode sees only the loops.
+    #[test]
+    fn hidden_text_measure_counts_a_running_fade_in_as_shown() {
+        let mut d = FakeDom::new();
+        let (_h, body) = d.with_page();
+        d.keyframes.insert(
+            "sent".to_string(),
+            vec![
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "0".into())] },
+                crate::browser::dom::KeyframeFrame { decls: vec![("opacity".into(), "1".into())] },
+            ],
+        );
+        d.keyframe_keys.insert("sent".to_string(), vec!["0%, 25%".to_string(), "27%, 100%".to_string()]);
+        hidden_box(&mut d, body, "p", &[], "visible text");
+        let bubble = hidden_box(
+            &mut d,
+            body,
+            "div",
+            &[
+                ("opacity", "0"),
+                ("animationName", "sent"),
+                ("animationIterationCount", "1"),
+                ("animationFillMode", "forwards"),
+                ("animationDirection", "normal"),
+                ("animationDuration", "10s"),
+                ("animationDelay", "0s"),
+                ("animationPlayState", "running"),
+                ("animationComposition", "replace"),
+            ],
+            "ok, moving to 10am",
+        );
+        d.set_running_animations(bubble, &["opacity", "transform"]);
+        mark_body_descendants(&mut d);
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 0.0);
+
+        // Fill mode none hands the box back to its own opacity 0.
+        d.set_style(bubble, "animationFillMode", "none");
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 18.0);
+        // An older recording: no fill mode read, base behaviour...
+        d.set_style(bubble, "animationFillMode", "");
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 18.0);
+        // ...except for a loop, which shows every cycle.
+        d.set_style(bubble, "animationIterationCount", "infinite");
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 0.0);
+        // Not seen running: hidden.
+        d.el_mut(bubble).running_animations = Some(Vec::new());
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 18.0);
+        // A fade that ends at 0 is not shown either.
+        d.set_running_animations(bubble, &["opacity"]);
+        d.set_styles(bubble, &[("animationIterationCount", "1"), ("animationFillMode", "forwards"), ("animationDirection", "reverse")]);
+        assert_eq!(measure_hidden_text_dom(&d).hidden_chars, 18.0);
     }
 }

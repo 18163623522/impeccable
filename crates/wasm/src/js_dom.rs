@@ -29,6 +29,7 @@ extern "C" {
     fn elements_from_point(x: f64, y: f64) -> Vec<u32>;
     fn css_escape(s: &str) -> String;
     fn keyframes(name: &str) -> Option<String>;
+    fn keyframe_keys(name: &str) -> Option<String>;
     fn document_html_for_patterns() -> String;
     fn linked_stylesheet_text() -> String;
     fn tag_name(el: u32) -> String;
@@ -184,6 +185,9 @@ impl Dom for JsDom {
                 .map(|decls| KeyframeFrame { decls })
                 .collect(),
         )
+    }
+    fn keyframe_keys(&self, name: &str) -> Option<Vec<String>> {
+        serde_json::from_str(&keyframe_keys(name)?).ok()
     }
     fn linked_stylesheet_text(&self) -> String {
         linked_stylesheet_text()

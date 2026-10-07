@@ -62,8 +62,14 @@ pub const NS_MATHML: &str = "http://www.w3.org/1998/Math/MathML";
 /// sync with `STYLE_PROPS` in `browser-bundle/15-snapshot.js` (the build
 /// checks the two lists agree).
 pub const STYLE_PROPS: &[&str] = &[
+    "animationComposition",
+    "animationDelay",
+    "animationDirection",
+    "animationDuration",
+    "animationFillMode",
     "animationIterationCount",
     "animationName",
+    "animationPlayState",
     "animationTimeline",
     "animationTimingFunction",
     "aspectRatio",
@@ -420,6 +426,10 @@ pub struct Snapshot {
     /// `[name, frames]` in stylesheet order (first rule per name wins).
     #[serde(default)]
     pub keyframes: Vec<(String, Vec<Vec<(String, String)>>)>,
+    /// `[name, [keyText, ...]]` per `keyframes` entry: the selector of each
+    /// recorded frame. Absent in captures older than it.
+    #[serde(rename = "keyframeKeys", default)]
+    pub keyframe_keys: Vec<(String, Vec<String>)>,
     /// `__snapLinkedStylesheetText()`: the readable linked-stylesheet corpus
     /// (#709). Absent in captures older than that change.
     #[serde(rename = "linkedCss", default)]
@@ -857,6 +867,11 @@ impl Dom for SnapshotDom {
                     })
                     .collect()
             })
+    }
+    fn keyframe_keys(&self, name: &str) -> Option<Vec<String>> {
+        let frames = self.snap.keyframes.iter().find(|(n, _)| n == name)?;
+        let keys = self.snap.keyframe_keys.iter().find(|(n, _)| n == name)?;
+        (keys.1.len() == frames.1.len()).then(|| keys.1.clone())
     }
     fn document_html_for_patterns(&self) -> String {
         self.snap.html.clone()
@@ -1352,6 +1367,27 @@ mod tests {
                 "aspectRatio".to_string()
             ]
         );
+    }
+
+    /// The fill mode, direction, duration, delay, play state and composition of animations,
+    /// and the keyframe selectors, joined the capture later: a recording
+    /// without them reads each as empty or `None`, which the rules that end
+    /// an animation take as unknown.
+    #[test]
+    fn older_capture_without_animation_timing_props() {
+        let d = snap(SMALL);
+        for prop in [
+            "animationFillMode",
+            "animationDirection",
+            "animationDuration",
+            "animationDelay",
+            "animationPlayState",
+            "animationComposition",
+        ] {
+            assert!(STYLE_PROPS.contains(&prop), "{prop} missing from STYLE_PROPS");
+            assert_eq!(d.style(5, prop), "", "{prop}");
+        }
+        assert_eq!(d.keyframe_keys("anything"), None);
     }
 
     /// The containing-block properties and `scrollHeight` joined the capture

@@ -106,6 +106,13 @@ pub trait Dom {
     /// when no sheet declares it. Mirrors `keyframesToggleVisibilityDOM`'s
     /// walk order.
     fn keyframes(&self, name: &str) -> Option<Vec<KeyframeFrame>>;
+    /// The selector of each frame [`Dom::keyframes`] returns for `name`, in
+    /// the same order (`"0%, 35%"`, `"to"`): which offsets each frame sets.
+    /// `None` where the probe did not record them (a recording made before
+    /// it did, the in-page probe), and a caller then knows no offsets.
+    fn keyframe_keys(&self, _name: &str) -> Option<Vec<String>> {
+        None
+    }
     /// `document.documentElement.cloneNode(true)` with every
     /// `[id^="impeccable-live-"]` node removed, serialized as `outerHTML`.
     fn document_html_for_patterns(&self) -> String;

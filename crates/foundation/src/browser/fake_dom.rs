@@ -77,6 +77,8 @@ pub struct FakeDom {
     /// `(x, y)` → element stack, topmost first.
     pub points: Vec<((f64, f64), Vec<ElId>)>,
     pub keyframes: HashMap<String, Vec<KeyframeFrame>>,
+    /// The selector of each frame in `keyframes`, where a test records them.
+    pub keyframe_keys: HashMap<String, Vec<String>>,
     pub html_for_patterns: String,
 }
 
@@ -418,6 +420,9 @@ impl Dom for FakeDom {
     }
     fn keyframes(&self, name: &str) -> Option<Vec<KeyframeFrame>> {
         self.keyframes.get(name).cloned()
+    }
+    fn keyframe_keys(&self, name: &str) -> Option<Vec<String>> {
+        self.keyframe_keys.get(name).cloned()
     }
     fn document_html_for_patterns(&self) -> String {
         self.html_for_patterns.clone()
